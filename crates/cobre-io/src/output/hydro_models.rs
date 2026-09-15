@@ -33,10 +33,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::extensions::{EvaporationModelRow, FphaDeviationPointRow, FphaHyperplaneRow};
-use crate::output::atomic::{write_json_atomic, write_parquet_atomic};
+use crate::output::atomic::{ensure_parent_dir, write_batch_atomic, write_json_atomic};
 use crate::output::error::OutputError;
-use crate::output::parquet_config::ParquetWriterConfig;
-use crate::output::stochastic::ensure_parent_dir;
 
 /// Write a slice of [`FphaHyperplaneRow`] to a Parquet file at `path`,
 /// re-readable as `system/fpha_hyperplanes.parquet` by
@@ -83,10 +81,8 @@ use crate::output::stochastic::ensure_parent_dir;
 /// # }
 /// ```
 pub fn write_fpha_hyperplanes(path: &Path, rows: &[FphaHyperplaneRow]) -> Result<(), OutputError> {
-    ensure_parent_dir(path)?;
-    let config = ParquetWriterConfig::default();
     let batch = build_fpha_hyperplanes_batch(rows)?;
-    write_parquet_atomic(path, &batch, &config)
+    write_batch_atomic(path, &batch)
 }
 
 // ── Schema builder ────────────────────────────────────────────────────────────
@@ -202,10 +198,8 @@ pub fn write_evaporation_models(
     path: &Path,
     rows: &[EvaporationModelRow],
 ) -> Result<(), OutputError> {
-    ensure_parent_dir(path)?;
-    let config = ParquetWriterConfig::default();
     let batch = build_evaporation_models_batch(rows)?;
-    write_parquet_atomic(path, &batch, &config)
+    write_batch_atomic(path, &batch)
 }
 
 fn evaporation_models_schema() -> Schema {
@@ -300,10 +294,8 @@ pub fn write_fpha_deviation_points(
     path: &Path,
     rows: &[FphaDeviationPointRow],
 ) -> Result<(), OutputError> {
-    ensure_parent_dir(path)?;
-    let config = ParquetWriterConfig::default();
     let batch = build_fpha_deviation_points_batch(rows)?;
-    write_parquet_atomic(path, &batch, &config)
+    write_batch_atomic(path, &batch)
 }
 
 fn fpha_deviation_points_schema() -> Schema {

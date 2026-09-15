@@ -42,14 +42,15 @@
 //! Duplicate `(hydro_id, stage_id)` detection is performed at build time by
 //! the consumer that assembles the loaded rows into the override table.
 
-use std::fs::File;
 use std::path::Path;
 
-use arrow::array::{Array, Float64Array, Int32Array};
+use arrow::array::Array;
 use cobre_core::EntityId;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use crate::LoadError;
+use crate::parquet_helpers::{
+    extract_required_float64, extract_required_int32, open_record_batch_reader,
+};
 
 /// A single row of the `system/hydro_energy_productivity.parquet` override table.
 ///
@@ -80,13 +81,7 @@ pub struct HydroEnergyProductivityRow {
 pub fn parse_hydro_energy_productivity(
     path: &Path,
 ) -> Result<Vec<HydroEnergyProductivityRow>, LoadError> {
-    let file = File::open(path).map_err(|e| LoadError::io(path, e))?;
-
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
-    let reader = builder
-        .build()
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
+    let reader = open_record_batch_reader(path)?;
 
     let mut rows: Vec<HydroEnergyProductivityRow> = Vec::new();
 
@@ -95,13 +90,13 @@ pub fn parse_hydro_energy_productivity(
 
         warn_on_stale_reference_volume_column(&batch);
 
-        let hydro_id_col = extract_int32_column(&batch, "hydro_id", path)?;
-        let stage_id_col = extract_int32_column(&batch, "stage_id", path)?;
+        let hydro_id_col = extract_required_int32(&batch, "hydro_id", path)?;
+        let stage_id_col = extract_required_int32(&batch, "stage_id", path)?;
         let rho_eq_col =
-            extract_float64_column(&batch, "equivalent_productivity_mw_per_m3s", path)?;
-        let q_ref_col = extract_float64_column(&batch, "reference_outflow_m3s", path)?;
+            extract_required_float64(&batch, "equivalent_productivity_mw_per_m3s", path)?;
+        let q_ref_col = extract_required_float64(&batch, "reference_outflow_m3s", path)?;
         let rho_esp_col =
-            extract_float64_column(&batch, "specific_productivity_mw_per_m3s_per_m", path)?;
+            extract_required_float64(&batch, "specific_productivity_mw_per_m3s_per_m", path)?;
 
         let n = batch.num_rows();
         let base_idx = rows.len();
@@ -170,56 +165,6 @@ pub fn parse_hydro_energy_productivity(
 
     rows.sort_by_key(|r| (r.hydro_id.0, r.stage_id.unwrap_or(-1)));
     Ok(rows)
-}
-
-// ── column extraction helpers ──────────────────────────────────────────────────
-
-fn extract_int32_column<'a>(
-    batch: &'a arrow::record_batch::RecordBatch,
-    name: &str,
-    path: &Path,
-) -> Result<&'a Int32Array, LoadError> {
-    let col = batch
-        .column_by_name(name)
-        .ok_or_else(|| LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: name.to_string(),
-            message: format!("missing column \"{name}\""),
-        })?;
-    col.as_any()
-        .downcast_ref::<Int32Array>()
-        .ok_or_else(|| LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: name.to_string(),
-            message: format!(
-                "column \"{name}\" has type {} but Int32 is required",
-                col.data_type()
-            ),
-        })
-}
-
-fn extract_float64_column<'a>(
-    batch: &'a arrow::record_batch::RecordBatch,
-    name: &str,
-    path: &Path,
-) -> Result<&'a Float64Array, LoadError> {
-    let col = batch
-        .column_by_name(name)
-        .ok_or_else(|| LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: name.to_string(),
-            message: format!("missing column \"{name}\""),
-        })?;
-    col.as_any()
-        .downcast_ref::<Float64Array>()
-        .ok_or_else(|| LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: name.to_string(),
-            message: format!(
-                "column \"{name}\" has type {} but Float64 is required",
-                col.data_type()
-            ),
-        })
 }
 
 // ── stale-column deprecation notice ─────────────────────────────────────────────

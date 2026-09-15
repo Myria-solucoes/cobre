@@ -76,12 +76,12 @@
 
 use arrow::array::Array;
 use cobre_core::EntityId;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use std::fs::File;
 use std::path::Path;
 
 use crate::LoadError;
-use crate::parquet_helpers::{extract_optional_float64, extract_required_int32};
+use crate::parquet_helpers::{
+    extract_optional_float64, extract_required_int32, open_record_batch_reader,
+};
 
 // ── Row types ─────────────────────────────────────────────────────────────────
 
@@ -316,14 +316,7 @@ fn validate_optional_positive(
 /// println!("loaded {} bus penalty override rows", rows.len());
 /// ```
 pub fn parse_penalty_overrides_bus(path: &Path) -> Result<Vec<BusPenaltyOverrideRow>, LoadError> {
-    let file = File::open(path).map_err(|e| LoadError::io(path, e))?;
-
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
-
-    let reader = builder
-        .build()
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
+    let reader = open_record_batch_reader(path)?;
 
     let mut rows: Vec<BusPenaltyOverrideRow> = Vec::new();
 
@@ -402,14 +395,7 @@ pub fn parse_penalty_overrides_bus(path: &Path) -> Result<Vec<BusPenaltyOverride
 /// println!("loaded {} line penalty override rows", rows.len());
 /// ```
 pub fn parse_penalty_overrides_line(path: &Path) -> Result<Vec<LinePenaltyOverrideRow>, LoadError> {
-    let file = File::open(path).map_err(|e| LoadError::io(path, e))?;
-
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
-
-    let reader = builder
-        .build()
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
+    let reader = open_record_batch_reader(path)?;
 
     let mut rows: Vec<LinePenaltyOverrideRow> = Vec::new();
 
@@ -494,14 +480,7 @@ pub fn parse_penalty_overrides_line(path: &Path) -> Result<Vec<LinePenaltyOverri
 pub fn parse_penalty_overrides_hydro(
     path: &Path,
 ) -> Result<Vec<HydroPenaltyOverrideRow>, LoadError> {
-    let file = File::open(path).map_err(|e| LoadError::io(path, e))?;
-
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
-
-    let reader = builder
-        .build()
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
+    let reader = open_record_batch_reader(path)?;
 
     let mut rows: Vec<HydroPenaltyOverrideRow> = Vec::new();
 
@@ -773,14 +752,7 @@ pub fn parse_penalty_overrides_hydro(
 /// println!("loaded {} NCS penalty override rows", rows.len());
 /// ```
 pub fn parse_penalty_overrides_ncs(path: &Path) -> Result<Vec<NcsPenaltyOverrideRow>, LoadError> {
-    let file = File::open(path).map_err(|e| LoadError::io(path, e))?;
-
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
-
-    let reader = builder
-        .build()
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
+    let reader = open_record_batch_reader(path)?;
 
     let mut rows: Vec<NcsPenaltyOverrideRow> = Vec::new();
 

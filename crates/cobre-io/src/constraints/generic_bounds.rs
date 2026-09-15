@@ -39,13 +39,12 @@
 //! - At-least-one-endpoint-present and `bound_upper >= bound_lower` (referential).
 
 use arrow::array::Array;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use std::fs::File;
 use std::path::Path;
 
 use crate::LoadError;
 use crate::parquet_helpers::{
     extract_optional_float64, extract_optional_int32, extract_required_int32,
+    open_record_batch_reader,
 };
 
 /// A single row from `constraints/generic_constraint_bounds.parquet`.
@@ -110,14 +109,7 @@ pub struct GenericConstraintBoundsRow {
 pub fn parse_generic_constraint_bounds(
     path: &Path,
 ) -> Result<Vec<GenericConstraintBoundsRow>, LoadError> {
-    let file = File::open(path).map_err(|e| LoadError::io(path, e))?;
-
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
-
-    let reader = builder
-        .build()
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
+    let reader = open_record_batch_reader(path)?;
 
     let mut rows: Vec<GenericConstraintBoundsRow> = Vec::new();
 

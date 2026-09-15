@@ -42,14 +42,12 @@
 
 use arrow::array::Array;
 use cobre_core::EntityId;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use std::fs::File;
 use std::path::Path;
 
 use crate::LoadError;
 use crate::parquet_helpers::{
     extract_optional_float64, extract_optional_int32, extract_required_float64,
-    extract_required_int32,
+    extract_required_int32, open_record_batch_reader,
 };
 
 /// A single row from `system/fpha_hyperplanes.parquet`.
@@ -127,14 +125,7 @@ pub struct FphaHyperplaneRow {
 /// ```
 #[allow(clippy::similar_names)]
 pub fn parse_fpha_hyperplanes(path: &Path) -> Result<Vec<FphaHyperplaneRow>, LoadError> {
-    let file = File::open(path).map_err(|e| LoadError::io(path, e))?;
-
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
-
-    let reader = builder
-        .build()
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
+    let reader = open_record_batch_reader(path)?;
 
     let mut rows: Vec<FphaHyperplaneRow> = Vec::new();
 

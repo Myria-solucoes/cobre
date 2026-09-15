@@ -1,13 +1,10 @@
 //! Loading pipeline: validation, resolution, scenario assembly, and
 //! `SystemBuilder::build` for a case directory.
-//!
-//! Use [`run_pipeline_with_report`] when the caller needs the warnings collected
-//! during validation (e.g., the `validate` CLI subcommand).
 
 use std::path::Path;
 
 use chrono::NaiveDate;
-use cobre_core::{System, SystemBuilder};
+use cobre_core::SystemBuilder;
 
 use crate::{
     CaseArtifacts, LoadError, LoadedCase, StageIdResolver,
@@ -33,9 +30,8 @@ use crate::{
     },
 };
 
-/// Run the complete loading pipeline for a case directory, discarding warnings.
-///
-/// Use [`run_pipeline_with_report`] to retrieve the collected warnings.
+/// The canonical pipeline: returns the validated [`System`](cobre_core::System) in a
+/// [`LoadedCase`] bundle with the [`CaseArtifacts`] rows and the [`ValidationReport`].
 ///
 /// # Errors
 ///
@@ -44,29 +40,6 @@ use crate::{
 /// - [`LoadError::ConstraintError`] — collected validation errors or
 ///   `SystemBuilder::build` rejection.
 /// - [`LoadError::SchemaError`] — AR coefficient count mismatch in scenario assembly.
-pub(crate) fn run_pipeline(path: &Path) -> Result<System, LoadError> {
-    run_pipeline_with_report(path).map(|(system, _report)| system)
-}
-
-/// Run the complete loading pipeline, returning the [`System`] and the
-/// [`ValidationReport`] of collected warnings.
-///
-/// # Errors
-///
-/// Same error conditions as [`run_pipeline`].
-pub(crate) fn run_pipeline_with_report(
-    path: &Path,
-) -> Result<(System, ValidationReport), LoadError> {
-    run_pipeline_with_artifacts(path).map(|(loaded, report)| (loaded.system, report))
-}
-
-/// The canonical pipeline: returns the validated [`System`] in a [`LoadedCase`]
-/// bundle with the [`CaseArtifacts`] rows and the [`ValidationReport`].
-/// `run_pipeline` / `run_pipeline_with_report` delegate here.
-///
-/// # Errors
-///
-/// Same error conditions as [`run_pipeline`].
 // Rationale: a single linear cascade where each stage's output feeds the next; splitting at layer
 // boundaries would scatter the global ordering guarantee across call sites.
 #[allow(clippy::too_many_lines)]

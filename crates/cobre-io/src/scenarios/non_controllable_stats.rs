@@ -14,12 +14,12 @@
 
 use cobre_core::EntityId;
 use cobre_core::scenario::NcsModel;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use std::fs::File;
 use std::path::Path;
 
 use crate::LoadError;
-use crate::parquet_helpers::{extract_required_float64, extract_required_int32};
+use crate::parquet_helpers::{
+    extract_required_float64, extract_required_int32, open_record_batch_reader,
+};
 
 /// Parse `scenarios/non_controllable_stats.parquet` and return rows sorted by
 /// `(ncs_id, stage_id)` ascending.
@@ -48,14 +48,7 @@ use crate::parquet_helpers::{extract_required_float64, extract_required_int32};
 /// println!("loaded {} NCS model rows", models.len());
 /// ```
 pub fn parse_ncs_stats(path: &Path) -> Result<Vec<NcsModel>, LoadError> {
-    let file = File::open(path).map_err(|e| LoadError::io(path, e))?;
-
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
-
-    let reader = builder
-        .build()
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
+    let reader = open_record_batch_reader(path)?;
 
     let mut rows: Vec<NcsModel> = Vec::new();
 

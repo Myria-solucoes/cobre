@@ -40,7 +40,7 @@ pub fn write_training_results(
     std::fs::create_dir_all(output_dir.join("simulation"))
         .map_err(|e| OutputError::io(output_dir.join("simulation"), e))?;
 
-    write_dictionaries(&output_dir.join("training/dictionaries"), system, config)?;
+    write_dictionaries(&output_dir.join("training/dictionaries"), system)?;
 
     let parquet_config = ParquetWriterConfig::default();
     let writer = TrainingParquetWriter::new(output_dir, &parquet_config)?;
@@ -227,10 +227,8 @@ mod tests {
             time_lower_bound_ms: 0,
             time_state_exchange_ms: 0,
             time_cut_batch_build_ms: 0,
-            time_bwd_setup_ms: 0,
             time_bwd_load_imbalance_ms: 0,
             time_bwd_scheduling_overhead_ms: 0,
-            time_fwd_setup_ms: 0,
             time_fwd_load_imbalance_ms: 0,
             time_fwd_scheduling_overhead_ms: 0,
             time_overhead_ms: 0,
@@ -274,7 +272,6 @@ mod tests {
             completed: 10,
             failed: 0,
             total_time_ms: 1_000,
-            partitions_written: vec!["simulation/costs/part-00.parquet".to_string()],
             cost: None,
             solve_stats: MetadataSimulationSolveStats::default(),
         }
@@ -336,7 +333,6 @@ mod tests {
             completed: 10,
             failed: 0,
             total_time_ms: 1_500,
-            partitions_written: vec!["simulation/costs/part-00.parquet".to_string()],
             cost: None,
             solve_stats: MetadataSimulationSolveStats::default(),
         };
@@ -532,7 +528,6 @@ mod tests {
             completed: 10,
             failed: 0,
             total_time_ms: 0,
-            partitions_written: vec![],
             cost: None,
             solve_stats: MetadataSimulationSolveStats::default(),
         };
@@ -582,7 +577,6 @@ mod tests {
             completed: 10,
             failed: 0,
             total_time_ms: 0,
-            partitions_written: vec![],
             cost: None,
             solve_stats: MetadataSimulationSolveStats::default(),
         };

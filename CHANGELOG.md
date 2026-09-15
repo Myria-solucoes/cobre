@@ -11,6 +11,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING — the `cobre-io` public surface drops a set of unused,
+  narrowly-reached, or duplicated items.** Four unused postcard serialization
+  helpers are removed: the free `System` and scalar-parameter
+  serialize/deserialize functions had no caller, since the broadcast path
+  encodes with postcard directly; the postcard-safe mirror types remain public
+  and unchanged. Two unused loading helpers are removed: the case-directory
+  wrapper for the scalar-parameters JSON file and the raw stage-to-season map
+  builder had no caller; the scalar-parameters parser they wrapped and the
+  season resolution the loading pipeline uses are unchanged. The aggregate
+  scenario-loading entry point and its result type are removed: a second
+  assembly implementation had no caller and could return inflow models whose
+  innovation-scale ratio was still the assembly placeholder; the per-file
+  scenario loaders remain public, and the loading pipeline assembly, which
+  always derives that ratio, is unchanged. The severity-defaulting method on
+  the validation error-kind enum is removed: no caller remained, since every
+  validation diagnostic sets its severity at the emission site, and the
+  method's classification had already diverged from one of those sites; the
+  error-kind and severity enums are unchanged. The dictionary writer no longer
+  takes a study-configuration argument: it was never read, since the dictionary
+  files are built from the loaded system and the writer's default Parquet
+  settings, so their content is unchanged; callers now pass the output path and
+  the system only. The two metadata serde-default helpers, `default_bounds` and
+  `default_upper_bound_kind`, are no longer part of the public surface; the
+  metadata they default is unchanged. `IterationRecord` no longer carries the
+  two per-iteration thread-pool setup fields that reached no output file; the
+  setup columns in the per-worker timing table are unchanged and still come
+  from the per-worker measurements. `SimulationOutput` no longer carries the
+  list of written partition paths, and a distributed run no longer exchanges
+  that list between ranks; the partition files themselves and every written
+  simulation artifact are unchanged. `LoadError` no longer carries the
+  cross-reference variant that no loading path ever produced;
+  referential-integrity failures are reported, as they always were, through the
+  aggregated constraint variant, and the Python error mapping drops the
+  corresponding unreachable name. A required column missing from
+  `hydro_geometry.parquet`, `hydro_energy_productivity.parquet`, or
+  `tailrace_curves.parquet` now reports `missing required column "<name>"`, the
+  same wording every other tabular input already produced, instead of `missing
+  column "<name>"`; the error variant, the file path, and the reported column
+  name are unchanged. The two per-entity factor resolvers are now reached only
+  through `cobre_io::resolution`: the deep `cobre_io::resolution::load_factors`
+  and `cobre_io::resolution::ncs_factors` module paths are gone, and both
+  function names, their signatures, and their resolved values are unchanged.
+
 - **BREAKING — three narrowly-used `cobre_core` surfaces are removed.**
   `ValidationError` no longer carries the two variants no validation path
   ever produced (a disconnected-bus report and an entity-penalty report).

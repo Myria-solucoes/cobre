@@ -16,7 +16,6 @@
 //! | `LoadError::IoError`                | `CaseIoError` (`OSError`)       |
 //! | `LoadError::ParseError`             | `ValidationError` (`ValueError`) |
 //! | `LoadError::SchemaError`            | `ValidationError` (`ValueError`) |
-//! | `LoadError::CrossReferenceError`    | `ValidationError` (`ValueError`) |
 //! | `LoadError::ConstraintError`        | `ValidationError` (`ValueError`) |
 //! | `LoadError::PolicyIncompatible`     | `PolicyIncompatibleError` (`ValueError`) |
 //!
@@ -52,7 +51,6 @@ fn load_error_kind(err: &LoadError) -> &'static str {
         LoadError::IoError { .. } => "IoError",
         LoadError::ParseError { .. } => "ParseError",
         LoadError::SchemaError { .. } => "SchemaError",
-        LoadError::CrossReferenceError { .. } => "CrossReferenceError",
         LoadError::ConstraintError { .. } => "ConstraintError",
         LoadError::PolicyIncompatible { .. } => "PolicyIncompatible",
     }

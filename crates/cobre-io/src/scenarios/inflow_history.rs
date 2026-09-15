@@ -40,17 +40,16 @@
 //! - `hydro_id` existence in the hydro registry — Layer 3.
 //! - Season/coverage alignment checks — Layer 4/5.
 
-use std::fs::File;
 use std::path::Path;
 
 use arrow::temporal_conversions::date32_to_datetime;
 use chrono::NaiveDate;
 use cobre_core::EntityId;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use crate::LoadError;
 use crate::parquet_helpers::{
     extract_required_date32, extract_required_float64, extract_required_int32,
+    open_record_batch_reader,
 };
 use crate::windowed_history::{WindowedRecord, validate_windowed_records};
 
@@ -84,14 +83,7 @@ const LEGACY_LAYOUT_MESSAGE: &str = "scenarios/inflow_history.parquet uses the l
 /// println!("loaded {} inflow history rows", rows.len());
 /// ```
 pub fn parse_inflow_history(path: &Path) -> Result<Vec<InflowHistoryRow>, LoadError> {
-    let file = File::open(path).map_err(|e| LoadError::io(path, e))?;
-
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
-
-    let reader = builder
-        .build()
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
+    let reader = open_record_batch_reader(path)?;
 
     let mut rows: Vec<InflowHistoryRow> = Vec::new();
 

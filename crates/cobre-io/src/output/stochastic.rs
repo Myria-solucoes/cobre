@@ -93,9 +93,8 @@ use cobre_core::scenario::{CorrelationModel, CorrelationScheduleEntry};
 use cobre_stochastic::OpeningTree;
 use serde::Serialize;
 
-use crate::output::atomic::{write_bytes_atomic, write_parquet_atomic};
+use crate::output::atomic::{ensure_parent_dir, write_batch_atomic, write_bytes_atomic};
 use crate::output::error::OutputError;
-use crate::output::parquet_config::ParquetWriterConfig;
 use crate::scenarios::{
     InflowAnnualComponentRow, InflowArCoefficientRow, InflowSeasonalStatsRow, LoadSeasonalStatsRow,
 };
@@ -128,10 +127,8 @@ use crate::scenarios::{
 /// # }
 /// ```
 pub fn write_noise_openings(path: &Path, tree: &OpeningTree) -> Result<(), OutputError> {
-    ensure_parent_dir(path)?;
-    let config = ParquetWriterConfig::default();
     let batch = build_noise_openings_batch(tree)?;
-    write_parquet_atomic(path, &batch, &config)
+    write_batch_atomic(path, &batch)
 }
 
 /// Write a slice of [`InflowSeasonalStatsRow`] to a Parquet file at `path`,
@@ -172,10 +169,8 @@ pub fn write_inflow_seasonal_stats(
     path: &Path,
     rows: &[InflowSeasonalStatsRow],
 ) -> Result<(), OutputError> {
-    ensure_parent_dir(path)?;
-    let config = ParquetWriterConfig::default();
     let batch = build_inflow_seasonal_stats_batch(rows)?;
-    write_parquet_atomic(path, &batch, &config)
+    write_batch_atomic(path, &batch)
 }
 
 /// Write a slice of [`InflowArCoefficientRow`] to a Parquet file at `path`,
@@ -216,10 +211,8 @@ pub fn write_inflow_ar_coefficients(
     path: &Path,
     rows: &[InflowArCoefficientRow],
 ) -> Result<(), OutputError> {
-    ensure_parent_dir(path)?;
-    let config = ParquetWriterConfig::default();
     let batch = build_inflow_ar_coefficients_batch(rows)?;
-    write_parquet_atomic(path, &batch, &config)
+    write_batch_atomic(path, &batch)
 }
 
 /// Write a slice of [`InflowAnnualComponentRow`] to a Parquet file at `path`,
@@ -262,10 +255,8 @@ pub fn write_inflow_annual_component(
     path: &Path,
     rows: &[InflowAnnualComponentRow],
 ) -> Result<(), OutputError> {
-    ensure_parent_dir(path)?;
-    let config = ParquetWriterConfig::default();
     let batch = build_inflow_annual_component_batch(rows)?;
-    write_parquet_atomic(path, &batch, &config)
+    write_batch_atomic(path, &batch)
 }
 
 // ── Intermediate serde types for correlation JSON output ──────────────────────
@@ -440,19 +431,8 @@ pub fn write_load_seasonal_stats(
     path: &Path,
     rows: &[LoadSeasonalStatsRow],
 ) -> Result<(), OutputError> {
-    ensure_parent_dir(path)?;
-    let config = ParquetWriterConfig::default();
     let batch = build_load_seasonal_stats_batch(rows)?;
-    write_parquet_atomic(path, &batch, &config)
-}
-
-// ── Shared helpers ────────────────────────────────────────────────────────────
-
-pub(crate) fn ensure_parent_dir(path: &Path) -> Result<(), OutputError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| OutputError::io(parent, e))?;
-    }
-    Ok(())
+    write_batch_atomic(path, &batch)
 }
 
 // ── Schema builders ───────────────────────────────────────────────────────────

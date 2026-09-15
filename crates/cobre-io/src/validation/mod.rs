@@ -89,17 +89,6 @@ pub enum ErrorKind {
     SemanticAmbiguity,
 }
 
-impl ErrorKind {
-    /// Returns the default severity associated with this error kind.
-    #[must_use]
-    pub fn default_severity(self) -> Severity {
-        match self {
-            Self::UnusedEntity | Self::ModelQuality | Self::SemanticAmbiguity => Severity::Warning,
-            _ => Severity::Error,
-        }
-    }
-}
-
 // ── ValidationEntry ──────────────────────────────────────────────────────────
 
 /// A single diagnostic emitted during validation.
@@ -412,20 +401,6 @@ mod tests {
         assert!(
             description.contains("file beta missing"),
             "description should contain second error, got: {description}"
-        );
-    }
-
-    #[test]
-    fn test_error_kind_default_severity() {
-        assert_eq!(ErrorKind::FileNotFound.default_severity(), Severity::Error);
-        assert_eq!(ErrorKind::ParseError.default_severity(), Severity::Error);
-        assert_eq!(
-            ErrorKind::UnusedEntity.default_severity(),
-            Severity::Warning
-        );
-        assert_eq!(
-            ErrorKind::ModelQuality.default_severity(),
-            Severity::Warning
         );
     }
 }

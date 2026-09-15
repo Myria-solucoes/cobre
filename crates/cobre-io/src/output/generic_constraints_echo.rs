@@ -13,11 +13,9 @@ use std::sync::Arc;
 
 use arrow::array::{BooleanBuilder, Float64Builder, Int32Builder, RecordBatch, StringBuilder};
 
-use crate::output::atomic::write_parquet_atomic;
+use crate::output::atomic::write_batch_atomic;
 use crate::output::error::OutputError;
-use crate::output::parquet_config::ParquetWriterConfig;
 use crate::output::schemas::generic_constraint_echo_schema;
-use crate::output::stochastic::ensure_parent_dir;
 
 /// One row of the resolved generic-constraint echo.
 ///
@@ -101,10 +99,8 @@ pub fn write_generic_constraint_echo(
     path: &Path,
     rows: &[GenericConstraintEchoRow],
 ) -> Result<(), OutputError> {
-    ensure_parent_dir(path)?;
-    let config = ParquetWriterConfig::default();
     let batch = build_generic_constraint_echo_batch(rows)?;
-    write_parquet_atomic(path, &batch, &config)
+    write_batch_atomic(path, &batch)
 }
 
 fn build_generic_constraint_echo_batch(

@@ -542,7 +542,6 @@ pub struct SimulationParquetWriter {
     /// non-contiguous.
     loss_factors: HashMap<i32, f64>,
     scenarios_written: u32,
-    partitions_written: Vec<String>,
     /// One row per `(scenario, stage)` visited, accumulated across every
     /// `write_scenario` call; drained by [`Self::path_rows`] into the run-level
     /// `paths.parquet` after the scenario stream closes.
@@ -657,14 +656,12 @@ impl SimulationParquetWriter {
             block_durations,
             loss_factors,
             scenarios_written: 0,
-            partitions_written: Vec::new(),
             path_rows: Vec::new(),
         })
     }
 
-    /// Create the partition directory, write `batch` as `data.parquet`, and
-    /// record the partition in [`Self::partitions_written`] — the single
-    /// owner of the create-dir / write / push tail every entity type in
+    /// Create the partition directory and write `batch` as `data.parquet` —
+    /// the single owner of the create-dir / write tail every entity type in
     /// [`Self::write_scenario`] shares. `subpath` is the entity's directory
     /// under `simulation/` (`"costs"`, `"violations/generic"`, ...).
     ///
@@ -674,7 +671,7 @@ impl SimulationParquetWriter {
     ///   constructed (array length mismatch).
     /// - [`OutputError::IoError`] if any filesystem operation fails.
     fn write_partition(
-        &mut self,
+        &self,
         subpath: &str,
         suffix: &str,
         batch: &RecordBatch,
@@ -687,8 +684,6 @@ impl SimulationParquetWriter {
         std::fs::create_dir_all(&part_dir).map_err(|e| OutputError::io(&part_dir, e))?;
         let file_path = part_dir.join("data.parquet");
         write_parquet_atomic(&file_path, batch, &self.config)?;
-        self.partitions_written
-            .push(format!("simulation/{subpath}/{suffix}/data.parquet"));
         Ok(())
     }
 
@@ -938,7 +933,6 @@ impl SimulationParquetWriter {
             completed: self.scenarios_written,
             failed: 0,
             total_time_ms,
-            partitions_written: self.partitions_written,
             cost: None,
             solve_stats: MetadataSimulationSolveStats::default(),
         }
@@ -3076,43 +3070,6 @@ mod tests {
     }
 
     #[test]
-    fn finalize_partitions_written_contains_all_paths() {
-        let tmp = tempfile::tempdir().expect("tempdir must succeed");
-        std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
-
-        let system = make_test_system();
-        let config = ParquetWriterConfig::default();
-
-        let mut writer =
-            SimulationParquetWriter::new(tmp.path(), &system, &config).expect("new must succeed");
-
-        writer
-            .write_scenario(make_scenario_payload(0, 1))
-            .expect("write scenario 0 must succeed");
-
-        let output = writer.finalize(0);
-        // The test system has hydros, so at minimum costs and hydros partitions.
-        assert!(
-            output.partitions_written.len() >= 2,
-            "partitions_written must include costs and hydros partitions"
-        );
-        assert!(
-            output
-                .partitions_written
-                .iter()
-                .any(|p| p.contains("simulation/costs/scenario_id=0000")),
-            "partitions_written must contain costs partition for scenario 0"
-        );
-        assert!(
-            output
-                .partitions_written
-                .iter()
-                .any(|p| p.contains("simulation/hydros/scenario_id=0000")),
-            "partitions_written must contain hydros partition for scenario 0"
-        );
-    }
-
-    #[test]
     fn write_scenario_parquet_roundtrip_costs_row_count() {
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
         std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
@@ -3563,15 +3520,6 @@ mod tests {
                 .exists(),
             "no empty hydro_bus_generation per-scenario partition must ship when \
              a scenario's stages carry no cell records"
-        );
-
-        let output = writer.finalize(0);
-        assert!(
-            !output
-                .partitions_written
-                .iter()
-                .any(|p| p.contains("hydro_bus_generation")),
-            "partitions_written must contain no hydro_bus_generation entry"
         );
     }
 

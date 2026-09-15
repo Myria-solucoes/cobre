@@ -282,7 +282,6 @@ fn print_sim_summary(
 
 /// Merge each rank's local [`SimulationOutput`](cobre_io::SimulationOutput) via
 /// MPI collectives.
-#[allow(clippy::cast_possible_truncation)]
 fn merge_simulation_metadata<C: Communicator>(
     comm: &C,
     local: &SimulationOutput,
@@ -302,59 +301,11 @@ fn merge_simulation_metadata<C: Communicator>(
             message: format!("simulation metadata time allreduce error: {e}"),
         })?;
 
-    let local_paths_bytes = local.partitions_written.join("\n").into_bytes();
-
-    let send_len = [local_paths_bytes.len() as u64];
-    let n_ranks = comm.size();
-    let mut all_lens = vec![0u64; n_ranks];
-    let len_counts: Vec<usize> = vec![1; n_ranks];
-    let len_displs: Vec<usize> = (0..n_ranks).collect();
-    comm.allgatherv(&send_len, &mut all_lens, &len_counts, &len_displs)
-        .map_err(|e| CliError::Internal {
-            message: format!("partition path length exchange error: {e}"),
-        })?;
-
-    let recv_counts: Vec<usize> = all_lens.iter().map(|&l| l as usize).collect();
-    let recv_displs: Vec<usize> = recv_counts
-        .iter()
-        .scan(0usize, |acc, &c| {
-            let d = *acc;
-            *acc += c;
-            Some(d)
-        })
-        .collect();
-    let total_bytes: usize = recv_counts.iter().sum();
-    let mut all_bytes = vec![0u8; total_bytes];
-    comm.allgatherv(
-        &local_paths_bytes,
-        &mut all_bytes,
-        &recv_counts,
-        &recv_displs,
-    )
-    .map_err(|e| CliError::Internal {
-        message: format!("partition path gather error: {e}"),
-    })?;
-
-    let mut all_partitions: Vec<String> = Vec::new();
-    for (i, &count) in recv_counts.iter().enumerate() {
-        if count == 0 {
-            continue;
-        }
-        let start = recv_displs[i];
-        let chunk = &all_bytes[start..start + count];
-        let text = std::str::from_utf8(chunk).map_err(|e| CliError::Internal {
-            message: format!("partition path UTF-8 decode error from rank {i}: {e}"),
-        })?;
-        all_partitions.extend(text.split('\n').filter(|s| !s.is_empty()).map(String::from));
-    }
-    all_partitions.sort();
-
     Ok(SimulationOutput {
         n_scenarios: merged_counts[0],
         completed: merged_counts[1],
         failed: merged_counts[2],
         total_time_ms: merged_time[0],
-        partitions_written: all_partitions,
         cost: None,
         solve_stats: MetadataSimulationSolveStats::default(),
     })

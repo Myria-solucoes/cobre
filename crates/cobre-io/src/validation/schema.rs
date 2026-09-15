@@ -70,12 +70,6 @@ use crate::{
 pub(crate) struct ParsedData {
     /// `config.json`.
     pub(crate) config: Config,
-    /// `penalties.json`.
-    // Rationale: the per-entity parsers embed these defaults for resolution, but the
-    // Layer 5 penalty-ordering check needs the original global values; retaining the
-    // parsed field here avoids re-reading `penalties.json` when that check runs.
-    #[allow(dead_code)]
-    pub(crate) penalties: GlobalPenaltyDefaults,
     /// `stages.json`.
     pub(crate) stages: StagesData,
     /// `initial_conditions.json`.
@@ -110,10 +104,6 @@ pub(crate) struct ParsedData {
     /// `system/fpha_hyperplanes.parquet`.
     pub(crate) fpha_hyperplanes: Vec<FphaHyperplaneRow>,
     /// `constraints/generic_parameters.json`.
-    // Rationale: the field is populated by the schema-validation layer for the expression-resolution
-    // step that substitutes `@name` sigils in constraint expressions; removing it would discard
-    // the parsed data and require re-parsing from disk at that step.
-    #[allow(dead_code)]
     pub(crate) scalar_parameters: Vec<ScalarParameter>,
 
     /// `scenarios/inflow_history.parquet`.
@@ -273,7 +263,7 @@ pub(crate) fn validate_schema(
 
     // Fall back to a sentinel when penalties failed to parse, so penalty-dependent
     // parsers still run and their own errors are collected in this pass.
-    let sentinel = penalties.clone().unwrap_or_else(sentinel_penalties);
+    let sentinel = penalties.unwrap_or_else(sentinel_penalties);
 
     let buses = parse_or_error(
         parse_buses(&case_root.join("system/buses.json"), &sentinel),
@@ -659,7 +649,6 @@ pub(crate) fn validate_schema(
     // The guard above already ensures every required file parsed; these `?`s only
     // narrow the Options to satisfy the type checker.
     let config = config?;
-    let penalties = penalties?;
     let stages = stages?;
     let initial_conditions = initial_conditions?;
     let buses = buses?;
@@ -669,7 +658,6 @@ pub(crate) fn validate_schema(
 
     Some(ParsedData {
         config,
-        penalties,
         stages,
         initial_conditions,
         post_study_stages,

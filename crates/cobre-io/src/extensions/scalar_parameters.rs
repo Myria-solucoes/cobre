@@ -239,26 +239,6 @@ pub fn parse_scalar_parameters_json(path: &Path) -> Result<Vec<ScalarParameter>,
     Ok(result)
 }
 
-/// Load `constraints/generic_parameters.json` relative to `case_dir`.
-///
-/// # Errors
-///
-/// Propagates [`LoadError`] from [`parse_scalar_parameters_json`].
-///
-/// # Examples
-///
-/// ```no_run
-/// use cobre_io::load_scalar_parameters_json;
-/// use std::path::Path;
-///
-/// let params = load_scalar_parameters_json(Path::new("/path/to/case"))
-///     .expect("valid parameters file");
-/// println!("loaded {} parameters", params.len());
-/// ```
-pub fn load_scalar_parameters_json(case_dir: &Path) -> Result<Vec<ScalarParameter>, LoadError> {
-    parse_scalar_parameters_json(&case_dir.join("constraints/generic_parameters.json"))
-}
-
 // ── Private conversion helpers ────────────────────────────────────────────────
 
 /// Convert a single `ScalarParameterJsonEntry` into a `ParameterKind`,

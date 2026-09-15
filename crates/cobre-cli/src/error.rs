@@ -454,19 +454,12 @@ mod tests {
     }
 
     #[test]
-    fn from_load_error_cross_reference_maps_to_validation() {
-        use std::path::PathBuf;
-
-        let load_err = LoadError::CrossReferenceError {
-            source_file: PathBuf::from("system/hydros.json"),
-            source_entity: "Hydro 'H1'".to_string(),
-            target_collection: "bus registry".to_string(),
-            target_entity: "BUS_99".to_string(),
-        };
+    fn from_load_error_parse_maps_to_validation() {
+        let load_err = LoadError::parse("stages.json", "unexpected end of input");
         let cli_err = CliError::from(load_err);
         assert!(
             matches!(cli_err, CliError::Validation { .. }),
-            "LoadError::CrossReferenceError must map to CliError::Validation, got: {cli_err:?}"
+            "LoadError::ParseError must map to CliError::Validation, got: {cli_err:?}"
         );
         assert_eq!(cli_err.exit_code(), 1);
     }

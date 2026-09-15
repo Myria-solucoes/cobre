@@ -44,7 +44,7 @@ pub use manifest::{
     MetadataConfiguration, MetadataConvergence, MetadataCost, MetadataIterations,
     MetadataProblemDimensions, MetadataRowPool, MetadataScenarios, MetadataSimulationSolveStats,
     MetadataTrainingSolveStats, OutputContext, SetupTimings, SimulationMetadata, TrainingMetadata,
-    default_bounds, get_hostname, now_iso8601, read_simulation_metadata, read_training_metadata,
+    get_hostname, now_iso8601, read_simulation_metadata, read_training_metadata,
     write_simulation_metadata, write_training_metadata,
 };
 pub use parquet_config::ParquetWriterConfig;
@@ -136,17 +136,11 @@ pub struct IterationRecord {
     /// Row-batch assembly time (ms) → `cut_batch_build_ms`. Backward sub-component.
     pub time_cut_batch_build_ms: u64,
 
-    /// Backward thread-pool setup time (ms) → `bwd_setup_ms`. Backward sub-component.
-    pub time_bwd_setup_ms: u64,
-
     /// Estimated backward worker load imbalance (ms) → `bwd_load_imbalance_ms`. Backward sub-component.
     pub time_bwd_load_imbalance_ms: u64,
 
     /// Backward scheduling/sync overhead (ms) → `bwd_scheduling_overhead_ms`. Backward sub-component.
     pub time_bwd_scheduling_overhead_ms: u64,
-
-    /// Forward thread-pool setup time (ms) → `fwd_setup_ms`. Forward sub-component.
-    pub time_fwd_setup_ms: u64,
 
     /// Estimated forward worker load imbalance (ms) → `fwd_load_imbalance_ms`. Forward sub-component.
     pub time_fwd_load_imbalance_ms: u64,
@@ -365,12 +359,6 @@ pub struct SimulationOutput {
     /// Total elapsed wall-clock time for the simulation run (ms).
     pub total_time_ms: u64,
 
-    /// Hive partition paths written by the simulation writer.
-    ///
-    /// Each element is a relative path string such as
-    /// `"simulation/costs/year=2030/month=01/part-00.parquet"`.
-    pub partitions_written: Vec<String>,
-
     /// Aggregate cost statistics for the simulated scenarios.
     ///
     /// `None` until a producer supplies it. When several per-rank outputs are
@@ -395,8 +383,6 @@ impl SimulationOutput {
     /// - `completed`: sum across all outputs.
     /// - `failed`: sum across all outputs.
     /// - `total_time_ms`: max across all outputs (wall-clock = slowest rank).
-    /// - `partitions_written`: concatenation of all outputs' partitions, sorted
-    ///   for deterministic ordering regardless of input order.
     /// - `cost`: first present value in slice order. The producer must supply
     ///   the authoritative aggregate first (the distributed pipeline computes it
     ///   on rank 0), so the merged cost is the rank-0 aggregate rather than a
@@ -407,8 +393,8 @@ impl SimulationOutput {
     ///   `parallelism` takes the maximum across inputs (`None`-safe). Sums and
     ///   max are order-invariant, so the merge is declaration-order invariant.
     ///
-    /// Returns a zeroed [`SimulationOutput`] (no cost, default solve stats) with
-    /// empty partitions when the input slice is empty.
+    /// Returns a zeroed [`SimulationOutput`] (no cost, default solve stats) when the
+    /// input slice is empty.
     #[must_use]
     pub fn merge(outputs: &[Self]) -> Self {
         if outputs.is_empty() {
@@ -417,7 +403,6 @@ impl SimulationOutput {
                 completed: 0,
                 failed: 0,
                 total_time_ms: 0,
-                partitions_written: Vec::new(),
                 cost: None,
                 solve_stats: MetadataSimulationSolveStats::default(),
             };
@@ -428,12 +413,6 @@ impl SimulationOutput {
         let failed = outputs.iter().map(|o| o.failed).sum();
         let total_time_ms = outputs.iter().map(|o| o.total_time_ms).max().unwrap_or(0);
 
-        let mut partitions_written: Vec<String> = outputs
-            .iter()
-            .flat_map(|o| o.partitions_written.iter().cloned())
-            .collect();
-        partitions_written.sort();
-
         let cost = outputs.iter().find_map(|o| o.cost.clone());
 
         let solve_stats = merge_simulation_solve_stats(outputs);
@@ -443,7 +422,6 @@ impl SimulationOutput {
             completed,
             failed,
             total_time_ms,
-            partitions_written,
             cost,
             solve_stats,
         }
@@ -535,10 +513,8 @@ mod tests {
                 time_lower_bound_ms: 0,
                 time_state_exchange_ms: 0,
                 time_cut_batch_build_ms: 0,
-                time_bwd_setup_ms: 0,
                 time_bwd_load_imbalance_ms: 0,
                 time_bwd_scheduling_overhead_ms: 0,
-                time_fwd_setup_ms: 0,
                 time_fwd_load_imbalance_ms: 0,
                 time_fwd_scheduling_overhead_ms: 0,
                 time_overhead_ms: 0,
@@ -610,10 +586,8 @@ mod tests {
             time_lower_bound_ms: 4,
             time_state_exchange_ms: 0,
             time_cut_batch_build_ms: 0,
-            time_bwd_setup_ms: 0,
             time_bwd_load_imbalance_ms: 0,
             time_bwd_scheduling_overhead_ms: 0,
-            time_fwd_setup_ms: 0,
             time_fwd_load_imbalance_ms: 0,
             time_fwd_scheduling_overhead_ms: 0,
             time_overhead_ms: 400u64.saturating_sub(150 + 250 + 5 + 3 + 4),
@@ -649,10 +623,6 @@ mod tests {
             completed: 100,
             failed: 0,
             total_time_ms: 3_200,
-            partitions_written: vec![
-                "simulation/costs/year=2030/part-00.parquet".to_string(),
-                "simulation/costs/year=2031/part-00.parquet".to_string(),
-            ],
             cost: None,
             solve_stats: MetadataSimulationSolveStats::default(),
         };
@@ -661,7 +631,6 @@ mod tests {
         assert_eq!(output.completed, 100);
         assert_eq!(output.failed, 0);
         assert_eq!(output.total_time_ms, 3_200);
-        assert_eq!(output.partitions_written.len(), 2);
     }
 
     #[test]
@@ -721,7 +690,6 @@ mod tests {
         assert_eq!(merged.completed, 0);
         assert_eq!(merged.failed, 0);
         assert_eq!(merged.total_time_ms, 0);
-        assert!(merged.partitions_written.is_empty());
     }
 
     #[test]
@@ -731,7 +699,6 @@ mod tests {
             completed: 4,
             failed: 1,
             total_time_ms: 1000,
-            partitions_written: vec!["simulation/costs/scenario_id=0000/data.parquet".to_string()],
             cost: None,
             solve_stats: MetadataSimulationSolveStats::default(),
         };
@@ -740,7 +707,6 @@ mod tests {
         assert_eq!(merged.completed, 4);
         assert_eq!(merged.failed, 1);
         assert_eq!(merged.total_time_ms, 1000);
-        assert_eq!(merged.partitions_written, output.partitions_written);
     }
 
     #[test]
@@ -750,10 +716,6 @@ mod tests {
             completed: 3,
             failed: 0,
             total_time_ms: 500,
-            partitions_written: vec![
-                "simulation/costs/scenario_id=0000/data.parquet".to_string(),
-                "simulation/costs/scenario_id=0001/data.parquet".to_string(),
-            ],
             cost: None,
             solve_stats: MetadataSimulationSolveStats::default(),
         };
@@ -762,7 +724,6 @@ mod tests {
             completed: 1,
             failed: 1,
             total_time_ms: 800,
-            partitions_written: vec!["simulation/costs/scenario_id=0002/data.parquet".to_string()],
             cost: None,
             solve_stats: MetadataSimulationSolveStats::default(),
         };
@@ -772,43 +733,6 @@ mod tests {
         assert_eq!(merged.failed, 1);
         // total_time_ms uses max, not sum
         assert_eq!(merged.total_time_ms, 800);
-        assert_eq!(merged.partitions_written.len(), 3);
-    }
-
-    #[test]
-    fn test_merge_partitions_sorted() {
-        let a = SimulationOutput {
-            n_scenarios: 1,
-            completed: 1,
-            failed: 0,
-            total_time_ms: 100,
-            partitions_written: vec![
-                "simulation/hydros/scenario_id=0002/data.parquet".to_string(),
-                "simulation/costs/scenario_id=0002/data.parquet".to_string(),
-            ],
-            cost: None,
-            solve_stats: MetadataSimulationSolveStats::default(),
-        };
-        let b = SimulationOutput {
-            n_scenarios: 1,
-            completed: 1,
-            failed: 0,
-            total_time_ms: 200,
-            partitions_written: vec![
-                "simulation/costs/scenario_id=0001/data.parquet".to_string(),
-                "simulation/hydros/scenario_id=0001/data.parquet".to_string(),
-            ],
-            cost: None,
-            solve_stats: MetadataSimulationSolveStats::default(),
-        };
-        let merged = SimulationOutput::merge(&[a, b]);
-        let expected = vec![
-            "simulation/costs/scenario_id=0001/data.parquet".to_string(),
-            "simulation/costs/scenario_id=0002/data.parquet".to_string(),
-            "simulation/hydros/scenario_id=0001/data.parquet".to_string(),
-            "simulation/hydros/scenario_id=0002/data.parquet".to_string(),
-        ];
-        assert_eq!(merged.partitions_written, expected);
     }
 
     #[test]
@@ -818,7 +742,6 @@ mod tests {
             completed: 2,
             failed: 0,
             total_time_ms: 500,
-            partitions_written: vec![],
             cost: Some(MetadataCost {
                 mean_cost: 100.0,
                 std_cost: 10.0,
@@ -837,7 +760,6 @@ mod tests {
             completed: 3,
             failed: 0,
             total_time_ms: 800,
-            partitions_written: vec![],
             cost: Some(MetadataCost {
                 mean_cost: 200.0,
                 std_cost: 20.0,
@@ -901,7 +823,6 @@ mod tests {
             completed: 1,
             failed: 0,
             total_time_ms: 100,
-            partitions_written: vec![],
             cost: None,
             solve_stats: MetadataSimulationSolveStats::default(),
         };

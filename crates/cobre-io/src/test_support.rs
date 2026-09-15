@@ -511,21 +511,6 @@ pub fn penalties_all(v: f64) -> HydroPenalties {
     }
 }
 
-/// Minimal `GlobalPenaltyDefaults` required to fill `ParsedData`.
-#[must_use]
-pub fn minimal_global_penalties() -> GlobalPenaltyDefaults {
-    GlobalPenaltyDefaults {
-        bus_deficit_segments: vec![DeficitSegment {
-            depth_mw: None,
-            cost_per_mwh: 1.0,
-        }],
-        bus_excess_cost: 1.0,
-        line_exchange_cost: 1.0,
-        hydro: penalties_all(1.0),
-        ncs_curtailment_cost: 1.0,
-    }
-}
-
 /// A `GlobalPenaltyDefaults` with a two-segment deficit curve and a
 /// non-uniform hydro penalty set.
 #[must_use]
@@ -705,7 +690,6 @@ pub fn make_stages(ids: Vec<i32>) -> StagesData {
 pub(crate) fn base_parsed_data(stages: StagesData, buses: Vec<Bus>) -> ParsedData {
     ParsedData {
         config: minimal_config(),
-        penalties: minimal_global_penalties(),
         stages,
         initial_conditions: InitialConditions {
             storage: vec![],

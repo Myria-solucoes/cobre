@@ -493,26 +493,6 @@ pub fn parse_stages(path: &Path) -> Result<StagesData, LoadError> {
     convert_stages(raw, path)
 }
 
-/// Build a `stage id -> season id` lookup, skipping stages without a `season_id`.
-///
-/// # Examples
-///
-/// ```
-/// use cobre_io::build_season_stage_map;
-/// use cobre_core::temporal::Stage;
-///
-/// // An empty slice produces an empty map.
-/// let map = build_season_stage_map(&[]);
-/// assert!(map.is_empty());
-/// ```
-#[must_use]
-pub fn build_season_stage_map(stages: &[Stage]) -> HashMap<i32, usize> {
-    stages
-        .iter()
-        .filter_map(|s| s.season_id.map(|sid| (s.id, sid)))
-        .collect()
-}
-
 // ── Validation ────────────────────────────────────────────────────────────────
 
 fn validate_raw_stages(raw: &RawStagesFile, path: &Path) -> Result<(), LoadError> {
@@ -2380,82 +2360,6 @@ mod tests {
             }
             other => panic!("expected SchemaError, got: {other:?}"),
         }
-    }
-
-    // ── build_season_stage_map ─────────────────────────────────────────────
-
-    /// 3 stages with season IDs → map entries {0 => 0, 1 => 0, 2 => 1}.
-    #[test]
-    fn test_build_season_stage_map_basic() {
-        let json = r#"{
-          "season_definitions": {
-            "cycle_type": "monthly",
-            "seasons": [
-              { "id": 0, "label": "S0", "month_start": 1 },
-              { "id": 1, "label": "S1", "month_start": 7 }
-            ]
-          },
-          "policy_graph": {
-            "type": "finite_horizon",
-            "annual_discount_rate": 0.0,
-            "transitions": [
-              { "source_id": 0, "target_id": 1, "probability": 1.0 },
-              { "source_id": 1, "target_id": 2, "probability": 1.0 }
-            ]
-          },
-          "stages": [
-            { "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
-              "season_id": 0,
-              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_openings": 5 },
-            { "id": 1, "start_date": "2024-02-01", "end_date": "2024-03-01",
-              "season_id": 0,
-              "blocks": [{ "id": 0, "name": "A", "hours": 672.0 }], "num_openings": 5 },
-            { "id": 2, "start_date": "2024-07-01", "end_date": "2024-08-01",
-              "season_id": 1,
-              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_openings": 5 }
-          ]
-        }"#;
-        let f = write_json(json);
-        let data = parse_stages(f.path()).unwrap();
-        let map = build_season_stage_map(&data.stages);
-        assert_eq!(map.len(), 3);
-        assert_eq!(map[&0], 0);
-        assert_eq!(map[&1], 0);
-        assert_eq!(map[&2], 1);
-    }
-
-    /// Empty stages slice → empty map.
-    #[test]
-    fn test_build_season_stage_map_empty() {
-        let map = build_season_stage_map(&[]);
-        assert!(map.is_empty());
-    }
-
-    /// Stages without season_id → empty map.
-    #[test]
-    fn test_build_season_stage_map_none_season_ids() {
-        let json = r#"{
-          "policy_graph": {
-            "type": "finite_horizon",
-            "annual_discount_rate": 0.0,
-            "transitions": [
-              { "source_id": 0, "target_id": 1, "probability": 1.0 }
-            ]
-          },
-          "stages": [
-            { "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
-              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_openings": 5 },
-            { "id": 1, "start_date": "2024-02-01", "end_date": "2024-03-01",
-              "blocks": [{ "id": 0, "name": "A", "hours": 672.0 }], "num_openings": 5 }
-          ]
-        }"#;
-        let f = write_json(json);
-        let data = parse_stages(f.path()).unwrap();
-        let map = build_season_stage_map(&data.stages);
-        assert!(
-            map.is_empty(),
-            "stages without season_id should yield an empty map"
-        );
     }
 
     /// `convert_noise_method(RawNoiseMethod::HistoricalResiduals)` returns

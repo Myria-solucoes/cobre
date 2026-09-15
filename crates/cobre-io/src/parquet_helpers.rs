@@ -1,11 +1,25 @@
-//! Shared Parquet column extraction helpers centralising the typed-downcast
+//! Centralises the shared Parquet reader-opening and typed column-downcast
 //! logic used by every Parquet parser in `cobre-io`.
 
 use arrow::array::{Array, Date32Array, Float64Array, Int32Array, UInt32Array};
 use arrow::record_batch::RecordBatch;
+use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
+use std::fs::File;
 use std::path::Path;
 
 use crate::LoadError;
+
+/// Single owner of `cobre-io`'s parquet open/build error mappings.
+pub(crate) fn open_record_batch_reader(path: &Path) -> Result<ParquetRecordBatchReader, LoadError> {
+    let file = File::open(path).map_err(|e| LoadError::io(path, e))?;
+
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|e| LoadError::parse(path, e.to_string()))?;
+
+    builder
+        .build()
+        .map_err(|e| LoadError::parse(path, e.to_string()))
+}
 
 pub(crate) fn extract_required_int32<'a>(
     batch: &'a RecordBatch,
@@ -151,6 +165,7 @@ pub(crate) fn extract_required_date32<'a>(
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::test_support::{write_json, write_parquet_batches};
     use arrow::array::ArrayRef;
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
@@ -468,5 +483,45 @@ mod tests {
         assert_eq!(err_path, path);
         assert!(message.starts_with("column \"start_date\" has type "));
         assert!(message.ends_with(" but Date32 is required"));
+    }
+
+    #[test]
+    fn open_record_batch_reader_reads_every_batch() {
+        let b1 = make_batch(
+            vec![Field::new("hydro_id", DataType::Int32, false)],
+            vec![Arc::new(Int32Array::from(vec![1, 2, 3]))],
+        );
+        let b2 = make_batch(
+            vec![Field::new("hydro_id", DataType::Int32, false)],
+            vec![Arc::new(Int32Array::from(vec![4, 5]))],
+        );
+        let total_rows = b1.num_rows() + b2.num_rows();
+        let tmp = write_parquet_batches(&[b1, b2]);
+        let reader = open_record_batch_reader(tmp.path()).unwrap();
+        let mut rows = 0;
+        for batch_result in reader {
+            rows += batch_result.unwrap().num_rows();
+        }
+        assert_eq!(rows, total_rows);
+    }
+
+    #[test]
+    fn open_record_batch_reader_errors_on_missing_file() {
+        let path = Path::new("/nonexistent-dir/does-not-exist.parquet");
+        let err = open_record_batch_reader(path).unwrap_err();
+        let LoadError::IoError { path: err_path, .. } = err else {
+            panic!("expected IoError, got a different variant");
+        };
+        assert_eq!(err_path, path);
+    }
+
+    #[test]
+    fn open_record_batch_reader_errors_on_non_parquet_file() {
+        let tmp = write_json("{}");
+        let err = open_record_batch_reader(tmp.path()).unwrap_err();
+        let LoadError::ParseError { path: err_path, .. } = err else {
+            panic!("expected ParseError, got a different variant");
+        };
+        assert_eq!(err_path, tmp.path());
     }
 }

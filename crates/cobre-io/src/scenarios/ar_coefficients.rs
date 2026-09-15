@@ -46,12 +46,12 @@
 //! - Lag contiguity (1, 2, …, p for each (hydro, stage)) — Layer 3/5.
 
 use cobre_core::EntityId;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use std::fs::File;
 use std::path::Path;
 
 use crate::LoadError;
-use crate::parquet_helpers::{extract_required_float64, extract_required_int32};
+use crate::parquet_helpers::{
+    extract_required_float64, extract_required_int32, open_record_batch_reader,
+};
 
 /// A single row from `scenarios/inflow_ar_coefficients.parquet`.
 ///
@@ -109,14 +109,7 @@ pub struct InflowArCoefficientRow {
 /// println!("loaded {} AR coefficient rows", rows.len());
 /// ```
 pub fn parse_inflow_ar_coefficients(path: &Path) -> Result<Vec<InflowArCoefficientRow>, LoadError> {
-    let file = File::open(path).map_err(|e| LoadError::io(path, e))?;
-
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
-
-    let reader = builder
-        .build()
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
+    let reader = open_record_batch_reader(path)?;
 
     let mut rows: Vec<InflowArCoefficientRow> = Vec::new();
 

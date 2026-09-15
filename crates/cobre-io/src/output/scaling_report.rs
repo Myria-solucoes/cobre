@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use super::atomic::write_json_atomic;
+use super::atomic::{ensure_parent_dir, write_json_atomic};
 use super::error::OutputError;
 
 use serde::Serialize;
@@ -21,9 +21,7 @@ use serde::Serialize;
 /// Returns [`OutputError::IoError`] on filesystem failures, or
 /// [`OutputError::SerializationError`] if JSON serialization fails.
 pub fn write_scaling_report(path: &Path, report: &impl Serialize) -> Result<(), OutputError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| OutputError::io(parent, e))?;
-    }
+    ensure_parent_dir(path)?;
 
     write_json_atomic(path, report, "scaling_report")
 }

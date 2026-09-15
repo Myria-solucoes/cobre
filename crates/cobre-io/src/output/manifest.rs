@@ -216,15 +216,13 @@ pub struct MetadataBounds {
 }
 
 /// The pre-exact-regime default for [`MetadataBounds::final_upper_bound_kind`].
-#[must_use]
-pub fn default_upper_bound_kind() -> String {
+fn default_upper_bound_kind() -> String {
     "statistical".to_string()
 }
 
 /// Default bounds (`final_lower_bound` `0.0`, absent upper bounds) used when
 /// metadata omits the `bounds` field.
-#[must_use]
-pub fn default_bounds() -> MetadataBounds {
+fn default_bounds() -> MetadataBounds {
     MetadataBounds {
         final_lower_bound: 0.0,
         final_upper_bound: None,

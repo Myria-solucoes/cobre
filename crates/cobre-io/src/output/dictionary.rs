@@ -13,7 +13,6 @@ use arrow::array::{Float64Builder, Int8Builder, Int32Builder, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
 use cobre_core::System;
 
-use crate::Config;
 use crate::output::atomic::{write_bytes_atomic, write_parquet_atomic};
 use crate::output::error::OutputError;
 use crate::output::parquet_config::ParquetWriterConfig;
@@ -65,11 +64,7 @@ const BOUND_FLOW_MAX: i8 = 9;
 /// - [`OutputError::SerializationError`] for Arrow `RecordBatch` construction
 ///   failures in `bounds.parquet`.
 /// - [`OutputError::ManifestError`] for JSON serialization failures.
-pub fn write_dictionaries(
-    path: &Path,
-    system: &System,
-    _config: &Config,
-) -> Result<(), OutputError> {
+pub fn write_dictionaries(path: &Path, system: &System) -> Result<(), OutputError> {
     write_codes_json(path)?;
     write_entities_csv(path, system)?;
     write_variables_csv(path)?;

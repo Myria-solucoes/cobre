@@ -1,44 +1,20 @@
-//! Postcard serialization helpers for MPI broadcast of [`System`] and
-//! [`ScalarParameter`] collections.
-//!
-//! Cobre uses `postcard` (not `bincode`) for MPI serialization (see CLAUDE.md hard rules).
-//! These helpers serialize payloads to compact byte buffers for broadcast
-//! and deserialize them on worker ranks.
-//!
-//! ## Why broadcast mirror types
+//! Postcard-safe mirror types for [`ScalarParameter`], used to broadcast
+//! scalar parameters over MPI.
 //!
 //! [`ParameterKind`] and [`ComputedParameter`] use serde internally-tagged
-//! enums (`#[serde(tag = "...")]`) to drive the user-facing JSON schema. Postcard
-//! does not support that representation. To keep MPI broadcast working without
-//! per-rank disk reads, the public `serialize_parameters` /
-//! `deserialize_parameters` helpers convert through tag-free mirror types
-//! ([`BroadcastScalarParameter`], [`BroadcastParameterKind`],
-//! [`BroadcastComputedParameter`]) on the wire and reconstruct the in-memory
-//! shape on the receiving end. This mirrors the `BroadcastConfig` pattern in
-//! `cobre-cli` used for [`crate::Config`].
+//! enums (`#[serde(tag = "...")]`) to drive the user-facing JSON schema — a
+//! representation postcard cannot encode. [`BroadcastScalarParameter`],
+//! [`BroadcastParameterKind`] and [`BroadcastComputedParameter`] mirror them
+//! with externally-tagged encoding instead, convertible via `From` in both
+//! directions. This is the same pattern as `BroadcastConfig` in `cobre-cli`,
+//! used for [`crate::Config`].
 //!
-//! # Usage
-//!
-//! On rank 0, load the case and serialize:
-//!
-//! ```rust,ignore
-//! let system = cobre_io::load_case(&path)?;
-//! let bytes = cobre_io::serialize_system(&system)?;
-//! // broadcast bytes via MPI ...
-//! ```
-//!
-//! On worker ranks, deserialize after receiving:
-//!
-//! ```rust,ignore
-//! // ... receive bytes via MPI
-//! let system = cobre_io::deserialize_system(&bytes)?;
-//! // system.bus(id) works immediately — indices are rebuilt
-//! ```
+//! A postcard round-trip of a [`cobre_core::System`] returns a value whose
+//! lookup indices are rebuilt by its `Deserialize` impl, so `system.bus(id)`
+//! works immediately.
 
-use cobre_core::{ComputedParameter, EntityId, ParameterKind, ScalarParameter, System};
+use cobre_core::{ComputedParameter, EntityId, ParameterKind, ScalarParameter};
 use serde::{Deserialize, Serialize};
-
-use crate::LoadError;
 
 // ── Broadcast mirror types (tag-free, postcard-compatible) ──────────────────
 
@@ -181,150 +157,6 @@ impl From<BroadcastComputedParameter> for ComputedParameter {
     }
 }
 
-/// Serialize a [`System`] to a postcard byte buffer for MPI broadcast.
-///
-/// The returned `Vec<u8>` is suitable for broadcasting over MPI. The recipient
-/// must call [`deserialize_system`] to reconstruct the [`System`] with working
-/// O(1) lookup indices.
-///
-/// # Errors
-///
-/// Returns [`LoadError::ParseError`] with path `"<broadcast>"` if postcard
-/// encounters an unsupported type during serialization. This should not occur
-/// in practice given the types used in [`System`].
-///
-/// # Examples
-///
-/// ```
-/// use chrono::NaiveDate;
-/// use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder};
-/// use cobre_io::serialize_system;
-///
-/// let bus = Bus {
-///     id: EntityId(1),
-///     name: "Main Bus".to_string(),
-///     operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-///     deficit_segments: vec![DeficitSegment { depth_mw: None, cost_per_mwh: 500.0 }],
-///     excess_cost: 0.0,
-/// };
-/// let system = SystemBuilder::new().buses(vec![bus]).build().unwrap();
-/// let bytes = serialize_system(&system).unwrap();
-/// assert!(!bytes.is_empty());
-/// ```
-pub fn serialize_system(system: &System) -> Result<Vec<u8>, LoadError> {
-    postcard::to_allocvec(system)
-        .map_err(|e| LoadError::parse("<broadcast>", format!("postcard serialization: {e}")))
-}
-
-/// Deserialize a [`System`] from a postcard byte buffer received via MPI broadcast.
-///
-/// `System`'s `Deserialize` impl rebuilds lookup indices unconditionally, so
-/// O(1) entity lookups (e.g., `system.bus(id)`) work immediately on the
-/// returned value.
-///
-/// # Errors
-///
-/// Returns [`LoadError::ParseError`] with path `"<broadcast>"` if the byte slice
-/// is corrupted, truncated, or not a valid postcard encoding of [`System`].
-///
-/// # Examples
-///
-/// ```
-/// use chrono::NaiveDate;
-/// use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder};
-/// use cobre_io::{deserialize_system, serialize_system};
-///
-/// let bus = Bus {
-///     id: EntityId(1),
-///     name: "Main Bus".to_string(),
-///     operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-///     deficit_segments: vec![DeficitSegment { depth_mw: None, cost_per_mwh: 500.0 }],
-///     excess_cost: 0.0,
-/// };
-/// let system = SystemBuilder::new().buses(vec![bus]).build().unwrap();
-/// let bytes = serialize_system(&system).unwrap();
-/// let restored = deserialize_system(&bytes).unwrap();
-/// assert_eq!(restored.n_buses(), 1);
-/// assert!(restored.bus(EntityId(1)).is_some());
-/// ```
-pub fn deserialize_system(bytes: &[u8]) -> Result<System, LoadError> {
-    postcard::from_bytes(bytes)
-        .map_err(|e| LoadError::parse("<broadcast>", format!("postcard deserialization: {e}")))
-}
-
-/// Serialize a list of [`ScalarParameter`] to a postcard byte buffer for MPI
-/// broadcast.
-///
-/// The returned `Vec<u8>` encodes the entire slice as a single postcard payload
-/// including a varint length prefix, so the recipient can deserialize without a
-/// separate length-broadcast step. The caller is responsible for the MPI
-/// broadcast call itself.
-///
-/// # Errors
-///
-/// Returns [`LoadError::ParseError`] with path `"<broadcast>"` if postcard
-/// serialization fails.
-///
-/// # Examples
-///
-/// ```
-/// use cobre_core::{EntityId, ParameterKind, ScalarParameter};
-/// use cobre_io::serialize_parameters;
-///
-/// let param = ScalarParameter {
-///     id: EntityId(1),
-///     name: "rho_eq_h1".to_string(),
-///     kind: ParameterKind::Constant { value: 3.6 },
-/// };
-/// let bytes = serialize_parameters(&[param.clone()]).unwrap();
-/// assert!(!bytes.is_empty());
-///
-/// let restored = cobre_io::deserialize_parameters(&bytes).unwrap();
-/// assert_eq!(restored, vec![param]);
-/// ```
-pub fn serialize_parameters(parameters: &[ScalarParameter]) -> Result<Vec<u8>, LoadError> {
-    let mirror: Vec<BroadcastScalarParameter> = parameters
-        .iter()
-        .map(BroadcastScalarParameter::from)
-        .collect();
-    postcard::to_allocvec(&mirror)
-        .map_err(|e| LoadError::parse("<broadcast>", format!("postcard serialization: {e}")))
-}
-
-/// Deserialize a `Vec<ScalarParameter>` from a postcard byte buffer received
-/// via MPI broadcast.
-///
-/// The byte buffer must have been produced by [`serialize_parameters`]. An empty
-/// slice or a corrupted buffer returns an error; this function never silently
-/// discards data.
-///
-/// # Errors
-///
-/// Returns [`LoadError::ParseError`] with path `"<broadcast>"` if the byte
-/// slice is corrupted, truncated, or not a valid postcard encoding of
-/// `Vec<ScalarParameter>`.
-///
-/// # Examples
-///
-/// ```
-/// use cobre_core::{EntityId, ParameterKind, ScalarParameter};
-/// use cobre_io::{deserialize_parameters, serialize_parameters};
-///
-/// let param = ScalarParameter {
-///     id: EntityId(1),
-///     name: "rho_eq_h1".to_string(),
-///     kind: ParameterKind::Constant { value: 3.6 },
-/// };
-/// let bytes = serialize_parameters(&[param.clone()]).unwrap();
-/// let restored = deserialize_parameters(&bytes).unwrap();
-/// assert_eq!(restored, vec![param]);
-/// ```
-pub fn deserialize_parameters(bytes: &[u8]) -> Result<Vec<ScalarParameter>, LoadError> {
-    let mirror: Vec<BroadcastScalarParameter> = postcard::from_bytes(bytes)
-        .map_err(|e| LoadError::parse("<broadcast>", format!("postcard deserialization: {e}")))?;
-    Ok(mirror.into_iter().map(ScalarParameter::from).collect())
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
@@ -333,7 +165,7 @@ mod tests {
     use cobre_core::{
         AnticipatedCommitmentHistory, Bus, ComputedParameter, DeficitSegment, EntityId, Hydro,
         HydroGenerationModel, HydroPenalties, InitialConditions, ParameterKind, ScalarParameter,
-        SystemBuilder, Thermal, entities::AnticipatedConfig,
+        System, SystemBuilder, Thermal, entities::AnticipatedConfig,
     };
 
     fn minimal_bus(id: i32) -> Bus {
@@ -423,10 +255,10 @@ mod tests {
         let bus = minimal_bus(1);
         let system = SystemBuilder::new().buses(vec![bus]).build().unwrap();
 
-        let bytes = serialize_system(&system).unwrap();
+        let bytes = postcard::to_allocvec(&system).unwrap();
         assert!(!bytes.is_empty());
 
-        let restored = deserialize_system(&bytes).unwrap();
+        let restored = postcard::from_bytes::<System>(&bytes).unwrap();
 
         assert_eq!(restored.n_buses(), system.n_buses());
         assert!(restored.bus(EntityId(1)).is_some());
@@ -445,8 +277,8 @@ mod tests {
             .build()
             .unwrap();
 
-        let bytes = serialize_system(&system).unwrap();
-        let restored = deserialize_system(&bytes).unwrap();
+        let bytes = postcard::to_allocvec(&system).unwrap();
+        let restored = postcard::from_bytes::<System>(&bytes).unwrap();
 
         assert_eq!(restored.n_buses(), system.n_buses());
         assert_eq!(restored.n_thermals(), system.n_thermals());
@@ -506,8 +338,8 @@ mod tests {
             .build()
             .unwrap();
 
-        let bytes = serialize_system(&system).unwrap();
-        let restored = deserialize_system(&bytes).unwrap();
+        let bytes = postcard::to_allocvec(&system).unwrap();
+        let restored = postcard::from_bytes::<System>(&bytes).unwrap();
 
         assert_eq!(restored, system);
         assert_eq!(
@@ -536,8 +368,8 @@ mod tests {
             .build()
             .unwrap();
 
-        let bytes = serialize_system(&system).unwrap();
-        let restored = deserialize_system(&bytes).unwrap();
+        let bytes = postcard::to_allocvec(&system).unwrap();
+        let restored = postcard::from_bytes::<System>(&bytes).unwrap();
 
         assert_eq!(restored.n_thermals(), system.n_thermals());
         let Some(restored_anticipated) = restored.thermal(EntityId(10)) else {
@@ -560,28 +392,10 @@ mod tests {
     }
 
     #[test]
-    fn test_deserialize_corrupted_bytes() {
-        let result = deserialize_system(&[0u8; 4]);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err.to_string().contains("<broadcast>"));
-        assert!(matches!(err, LoadError::ParseError { .. }));
-    }
-
-    #[test]
-    fn test_deserialize_empty_bytes() {
-        let result = deserialize_system(&[]);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(err, LoadError::ParseError { .. }));
-        assert!(err.to_string().contains("<broadcast>"));
-    }
-
-    #[test]
     fn test_serialized_size_reasonable() {
         let bus = minimal_bus(1);
         let system = SystemBuilder::new().buses(vec![bus]).build().unwrap();
-        let bytes = serialize_system(&system).unwrap();
+        let bytes = postcard::to_allocvec(&system).unwrap();
         assert!(bytes.len() < 1024);
     }
 
@@ -629,36 +443,28 @@ mod tests {
     #[test]
     fn round_trip_all_five_parameter_kinds() {
         let original = five_kinds_fixture();
-        let bytes = serialize_parameters(&original).unwrap();
+        let mirror: Vec<BroadcastScalarParameter> = original
+            .iter()
+            .map(BroadcastScalarParameter::from)
+            .collect();
+        let bytes = postcard::to_allocvec(&mirror).unwrap();
         assert!(!bytes.is_empty());
-        let restored = deserialize_parameters(&bytes).unwrap();
+        let restored_mirror: Vec<BroadcastScalarParameter> = postcard::from_bytes(&bytes).unwrap();
+        let restored: Vec<ScalarParameter> = restored_mirror
+            .into_iter()
+            .map(ScalarParameter::from)
+            .collect();
         assert_eq!(restored, original);
     }
 
     #[test]
-    fn serialize_parameters_is_deterministic() {
+    fn mirror_parameter_encoding_is_deterministic() {
         let params = five_kinds_fixture();
-        let bytes_a = serialize_parameters(&params).unwrap();
-        let bytes_b = serialize_parameters(&params).unwrap();
+        let mirror: Vec<BroadcastScalarParameter> =
+            params.iter().map(BroadcastScalarParameter::from).collect();
+        let bytes_a = postcard::to_allocvec(&mirror).unwrap();
+        let bytes_b = postcard::to_allocvec(&mirror).unwrap();
         assert_eq!(bytes_a, bytes_b);
-    }
-
-    #[test]
-    fn deserialize_parameters_rejects_corrupted_bytes() {
-        let result = deserialize_parameters(&[0xFF, 0xFE, 0xFD, 0xFC]);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(err, LoadError::ParseError { .. }));
-        assert!(err.to_string().contains("<broadcast>"));
-    }
-
-    #[test]
-    fn deserialize_parameters_rejects_empty_buffer() {
-        let result = deserialize_parameters(&[]);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(err, LoadError::ParseError { .. }));
-        assert!(err.to_string().contains("<broadcast>"));
     }
 
     #[test]

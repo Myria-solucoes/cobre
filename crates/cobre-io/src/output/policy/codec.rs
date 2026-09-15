@@ -567,27 +567,6 @@ fn follow_uoffset(buf: &[u8], pos: usize) -> Option<usize> {
     pos.checked_add(off as usize)
 }
 
-/// Read a `f32` vector stored at `vec_pos` and return its elements as `f64`.
-// Rationale: the f32 vector reader is the symmetric counterpart to `read_f64_vector`; retaining
-// it keeps the codec complete against the full FlatBuffers type palette and avoids re-deriving
-// the safe byte-level parsing pattern from scratch when an f32 field is added to the schema.
-#[allow(dead_code)]
-fn read_f32_vector_as_f64(buf: &[u8], vec_pos: usize) -> Option<Vec<f64>> {
-    let len = read_u32_le(buf, vec_pos)? as usize;
-    let data_start = vec_pos.checked_add(4)?;
-    let data_end = data_start.checked_add(len.checked_mul(4)?)?;
-    if data_end > buf.len() {
-        return None;
-    }
-    let mut out = Vec::with_capacity(len);
-    for i in 0..len {
-        let pos = data_start + i * 4;
-        let bits = u32::from_le_bytes([buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]]);
-        out.push(f64::from(f32::from_bits(bits)));
-    }
-    Some(out)
-}
-
 fn read_f64_vector(buf: &[u8], vec_pos: usize) -> Option<Vec<f64>> {
     let len = read_u32_le(buf, vec_pos)? as usize;
     let data_start = vec_pos.checked_add(4)?;

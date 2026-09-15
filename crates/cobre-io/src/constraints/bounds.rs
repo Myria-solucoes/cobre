@@ -142,13 +142,12 @@
 
 use arrow::array::{Array, Float64Array, Int32Array};
 use cobre_core::EntityId;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use std::fs::File;
 use std::path::Path;
 
 use crate::LoadError;
 use crate::parquet_helpers::{
     extract_optional_float64, extract_optional_int32, extract_required_int32,
+    open_record_batch_reader,
 };
 
 // ── Row types ─────────────────────────────────────────────────────────────────
@@ -474,14 +473,7 @@ pub(super) fn validate_optional_finite(
 /// println!("loaded {} thermal bounds rows", rows.len());
 /// ```
 pub fn parse_thermal_bounds(path: &Path) -> Result<Vec<ThermalBoundsRow>, LoadError> {
-    let file = File::open(path).map_err(|e| LoadError::io(path, e))?;
-
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
-
-    let reader = builder
-        .build()
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
+    let reader = open_record_batch_reader(path)?;
 
     let mut rows: Vec<ThermalBoundsRow> = Vec::new();
 
@@ -574,14 +566,7 @@ pub fn parse_thermal_bounds(path: &Path) -> Result<Vec<ThermalBoundsRow>, LoadEr
 // splitting would require multiple passes over the batch.
 #[allow(clippy::too_many_lines)]
 pub fn parse_hydro_bounds(path: &Path) -> Result<Vec<HydroBoundsRow>, LoadError> {
-    let file = File::open(path).map_err(|e| LoadError::io(path, e))?;
-
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
-
-    let reader = builder
-        .build()
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
+    let reader = open_record_batch_reader(path)?;
 
     let mut rows: Vec<HydroBoundsRow> = Vec::new();
 
@@ -758,14 +743,7 @@ pub fn parse_hydro_bounds(path: &Path) -> Result<Vec<HydroBoundsRow>, LoadError>
 /// println!("loaded {} line bounds rows", rows.len());
 /// ```
 pub fn parse_line_bounds(path: &Path) -> Result<Vec<LineBoundsRow>, LoadError> {
-    let file = File::open(path).map_err(|e| LoadError::io(path, e))?;
-
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
-
-    let reader = builder
-        .build()
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
+    let reader = open_record_batch_reader(path)?;
 
     let mut rows: Vec<LineBoundsRow> = Vec::new();
 
@@ -834,14 +812,7 @@ pub fn parse_line_bounds(path: &Path) -> Result<Vec<LineBoundsRow>, LoadError> {
 /// println!("loaded {} pumping bounds rows", rows.len());
 /// ```
 pub fn parse_pumping_bounds(path: &Path) -> Result<Vec<PumpingBoundsRow>, LoadError> {
-    let file = File::open(path).map_err(|e| LoadError::io(path, e))?;
-
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
-
-    let reader = builder
-        .build()
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
+    let reader = open_record_batch_reader(path)?;
 
     let mut rows: Vec<PumpingBoundsRow> = Vec::new();
 
@@ -942,14 +913,7 @@ pub fn parse_pumping_bounds(path: &Path) -> Result<Vec<PumpingBoundsRow>, LoadEr
 /// println!("loaded {} contract bounds rows", rows.len());
 /// ```
 pub fn parse_contract_bounds(path: &Path) -> Result<Vec<ContractBoundsRow>, LoadError> {
-    let file = File::open(path).map_err(|e| LoadError::io(path, e))?;
-
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
-
-    let reader = builder
-        .build()
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
+    let reader = open_record_batch_reader(path)?;
 
     let mut rows: Vec<ContractBoundsRow> = Vec::new();
 

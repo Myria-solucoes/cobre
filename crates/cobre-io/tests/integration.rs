@@ -22,9 +22,7 @@ use cobre_io::output::simulation_writer::{
     HydroBusWriteRecord, HydroWriteRecord, ScenarioWritePayload, SimulationParquetWriter,
     StageWritePayload, write_paths,
 };
-use cobre_io::{
-    ParquetWriterConfig, deserialize_system, load_case, serialize_system, validate_case,
-};
+use cobre_io::{ParquetWriterConfig, load_case, validate_case};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use tempfile::TempDir;
 
@@ -406,6 +404,29 @@ fn test_inflow_history_wired_into_system() {
         assert!(
             row.value_m3s.is_finite(),
             "every inflow_history row must have a finite value_m3s"
+        );
+    }
+
+    assert!(
+        system
+            .inflow_models()
+            .iter()
+            .any(|m| !m.ar_coefficients.is_empty()),
+        "the deck must produce at least one order-bearing inflow model, or the \
+         residual_std_ratio check below passes vacuously"
+    );
+    for model in system.inflow_models() {
+        if model.ar_coefficients.is_empty() {
+            continue;
+        }
+        assert!(
+            model.residual_std_ratio > 0.0 && model.residual_std_ratio < 1.0,
+            "order-bearing model for hydro {:?} stage {} must have a closure-derived \
+             residual_std_ratio in (0, 1), not the assemble_inflow_models placeholder \
+             1.0; got {}",
+            model.hydro_id,
+            model.stage_id,
+            model.residual_std_ratio
         );
     }
 }
@@ -986,13 +1007,13 @@ fn test_postcard_round_trip() {
     let original = load_case(dir.path())
         .unwrap_or_else(|e| panic!("load_case should succeed for minimal case, got: {e}"));
 
-    let bytes = serialize_system(&original)
-        .unwrap_or_else(|e| panic!("serialize_system should succeed, got: {e}"));
+    let bytes = postcard::to_allocvec(&original)
+        .unwrap_or_else(|e| panic!("postcard serialization should succeed, got: {e}"));
 
     assert!(!bytes.is_empty(), "serialized bytes should be non-empty");
 
-    let deserialized = deserialize_system(&bytes)
-        .unwrap_or_else(|e| panic!("deserialize_system should succeed, got: {e}"));
+    let deserialized = postcard::from_bytes::<System>(&bytes)
+        .unwrap_or_else(|e| panic!("postcard deserialization should succeed, got: {e}"));
 
     assert_eq!(
         deserialized.n_buses(),
