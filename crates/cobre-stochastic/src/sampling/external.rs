@@ -145,8 +145,6 @@ impl ExternalScenarioLibrary {
 
     /// Returns the `n_entities`-length slice of eta values for `(stage, scenario)`.
     ///
-    /// Layout: `eta[stage * n_scenarios * n_entities + scenario * n_entities + entity]`.
-    ///
     /// # Panics
     ///
     /// Panics if `stage >= n_stages` or `scenario >= n_scenarios`.
@@ -640,13 +638,9 @@ pub fn standardize_external_ncs(
 
 /// Validate a populated [`ExternalScenarioLibrary`] against construction inputs.
 ///
-/// This is the Tier 3 validation gate for external scenario libraries.
-/// It runs after per-class file parsing and eta standardization, confirming
-/// that the library is well-formed before it is stored on `StudySetup`.
-///
-/// Validation uses **fail-fast** semantics: the first failed check immediately
-/// returns `Err`. The scenario-count warning (V3.8) is emitted via
-/// `tracing::warn!` and does not abort construction.
+/// Runs after per-class file parsing and eta standardization, before the
+/// library is stored on `StudySetup`; the first failed error check returns
+/// `Err`.
 ///
 /// ## Checks performed
 ///
@@ -702,7 +696,6 @@ pub fn validate_external_library(
     let n_entities = entity_ids.len();
     let class = library.entity_class();
 
-    // V3.2 — every entity in `entity_ids` must appear in `row_entity_ids`.
     for &id in entity_ids {
         if !row_entity_ids.contains(&id) {
             return Err(StochasticError::InsufficientData {
@@ -715,7 +708,6 @@ pub fn validate_external_library(
         }
     }
 
-    // V3.3 — every study stage must have at least one row.
     for (stage_idx, &count) in rows_per_stage.iter().enumerate().take(n_stages) {
         if count == 0 {
             return Err(StochasticError::InsufficientData {
@@ -727,9 +719,9 @@ pub fn validate_external_library(
         }
     }
 
-    // V3.4 — each stage's row count must be divisible by n_entities. Non-uniform
-    // counts are accepted; `pad_library_to_uniform` fills them afterward. The
-    // zero-entity guard skips an empty (benign) library to avoid a div-by-zero.
+    // V3.4 accepts non-uniform counts; `pad_library_to_uniform` fills them
+    // afterward. The zero-entity guard skips an empty (benign) library to avoid
+    // a div-by-zero.
     if n_entities > 0 && n_stages > 0 {
         for (stage_idx, &count) in rows_per_stage.iter().enumerate().take(n_stages) {
             if count % n_entities != 0 {
@@ -744,7 +736,6 @@ pub fn validate_external_library(
         }
     }
 
-    // V3.5 — every ID in `row_entity_ids` must exist in `entity_ids`.
     let entity_id_set: HashSet<EntityId> = entity_ids.iter().copied().collect();
     for &id in row_entity_ids {
         if !entity_id_set.contains(&id) {
@@ -791,7 +782,6 @@ pub fn validate_external_library(
         }
     }
 
-    // V3.8 — warn (do not fail) when scenarios < forward passes.
     if library.n_scenarios() < forward_passes as usize {
         tracing::warn!(
             n_scenarios = library.n_scenarios(),
@@ -974,14 +964,12 @@ mod tests {
         // Two stages, both season 0 (single-season system).
         let stages = vec![make_stage(0, 0, 0), make_stage(1, 1, 0)];
 
-        // AR(0): mean=100, std=30.
         let models = vec![
             make_inflow_model(1, 0, 100.0, 30.0, vec![]),
             make_inflow_model(1, 1, 100.0, 30.0, vec![]),
         ];
         let par = PrecomputedPar::build(&models, &stages, &hydro_ids, None).unwrap();
 
-        // 2 stages, 1 scenario, 1 hydro.
         let mut lib = ExternalScenarioLibrary::new(2, 1, 1, "inflow", vec![1, 1]);
 
         let rows = vec![
@@ -1040,15 +1028,14 @@ mod tests {
 
         let stages = vec![make_stage(0, 0, 0), make_stage(1, 1, 0)];
 
-        // AR(1): mean=160, std=25, psi*=0.5.
-        // PrecomputedPar will compute: psi_val=0.5, base=80.0, sigma=25.0.
+        // From mean=160, std=25, psi*=0.5, PrecomputedPar computes psi_val=0.5,
+        // base=80.0, sigma=25.0.
         let models = vec![
             make_inflow_model(1, 0, 160.0, 25.0, vec![0.5]),
             make_inflow_model(1, 1, 160.0, 25.0, vec![0.5]),
         ];
         let par = PrecomputedPar::build(&models, &stages, &hydro_ids, None).unwrap();
 
-        // Sanity-check precomputed values.
         assert!((par.deterministic_base(0, 0) - 80.0).abs() < 1e-10);
         assert!((par.sigma(0, 0) - 25.0).abs() < 1e-10);
         assert!((par.psi_slice(0, 0)[0] - 0.5).abs() < 1e-10);
@@ -1069,7 +1056,6 @@ mod tests {
             },
         ];
 
-        // Derived lag seed provides lag-1 = 110.0 for stage 0.
         let derived_lag_values = [110.0];
         let transitions = uniform_monthly_transitions(stages.len());
         standardize_external_inflow(
@@ -1145,9 +1131,6 @@ mod tests {
         ];
         let par = PrecomputedPar::build(&models, &stages, &hydro_ids, None).unwrap();
 
-        // 3 weekly stages within one monthly lag period:
-        //   stages 0 and 1: accumulate but do not finalize
-        //   stage 2: accumulate and finalize
         let transitions = vec![
             StageLagTransition {
                 accumulate_weight: 0.4,
@@ -1203,7 +1186,6 @@ mod tests {
             },
         ];
 
-        // Derived lag seed: lag-1 = 110.0 for hydro 1.
         let derived_lag_values = [110.0];
 
         standardize_external_inflow(
@@ -1360,10 +1342,8 @@ mod tests {
             "eta[stage=0] = {eta_0}, expected {expected_eta_0}"
         );
 
-        // Stage 1: lag-1 = 150.0 (shifted in at stage 0 finalize: avg = 150*0.7/0.7 = 150.0).
-        // The spillover seeds the next accumulator with 150.0*0.3=45.0, weight=0.3.
-        // Stage 1 then adds 130.0*1.0=130.0 → accum=175.0, weight=1.3 (finalized at end).
-        // But the lag used for eta is the one shifted AT stage 0, which is 150.0.
+        // Stage 1: lag-1 = 150.0, shifted in at stage 0's finalize — not the
+        // spillover-seeded accumulator, which only finalizes at stage 1's end.
         let expected_eta_1 = (130.0 - det_base - psi * 150.0) / sigma;
         let eta_1 = lib.eta_slice(1, 0)[0];
         assert!(
@@ -1543,8 +1523,6 @@ mod tests {
             },
         ];
 
-        // 2 stages, 2 scenarios, 1 bus. scenario_id == 2 is out of range; without
-        // the defensive bound its offset aliases stage 1's realization 0.
         let mut lib = ExternalScenarioLibrary::new(2, 2, 1, "load", vec![2, 2]);
         let rows = vec![
             ExternalLoadRow {
@@ -1673,7 +1651,6 @@ mod tests {
         let bus_b = EntityId(2);
         let bus_ids = vec![bus_a, bus_b];
 
-        // Distinct (mean, std) per (bus, stage) so any index/accessor swap shows up.
         let load_models = vec![
             LoadModel {
                 bus_id: bus_a,
@@ -1865,7 +1842,6 @@ mod tests {
 
         assert_eq!(lib.eta_slice(0, 0), &[0.1, 0.2, 0.3, 0.4]);
         assert_eq!(lib.eta_slice(2, 1), &[9.0, 8.0, 7.0, 6.0]);
-        // (1, 0) was not written and must still be zero.
         assert_eq!(lib.eta_slice(1, 0), &[0.0, 0.0, 0.0, 0.0]);
     }
 
@@ -1877,7 +1853,6 @@ mod tests {
         let mut cloned = lib.clone();
         cloned.eta_slice_mut(0, 0).copy_from_slice(&[99.0, 99.0]);
 
-        // Original must be unaffected.
         assert_eq!(lib.eta_slice(0, 0), &[1.0, 2.0]);
         assert_eq!(cloned.eta_slice(0, 0), &[99.0, 99.0]);
     }
@@ -1891,7 +1866,6 @@ mod tests {
     use super::validate_external_library;
     use crate::StochasticError;
 
-    /// Build a valid `ExternalScenarioLibrary` with all-finite eta values.
     fn make_valid_library(
         n_stages: usize,
         n_scenarios: usize,
@@ -1911,12 +1885,10 @@ mod tests {
         lib
     }
 
-    /// Build a `HashSet` of `EntityId`s from a range of i32 values.
     fn entity_id_set(ids: impl IntoIterator<Item = i32>) -> HashSet<EntityId> {
         ids.into_iter().map(EntityId).collect()
     }
 
-    /// Build a `rows_per_stage` vector where each stage has `n_scenarios * n_entities` rows.
     fn uniform_rows_per_stage(
         n_stages: usize,
         n_scenarios: usize,
@@ -1925,8 +1897,6 @@ mod tests {
         vec![n_scenarios * n_entities; n_stages]
     }
 
-    /// Given a valid external library with 50 scenarios, 12 stages, 5 entities,
-    /// all finite eta values, `validate_external_library` returns `Ok(())`.
     #[test]
     fn test_valid_library_passes() {
         let n_stages = 12;
@@ -1948,8 +1918,6 @@ mod tests {
         assert!(result.is_ok(), "expected Ok(()), got: {result:?}");
     }
 
-    /// Given raw rows missing data for entity ID 7, `validate_external_library`
-    /// returns `Err` with a message containing "V3.2" and "7".
     #[test]
     fn test_missing_entity_fails_v3_2() {
         let n_stages = 3;
@@ -1984,10 +1952,6 @@ mod tests {
         }
     }
 
-    /// Given raw rows where stage counts differ but are all exactly divisible by
-    /// `n_entities`, `validate_external_library` now returns `Ok(())` because V3.4
-    /// only enforces exact divisibility — non-uniform counts are accepted and
-    /// handled by `pad_library_to_uniform`.
     #[test]
     fn test_nonuniform_divisible_counts_accepted_v3_4() {
         let n_stages = 3;
@@ -2013,15 +1977,12 @@ mod tests {
         );
     }
 
-    /// Given a library where `eta_slice(3, 10)[2]` is `NaN`,
-    /// `validate_external_library` returns `Err` with "V3.7".
     #[test]
     fn test_nan_eta_fails_v3_7() {
         let n_stages = 5;
         let n_scenarios = 20;
         let n_entities = 4;
         let mut lib = make_valid_library(n_stages, n_scenarios, n_entities, "ncs");
-        // Inject NaN at stage=3, scenario=10, entity=2.
         lib.eta_slice_mut(3, 10)[2] = f64::NAN;
 
         let entity_ids: Vec<EntityId> = (1..=4).map(EntityId).collect();
@@ -2077,7 +2038,6 @@ mod tests {
         const N_STAGES: usize = 5;
         let hydro_ids = vec![EntityId(1)];
 
-        // season_id=3 for April stages, season_id=4 for the May stage.
         let stages = vec![
             make_stage(0, 0, 3), // W1 — April
             make_stage(1, 1, 3), // W2 — April
@@ -2151,7 +2111,6 @@ mod tests {
             },
         ];
 
-        // External targets: 2 scenarios × 5 stages, 1 hydro.
         let targets = [
             [480.0_f64, 520.0, 490.0, 510.0, 530.0], // scenario 0
             [550.0_f64, 470.0, 500.0, 540.0, 460.0], // scenario 1
@@ -2174,12 +2133,9 @@ mod tests {
     /// [`evaluate_par`] must reconstruct the original external targets for a
     /// mixed 4-weekly + 1-monthly layout with AR(1) lags.
     ///
-    /// The lag state used during standardization (frozen within each lag period,
-    /// advanced by weighted average at period boundaries) is replicated in the
-    /// reconstruction loop. Any divergence between the two paths would cause the
-    /// assertion to fail.
-    ///
-    /// See `make_round_trip_fixture` for the full stage layout and parameter set.
+    /// The reconstruction loop replicates the lag state standardization used:
+    /// frozen within each lag period, advanced by weighted average at period
+    /// boundaries. See `make_round_trip_fixture` for the stage layout.
     #[test]
     fn test_round_trip_weekly_monthly_ar1() {
         let (stages, par, stage_lag_transitions, targets, past_lag, hydro_ids) =
@@ -2220,9 +2176,6 @@ mod tests {
             0,
         );
 
-        // Forward reconstruction: mirror the frozen-lag + accumulation logic from
-        // `standardize_external_inflow` and assert that `evaluate_par` reproduces
-        // the original target within 1e-10 at every (stage, scenario).
         for (scenario, scenario_targets) in targets.iter().enumerate() {
             let mut lag_buf = vec![past_lag]; // lag-1 initialized from the derived seed
             let mut accum = 0.0_f64;
@@ -2238,7 +2191,6 @@ mod tests {
                 let psi = par.psi_slice(t, 0);
                 let sigma = par.sigma(t, 0);
 
-                // evaluate_par with the frozen lag state must reproduce the target.
                 let reconstructed = evaluate_par(det_base, psi, &lag_buf, sigma, eta);
                 assert!(
                     (reconstructed - target).abs() < 1e-10,
@@ -2247,11 +2199,9 @@ mod tests {
                     (reconstructed - target).abs()
                 );
 
-                // Accumulate this stage's contribution to the lag period average.
                 accum += target * slt.accumulate_weight;
                 weight_accum += slt.accumulate_weight;
 
-                // At a period boundary: shift lag state, reset accumulators.
                 if slt.finalize_period && weight_accum > 0.0 {
                     lag_buf[0] = accum / weight_accum;
                     accum = 0.0;
@@ -2262,9 +2212,6 @@ mod tests {
         }
     }
 
-    /// Given `library.n_scenarios() = 10` and `forward_passes = 50`,
-    /// `validate_external_library` returns `Ok(())` (the V3.8 warning is emitted
-    /// via tracing but does not abort construction).
     #[test]
     fn test_scenario_count_warning_returns_ok() {
         let n_stages = 2;
@@ -2296,9 +2243,6 @@ mod tests {
 
     use super::pad_library_to_uniform;
 
-    /// V3.4 accepts non-uniform scenario counts as long as every stage is
-    /// exactly divisible by `n_entities` (`rows_per_stage` = [2,2,2,2,100] with
-    /// `n_entities=2` → scenario counts [1,1,1,1,50]).
     #[test]
     fn test_v34_accepts_nonuniform_scenario_counts() {
         // 5 stages: 4 with 1 scenario (2 rows each) and 1 with 50 scenarios (100 rows).
@@ -2324,8 +2268,6 @@ mod tests {
         );
     }
 
-    /// V3.4 still rejects `rows_per_stage` where any stage has a row count not
-    /// exactly divisible by `n_entities`.
     #[test]
     fn test_v34_still_rejects_indivisible_rows() {
         let n_entities = 2;
@@ -2355,8 +2297,6 @@ mod tests {
         }
     }
 
-    /// When all stages have the same scenario count (uniform), `raw_scenarios_per_stage`
-    /// must equal `n_scenarios` for every entry.
     #[test]
     fn test_raw_scenarios_per_stage_uniform() {
         let n_stages = 4;
@@ -2366,8 +2306,6 @@ mod tests {
         assert_eq!(lib.raw_scenarios_per_stage(), &[10, 10, 10, 10]);
     }
 
-    /// When the library is created with non-uniform raw counts, `raw_scenarios_per_stage`
-    /// returns exactly what was passed in.
     #[test]
     fn test_raw_scenarios_per_stage_nonuniform() {
         let n_stages = 3;

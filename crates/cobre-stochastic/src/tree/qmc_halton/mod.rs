@@ -4,19 +4,12 @@
 //! (2, 3, 5, …); point `n`'s coordinate in dimension `d` is
 //! `radical_inverse(n, p_d)`, with dimension 1 the van der Corput base-2 sequence.
 //!
-//! ## Entry points
+//! [`scrambled_halton_point`] generates one scenario independently of all others.
 //!
-//! - `sieve_primes`: building block generating the per-dimension prime bases.
-//! - [`generate_qmc_halton`]: batch generation for all openings of a stage.
-//! - [`scrambled_halton_point`]: single-scenario point-wise generation for the
-//!   out-of-sample forward pass, independent of all other scenarios.
-//!
-//! ## Scrambling
-//!
-//! The plain Halton sequence suffers correlation artifacts in high dimensions
-//! (the "Halton curse"). Owen-style random digit scrambling breaks these by
-//! permuting each digit position per dimension via tables derived
-//! deterministically from the stage seed (so output is reproducible).
+//! Plain Halton suffers correlation artifacts in high dimensions (the "Halton
+//! curse"). Owen-style random digit scrambling breaks these by permuting each
+//! digit position per dimension via tables derived deterministically from the
+//! stage seed, so output stays reproducible.
 
 use crate::noise::{
     quantile::norm_quantile,
@@ -184,8 +177,6 @@ fn scrambled_radical_inverse(n: u32, base: u32, perm_table: &[Vec<u32>]) -> f64 
     result
 }
 
-/// Combines the scrambled radical inverse at `(n, base)` with the inverse-CDF
-/// transform to a standard-normal sample.
 fn scrambled_normal_sample(n: u32, base: u32, perm_table: &[Vec<u32>]) -> f64 {
     let u = scrambled_radical_inverse(n, base, perm_table);
     let u = u.clamp(f64::MIN_POSITIVE, 1.0 - f64::EPSILON);
@@ -384,11 +375,7 @@ mod tests {
 
     #[test]
     fn test_radical_inverse_base3_known_values() {
-        // Base-3 radical inverse first 4 values.
-        // n=0 -> 0.0
-        // n=1 -> 1/3
-        // n=2 -> 2/3
-        // n=3 -> ternary "10" -> 0.01 in ternary = 1/9
+        // n=3 is ternary "10", reflecting to 0.01 ternary = 1/9.
         let expected = [
             (0_u32, 0.0_f64),
             (1, 1.0 / 3.0),
@@ -416,7 +403,6 @@ mod tests {
 
     #[test]
     fn test_radical_inverse_range() {
-        // For bases 2, 3, 5, 7 and n in 1..100, all results must be in (0.0, 1.0).
         for base in [2_u32, 3, 5, 7] {
             for n in 1_u32..100 {
                 let v = radical_inverse(n, base);
@@ -430,7 +416,6 @@ mod tests {
 
     // --- Batch generator tests ---
 
-    /// Same inputs produce bitwise identical output (determinism).
     #[test]
     fn test_halton_batch_determinism() {
         let n_openings = 64;
@@ -442,7 +427,6 @@ mod tests {
         assert_eq!(out1, out2, "generate_qmc_halton is not deterministic");
     }
 
-    /// Different `base_seed` values must produce different output.
     #[test]
     fn test_halton_batch_different_seeds_differ() {
         let n_openings = 64;
@@ -454,7 +438,6 @@ mod tests {
         assert_ne!(out1, out2, "different seeds produced identical output");
     }
 
-    /// All output values must be finite for N=64, dim=5.
     #[test]
     fn test_halton_batch_all_finite() {
         let n_openings = 64;
@@ -466,10 +449,7 @@ mod tests {
         }
     }
 
-    /// All output values must be in the finite range expected for N(0,1).
-    ///
-    /// The BSM approximation clamps at ±8.22; all values must be within
-    /// that range and finite.
+    /// The BSM approximation clamps at ±8.22.
     #[test]
     fn test_halton_batch_values_in_range() {
         let n_openings = 64;
@@ -485,7 +465,6 @@ mod tests {
         }
     }
 
-    /// Output must fill exactly `n_openings * dim` elements.
     #[test]
     fn test_halton_batch_correct_length() {
         let n_openings = 32;
@@ -495,7 +474,6 @@ mod tests {
         assert_eq!(output.len(), n_openings * dim);
     }
 
-    /// `n_openings == 0` must not panic and must be a no-op.
     #[test]
     fn test_halton_batch_zero_openings() {
         let mut output: Vec<f64> = vec![];
@@ -503,7 +481,6 @@ mod tests {
         assert!(output.is_empty());
     }
 
-    /// `dim == 0` must not panic and must be a no-op.
     #[test]
     fn test_halton_batch_zero_dim() {
         let mut output: Vec<f64> = vec![];
@@ -513,7 +490,6 @@ mod tests {
 
     // --- Point-wise generator tests ---
 
-    /// Same `NoisePointSpec` produces bitwise identical output (determinism).
     #[test]
     fn test_halton_point_determinism() {
         let dim = 2;
@@ -532,7 +508,6 @@ mod tests {
         assert_eq!(out1, out2, "scrambled_halton_point is not deterministic");
     }
 
-    /// Different `sampling_seed` values must produce different output.
     #[test]
     fn test_halton_point_different_seeds_differ() {
         let dim = 3;
@@ -560,7 +535,6 @@ mod tests {
         );
     }
 
-    /// All values must be finite for all scenarios 0..N.
     #[test]
     fn test_halton_point_all_finite() {
         let n = 64_usize;
@@ -587,8 +561,6 @@ mod tests {
         }
     }
 
-    /// `scrambled_halton_point` matches `scrambled_halton_point_reference`
-    /// element-wise for every scenario, across several `(dim, total_scenarios)`.
     #[test]
     fn halton_point_matches_reference() {
         for (dim, total_scenarios) in [(1_usize, 4_u32), (2, 16), (5, 8)] {

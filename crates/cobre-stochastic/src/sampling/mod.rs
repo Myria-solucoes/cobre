@@ -92,7 +92,6 @@ pub struct ForwardSampler<'a> {
 }
 
 impl<'a> ForwardSampler<'a> {
-    /// Construct a [`ForwardSampler`] from its constituent parts.
     pub(crate) fn new(
         inflow: ClassSampler<'a>,
         load: ClassSampler<'a>,
@@ -337,21 +336,17 @@ pub struct ForwardSamplerConfig<'a> {
     pub stages: &'a [Stage],
     /// Per-class entity counts for noise buffer splitting.
     pub dims: ClassDimensions,
-    /// Pre-standardized historical inflow windows library.
-    ///
-    /// Required when `class_schemes.inflow == Some(Historical)`.
+    /// Pre-standardized historical inflow windows library, required when
+    /// `class_schemes.inflow == Some(Historical)`.
     pub historical_library: Option<&'a HistoricalScenarioLibrary>,
-    /// Pre-standardized external inflow scenario library.
-    ///
-    /// Required when `class_schemes.inflow == Some(External)`.
+    /// Pre-standardized external inflow scenario library, required when
+    /// `class_schemes.inflow == Some(External)`.
     pub external_inflow_library: Option<&'a ExternalScenarioLibrary>,
-    /// Pre-standardized external load scenario library.
-    ///
-    /// Required when `class_schemes.load == Some(External)`.
+    /// Pre-standardized external load scenario library, required when
+    /// `class_schemes.load == Some(External)`.
     pub external_load_library: Option<&'a ExternalScenarioLibrary>,
-    /// Pre-standardized external NCS scenario library.
-    ///
-    /// Required when `class_schemes.ncs == Some(External)`.
+    /// Pre-standardized external NCS scenario library, required when
+    /// `class_schemes.ncs == Some(External)`.
     pub external_ncs_library: Option<&'a ExternalScenarioLibrary>,
 }
 
@@ -691,8 +686,10 @@ pub fn build_forward_sampler(
 /// - Indices `0..max_order`: pre-study lag seasons (oldest first)
 /// - Indices `max_order..max_order + stages.len()`: study seasons
 ///
-/// The year offset relative to the window starting year increments whenever
-/// the season sequence wraps from `n_seasons - 1` back to `0`.
+/// The year offset increments whenever the season sequence wraps from
+/// `n_seasons - 1` back to `0`, then is normalized so the first study entry is
+/// `0` — `window_year` is the first study observation's year and lag entries go
+/// negative.
 ///
 /// When `n_seasons == 1` (annual data), every entry advances exactly one year
 /// (wrap-detection is suppressed to avoid self-referential offsets).
@@ -739,7 +736,6 @@ pub(crate) fn build_observation_sequence(
             result.push((i as i32, season));
         }
     } else {
-        // Detect season wraps (Dec→Jan) to advance the year offset.
         let mut year_offset: i32 = 0;
         let mut prev_season = full_seasons[0];
         for (i, &season) in full_seasons.iter().enumerate() {
@@ -749,8 +745,7 @@ pub(crate) fn build_observation_sequence(
             result.push((year_offset, season));
             prev_season = season;
         }
-        // Normalize so the first study stage (index max_order) has year_offset 0
-        // — `window_year` is the first study observation's year; lags go negative.
+        // Normalize so the first study stage (index max_order) has year_offset 0.
         let study_base = result[max_order].0;
         if study_base != 0 {
             for entry in &mut result {
@@ -803,10 +798,6 @@ mod tests {
         tree::generate::ClassDimensions,
         tree::lhs::{sample_lhs_point, sample_lhs_point_reference},
     };
-
-    // -----------------------------------------------------------------------
-    // Minimal WARN-capturing subscriber for use in tests.
-    // -----------------------------------------------------------------------
 
     /// Records all WARN-level event messages into a shared `Vec<String>`.
     struct WarnRecorder {
@@ -984,8 +975,6 @@ mod tests {
     // Factory helper
     // -----------------------------------------------------------------------
 
-    /// Split `ctx`'s entity counts into a `ClassDimensions` for the noise
-    /// buffer layout `[hydros | load_buses | ncs]`.
     fn dims_from_ctx(ctx: &StochasticContext) -> ClassDimensions {
         ClassDimensions {
             n_hydros: ctx.dim() - ctx.n_load_buses() - ctx.n_stochastic_ncs(),
@@ -994,7 +983,6 @@ mod tests {
         }
     }
 
-    /// Build a `ForwardSamplerConfig` with all three classes set to `scheme`.
     fn all_classes_config<'a>(
         scheme: SamplingScheme,
         ctx: &'a StochasticContext,
@@ -1017,9 +1005,7 @@ mod tests {
         }
     }
 
-    /// Rebuild `sampler`'s noise tables for one `(iteration, total,
-    /// groups)` triple — the `SampleRequest.tables` every `sample()` test
-    /// call needs.
+    /// The `SampleRequest.tables` every `sample()` test call needs.
     fn tables_for(
         sampler: &ForwardSampler<'_>,
         iteration: u32,
@@ -1111,8 +1097,7 @@ mod tests {
 
     /// When both `historical_library` and `external_inflow_library` are
     /// `Some` for a `Historical` inflow scheme, the fold must still pick the
-    /// historical library and ignore the external one, exactly as the
-    /// pre-fold `scheme`-keyed match did.
+    /// historical library and ignore the external one.
     #[test]
     fn test_build_historical_with_library_ignores_external_library() {
         use super::{ExternalScenarioLibrary, HistoricalScenarioLibrary};
@@ -1380,7 +1365,6 @@ mod tests {
 
     #[test]
     fn test_composite_in_sample_fills_correct_segments() {
-        // dim=5 split as 2 hydros + 2 load + 1 ncs.
         let tree = uniform_tree(1, 3, 5);
         let view = tree.view();
         let dims = ClassDimensions {
@@ -1626,10 +1610,9 @@ mod tests {
         );
     }
 
-    /// Classes sampled out of sample must not share a noise stream: with one
-    /// seed for every class, the load and NCS slots repeated the first inflow
-    /// slots bit-for-bit under every noise method. The inflow slot is pinned to
-    /// its pre-fix value: inflow keeps the root seed.
+    /// Classes sampled out of sample must not share a noise stream: one seed
+    /// for every class makes the load and NCS slots repeat the first inflow
+    /// slots bit-for-bit. Inflow keeps the root seed, so its slot is pinned.
     #[test]
     fn test_out_of_sample_classes_draw_distinct_streams() {
         let stages = vec![make_stage(0, 0, 5), make_stage(1, 1, 5)];

@@ -3,8 +3,6 @@
 //!
 //! Resolves the concrete calendar `[start, end)` window and total duration for
 //! a stage's season-period occurrence, and the next chronological occurrence.
-//! [`StageCalendar`] consolidates this module's forward date-window coverage
-//! and both backward pre-study projections behind one resolver.
 
 use chrono::{Datelike, NaiveDate, TimeDelta, Weekday};
 use cobre_core::PostStudyStage;
@@ -13,8 +11,7 @@ use cobre_core::temporal::{
     SeasonMap, Stage, StageRiskConfig, StageStateConfig, window_period_overlaps,
 };
 
-/// Compute the exclusive end date of the calendar month identified by
-/// `month` (1–12) and `year`.
+/// Exclusive end date of calendar month `month` (1–12) in `year`.
 pub(crate) fn month_exclusive_end(year: i32, month: u32) -> NaiveDate {
     let (next_year, next_month) = if month == 12 {
         (year + 1, 1u32)
@@ -25,8 +22,8 @@ pub(crate) fn month_exclusive_end(year: i32, month: u32) -> NaiveDate {
         .unwrap_or_else(|| unreachable!("next-month date is always valid"))
 }
 
-/// Returns the total hours in the calendar month identified by `year` and
-/// `month` (1–12). Each day is exactly 24 hours (timezone-free calendar dates, no DST).
+/// Total hours in calendar month `month` (1–12) of `year`. Each day is exactly
+/// 24 hours (timezone-free calendar dates, no DST).
 pub(crate) fn month_total_hours(year: i32, month: u32) -> f64 {
     f64::from(days_in_month(year, month)) * 24.0
 }
@@ -137,12 +134,8 @@ pub(crate) fn find_season_year_custom(
 
 /// Resolve `season_def`'s concrete calendar window for `stage`'s occurrence.
 ///
-/// `Monthly` routes through `find_season_year_monthly`/`month_exclusive_end`/
-/// `month_total_hours` verbatim. `Weekly` derives the 7-day ISO-week window
-/// containing `stage.start_date` directly — `season_for_date`'s week-53→52
-/// fold is a season-id label fold, not a window fold, so the physical week
-/// stays 7 real days regardless. `Custom` resolves `season_def`'s own range
-/// via `find_season_year_custom`/`custom_period_bounds`.
+/// `season_for_date`'s week-53→52 fold is a season-id label fold, not a window
+/// fold, so a `Weekly` window stays 7 real days regardless.
 #[must_use]
 pub fn season_period_window(
     season_map: &SeasonMap,
@@ -187,10 +180,8 @@ pub fn season_period_window(
 /// Resolve the period window immediately following `current`, for forward
 /// spillover accounting.
 ///
-/// `Monthly` and `Weekly` derive the next window arithmetically (next
-/// calendar month; next 7-day span). `Custom` advances to the next
-/// `season_def` in id order, wrapping the season list — `season_map.seasons`
-/// is sorted by id, so this is the next entry in the list.
+/// The `Custom` arm advances to the next `season_def` in id order, wrapping the
+/// list: `season_map.seasons` is sorted by id, so that is the next entry.
 #[must_use]
 pub fn next_season_period_window(
     season_map: &SeasonMap,
@@ -360,9 +351,7 @@ pub struct Projection {
     pub coverage: f64,
 }
 
-/// Hours of calendar overlap between `[window_start, window_end)` and
-/// `[period_start, period_end)`; zero for a window that does not intersect
-/// the period.
+/// Hours of calendar overlap, zero when the window does not intersect the period.
 fn overlap_hours(
     window_start: NaiveDate,
     window_end: NaiveDate,
@@ -520,9 +509,7 @@ pub fn post_study_calendar_stages(stages: &[PostStudyStage]) -> Vec<Stage> {
 /// Layer-2 resolver over the study's ordered, non-overlapping
 /// `[start_date, end_date)` stage calendar: forward date-window coverage for
 /// windowed inputs, and the two backward pre-study projections that season-
-/// anchored and hour-anchored seeding each need. Consolidates this module's
-/// `cast`/`nth_previous_occurrence`/[`window_period_overlaps`] call sites
-/// behind one resolver.
+/// anchored and hour-anchored seeding each need.
 pub struct StageCalendar<'a> {
     stages: &'a [Stage],
     stage_hours: Vec<f64>,
@@ -608,9 +595,8 @@ impl<'a> StageCalendar<'a> {
     /// Backward season-occurrence projection: [`cast`]-projects `windows`
     /// onto the `k`-th previous occurrence of `season_def` before this
     /// calendar's own first stage (`k == 0` is that stage's in-progress
-    /// occurrence). Wraps [`season_period_window`], [`nth_previous_occurrence`],
-    /// and [`cast`]. `None` when the calendar has no stages or the walk
-    /// cannot resolve occurrence `k`.
+    /// occurrence). `None` when the calendar has no stages or the walk cannot
+    /// resolve occurrence `k`.
     #[must_use]
     pub fn season_occurrence(
         &self,
@@ -1060,8 +1046,6 @@ mod tests {
         }
     }
 
-    /// Six non-uniform stages (10, 20, 5, 15, 30, 10 days), chained
-    /// contiguously from `2026-01-01`.
     fn six_stage_calendar() -> Vec<Stage> {
         let widths_days = [10, 20, 5, 15, 30, 10];
         let mut cursor = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
@@ -1107,10 +1091,9 @@ mod tests {
         assert!(!calendar.covers_exactly(&[stage_0_window, stage_2_window], 3));
     }
 
-    /// A 730 h nominal-month `Stage`: real span is `year`-`month`'s actual
-    /// calendar length (28-31 days), while the declared block carries the
-    /// repository's flat 730 h nominal-month convention — the two diverge on
-    /// every month except a hypothetical 730 h/24 = 30.4166... day month.
+    /// A 730 h nominal-month `Stage`: the real span is the month's actual
+    /// calendar length, which no real month makes equal to the flat 730 h
+    /// declared block.
     fn nominal_month_stage(index: usize, year: i32, month: u32) -> Stage {
         let start = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
         let end = month_exclusive_end(year, month);
@@ -1138,9 +1121,7 @@ mod tests {
         }
     }
 
-    /// Three chained 730 h nominal-month stages, Jan/Feb/Mar 2024: real spans
-    /// 744 h / 696 h / 744 h, none equal to the flat 730 h declaration — the
-    /// case the declared-hours coverage basis could never tile exactly.
+    /// Jan/Feb/Mar 2024: real spans 744 h / 696 h / 744 h, none equal to 730 h.
     fn nominal_month_calendar() -> Vec<Stage> {
         vec![
             nominal_month_stage(0, 2024, 1),
@@ -1262,10 +1243,6 @@ mod tests {
         assert_eq!(calendar.resolve_window(&partial), None);
     }
 
-    /// [`StageCalendar::season_occurrence`] must reproduce the pre-refactor
-    /// helper sequence (`season_period_window` + `nth_previous_occurrence` +
-    /// `cast`) bit-for-bit, for both the in-progress (`k == 0`) and a lagged
-    /// occurrence.
     #[test]
     #[allow(clippy::float_cmp)] // both paths run the identical arithmetic; the comparison must be bit-exact
     fn test_season_occurrence_matches_pre_refactor_helper_sequence() {
