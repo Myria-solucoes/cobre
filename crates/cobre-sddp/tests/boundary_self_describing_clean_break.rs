@@ -12,8 +12,8 @@ use std::process::Command;
 
 use chrono::NaiveDate;
 use cobre_io::{
-    ENTITY_SLOT_DELIVERY_DATE_SENTINEL, GraphManifest, PolicyCutRecord, ProducerBlock,
-    StageCutsPayload, encode_slot_date, write_policy_checkpoint,
+    ENTITY_SLOT_DELIVERY_DATE_SENTINEL, FORMAT_VERSION, GraphManifest, PolicyCutRecord,
+    ProducerBlock, StageCutsPayload, encode_slot_date, write_policy_checkpoint,
 };
 use cobre_sddp::{BoundaryLoadRequest, SddpError, load_boundary_cuts};
 use serde_json::json;
@@ -315,5 +315,69 @@ fn boundary_load_rejects_pre_self_describing_checkpoint() {
     assert!(
         msg.contains(&tmp.path().display().to_string()),
         "message must name the checkpoint path: {msg}"
+    );
+}
+
+/// A checkpoint whose `CheckpointManifest::format_version` predates
+/// `FORMAT_VERSION` rejects as a boundary-path error naming the checkpoint
+/// directory and the version field — never a fall-through to a generic
+/// not-found or dimension message.
+#[test]
+fn boundary_load_rejects_pre_format_version_checkpoint() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    let placeholder_coeff = [1.0_f64];
+    let cut = PolicyCutRecord {
+        cut_id: 0,
+        slot_index: 0,
+        iteration: 0,
+        forward_pass_index: 0,
+        intercept: 1.0,
+        coefficients: &placeholder_coeff,
+        is_active: true,
+    };
+    let payload = StageCutsPayload {
+        stage_id: 0,
+        state_dimension: 1,
+        capacity: 1,
+        warm_start_count: 0,
+        cuts: &[cut],
+        active_cut_indices: &[0],
+        populated_count: 1,
+        entity_manifest: &[],
+        cost_scale_factor: 1_000_000.0,
+        node_id: 0,
+        graph_stage_id: 0,
+        priced_state_date: encode_slot_date(fixture_priced_date(0)),
+    };
+    let mut metadata = cobre_sddp::test_support::checkpoint_metadata(
+        1,
+        GraphManifest::default(),
+        producer_block(),
+    );
+    metadata.format_version = FORMAT_VERSION - 1;
+    write_policy_checkpoint(tmp.path(), &[payload], &[], &metadata, &[]).unwrap();
+
+    let result = load_boundary_cuts(&BoundaryLoadRequest::new(
+        tmp.path(),
+        fixture_priced_date(0),
+        1,
+        &[],
+        1_000_000.0,
+    ));
+
+    let err = result.expect_err("a pre-format-version checkpoint must reject, never load silently");
+    assert!(
+        matches!(err, SddpError::Validation(_)),
+        "must reject as SddpError::Validation: {err:?}"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains(&tmp.path().display().to_string()),
+        "message must name the checkpoint directory: {msg}"
+    );
+    assert!(
+        msg.contains("format_version"),
+        "message must name the version field: {msg}"
     );
 }

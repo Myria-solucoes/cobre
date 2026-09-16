@@ -12,8 +12,9 @@ use std::path::Path;
 use chrono::NaiveDate;
 use cobre_io::EntitySlot;
 use cobre_io::output::policy::{
-    CheckpointManifest, FORMAT_VERSION, HydroSeasonOrders, ProducerBlock, SEASON_CYCLE_CODE_CUSTOM,
-    SEASON_CYCLE_CODE_MONTHLY, SEASON_CYCLE_CODE_WEEKLY, SeasonManifest, write_policy_checkpoint,
+    CheckpointManifest, FORMAT_VERSION, HydroSeasonOrders, ProducerBlock, SEASON_CYCLE_CODE_ABSENT,
+    SEASON_CYCLE_CODE_CUSTOM, SEASON_CYCLE_CODE_MONTHLY, SEASON_CYCLE_CODE_WEEKLY, SeasonManifest,
+    write_policy_checkpoint,
 };
 use cobre_io::output::{
     OutputError, write_correlation_json, write_fitting_report, write_inflow_annual_component,
@@ -64,11 +65,81 @@ fn training_block_provenance(modes: &[BlockMode]) -> (String, Vec<String>) {
     }
 }
 
+/// One hydro's per-season autoregressive order, as the loading study itself
+/// observes it. `orders[s] == None` means no inflow model of this hydro maps
+/// to a stage on dense season ordinal `s` — the study has no PAR opinion
+/// there. `orders[s] == Some(k)` is a fitted order, including `Some(0)`.
+/// Element type of [`StudySeasonManifest::hydro_orders`].
+#[derive(Debug, Clone)]
+pub struct StudyHydroSeasonOrders {
+    /// Owning hydro's id.
+    pub hydro_id: i32,
+    /// Fitted AR order per dense season ordinal, or `None` where the study
+    /// references no stage on that season. Length equals
+    /// [`StudySeasonManifest::n_seasons`].
+    pub orders: Vec<Option<u32>>,
+}
+
+/// Study-side season-cycle and per-hydro PAR-order descriptor: the shape
+/// [`SeasonManifest`] carries on the checkpoint wire, except each per-season
+/// entry can be absent rather than zero-filled. A study whose horizon spans
+/// only part of the declared cycle references a strict subset of its
+/// seasons; this type lets the boundary-load season/PAR-identity gate tell
+/// "the study never reached this season" from "the study fitted order zero
+/// here", which a dense `u32` vector cannot.
+/// [`to_season_manifest`](Self::to_season_manifest) projects this onto the
+/// unchanged wire type for the checkpoint writer.
+#[derive(Debug, Clone)]
+pub struct StudySeasonManifest {
+    /// Season cycle discriminant; one of the `SEASON_CYCLE_CODE_*` constants.
+    pub cycle_code: u8,
+    /// Number of distinct seasons in the cycle; the length of every
+    /// [`StudyHydroSeasonOrders::orders`] vector.
+    pub n_seasons: u32,
+    /// Per-hydro AR order opinions, in canonical ascending `hydro_id` order.
+    pub hydro_orders: Vec<StudyHydroSeasonOrders>,
+}
+
+impl Default for StudySeasonManifest {
+    /// The absent descriptor: [`SEASON_CYCLE_CODE_ABSENT`], zero seasons, no
+    /// hydros — mirrors [`SeasonManifest`]'s own `Default`.
+    fn default() -> Self {
+        Self {
+            cycle_code: SEASON_CYCLE_CODE_ABSENT,
+            n_seasons: 0,
+            hydro_orders: Vec::new(),
+        }
+    }
+}
+
+impl StudySeasonManifest {
+    /// Projects this descriptor onto the checkpoint wire type, mapping each
+    /// `None` entry to `0`. The "no opinion" state lives only on this
+    /// study-side type; the wire `SeasonManifest` this produces is
+    /// byte-identical to what [`build_season_manifest`] wrote before this
+    /// type existed.
+    #[must_use]
+    pub fn to_season_manifest(&self) -> SeasonManifest {
+        SeasonManifest {
+            cycle_code: self.cycle_code,
+            n_seasons: self.n_seasons,
+            hydro_orders: self
+                .hydro_orders
+                .iter()
+                .map(|h| HydroSeasonOrders {
+                    hydro_id: h.hydro_id,
+                    orders: h.orders.iter().map(|o| o.unwrap_or(0)).collect(),
+                })
+                .collect(),
+        }
+    }
+}
+
 /// Builds the study's season-cycle and per-hydro PAR-order descriptor.
 ///
-/// This is the single owner both the checkpoint writer
-/// ([`write_checkpoint`], via [`CheckpointManifest::season_manifest`]) and the
-/// boundary-load season/PAR-identity gate
+/// This is the single owner both the checkpoint writer ([`write_checkpoint`],
+/// via [`StudySeasonManifest::to_season_manifest`]) and the boundary-load
+/// season/PAR-identity gate
 /// ([`crate::policy::policy_load::BoundaryLoadRequest::with_study_seasons`])
 /// build their descriptor from, so the two sides can never construct
 /// incomparable descriptors.
@@ -81,9 +152,9 @@ fn training_block_provenance(modes: &[BlockMode]) -> (String, Vec<String>) {
 /// horizon — from silently dropping out of the descriptor.
 #[must_use]
 #[allow(clippy::cast_possible_truncation)] // season/AR-order counts are small
-pub fn build_season_manifest(system: &System) -> SeasonManifest {
+pub fn build_season_manifest(system: &System) -> StudySeasonManifest {
     let Some(season_map) = system.policy_graph().season_map.as_ref() else {
-        return SeasonManifest::default();
+        return StudySeasonManifest::default();
     };
 
     let cycle_code = match season_map.cycle_type {
@@ -99,7 +170,7 @@ pub fn build_season_manifest(system: &System) -> SeasonManifest {
     );
     let hydro_orders = hydro_season_orders(system.inflow_models(), &stage_to_season, n_seasons);
 
-    SeasonManifest {
+    StudySeasonManifest {
         cycle_code,
         n_seasons: n_seasons as u32,
         hydro_orders,
@@ -111,25 +182,25 @@ fn hydro_season_orders(
     inflow_models: &[InflowModel],
     stage_to_season: &HashMap<i32, usize>,
     n_seasons: usize,
-) -> Vec<HydroSeasonOrders> {
+) -> Vec<StudyHydroSeasonOrders> {
     // BTreeMap, not HashMap: ascending hydro_id order must not depend on
     // insertion order or hash-seed randomization.
-    let mut orders_by_hydro: BTreeMap<i32, Vec<u32>> = BTreeMap::new();
+    let mut orders_by_hydro = BTreeMap::new();
     for model in inflow_models {
         let Some(&season) = stage_to_season.get(&model.stage_id) else {
             continue;
         };
         let orders = orders_by_hydro
             .entry(model.hydro_id.0)
-            .or_insert_with(|| vec![0_u32; n_seasons]);
-        orders[season] = model.ar_order() as u32;
+            .or_insert_with(|| vec![None; n_seasons]);
+        orders[season] = Some(model.ar_order() as u32);
     }
 
     orders_by_hydro
         .into_iter()
         .map(|(hydro_id, orders)| {
             debug_assert_eq!(orders.len(), n_seasons, "orders must span every season");
-            HydroSeasonOrders { hydro_id, orders }
+            StudyHydroSeasonOrders { hydro_id, orders }
         })
         .collect()
 }
@@ -269,7 +340,7 @@ pub fn write_checkpoint(
             training_block_mode_per_stage,
             cost_scale_factor: Some(setup.stage_data.stage_templates.cost_scale_factor),
         },
-        season_manifest: build_season_manifest(system),
+        season_manifest: build_season_manifest(system).to_season_manifest(),
     };
 
     let stage_states = if params.export_states {
@@ -538,7 +609,7 @@ mod tests {
             ],
         );
 
-        let manifest = build_season_manifest(&system);
+        let manifest = build_season_manifest(&system).to_season_manifest();
 
         assert_eq!(manifest.cycle_code, SEASON_CYCLE_CODE_WEEKLY);
         assert_eq!(manifest.n_seasons, 2);
@@ -574,7 +645,7 @@ mod tests {
             vec![inflow_model(1, 0, vec![0.3])],
         );
 
-        let manifest = build_season_manifest(&system);
+        let manifest = build_season_manifest(&system).to_season_manifest();
 
         assert_eq!(manifest.n_seasons, 4);
         assert_eq!(manifest.hydro_orders.len(), 1);
@@ -612,9 +683,9 @@ mod tests {
 
         assert_eq!(from_5_first.len(), 2);
         assert_eq!(from_5_first[0].hydro_id, 2);
-        assert_eq!(from_5_first[0].orders, vec![1, 1]);
+        assert_eq!(from_5_first[0].orders, vec![Some(1), Some(1)]);
         assert_eq!(from_5_first[1].hydro_id, 5);
-        assert_eq!(from_5_first[1].orders, vec![2, 1]);
+        assert_eq!(from_5_first[1].orders, vec![Some(2), Some(1)]);
         assert_eq!(
             format!("{from_5_first:?}"),
             format!("{from_2_first:?}"),
@@ -639,7 +710,7 @@ mod tests {
             ],
         );
 
-        let manifest = build_season_manifest(&system);
+        let manifest = build_season_manifest(&system).to_season_manifest();
 
         assert_eq!(manifest.n_seasons, 3);
         assert_eq!(manifest.hydro_orders.len(), 1);
@@ -647,11 +718,44 @@ mod tests {
         assert_eq!(manifest.hydro_orders[0].orders, vec![1, 0, 2]);
     }
 
+    /// The study-side descriptor tells "no inflow model reaches this season"
+    /// (`None`) from "the study fitted order zero here" (`Some(0)`), which the
+    /// zero-filled checkpoint wire vector above cannot: hydro 7 has no model
+    /// at season 1, so its study-side entry is `None`, not `Some(0)`.
+    #[test]
+    fn season_descriptor_marks_a_season_with_no_inflow_model_as_no_opinion() {
+        let stages = vec![
+            stage_with_season(0, Some(0)),
+            stage_with_season(1, Some(1)),
+            stage_with_season(2, Some(2)),
+        ];
+        let system = system_with(
+            stages,
+            Some(season_map(SeasonCycleType::Monthly, 3)),
+            vec![
+                inflow_model(7, 0, vec![0.4]),
+                inflow_model(7, 2, vec![0.2, 0.1]),
+            ],
+        );
+
+        let manifest = build_season_manifest(&system);
+
+        assert_eq!(manifest.hydro_orders.len(), 1);
+        assert_eq!(manifest.hydro_orders[0].hydro_id, 7);
+        assert_eq!(
+            manifest.hydro_orders[0].orders,
+            vec![Some(1), None, Some(2)]
+        );
+    }
+
     /// Regression for a reviewer-flagged bug: `build_season_manifest` used to
     /// resolve every `InflowModel.stage_id` through `system.stages()` alone,
     /// so a fitted model at a synthesized pre-study stage id (never merged
     /// into `system.stages()`) silently dropped out of `hydro_season_orders`
-    /// and its gap season stayed at order 0.
+    /// and its gap season stayed at order 0. A synthesized pre-study season a
+    /// partial-year study's AR lags reach back into counts as referenced, the
+    /// same as any of the study's own stages: its study-side entry is
+    /// `Some`, never the `None` an unvisited season carries.
     #[test]
     fn season_descriptor_keeps_gap_season_orders_from_synthesized_prestudy_stages() {
         // Declared study stages: ids 0..3, seasons 8..11 (Sep-Dec).
@@ -682,18 +786,27 @@ mod tests {
         let orders = &manifest.hydro_orders[0].orders;
         assert_eq!(orders.len(), 12);
         assert_eq!(
-            orders[7], 2,
+            orders[7],
+            Some(2),
             "gap season 7 (Aug) must keep the synthesized stage -1's order"
         );
         assert_eq!(
-            orders[6], 3,
+            orders[6],
+            Some(3),
             "gap season 6 (Jul) must keep the synthesized stage -2's order"
         );
         for &season in &[0_usize, 1, 2, 3, 4, 5] {
             assert_eq!(
-                orders[season], 0,
-                "untouched gap season {season} must stay zero"
+                orders[season], None,
+                "untouched gap season {season} has no inflow model and carries no opinion"
             );
         }
+
+        let wire_orders = manifest.to_season_manifest().hydro_orders[0].orders.clone();
+        assert_eq!(
+            wire_orders,
+            orders.iter().map(|o| o.unwrap_or(0)).collect::<Vec<u32>>(),
+            "the wire projection reads every None as 0, leaving the checkpoint byte-identical"
+        );
     }
 }

@@ -222,11 +222,11 @@ fn single_node_source_injects_into_the_one_pool_every_terminal_fan_leaf_shares()
 }
 
 #[test]
-fn multi_node_source_stage_is_rejected() {
+fn multi_node_shared_pool_is_rejected() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let source_dir = tmp.path().join("multi_node_source");
-    // Two declared nodes (ids 200, 201) both at stage 5, sharing pool 0: the
-    // pool's own node_id reads the STAGE_CUTS_NODE_ID_SENTINEL.
+    // Two declared nodes (ids 200, 201) share pool 0: the pool's own node_id
+    // reads the STAGE_CUTS_NODE_ID_SENTINEL rather than a single owner.
     write_synthetic_checkpoint(&source_dir, &[(200, 5, 0), (201, 5, 0)], 0, &[7.0, 11.0], 2);
 
     let result = load_boundary_cuts(&BoundaryLoadRequest::new(

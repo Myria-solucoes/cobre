@@ -41,6 +41,18 @@ def _set_boundary_policy(
     config_path.write_text(json.dumps(config))
 
 
+def _set_boundary_policy_with_strict(
+    case_dir: pathlib.Path, source_policy_dir: pathlib.Path, strict: bool
+) -> None:
+    """`_set_boundary_policy` with an explicit `strict` key merged in."""
+    config_path = case_dir / "config.json"
+    config = json.loads(config_path.read_text())
+    policy = config.get("policy", {})
+    policy["boundary"] = {"path": str(source_policy_dir), "strict": strict}
+    config["policy"] = policy
+    config_path.write_text(json.dumps(config))
+
+
 def test_boundary_load_reports_source_date_and_reconciliation(
     tmp_path: pathlib.Path, capfd: pytest.CaptureFixture[str]
 ) -> None:
@@ -76,6 +88,35 @@ def test_boundary_load_reports_source_date_and_reconciliation(
     )
     assert err.index("boundary cuts:") < err.index("boundary reconciliation:"), (
         "the source/date/count line must precede the reconciliation summary"
+    )
+
+
+def test_boundary_load_strict_accepts_a_faithful_self_boundary(
+    tmp_path: pathlib.Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """A self-boundary load under `policy.boundary.strict = True` is not a
+    superset of itself, so it loads cleanly and still reports the
+    reconciliation summary on stderr.
+    """
+    import cobre.run  # noqa: PLC0415
+
+    source_output = tmp_path / "strict_source"
+    cobre.run.run(VALID_CASE, output_dir=str(source_output))
+    source_policy_dir = source_output / "policy"
+    assert source_policy_dir.exists(), (
+        f"expected a policy checkpoint at {source_policy_dir}"
+    )
+
+    target_case = tmp_path / "strict_target"
+    shutil.copytree(VALID_CASE, target_case)
+    _set_boundary_policy_with_strict(target_case, source_policy_dir, True)
+
+    capfd.readouterr()  # discard the source run's own stderr
+    cobre.run.run(str(target_case), output_dir=str(tmp_path / "strict_target_output"))
+
+    err = capfd.readouterr().err
+    assert "boundary reconciliation:" in err, (
+        f"expected the reconciliation summary line in stderr: {err}"
     )
 
 

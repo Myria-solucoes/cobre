@@ -99,6 +99,29 @@ backed by `MPI_Win_allocate_shared`. When the first such consumer lands,
 stays reserved rather than removed, per the "unwired config is reserved, not
 dead" rule.
 
+### Boundary-cut wire `graph_stage_id` (`STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL`)
+
+**What it is.** Every exported stage-cuts payload carries a `graph_stage_id`
+field (`policy_export.rs`'s `build_stage_cuts_payloads`, falling back to
+`STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL` when a pool's `pool_stage` is out of
+range), round-trips through the FlatBuffers wire encoding
+(`cobre-io/src/output/policy/codec.rs`), and is exposed to Python callers
+(`cobre-python/src/policy.rs`, `results.rs`). No code in `cobre-sddp` reads the
+decoded value back off a loaded checkpoint any more — boundary-cut selection
+reads `priced_state_date` instead, which the node-graph-to-calendar switchover
+made the authoritative pool key.
+
+**Owner.** The policy / boundary owner (`crates/cobre-sddp/src/policy/
+policy_export.rs`, `policy_load.rs`; `crates/cobre-io/src/output/policy/
+codec.rs`).
+
+**Consuming milestone.** The first `cobre-sddp` reader that needs the
+originating node-graph stage id independent of the calendar-derived
+`priced_state_date` — for example a diagnostic cross-checking a loaded
+checkpoint's graph shape, or a future selection mode disambiguating pools that
+share one `priced_state_date` by graph position. Until such a reader lands the
+field stays a write-only wire and Python-visible diagnostic surface.
+
 ## Verified NOT reserved
 
 `historical_years` (`cobre_core::scenario::ScenarioSource`,
@@ -526,6 +549,33 @@ a trigger.
 unknown-field / unknown-variant deserialize error, pinned by the reject tests in
 `crates/cobre-io/src/config/{training,simulation}.rs` and the FlatBuffers schema
 conformance test — the invariant that stands in for a version snapshot.
+
+### Unpinned CLP/HiGHS basis-validation asymmetry and delivery-date sentinel naming
+
+**What it is.** Two adjacent findings, neither actioned here. First,
+`.claude/rules/sddp.md`'s contract that CLP accepts a shape-mismatched (or
+otherwise wrong) warm basis silently while HiGHS validates and rejects it
+loudly has no pinning test: `crates/cobre-solver/tests/conformance.rs`'s basis
+tests (`basis_dimensions_after_solve`, `basis_cut_extension`,
+`basis_warm_start_iterations`, `test_basis_roundtrip`) cover round-trip and
+warm-start behavior, not backend divergence on a deliberately malformed basis.
+Second, `cobre-io`'s `ENTITY_SLOT_DELIVERY_DATE_SENTINEL` constant
+(`crates/cobre-io/src/output/policy/records.rs`) is shared across three
+unrelated fields (`reference_date`, which for an inflow-lag slot is the
+reference past stage's `start_date`, `interval_start` and `interval_end`)
+despite a name that still describes only the single retired `delivery_date`
+field it originally sentineled.
+
+**Owner.** The solver-crate owner for the basis-validation asymmetry
+(`crates/cobre-solver`); the `cobre-io` policy-output owner for the sentinel
+naming (`crates/cobre-io/src/output/policy/records.rs`).
+
+**Trigger.** A dedicated solver-crate ticket constructing a deliberately
+malformed basis and asserting divergent CLP/HiGHS behavior, one test per
+backend; and, separately, the next licensed `cobre-io` public-API break, at
+which point `ENTITY_SLOT_DELIVERY_DATE_SENTINEL` can be renamed to a
+family-neutral name alongside that break's other renames. Neither is
+scheduled.
 
 ## Deferred-debt register — whole-lifecycle audit findings
 

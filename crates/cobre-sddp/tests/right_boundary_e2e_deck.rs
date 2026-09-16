@@ -274,9 +274,9 @@ mod anticipated_fanout_readback {
         }
     }
 
-    fn anticipated_source_slot(thermal_id: i32, ring_slot: u32, delivery_date: i32) -> EntitySlot {
+    fn anticipated_source_slot(thermal_id: i32, ring_slot: u32, month_anchor: i32) -> EntitySlot {
         EntitySlot::anticipated(thermal_id, ring_slot, true)
-            .with_interval(delivery_date, next_month_anchor(delivery_date))
+            .with_interval(month_anchor, next_month_anchor(month_anchor))
     }
 
     /// The following month's day-01 `YYYYMMDD` anchor of `month_anchor`

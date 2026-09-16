@@ -70,9 +70,9 @@ fn sentinel_anticipated_slot(thermal_id: i32, ring_slot: u32) -> EntitySlot {
     EntitySlot::anticipated(thermal_id, ring_slot, true)
 }
 
-fn dated_anticipated_slot(thermal_id: i32, ring_slot: u32, delivery_date: i32) -> EntitySlot {
+fn dated_anticipated_slot(thermal_id: i32, ring_slot: u32, month_anchor: i32) -> EntitySlot {
     EntitySlot::anticipated(thermal_id, ring_slot, true)
-        .with_interval(delivery_date, next_month_anchor(delivery_date))
+        .with_interval(month_anchor, next_month_anchor(month_anchor))
 }
 
 /// A single `AnticipatedThermalState` slot dated at `start_anchor`, carrying
@@ -664,6 +664,69 @@ fn boundary_injection_transit_bucket_blends_on_identical_arrival_interval() {
     );
 }
 
+/// Given a source transit-bucket slot spanning one calendar month and a
+/// current transit-bucket slot spanning one week strictly inside it — a
+/// mismatched-calendar transit boundary, unlike
+/// `boundary_injection_transit_bucket_blends_on_identical_arrival_interval`'s
+/// matching-interval case — when the `BoundaryInjection` load runs, then the
+/// loaded coefficient equals the source coefficient scaled by the target's
+/// own span over the source's own span: the target draws the source's
+/// density over its own overlapping hours. The report still tallies the
+/// slot as a fully-covered `fan_out`, never `straddling`.
+#[test]
+fn boundary_injection_transit_bucket_blends_at_fractional_source_hours() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let source_start = ymd(2026, 4, 1);
+    let source_end = ymd(2026, 5, 1);
+    let manifest = vec![transit_bucket_slot_over(
+        2,
+        1,
+        encode_slot_date(source_start),
+        encode_slot_date(source_end),
+    )];
+    let source_coeff = 30.0;
+    write_checkpoint(tmp.path(), &manifest, &[source_coeff]);
+
+    let target_start = ymd(2026, 4, 8);
+    let target_end = ymd(2026, 4, 15);
+    let current = vec![transit_bucket_slot_over(
+        2,
+        1,
+        encode_slot_date(target_start),
+        encode_slot_date(target_end),
+    )];
+    let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+        tmp.path(),
+        fixture_priced_date(0),
+        1,
+        &current,
+        1.0,
+    ))
+    .expect("a strictly-inside transit-bucket target must load");
+
+    assert_eq!(cuts.len(), 1);
+
+    let source_span_hours = (source_end - source_start).num_days() as f64 * 24.0;
+    let target_span_hours = (target_end - target_start).num_days() as f64 * 24.0;
+    let expected = source_coeff * target_span_hours / source_span_hours;
+    let actual = cuts[0].coefficients[0];
+    assert!(
+        (actual - expected).abs() < expected.abs() * 1e-9,
+        "coefficient {actual} != expected {expected} (source_coeff * target_span_hours / \
+         source_span_hours)"
+    );
+
+    let report = cuts.report();
+    assert_eq!(
+        report.transit_bucket.fan_out, 1,
+        "a fully-covered target interval tallies as fan_out"
+    );
+    assert_eq!(
+        report.transit_bucket.straddling, 0,
+        "full coverage by one source interval is never straddling"
+    );
+}
+
 /// One source month (April 2026, `π_M = 300.0`) and the four `[start, end)`
 /// week-lane intervals that exactly tile it — shared by the fan-out matrix and
 /// interior-weeks conservation tests below.
@@ -1128,5 +1191,277 @@ fn boundary_injection_dated_target_interval_ending_at_the_boundary_date_yields_z
         vec![10.0, 0.0],
         "a target interval ending at or before the boundary date is an in-study delivery: it \
          defaults to 0.0, never fans out against the overlapping source month"
+    );
+}
+
+/// Given a boundary SOURCE that carries an inflow-lag depth for hydro 1 the
+/// current study's own inflow-lag block does not carry (same hydro, one
+/// deeper lag order), when the `BoundaryInjection` load runs, then the extra
+/// depth is dropped (its coefficient discarded) and the load succeeds with
+/// no warning — the source-drop is surfaced only in the reconciliation
+/// report. The storage and matching lag-1 coefficients still land
+/// identity-matched.
+#[test]
+fn boundary_injection_dropped_source_inflow_lag_loads_silently_and_is_reported() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let manifest = vec![
+        storage_slot(1),
+        inflow_lag_slot(1, 1),
+        inflow_lag_slot(1, 2),
+    ];
+    write_checkpoint(tmp.path(), &manifest, &[10.0, 20.0, 30.0]);
+
+    let current = vec![storage_slot(1), inflow_lag_slot(1, 1)];
+    let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+        tmp.path(),
+        fixture_priced_date(0),
+        2,
+        &current,
+        1.0,
+    ))
+    .expect("a dropped source lag depth must load, never reject, by default");
+
+    assert_eq!(cuts.len(), 1);
+    assert_eq!(
+        cuts[0].coefficients,
+        vec![10.0, 20.0],
+        "the identity-matched storage and lag-1 coefficients still land"
+    );
+
+    let report = cuts.report();
+    assert_eq!(
+        report.dropped_source_slots.len(),
+        1,
+        "the report must still name the dropped lag depth: {:?}",
+        report.dropped_source_slots
+    );
+    let dropped = &report.dropped_source_slots[0];
+    assert_eq!(dropped.family, "inflow-lag");
+    assert_eq!(dropped.entity_id, 1);
+    assert_eq!(dropped.subindex, 2);
+    assert_eq!(
+        dropped.reference_date,
+        Some(ymd(2031, 1, 1)),
+        "the dropped slot's own reference date"
+    );
+}
+
+/// Given the same boundary source and target as
+/// [`boundary_injection_dropped_source_inflow_lag_loads_silently_and_is_reported`]
+/// but a request built with `.with_strict(true)`, when the `BoundaryInjection`
+/// load runs, then it rejects naming the boundary path, the dropped total and
+/// the dropping family, and no cuts are returned.
+#[test]
+fn boundary_injection_dropped_source_inflow_lag_rejects_under_strict() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let manifest = vec![
+        storage_slot(1),
+        inflow_lag_slot(1, 1),
+        inflow_lag_slot(1, 2),
+    ];
+    write_checkpoint(tmp.path(), &manifest, &[10.0, 20.0, 30.0]);
+
+    let current = vec![storage_slot(1), inflow_lag_slot(1, 1)];
+    let result = load_boundary_cuts(
+        &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 2, &current, 1.0)
+            .with_strict(true),
+    );
+
+    let err = result
+        .expect_err("a dropped source lag depth must reject under strict")
+        .to_string();
+    assert!(
+        err.contains(&format!("boundary policy at {}", tmp.path().display())),
+        "must name the boundary path: {err}"
+    );
+    assert!(
+        err.contains(
+            "is a superset: 1 source slot(s) price entities this study does not model \
+             (inflow-lag: 1)"
+        ),
+        "must name the total and the dropping family: {err}"
+    );
+    assert!(
+        err.contains("; see the reconciliation report or set policy.boundary.strict = false"),
+        "must state the remedy: {err}"
+    );
+}
+
+/// Given a boundary SOURCE that prices a dated anticipated lane for thermal 7
+/// the current study's own manifest does not model at all (no matching
+/// entity id, not merely a different lane), when the `BoundaryInjection`
+/// load runs, then the source lane is dropped (its coefficient discarded)
+/// and the load succeeds with no warning — the source-drop is surfaced only
+/// in the reconciliation report. The storage slot still loads its
+/// identity-matched coefficient.
+#[test]
+fn boundary_injection_dropped_source_anticipated_lane_loads_silently_and_is_reported() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let manifest = vec![storage_slot(1), dated_anticipated_slot(7, 0, 20_260_401)];
+    write_checkpoint(tmp.path(), &manifest, &[10.0, 300.0]);
+
+    let current = vec![storage_slot(1)];
+    let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+        tmp.path(),
+        fixture_priced_date(0),
+        1,
+        &current,
+        1.0,
+    ))
+    .expect("a dropped source anticipated lane must load, never reject, by default");
+
+    assert_eq!(cuts.len(), 1);
+    assert_eq!(
+        cuts[0].coefficients,
+        vec![10.0],
+        "the identity-matched storage coefficient still lands"
+    );
+
+    let report = cuts.report();
+    assert_eq!(
+        report.dropped_source_slots.len(),
+        1,
+        "the report must still name the dropped anticipated lane: {:?}",
+        report.dropped_source_slots
+    );
+    let dropped = &report.dropped_source_slots[0];
+    assert_eq!(dropped.family, "anticipated");
+    assert_eq!(dropped.entity_id, 7);
+    assert_eq!(dropped.subindex, 0);
+    assert_eq!(
+        dropped.interval,
+        Some((ymd(2026, 4, 1), ymd(2026, 5, 1))),
+        "the dropped slot's own delivery interval"
+    );
+}
+
+/// Given the same boundary source and target as
+/// [`boundary_injection_dropped_source_anticipated_lane_loads_silently_and_is_reported`]
+/// but a request built with `.with_strict(true)`, when the `BoundaryInjection`
+/// load runs, then it rejects naming the boundary path, the dropped total and
+/// the dropping family, and no cuts are returned.
+#[test]
+fn boundary_injection_dropped_source_anticipated_lane_rejects_under_strict() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let manifest = vec![storage_slot(1), dated_anticipated_slot(7, 0, 20_260_401)];
+    write_checkpoint(tmp.path(), &manifest, &[10.0, 300.0]);
+
+    let current = vec![storage_slot(1)];
+    let result = load_boundary_cuts(
+        &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 1, &current, 1.0)
+            .with_strict(true),
+    );
+
+    let err = result
+        .expect_err("a dropped source anticipated lane must reject under strict")
+        .to_string();
+    assert!(
+        err.contains(&format!("boundary policy at {}", tmp.path().display())),
+        "must name the boundary path: {err}"
+    );
+    assert!(
+        err.contains(
+            "is a superset: 1 source slot(s) price entities this study does not model \
+             (anticipated: 1)"
+        ),
+        "must name the total and the dropping family: {err}"
+    );
+    assert!(
+        err.contains("; see the reconciliation report or set policy.boundary.strict = false"),
+        "must state the remedy: {err}"
+    );
+}
+
+/// Given the same current manifest as
+/// [`boundary_injection_dropped_source_anticipated_lane_loads_silently_and_is_reported`]
+/// but a source carrying a SENTINEL-dated anticipated slot in place of the
+/// dated one, when the `BoundaryInjection` load runs, then the pad is
+/// excluded from the dropped-source tally under the default request, and a
+/// request built with `.with_strict(true)` still succeeds — an excluded pad
+/// can never trip the strict reject.
+#[test]
+fn boundary_injection_sentinel_source_anticipated_pad_is_not_a_dropped_source() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let manifest = vec![storage_slot(1), sentinel_anticipated_slot(7, 0)];
+    write_checkpoint(tmp.path(), &manifest, &[10.0, 300.0]);
+
+    let current = vec![storage_slot(1)];
+
+    let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+        tmp.path(),
+        fixture_priced_date(0),
+        1,
+        &current,
+        1.0,
+    ))
+    .expect("a sentinel-dated source pad must never be treated as dropped");
+    let report = cuts.report();
+    assert!(
+        report.dropped_source_slots.is_empty(),
+        "a structural pad must not appear in dropped_source_slots: {:?}",
+        report.dropped_source_slots
+    );
+    assert_eq!(
+        report.anticipated.dropped_source, 0,
+        "a structural pad must not increment the anticipated dropped_source tally"
+    );
+
+    load_boundary_cuts(
+        &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 1, &current, 1.0)
+            .with_strict(true),
+    )
+    .expect("an excluded structural pad must never trip the strict reject");
+}
+
+/// Given a boundary SOURCE dropping one storage slot (an extra hydro 2
+/// reservoir the current study does not model) AND one dated anticipated
+/// lane (for thermal 7, likewise unmodeled), when the `BoundaryInjection`
+/// load runs with `.with_strict(true)`, then it rejects naming both
+/// dropping families in [`BoundaryReconciliationReport::families`] order;
+/// without `strict` the same source loads, and both families' tallies read
+/// their own single drop.
+#[test]
+fn boundary_injection_multi_family_superset_rejects_naming_families_in_order() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let manifest = vec![
+        storage_slot(1),
+        storage_slot(2),
+        dated_anticipated_slot(7, 0, 20_260_401),
+    ];
+    write_checkpoint(tmp.path(), &manifest, &[10.0, 20.0, 300.0]);
+
+    let current = vec![storage_slot(1)];
+
+    let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+        tmp.path(),
+        fixture_priced_date(0),
+        1,
+        &current,
+        1.0,
+    ))
+    .expect("a two-family superset source must load, never reject, by default");
+    assert_eq!(cuts.len(), 1);
+    assert_eq!(
+        cuts[0].coefficients,
+        vec![10.0],
+        "the identity-matched storage coefficient still lands"
+    );
+
+    let report = cuts.report();
+    assert_eq!(report.storage.dropped_source, 1);
+    assert_eq!(report.anticipated.dropped_source, 1);
+
+    let err = load_boundary_cuts(
+        &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 1, &current, 1.0)
+            .with_strict(true),
+    )
+    .expect_err("a two-family superset source must reject under strict")
+    .to_string();
+    assert!(
+        err.contains(
+            "is a superset: 2 source slot(s) price entities this study does not model \
+             (storage: 1, anticipated: 1)"
+        ),
+        "must name both dropping families in declaration order: {err}"
     );
 }

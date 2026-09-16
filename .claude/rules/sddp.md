@@ -418,8 +418,7 @@ basis built against a different LP.
 
 This node-tag check is the **sole** line of defence, not defence in depth:
 **CLP accepts a shape-mismatched (or otherwise wrong) warm basis silently**,
-whereas HiGHS validates and rejects it loudly
-(`reference_solver_basis_validation_asymmetry`). A cross-node warm-start is
+whereas HiGHS validates and rejects it loudly. A cross-node warm-start is
 therefore a silent wrong-vertex / wrong-dual on the CLP backend with no solver
 backstop — so the check must live in cobre's own apply path, never be delegated
 to the solver. Dropping the `node_id` filter, or comparing pool id instead of the
@@ -436,6 +435,9 @@ Pinned directly by `run_stage_solve_cross_node_stored_basis_is_treated_as_cold`
 drops to cold instead of erroring) and its DCS companion in `cut/dcs.rs`; the
 reproducibility the check protects is pinned by the `opening_order_determinism`
 gate in `tests/mpi_wire.rs` (bitwise `final_lb` across thread and rank shapes).
+The CLP/HiGHS basis-validation asymmetry itself is unpinned by any test;
+recorded in `docs/design/reserved-seams-and-deferred-debt.md`'s deferred-debt
+register.
 
 ### Simulation pool-fill re-tags a shared-pool sibling basis, never pool-matches
 
@@ -878,6 +880,10 @@ retired — the study-global graph, `num_stages`, and provenance now live on the
 graph-identity check — so a metadata read would fail to compile or silently
 reintroduce a stale-scale bug.
 
+The shared-pool `node_id` reject above is pinned by
+`multi_node_shared_pool_is_rejected` in
+`tests/shared_boundary_terminal_fan_probe.rs`.
+
 Read: `policy/policy_load.rs` (`validate_policy_load`, `slot_identity`,
 `checkpoint_terminal_cost_scale_factor`, `boundary_predates_self_describing_cuts`,
 `PolicyLoadKind::CHECK_STATE_DIMENSION`,
@@ -904,6 +910,10 @@ selector itself is pinned by `policy_load.rs`'s own
 `load_boundary_cuts_multi_pool_date_tie_rejects_naming_both_pools`, and
 `load_boundary_cuts_undated_pools_reject_with_reexport_hint`.
 
+A checkpoint predating `FORMAT_VERSION` is pinned by
+`boundary_load_rejects_pre_format_version_checkpoint`, also in
+`tests/boundary_self_describing_clean_break.rs`.
+
 ### Boundary loads gate on season-cycle and PAR-order identity before reconciling
 
 The inflow-lag family's join maps a lag depth `d` to a calendar season (`d`
@@ -929,10 +939,32 @@ entry in the source's (the hydro named — "the boundary was fitted on a
 different set of inflow processes", a more diagnostic reject than the
 storage/inflow-lag topology gate a genuinely different deck would otherwise
 trip first); or a hydro present on both sides has a differing `orders` vector
-(the hydro, the first differing season ordinal, and both orders there named;
-a length mismatch between the two `orders` vectors rejects first, naming both
-counts, so a truncated source descriptor can never pass by comparing fewer
-seasons — `boundary_load_rejects_truncated_source_par_orders_for_a_hydro`).
+AT A SEASON THE STUDY REFERENCES (the hydro, the first such differing season
+ordinal, and both orders there named; a length mismatch between the two
+`orders` vectors rejects first, naming both counts, so a truncated source
+descriptor can never pass by comparing fewer seasons —
+`boundary_load_rejects_truncated_source_par_orders_for_a_hydro`).
+
+A study season no inflow model reaches carries no opinion and is skipped by
+the per-season comparison above — it is not read as a fitted order-zero. The
+study side of the descriptor is `orchestration::StudySeasonManifest`, whose
+`hydro_orders[_].orders` is `Vec<Option<u32>>`: `None` at dense season ordinal
+`s` means no inflow model of that hydro maps to a stage on season `s` (a
+season the study's own stages never reach, including a stage a horizon
+reduction truncates away from a longer source study), `Some(k)` is a fitted
+order, including `Some(0)`. The source side stays the dense, zero-filled
+`cobre_io::SeasonManifest` the checkpoint wire carries — only the loading
+study's own opinion can be absent; a source that priced a season the study
+never visited is not, on that account alone, treated as absent.
+`StudySeasonManifest::to_season_manifest` projects every `None` to `0` when
+`write_checkpoint` builds the outgoing wire manifest, so a study's own
+checkpoint is byte-identical to what it was before this relaxation existed —
+the "no opinion" state lives only on the study-side type, never on the wire.
+This is why a pure horizon reduction against a longer source now loads: the
+reduction's stages reference a strict subset of the source's seasons, and the
+seasons only the source visited are skipped rather than compared against the
+reduction's zero allocation.
+
 Both hydro checks walk the STUDY's `hydro_orders` positionally — both sides are
 canonical ascending `hydro_id` by construction
 (`orchestration::hydro_season_orders`'s `BTreeMap` grouping) — and look each
@@ -960,15 +992,23 @@ the metadata-avoidance contract exists to prevent.
 Read: `policy/policy_load.rs` (`check_season_compatibility`,
 `season_cycle_label`, `BoundaryLoadRequest::study_seasons`/`with_study_seasons`,
 `load_boundary_cuts`), `policy/orchestration.rs` (`build_season_manifest`,
-`hydro_season_orders`). Pinned by `boundary_load_rejects_differing_season_cycle`,
+`hydro_season_orders`, `StudySeasonManifest`, `StudyHydroSeasonOrders`,
+`StudySeasonManifest::to_season_manifest`). Pinned by
+`boundary_load_rejects_differing_season_cycle`,
 `boundary_load_rejects_differing_season_count`,
 `boundary_load_rejects_source_missing_a_modeled_hydro_par_order`,
 `boundary_load_rejects_differing_par_order_naming_hydro_and_season`,
-`boundary_load_rejects_absent_source_season_descriptor_with_reexport_hint`, and
-`boundary_load_without_a_study_season_descriptor_skips_the_gate` (all in
-`policy/policy_load.rs`), and the producer-to-consumer end-to-end round trip
+`boundary_load_rejects_absent_source_season_descriptor_with_reexport_hint`,
+`boundary_load_without_a_study_season_descriptor_skips_the_gate`,
+`boundary_load_accepts_a_source_par_order_at_a_season_the_study_never_references`,
+and
+`boundary_load_rejects_differing_par_order_at_a_referenced_season_despite_unreferenced_gaps`
+(all in `policy/policy_load.rs`); the producer-to-consumer end-to-end round trip
 `boundary_load_accepts_the_studys_own_checkpoint_under_its_own_season_gate` in
-`tests/deterministic.rs`'s `boundary_season_gate_round_trip` module.
+`tests/deterministic.rs`'s `boundary_season_gate_round_trip` module; and the
+real-season-map horizon reduction
+`horizon_reduction_under_a_real_season_map_reconciles_with_zero_dropped_couplings`
+in `tests/boundary_horizon_reduction.rs`.
 
 ### Boundary loads gate on the storage/inflow-lag topology before reconciling
 

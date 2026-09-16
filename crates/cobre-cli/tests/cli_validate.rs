@@ -411,7 +411,48 @@ fn fpha_hydro_without_production_models_json_fails_validate() {
 // production model — the smallest fixture with a nonzero terminal storage
 // slot, so `load_boundary_cuts`'s reconciliation has a slot to tally.
 
-fn write_boundary_case(dir: &Path, hydro_id: i64) {
+fn boundary_hydro_entry_json(hydro_id: i64) -> String {
+    format!(
+        r#"{{
+                        "id": {hydro_id}, "name": "H", "operational_start_date": "2020-01-01",
+                        "downstream_id": null,
+                        "reservoir": {{ "min_storage_hm3": 0.0, "max_storage_hm3": 200.0 }},
+                        "outflow": {{ "min_outflow_m3s": 0.0, "max_outflow_m3s": 50.0 }},
+                        "generation": {{
+                            "model": "constant_productivity",
+                            "min_turbined_m3s": 0.0, "max_turbined_m3s": 50.0,
+                            "min_generation_mw": 0.0, "max_generation_mw": 50.0
+                        }},
+                        "unit_groups": [
+                            {{
+                                "id": 0, "name": "H", "bus_id": 0,
+                                "min_generation_mw": 0.0, "max_generation_mw": 50.0,
+                                "min_turbined_m3s": 0.0, "max_turbined_m3s": 50.0
+                            }}
+                        ]
+                    }}"#
+    )
+}
+
+fn boundary_production_model_entry_json(hydro_id: i64) -> String {
+    format!(
+        r#"{{
+                        "hydro_id": {hydro_id}, "selection_mode": "stage_ranges",
+                        "stage_ranges": [
+                            {{
+                                "start_stage_id": 0, "end_stage_id": null,
+                                "model": "constant_productivity", "productivity_mw_per_m3s": 1.0
+                            }}
+                        ]
+                    }}"#
+    )
+}
+
+/// Writes one entry per id in `hydro_ids` into `system/hydros.json`,
+/// `system/hydro_production_models.json` and `initial_conditions.json`, each
+/// hydro on bus 0 with `downstream_id: null`. A one-element slice reproduces
+/// [`write_boundary_case`]'s prior byte-for-byte output.
+fn write_boundary_case_with_hydros(dir: &Path, hydro_ids: &[i64]) {
     write_file(
         dir,
         "config.json",
@@ -441,49 +482,34 @@ fn write_boundary_case(dir: &Path, hydro_id: i64) {
             ]
         }"#,
     );
+    let hydro_entries = hydro_ids
+        .iter()
+        .map(|&id| boundary_hydro_entry_json(id))
+        .collect::<Vec<_>>()
+        .join(",\n                    ");
     write_file(
         dir,
         "system/hydros.json",
         &format!(
             r#"{{
                 "hydros": [
-                    {{
-                        "id": {hydro_id}, "name": "H", "operational_start_date": "2020-01-01",
-                        "downstream_id": null,
-                        "reservoir": {{ "min_storage_hm3": 0.0, "max_storage_hm3": 200.0 }},
-                        "outflow": {{ "min_outflow_m3s": 0.0, "max_outflow_m3s": 50.0 }},
-                        "generation": {{
-                            "model": "constant_productivity",
-                            "min_turbined_m3s": 0.0, "max_turbined_m3s": 50.0,
-                            "min_generation_mw": 0.0, "max_generation_mw": 50.0
-                        }},
-                        "unit_groups": [
-                            {{
-                                "id": 0, "name": "H", "bus_id": 0,
-                                "min_generation_mw": 0.0, "max_generation_mw": 50.0,
-                                "min_turbined_m3s": 0.0, "max_turbined_m3s": 50.0
-                            }}
-                        ]
-                    }}
+                    {hydro_entries}
                 ]
             }}"#
         ),
     );
+    let production_model_entries = hydro_ids
+        .iter()
+        .map(|&id| boundary_production_model_entry_json(id))
+        .collect::<Vec<_>>()
+        .join(",\n                    ");
     write_file(
         dir,
         "system/hydro_production_models.json",
         &format!(
             r#"{{
                 "production_models": [
-                    {{
-                        "hydro_id": {hydro_id}, "selection_mode": "stage_ranges",
-                        "stage_ranges": [
-                            {{
-                                "start_stage_id": 0, "end_stage_id": null,
-                                "model": "constant_productivity", "productivity_mw_per_m3s": 1.0
-                            }}
-                        ]
-                    }}
+                    {production_model_entries}
                 ]
             }}"#
         ),
@@ -498,12 +524,15 @@ fn write_boundary_case(dir: &Path, hydro_id: i64) {
     );
     write_file(dir, "system/lines.json", LINES_JSON);
     write_file(dir, "system/thermals.json", THERMALS_JSON);
+    let storage_entries = hydro_ids
+        .iter()
+        .map(|&id| format!(r#"{{ "hydro_id": {id}, "value_hm3": 100.0 }}"#))
+        .collect::<Vec<_>>()
+        .join(", ");
     write_file(
         dir,
         "initial_conditions.json",
-        &format!(
-            r#"{{ "storage": [{{ "hydro_id": {hydro_id}, "value_hm3": 100.0 }}], "filling_storage": [] }}"#
-        ),
+        &format!(r#"{{ "storage": [{storage_entries}], "filling_storage": [] }}"#),
     );
     write_file(
         dir,
@@ -516,7 +545,7 @@ fn write_boundary_case(dir: &Path, hydro_id: i64) {
             "line": { "exchange_cost": 0.01 },
             "hydro": {
                 "spillage_cost": 0.01, "turbined_cost": 0.01, "diversion_cost": 0.01,
-                "storage_violation_below_cost": 500.0, "filling_target_violation_cost": 500.0,
+                "storage_violation_below_cost": 1500.0, "filling_target_violation_cost": 500.0,
                 "turbined_violation_below_cost": 500.0, "outflow_violation_below_cost": 500.0,
                 "outflow_violation_above_cost": 500.0, "generation_violation_below_cost": 500.0,
                 "evaporation_violation_cost": 500.0, "water_withdrawal_violation_cost": 500.0
@@ -524,6 +553,10 @@ fn write_boundary_case(dir: &Path, hydro_id: i64) {
             "non_controllable_source": { "curtailment_cost": 0.005 }
         }"#,
     );
+}
+
+fn write_boundary_case(dir: &Path, hydro_id: i64) {
+    write_boundary_case_with_hydros(dir, &[hydro_id]);
 }
 
 /// Materializes the policy checkpoint at `dir/output/policy` that the
@@ -546,6 +579,24 @@ fn append_boundary_policy(dir: &Path, boundary_policy_dir: &Path) {
             "simulation": {{ "enabled": false }},
             "modeling": {{ "inflow_non_negativity": {{ "method": "none" }} }},
             "policy": {{ "boundary": {{ "path": "{boundary_path}" }} }}
+        }}"#
+    );
+    write_file(dir, "config.json", &config);
+}
+
+/// [`append_boundary_policy`] with an explicit `strict` key merged in;
+/// `append_boundary_policy` itself keeps writing no `strict` key at all.
+fn append_boundary_policy_with_strict(dir: &Path, boundary_policy_dir: &Path, strict: bool) {
+    let boundary_path = boundary_policy_dir.to_str().unwrap();
+    let config = format!(
+        r#"{{
+            "training": {{
+                "selection": {{ "method": "sampled", "forward_passes": 1 }},
+                "stopping_rules": [{{ "type": "iteration_limit", "limit": 1 }}]
+            }},
+            "simulation": {{ "enabled": false }},
+            "modeling": {{ "inflow_non_negativity": {{ "method": "none" }} }},
+            "policy": {{ "boundary": {{ "path": "{boundary_path}", "strict": {strict} }} }}
         }}"#
     );
     write_file(dir, "config.json", &config);
@@ -655,6 +706,96 @@ fn boundary_mismatched_hydro_set_exits_nonzero_and_names_hydro() {
         .code(1)
         .stdout(predicate::str::contains("hydro 0"))
         .stdout(predicate::str::contains("different set of plants"));
+}
+
+/// A SOURCE boundary that prices an extra hydro the target does not model is
+/// a superset, not a mismatch: `cobre validate` still exits 0, and `--json`
+/// reports the extra hydro's storage slot under `dropped_source_slots`.
+#[test]
+fn boundary_superset_source_exits_zero_and_reports_the_drop_in_json() {
+    let target_dir = TempDir::new().unwrap();
+    write_boundary_case(target_dir.path(), 0);
+    run_case(target_dir.path());
+
+    let source_dir = TempDir::new().unwrap();
+    write_boundary_case_with_hydros(source_dir.path(), &[0, 1]);
+    run_case(source_dir.path());
+
+    append_boundary_policy(target_dir.path(), &source_dir.path().join("output/policy"));
+
+    let output = cobre()
+        .args(["validate", target_dir.path().to_str().unwrap()])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        !stdout.contains("warning:") && !stderr.contains("warning:"),
+        "boundary path must never warn: stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        output.status.success(),
+        "stdout={stdout:?} stderr={stderr:?}"
+    );
+
+    let json_output = cobre()
+        .args(["validate", target_dir.path().to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    assert!(json_output.status.success());
+    let json_stdout = String::from_utf8(json_output.stdout).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json_stdout).unwrap();
+    let dropped = value["report"]["dropped_source_slots"].as_array().unwrap();
+    assert!(
+        !dropped.is_empty(),
+        "dropped_source_slots must be non-empty: {json_stdout}"
+    );
+    assert_eq!(dropped[0]["family"], serde_json::json!("storage"));
+    assert!(value["report"]["straddling_slots"].is_array());
+}
+
+/// The same superset under `policy.boundary.strict = true` is a reject:
+/// `cobre validate` exits 1 and names the dropping family in its message.
+#[test]
+fn boundary_superset_source_under_strict_exits_nonzero_and_names_the_family() {
+    let target_dir = TempDir::new().unwrap();
+    write_boundary_case(target_dir.path(), 0);
+    run_case(target_dir.path());
+
+    let source_dir = TempDir::new().unwrap();
+    write_boundary_case_with_hydros(source_dir.path(), &[0, 1]);
+    run_case(source_dir.path());
+
+    append_boundary_policy_with_strict(
+        target_dir.path(),
+        &source_dir.path().join("output/policy"),
+        true,
+    );
+
+    let output = cobre()
+        .args(["validate", target_dir.path().to_str().unwrap()])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        !stdout.contains("warning:") && !stderr.contains("warning:"),
+        "boundary path must never warn: stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        stdout.contains("price entities this study does not model"),
+        "stdout={stdout:?}"
+    );
+    assert!(stdout.contains("(storage: 1)"), "stdout={stdout:?}");
+    assert!(
+        stdout.contains("policy.boundary.strict"),
+        "stdout={stdout:?}"
+    );
 }
 
 #[test]

@@ -35,6 +35,7 @@ use cobre_solver::{Basis, BasisStatus};
 
 use crate::SddpError;
 use crate::cut::pool::CutPool;
+use crate::policy::orchestration::StudySeasonManifest;
 use crate::policy::reconcile::{
     BoundaryReconciliationReport, build_boundary_fold, build_rebind, build_reconciliation_report,
     build_source_interval_index, rebind_cut,
@@ -641,7 +642,7 @@ pub struct BoundaryLoadRequest<'a> {
     loading_cost_scale_factor: f64,
     fixed_windows: &'a [AnticipatedCommitmentHistory],
     inflow_lag_depth: Option<u32>,
-    study_seasons: Option<&'a SeasonManifest>,
+    study_seasons: Option<&'a StudySeasonManifest>,
     strict: bool,
 }
 
@@ -697,7 +698,7 @@ impl<'a> BoundaryLoadRequest<'a> {
     /// function the checkpoint writer calls — so the study and source sides
     /// are never constructed by diverging code paths.
     #[must_use]
-    pub fn with_study_seasons(self, study_seasons: &'a SeasonManifest) -> Self {
+    pub fn with_study_seasons(self, study_seasons: &'a StudySeasonManifest) -> Self {
         Self {
             study_seasons: Some(study_seasons),
             ..self
@@ -813,7 +814,7 @@ fn season_cycle_label(code: u8) -> &'static str {
 /// built only once a reject is certain.
 fn check_season_compatibility(
     boundary_path: &Path,
-    study: &SeasonManifest,
+    study: &StudySeasonManifest,
     source: &SeasonManifest,
 ) -> Result<(), SddpError> {
     if source.cycle_code == SEASON_CYCLE_CODE_ABSENT {
@@ -867,19 +868,22 @@ fn check_season_compatibility(
             )));
         }
 
-        if let Some(season) = study_hydro
+        if let Some((season, study_order, source_order)) = study_hydro
             .orders
             .iter()
             .zip(&source_hydro.orders)
-            .position(|(s, o)| s != o)
+            .enumerate()
+            .find_map(|(season, (study, source))| {
+                study
+                    .filter(|order| order != source)
+                    .map(|order| (season, order, *source))
+            })
         {
             return Err(SddpError::Validation(format!(
                 "boundary policy at {}: hydro {} PAR order mismatch at season {season} (study \
-                 has order {}, source has order {})",
+                 has order {study_order}, source has order {source_order})",
                 boundary_path.display(),
-                study_hydro.hydro_id,
-                study_hydro.orders[season],
-                source_hydro.orders[season]
+                study_hydro.hydro_id
             )));
         }
     }
@@ -1379,6 +1383,7 @@ mod tests {
         validate_policy_load,
     };
     use crate::SddpError;
+    use crate::policy::orchestration::{StudyHydroSeasonOrders, StudySeasonManifest};
     use crate::policy::reconcile::overlap_hours;
     use crate::test_support;
 
@@ -1399,11 +1404,11 @@ mod tests {
     }
 
     /// A single `AnticipatedThermalState` slot (`entity_type 2`), carrying its
-    /// own calendar-month `[delivery_date, next_month_anchor(delivery_date))`
-    /// delivery interval anchored at `delivery_date` (`YYYYMM01`).
-    fn anticipated_slot(thermal_id: i32, ring_slot: u32, delivery_date: i32) -> EntitySlot {
+    /// own calendar-month `[month_anchor, next_month_anchor(month_anchor))`
+    /// delivery interval anchored at `month_anchor` (`YYYYMM01`).
+    fn anticipated_slot(thermal_id: i32, ring_slot: u32, month_anchor: i32) -> EntitySlot {
         EntitySlot::anticipated(thermal_id, ring_slot, true)
-            .with_interval(delivery_date, next_month_anchor(delivery_date))
+            .with_interval(month_anchor, next_month_anchor(month_anchor))
     }
 
     /// The following month's day-01 `YYYYMMDD` anchor of `month_anchor`
@@ -2134,13 +2139,28 @@ mod tests {
         );
     }
 
-    /// A [`SeasonManifest`] literal for the season/PAR-identity gate tests.
+    /// A [`SeasonManifest`] literal for the season/PAR-identity gate tests'
+    /// SOURCE side (the checkpoint's own dense, zero-filled descriptor).
     fn seasons(
         cycle_code: u8,
         n_seasons: u32,
         hydro_orders: Vec<HydroSeasonOrders>,
     ) -> SeasonManifest {
         SeasonManifest {
+            cycle_code,
+            n_seasons,
+            hydro_orders,
+        }
+    }
+
+    /// A [`StudySeasonManifest`] literal for the season/PAR-identity gate
+    /// tests' STUDY side, whose per-season entries can be absent.
+    fn study_seasons(
+        cycle_code: u8,
+        n_seasons: u32,
+        hydro_orders: Vec<StudyHydroSeasonOrders>,
+    ) -> StudySeasonManifest {
+        StudySeasonManifest {
             cycle_code,
             n_seasons,
             hydro_orders,
@@ -2157,7 +2177,7 @@ mod tests {
         let source_seasons = seasons(SEASON_CYCLE_CODE_WEEKLY, 52, vec![]);
         write_checkpoint_with_manifest_and_seasons(tmp.path(), 1, 1, &[10.0], &[], source_seasons);
 
-        let study_seasons = seasons(SEASON_CYCLE_CODE_MONTHLY, 12, vec![]);
+        let study = study_seasons(SEASON_CYCLE_CODE_MONTHLY, 12, vec![]);
         let result = load_boundary_cuts(
             &BoundaryLoadRequest::new(
                 tmp.path(),
@@ -2166,7 +2186,7 @@ mod tests {
                 &[],
                 NEUTRAL_LOADING_FACTOR,
             )
-            .with_study_seasons(&study_seasons),
+            .with_study_seasons(&study),
         );
 
         let msg = result.unwrap_err().to_string();
@@ -2186,7 +2206,7 @@ mod tests {
         let source_seasons = seasons(SEASON_CYCLE_CODE_MONTHLY, 4, vec![]);
         write_checkpoint_with_manifest_and_seasons(tmp.path(), 1, 1, &[10.0], &[], source_seasons);
 
-        let study_seasons = seasons(SEASON_CYCLE_CODE_MONTHLY, 12, vec![]);
+        let study = study_seasons(SEASON_CYCLE_CODE_MONTHLY, 12, vec![]);
         let result = load_boundary_cuts(
             &BoundaryLoadRequest::new(
                 tmp.path(),
@@ -2195,7 +2215,7 @@ mod tests {
                 &[],
                 NEUTRAL_LOADING_FACTOR,
             )
-            .with_study_seasons(&study_seasons),
+            .with_study_seasons(&study),
         );
 
         let msg = result.unwrap_err().to_string();
@@ -2218,12 +2238,12 @@ mod tests {
         let source_seasons = seasons(SEASON_CYCLE_CODE_MONTHLY, 3, vec![]);
         write_checkpoint_with_manifest_and_seasons(tmp.path(), 1, 1, &[10.0], &[], source_seasons);
 
-        let study_seasons = seasons(
+        let study = study_seasons(
             SEASON_CYCLE_CODE_MONTHLY,
             3,
-            vec![HydroSeasonOrders {
+            vec![StudyHydroSeasonOrders {
                 hydro_id: 7,
-                orders: vec![1, 2, 3],
+                orders: vec![Some(1), Some(2), Some(3)],
             }],
         );
         let result = load_boundary_cuts(
@@ -2234,7 +2254,7 @@ mod tests {
                 &[],
                 NEUTRAL_LOADING_FACTOR,
             )
-            .with_study_seasons(&study_seasons),
+            .with_study_seasons(&study),
         );
 
         let msg = result.unwrap_err().to_string();
@@ -2261,12 +2281,12 @@ mod tests {
         );
         write_checkpoint_with_manifest_and_seasons(tmp.path(), 1, 1, &[10.0], &[], source_seasons);
 
-        let study_seasons = seasons(
+        let study = study_seasons(
             SEASON_CYCLE_CODE_MONTHLY,
             3,
-            vec![HydroSeasonOrders {
+            vec![StudyHydroSeasonOrders {
                 hydro_id: 7,
-                orders: vec![2, 2, 3],
+                orders: vec![Some(2), Some(2), Some(3)],
             }],
         );
         let result = load_boundary_cuts(
@@ -2277,7 +2297,7 @@ mod tests {
                 &[],
                 NEUTRAL_LOADING_FACTOR,
             )
-            .with_study_seasons(&study_seasons),
+            .with_study_seasons(&study),
         );
 
         let msg = result.unwrap_err().to_string();
@@ -2303,12 +2323,12 @@ mod tests {
         );
         write_checkpoint_with_manifest_and_seasons(tmp.path(), 1, 1, &[10.0], &[], source_seasons);
 
-        let study_seasons = seasons(
+        let study = study_seasons(
             SEASON_CYCLE_CODE_MONTHLY,
             3,
-            vec![HydroSeasonOrders {
+            vec![StudyHydroSeasonOrders {
                 hydro_id: 7,
-                orders: vec![2, 2, 3],
+                orders: vec![Some(2), Some(2), Some(3)],
             }],
         );
         let result = load_boundary_cuts(
@@ -2319,7 +2339,7 @@ mod tests {
                 &[],
                 NEUTRAL_LOADING_FACTOR,
             )
-            .with_study_seasons(&study_seasons),
+            .with_study_seasons(&study),
         );
 
         let msg = result.unwrap_err().to_string();
@@ -2327,6 +2347,105 @@ mod tests {
         assert!(
             msg.contains("season 1"),
             "must name the first differing season ordinal: {msg}"
+        );
+        assert!(
+            msg.contains("order 2"),
+            "must name the study's order at that season: {msg}"
+        );
+        assert!(
+            msg.contains("order 4"),
+            "must name the source's order at that season: {msg}"
+        );
+    }
+
+    /// Given a study descriptor with hydro 7's season 0 fitted and seasons 1
+    /// and 2 unreferenced (`orders` `[Some(2), None, None]`), against a
+    /// source whose `orders` are `[2, 4, 3]`, `load_boundary_cuts` succeeds:
+    /// the differing orders at the two unreferenced seasons are never
+    /// compared — a season no inflow model reaches carries no opinion.
+    #[test]
+    fn boundary_load_accepts_a_source_par_order_at_a_season_the_study_never_references() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source_seasons = seasons(
+            SEASON_CYCLE_CODE_MONTHLY,
+            3,
+            vec![HydroSeasonOrders {
+                hydro_id: 7,
+                orders: vec![2, 4, 3],
+            }],
+        );
+        write_checkpoint_with_manifest_and_seasons(tmp.path(), 1, 1, &[10.0], &[], source_seasons);
+
+        let study = study_seasons(
+            SEASON_CYCLE_CODE_MONTHLY,
+            3,
+            vec![StudyHydroSeasonOrders {
+                hydro_id: 7,
+                orders: vec![Some(2), None, None],
+            }],
+        );
+        let cuts = load_boundary_cuts(
+            &BoundaryLoadRequest::new(
+                tmp.path(),
+                fixture_priced_date(0),
+                1,
+                &[],
+                NEUTRAL_LOADING_FACTOR,
+            )
+            .with_study_seasons(&study),
+        )
+        .unwrap();
+
+        assert_eq!(
+            cuts.len(),
+            1,
+            "the load must succeed when the only differing seasons are unreferenced"
+        );
+    }
+
+    /// Given a study descriptor with hydro 7's seasons 0 and 1 fitted and
+    /// season 2 unreferenced (`orders` `[Some(2), Some(2), None]`), against a
+    /// source whose `orders` are `[2, 4, 3]`, `load_boundary_cuts` still
+    /// rejects at season 1 — the genuine mismatch at a referenced season is
+    /// not swallowed by the unreferenced gap at season 2.
+    #[test]
+    fn boundary_load_rejects_differing_par_order_at_a_referenced_season_despite_unreferenced_gaps()
+    {
+        let tmp = tempfile::tempdir().unwrap();
+        let source_seasons = seasons(
+            SEASON_CYCLE_CODE_MONTHLY,
+            3,
+            vec![HydroSeasonOrders {
+                hydro_id: 7,
+                orders: vec![2, 4, 3],
+            }],
+        );
+        write_checkpoint_with_manifest_and_seasons(tmp.path(), 1, 1, &[10.0], &[], source_seasons);
+
+        let study = study_seasons(
+            SEASON_CYCLE_CODE_MONTHLY,
+            3,
+            vec![StudyHydroSeasonOrders {
+                hydro_id: 7,
+                orders: vec![Some(2), Some(2), None],
+            }],
+        );
+        let result = load_boundary_cuts(
+            &BoundaryLoadRequest::new(
+                tmp.path(),
+                fixture_priced_date(0),
+                1,
+                &[],
+                NEUTRAL_LOADING_FACTOR,
+            )
+            .with_study_seasons(&study),
+        );
+
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("hydro 7"), "must name the hydro: {msg}");
+        assert!(
+            msg.contains("season 1"),
+            "must name the referenced differing season ordinal: {msg}"
         );
         assert!(
             msg.contains("order 2"),
@@ -2346,7 +2465,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_checkpoint_with_manifest(tmp.path(), 1, 1, &[10.0], &[]);
 
-        let study_seasons = seasons(SEASON_CYCLE_CODE_MONTHLY, 12, vec![]);
+        let study = study_seasons(SEASON_CYCLE_CODE_MONTHLY, 12, vec![]);
         let result = load_boundary_cuts(
             &BoundaryLoadRequest::new(
                 tmp.path(),
@@ -2355,7 +2474,7 @@ mod tests {
                 &[],
                 NEUTRAL_LOADING_FACTOR,
             )
-            .with_study_seasons(&study_seasons),
+            .with_study_seasons(&study),
         );
 
         let msg = result.unwrap_err().to_string();

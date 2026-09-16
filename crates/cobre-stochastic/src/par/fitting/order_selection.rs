@@ -92,6 +92,9 @@ pub fn select_order_aic(sigma2_per_order: &[f64], n_observations: usize) -> AicS
 #[derive(Debug, Clone, PartialEq)]
 pub struct PacfSelectionResult {
     /// Selected AR order; `0` when no lag exceeds the significance threshold.
+    /// The order names the outermost significant lag, never a subset, so the
+    /// fitted coefficient vector carries one entry per lag `1..=selected_order`,
+    /// where position `k` is lag `k + 1`.
     pub selected_order: usize,
     /// PACF values for lags `1..=p_max`; `pacf_values[k]` is the PACF at lag `k+1`.
     pub pacf_values: Vec<f64>,
