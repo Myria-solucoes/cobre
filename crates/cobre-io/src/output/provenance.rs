@@ -114,10 +114,8 @@ mod tests {
         assert!(path.exists(), "final file should exist");
     }
 
-    // ── Generic reader ───────────────────────────────────────────────────────
-
     /// Nested mock mirroring the cross-model report shape, defined locally so
-    /// the reader test never depends on an algorithm crate (genericity rule).
+    /// the round-trip test never depends on an algorithm crate (genericity rule).
     #[derive(Debug, Serialize, Deserialize, PartialEq)]
     struct MockReport {
         inflow: MockSection,
@@ -144,7 +142,7 @@ mod tests {
     }
 
     #[test]
-    fn read_provenance_report_round_trips_mock() {
+    fn write_provenance_report_round_trips_nested_mock() {
         let dir = TempDir::new().expect("temp dir");
         let path = dir.path().join("training/model_provenance.json");
 

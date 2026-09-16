@@ -105,6 +105,15 @@ fail() {
   exit 1
 }
 
+check_keys() {
+  local file="$1" label="$2"
+  shift 2
+  for key in "$@"; do
+    jq -e "has(\"$key\")" "$file" >/dev/null \
+      || fail "$label is missing expected top-level key \`$key\`."
+  done
+}
+
 # ── Invariant 1: init materializes exactly the expected file count ───────────
 "$BIN" init --template "$TEMPLATE" "$CASE_DIR" >/dev/null
 actual_files="$(find "$CASE_DIR" -type f | wc -l | tr -d '[:space:]')"
@@ -119,10 +128,7 @@ echo "init file count: $actual_files == $EXPECTED_INPUT_FILES (expected) ✓"
 # ── Invariant 2: training/metadata.json exists + expected top-level keys ─────
 training_meta="$OUT_DIR/training/metadata.json"
 [[ -f "$training_meta" ]] || fail "training/metadata.json was not written."
-for key in "${TRAINING_METADATA_KEYS[@]}"; do
-  jq -e "has(\"$key\")" "$training_meta" >/dev/null \
-    || fail "training/metadata.json is missing expected top-level key \`$key\`."
-done
+check_keys "$training_meta" "training/metadata.json" "${TRAINING_METADATA_KEYS[@]}"
 echo "training/metadata.json: ${#TRAINING_METADATA_KEYS[@]} expected top-level keys present (incl. row_pool) ✓"
 
 # ── Invariant 3: policy/manifest.bin exists (the checkpoint commit signal) ────
@@ -133,10 +139,7 @@ echo "policy/manifest.bin: present (self-describing checkpoint commit signal) �
 # ── Invariant 4: simulation/metadata.json exists + expected top-level keys ───
 simulation_meta="$OUT_DIR/simulation/metadata.json"
 [[ -f "$simulation_meta" ]] || fail "simulation/metadata.json was not written."
-for key in "${SIMULATION_METADATA_KEYS[@]}"; do
-  jq -e "has(\"$key\")" "$simulation_meta" >/dev/null \
-    || fail "simulation/metadata.json is missing expected top-level key \`$key\`."
-done
+check_keys "$simulation_meta" "simulation/metadata.json" "${SIMULATION_METADATA_KEYS[@]}"
 echo "simulation/metadata.json: ${#SIMULATION_METADATA_KEYS[@]} expected top-level keys present ✓"
 
 echo "All init/run structural invariants hold. ✓"

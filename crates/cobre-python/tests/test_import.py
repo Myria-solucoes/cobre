@@ -10,12 +10,10 @@ Run with:
 
 
 def test_import_cobre() -> None:
-    """Importing cobre must succeed without errors."""
     import cobre  # noqa: F401, PLC0415
 
 
 def test_version() -> None:
-    """cobre.__version__ must be a non-empty string."""
     import cobre  # noqa: PLC0415
 
     assert isinstance(cobre.__version__, str)
@@ -23,7 +21,6 @@ def test_version() -> None:
 
 
 def test_submodules_exist() -> None:
-    """cobre.model, cobre.io, cobre.run, and cobre.results must be importable."""
     import cobre.io  # noqa: F401, PLC0415
     import cobre.model  # noqa: F401, PLC0415
     import cobre.results  # noqa: F401, PLC0415
@@ -31,7 +28,6 @@ def test_submodules_exist() -> None:
 
 
 def test_native_module_importable() -> None:
-    """The private compiled module cobre._native must import cleanly."""
     import cobre._native  # noqa: F401, PLC0415
 
 
@@ -52,7 +48,6 @@ def test_public_submodules_are_the_native_modules() -> None:
 
 
 def test_version_matches_native() -> None:
-    """The public __version__ mirrors the compiled module's __version__."""
     import cobre  # noqa: PLC0415
     import cobre._native  # noqa: PLC0415
 

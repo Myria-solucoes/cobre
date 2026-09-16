@@ -353,7 +353,6 @@ mod tests {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    /// Build a sample [`FphaHyperplaneRow`] for `hydro_id` and `plane_id`.
     fn make_row(hydro_id: i32, plane_id: i32, gamma_0: f64, kappa: f64) -> FphaHyperplaneRow {
         FphaHyperplaneRow {
             hydro_id: EntityId::from(hydro_id),

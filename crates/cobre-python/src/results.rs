@@ -21,6 +21,7 @@
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use arrow::array::{
     Array, BooleanArray, Float64Array, Int8Array, Int32Array, Int64Array, StringArray, UInt32Array,
@@ -95,7 +96,7 @@ fn json_value_to_py(py: Python<'_>, val: &serde_json::Value) -> PyResult<Py<PyAn
     }
 }
 
-fn read_json_file(path: &std::path::Path) -> PyResult<serde_json::Value> {
+fn read_json_file(path: &Path) -> PyResult<serde_json::Value> {
     let content = fs::read_to_string(path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             PyFileNotFoundError::new_err(format!("file not found: {}", path.display()))
@@ -963,7 +964,7 @@ fn metadata_to_py<'py>(
 /// into every row from `scenario_id_val`.
 fn read_parquet_partition_into(
     py: Python<'_>,
-    parquet_path: &std::path::Path,
+    parquet_path: &Path,
     scenario_id_val: i64,
     result_list: &Bound<'_, PyList>,
 ) -> PyResult<()> {
@@ -1021,9 +1022,7 @@ fn read_parquet_partition_into(
 /// Collect the `scenario_id=NNNN` subdirectories of `entity_dir`, pairing each
 /// parsed id with its `data.parquet` path, sorted ascending by id for
 /// deterministic output order.
-fn collect_sorted_scenario_entries(
-    entity_dir: &std::path::Path,
-) -> PyResult<Vec<(i64, std::path::PathBuf)>> {
+fn collect_sorted_scenario_entries(entity_dir: &Path) -> PyResult<Vec<(i64, PathBuf)>> {
     let read_dir = fs::read_dir(entity_dir).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             PyFileNotFoundError::new_err(format!(
@@ -1038,7 +1037,7 @@ fn collect_sorted_scenario_entries(
         }
     })?;
 
-    let mut entries: Vec<(i64, std::path::PathBuf)> = Vec::new();
+    let mut entries: Vec<(i64, PathBuf)> = Vec::new();
 
     for dir_entry in read_dir {
         let dir_entry = dir_entry.map_err(|e| {
@@ -1072,7 +1071,7 @@ fn collect_sorted_scenario_entries(
 ///
 /// Returns an empty list if the directory exists but contains no scenario
 /// subdirectories.
-fn load_entity_type(py: Python<'_>, entity_dir: &std::path::Path) -> PyResult<Py<PyList>> {
+fn load_entity_type(py: Python<'_>, entity_dir: &Path) -> PyResult<Py<PyList>> {
     let result_list = PyList::empty(py);
 
     let entries = collect_sorted_scenario_entries(entity_dir)?;
@@ -1181,10 +1180,10 @@ pub fn load_simulation(
 /// `out_schema` is the extended schema, written on the first call (when `None`)
 /// and reused by later calls so all batches share one schema for concatenation.
 fn read_parquet_partition_as_batches(
-    parquet_path: &std::path::Path,
+    parquet_path: &Path,
     scenario_id_val: i64,
     out_batches: &mut Vec<RecordBatch>,
-    out_schema: &mut Option<std::sync::Arc<Schema>>,
+    out_schema: &mut Option<Arc<Schema>>,
 ) -> PyResult<()> {
     let file = fs::File::open(parquet_path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
@@ -1236,8 +1235,8 @@ fn read_parquet_partition_as_batches(
         }
 
         let n_rows = batch.num_rows();
-        let scenario_id_array = std::sync::Arc::new(Int64Array::from(vec![scenario_id_val; n_rows]))
-            as std::sync::Arc<dyn arrow::array::Array>;
+        let scenario_id_array =
+            Arc::new(Int64Array::from(vec![scenario_id_val; n_rows])) as Arc<dyn Array>;
 
         let extended_schema = if let Some(schema) = out_schema.as_ref() {
             schema.clone()
@@ -1245,13 +1244,12 @@ fn read_parquet_partition_as_batches(
             let orig_schema = batch.schema();
             let mut fields: Vec<Field> = vec![Field::new("scenario_id", DataType::Int64, false)];
             fields.extend(orig_schema.fields().iter().map(|f| f.as_ref().clone()));
-            let schema = std::sync::Arc::new(Schema::new(fields));
+            let schema = Arc::new(Schema::new(fields));
             *out_schema = Some(schema.clone());
             schema
         };
 
-        let mut columns: Vec<std::sync::Arc<dyn arrow::array::Array>> =
-            Vec::with_capacity(batch.num_columns() + 1);
+        let mut columns: Vec<Arc<dyn Array>> = Vec::with_capacity(batch.num_columns() + 1);
         columns.push(scenario_id_array);
         columns.extend(batch.columns().iter().cloned());
 
@@ -1269,9 +1267,7 @@ fn read_parquet_partition_as_batches(
 /// concatenated across scenarios (ordered by `scenario_id` ascending).
 ///
 /// Returns `None` when the directory exists but contains no scenario subdirectories.
-fn load_entity_type_as_batch(
-    entity_dir: &std::path::Path,
-) -> PyResult<Option<(RecordBatch, std::sync::Arc<Schema>)>> {
+fn load_entity_type_as_batch(entity_dir: &Path) -> PyResult<Option<(RecordBatch, Arc<Schema>)>> {
     let entries = collect_sorted_scenario_entries(entity_dir)?;
 
     if entries.is_empty() {
@@ -1279,7 +1275,7 @@ fn load_entity_type_as_batch(
     }
 
     let mut all_batches: Vec<RecordBatch> = Vec::new();
-    let mut schema: Option<std::sync::Arc<Schema>> = None;
+    let mut schema: Option<Arc<Schema>> = None;
 
     for (scenario_id, parquet_path) in &entries {
         read_parquet_partition_as_batches(
@@ -1321,7 +1317,7 @@ fn entity_type_ipc_bytes(entity_dir: &Path) -> PyResult<Vec<u8>> {
         batch_to_ipc_bytes(&batch, &schema)
     } else {
         let empty_schema = Schema::new(vec![Field::new("scenario_id", DataType::Int64, false)]);
-        let empty_batch = RecordBatch::new_empty(std::sync::Arc::new(empty_schema.clone()));
+        let empty_batch = RecordBatch::new_empty(Arc::new(empty_schema.clone()));
         batch_to_ipc_bytes(&empty_batch, &empty_schema)
     }
 }

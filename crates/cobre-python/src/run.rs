@@ -1010,7 +1010,6 @@ pub(crate) fn build_study_setup(
         build_stochastic_summary(&system, &setup.stochastic, estimation_report.as_ref(), seed);
     let hydro_models_summary = build_hydro_model_summary(&setup.hydro_models, &system);
 
-    // Write the `training/hydro_models.json` output file.
     let hydro_models_path = output_dir.join("training/hydro_models.json");
     write_hydro_model_summary(&hydro_models_path, &hydro_models_summary)
         .map_err(|e| format!("output write error: failed to write hydro model summary: {e}"))?;
@@ -1437,41 +1436,39 @@ pub(crate) fn run_via_study(
             hydro_models: hydro_models_summary,
             provenance: Some(provenance_report),
         })
+    } else if should_simulate {
+        let policy_dir = output_dir.join(&setup.policy_path);
+        let (loaded_fcf, training_result) =
+            reconstruct_policy_from_checkpoint(&setup, &system, &policy_dir)?;
+
+        setup.replace_fcf(loaded_fcf);
+
+        let simulation = Some(run_simulation_phase_py(
+            &mut setup,
+            &output_dir,
+            &system,
+            &training_result,
+            n_threads,
+        )?);
+
+        Ok(RunSummary {
+            converged: false,
+            iterations: 0,
+            lower_bound: training_result.final_lb,
+            upper_bound: if training_result.final_ub.is_finite() {
+                Some(training_result.final_ub)
+            } else {
+                None
+            },
+            gap_percent: None,
+            total_time_ms: 0,
+            output_dir,
+            simulation,
+            stochastic: Some(stochastic_summary),
+            hydro_models: hydro_models_summary,
+            provenance: Some(provenance_report),
+        })
     } else {
-        if should_simulate {
-            let policy_dir = output_dir.join(&setup.policy_path);
-            let (loaded_fcf, training_result) =
-                reconstruct_policy_from_checkpoint(&setup, &system, &policy_dir)?;
-
-            setup.replace_fcf(loaded_fcf);
-
-            let simulation = Some(run_simulation_phase_py(
-                &mut setup,
-                &output_dir,
-                &system,
-                &training_result,
-                n_threads,
-            )?);
-
-            return Ok(RunSummary {
-                converged: false,
-                iterations: 0,
-                lower_bound: training_result.final_lb,
-                upper_bound: if training_result.final_ub.is_finite() {
-                    Some(training_result.final_ub)
-                } else {
-                    None
-                },
-                gap_percent: None,
-                total_time_ms: 0,
-                output_dir,
-                simulation,
-                stochastic: Some(stochastic_summary),
-                hydro_models: hydro_models_summary,
-                provenance: Some(provenance_report),
-            });
-        }
-
         Ok(RunSummary {
             converged: false,
             iterations: 0,

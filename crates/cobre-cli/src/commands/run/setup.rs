@@ -92,8 +92,6 @@ fn load_case_and_config(
     if !quiet {
         let _ = stderr.write_line(&format!("Loading case: {}", args.case_dir.display()));
     }
-    // Single load: downstream consumers reuse the artifacts returned here instead
-    // of re-reading the same files from disk.
     let mut timings = SetupTimings::default();
 
     let load_start = std::time::Instant::now();
@@ -107,7 +105,7 @@ fn load_case_and_config(
     // state layout and the boundary-load reject see the identical requirements on
     // every rank.
     let boundary_requirements = resolve_boundary_state_requirements(&args.case_dir, &config)?;
-    if let (Some(d), false) = (boundary_requirements.inflow_lag_depth(), quiet) {
+    if !quiet && let Some(d) = boundary_requirements.inflow_lag_depth() {
         let _ = stderr.write_line(&format!("Boundary policy: inflow-lag depth {d}"));
     }
 

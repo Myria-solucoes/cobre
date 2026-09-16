@@ -665,6 +665,14 @@ fn format_pct(pct: f64) -> String {
     }
 }
 
+fn pct_of(part: f64, total: f64) -> f64 {
+    if total > 0.0 {
+        100.0 * part / total
+    } else {
+        0.0
+    }
+}
+
 /// The three training Time-split component walls (forward, backward, serial),
 /// in seconds. `None` when per-iteration phase-wall timing is unavailable.
 #[allow(clippy::cast_precision_loss)]
@@ -749,19 +757,12 @@ fn format_time_split_training(t: &TrainingSummary) -> Vec<String> {
         return Vec::new();
     };
     let total_s = t.total_time_ms as f64 / 1000.0;
-    let pct = |part: f64| -> f64 {
-        if total_s > 0.0 {
-            100.0 * part / total_s
-        } else {
-            0.0
-        }
-    };
 
     vec![
         format!(
             "  Time split:   Forward  {} ({}){}",
             format_split_duration(forward_wall),
-            format_pct(pct(forward_wall)),
+            format_pct(pct_of(forward_wall, total_s)),
             format_phase_solve_wait(
                 t.total_forward_solve_seconds,
                 t.forward_wait_seconds,
@@ -772,7 +773,7 @@ fn format_time_split_training(t: &TrainingSummary) -> Vec<String> {
         format!(
             "                Backward {} ({}){}",
             format_split_duration(backward_wall),
-            format_pct(pct(backward_wall)),
+            format_pct(pct_of(backward_wall, total_s)),
             format_phase_solve_wait(
                 t.total_backward_solve_seconds,
                 t.backward_wait_seconds,
@@ -783,7 +784,7 @@ fn format_time_split_training(t: &TrainingSummary) -> Vec<String> {
         format!(
             "                Serial   {} ({}){}",
             format_split_duration(serial_wall),
-            format_pct(pct(serial_wall)),
+            format_pct(pct_of(serial_wall, total_s)),
             format_serial_breakdown(t, serial_wall)
         ),
     ]
@@ -999,22 +1000,15 @@ pub fn print_simulation_summary(stderr: &Term, sim: &SimulationSummary) {
         let total_s = sim.total_time_ms as f64 / 1000.0;
         let solver = per_worker_mean_seconds(solve_time, parallelism, total_s);
         let other = (total_s - solver).max(0.0);
-        let pct = |part: f64| -> f64 {
-            if total_s > 0.0 {
-                100.0 * part / total_s
-            } else {
-                0.0
-            }
-        };
         let _ = stderr.write_line(&format!(
             "  Time split:   Solver {} ({:.0}%)",
             format_split_duration(solver),
-            pct(solver)
+            pct_of(solver, total_s)
         ));
         let _ = stderr.write_line(&format!(
             "                Other  {} ({:.0}%)",
             format_split_duration(other),
-            pct(other)
+            pct_of(other, total_s)
         ));
     }
 }

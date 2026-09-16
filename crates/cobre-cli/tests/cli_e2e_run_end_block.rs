@@ -44,6 +44,13 @@ fn assert_ordered(haystack: &str, needle_a: &str, needle_b: &str) {
     );
 }
 
+fn find_line<'a>(haystack: &'a str, label: &str) -> &'a str {
+    haystack
+        .lines()
+        .find(|l| l.contains(label))
+        .unwrap_or_else(|| panic!("expected a {label} Time-split line in run stderr"))
+}
+
 const EXPECTED_MEAN_COST: f64 = 9_679_385.922_404_844;
 
 #[test]
@@ -94,18 +101,9 @@ fn run_produces_deterministic_end_block_and_metadata() {
         );
     }
 
-    let forward_line = run_stderr
-        .lines()
-        .find(|l| l.contains("Forward"))
-        .unwrap_or_else(|| panic!("expected a Forward Time-split line in run stderr"));
-    let backward_line = run_stderr
-        .lines()
-        .find(|l| l.contains("Backward"))
-        .unwrap_or_else(|| panic!("expected a Backward Time-split line in run stderr"));
-    let serial_line = run_stderr
-        .lines()
-        .find(|l| l.contains("Serial"))
-        .unwrap_or_else(|| panic!("expected a Serial Time-split line in run stderr"));
+    let forward_line = find_line(&run_stderr, "Forward");
+    let backward_line = find_line(&run_stderr, "Backward");
+    let serial_line = find_line(&run_stderr, "Serial");
 
     for (label, line) in [
         ("Forward", forward_line),
