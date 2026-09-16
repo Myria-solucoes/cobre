@@ -450,8 +450,8 @@ fn boundary_production_model_entry_json(hydro_id: i64) -> String {
 
 /// Writes one entry per id in `hydro_ids` into `system/hydros.json`,
 /// `system/hydro_production_models.json` and `initial_conditions.json`, each
-/// hydro on bus 0 with `downstream_id: null`. A one-element slice reproduces
-/// [`write_boundary_case`]'s prior byte-for-byte output.
+/// hydro on bus 0 with `downstream_id: null`. [`write_boundary_case`] is the
+/// one-element form.
 fn write_boundary_case_with_hydros(dir: &Path, hydro_ids: &[i64]) {
     write_file(
         dir,

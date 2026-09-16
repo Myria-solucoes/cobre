@@ -28,7 +28,10 @@ VALID_CASE = str(_REPO_ROOT / "examples" / "1dtoy")
 
 
 def _set_boundary_policy(
-    case_dir: pathlib.Path, source_policy_dir: pathlib.Path
+    case_dir: pathlib.Path,
+    source_policy_dir: pathlib.Path,
+    *,
+    strict: bool | None = None,
 ) -> None:
     """Point `case_dir`'s `config.json` at `source_policy_dir` as a boundary
     source, merging into whatever `policy` block the case already declares.
@@ -36,19 +39,10 @@ def _set_boundary_policy(
     config_path = case_dir / "config.json"
     config = json.loads(config_path.read_text())
     policy = config.get("policy", {})
-    policy["boundary"] = {"path": str(source_policy_dir)}
-    config["policy"] = policy
-    config_path.write_text(json.dumps(config))
-
-
-def _set_boundary_policy_with_strict(
-    case_dir: pathlib.Path, source_policy_dir: pathlib.Path, strict: bool
-) -> None:
-    """`_set_boundary_policy` with an explicit `strict` key merged in."""
-    config_path = case_dir / "config.json"
-    config = json.loads(config_path.read_text())
-    policy = config.get("policy", {})
-    policy["boundary"] = {"path": str(source_policy_dir), "strict": strict}
+    boundary: dict[str, object] = {"path": str(source_policy_dir)}
+    if strict is not None:
+        boundary["strict"] = strict
+    policy["boundary"] = boundary
     config["policy"] = policy
     config_path.write_text(json.dumps(config))
 
@@ -109,7 +103,7 @@ def test_boundary_load_strict_accepts_a_faithful_self_boundary(
 
     target_case = tmp_path / "strict_target"
     shutil.copytree(VALID_CASE, target_case)
-    _set_boundary_policy_with_strict(target_case, source_policy_dir, True)
+    _set_boundary_policy(target_case, source_policy_dir, strict=True)
 
     capfd.readouterr()  # discard the source run's own stderr
     cobre.run.run(str(target_case), output_dir=str(tmp_path / "strict_target_output"))

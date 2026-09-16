@@ -748,14 +748,10 @@ mod tests {
         );
     }
 
-    /// Regression for a reviewer-flagged bug: `build_season_manifest` used to
-    /// resolve every `InflowModel.stage_id` through `system.stages()` alone,
-    /// so a fitted model at a synthesized pre-study stage id (never merged
-    /// into `system.stages()`) silently dropped out of `hydro_season_orders`
-    /// and its gap season stayed at order 0. A synthesized pre-study season a
-    /// partial-year study's AR lags reach back into counts as referenced, the
-    /// same as any of the study's own stages: its study-side entry is
-    /// `Some`, never the `None` an unvisited season carries.
+    /// A synthesized pre-study season a partial-year study's AR lags reach
+    /// back into counts as referenced, the same as any of the study's own
+    /// stages: its study-side entry is `Some`, never the `None` an unvisited
+    /// season carries.
     #[test]
     fn season_descriptor_keeps_gap_season_orders_from_synthesized_prestudy_stages() {
         // Declared study stages: ids 0..3, seasons 8..11 (Sep-Dec).

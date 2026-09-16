@@ -210,7 +210,6 @@ pub fn select_order_pacf_annual(
         f64::INFINITY
     };
 
-    // Rule 1 (doc): a structural zero at lag 1 forces order 0.
     if conditional_facp.first().copied() == Some(0.0) {
         return PacfSelectionResult {
             selected_order: 0,
@@ -226,7 +225,6 @@ pub fn select_order_pacf_annual(
         .find(|&(_, p)| p.abs() > threshold)
         .map_or(0, |(k, _)| k + 1);
 
-    // Rule 2 (doc): a non-zero lag 1 floors the order at AR(1).
     let selected_order = match conditional_facp.first() {
         Some(&p1) if p1 != 0.0 => max_significant.max(1),
         _ => max_significant,

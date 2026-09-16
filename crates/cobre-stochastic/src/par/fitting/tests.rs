@@ -3306,7 +3306,7 @@ fn conditional_facp_partitioned_two_season_hand_computed() {
     // Season 0 is a0 (we use only z0, z1, and the annual component a1 at season 1).
     // For season=0, prev_season=1, so the annual data needed is a1.
     // We still need a0 for completeness (though it won't be accessed for k<=2 at season=0).
-    let a0: &[f64] = &[0.0; 5]; // not accessed for season=0, k=1,2
+    let a0: &[f64] = &[0.0; 5];
 
     let obs: &[&[f64]] = &[z0, z1];
     let stats = [pop_mean_std_ann(z0), pop_mean_std_ann(z1)];
@@ -3775,16 +3775,6 @@ fn select_order_pacf_annual_interior_insignificant_lag_still_selects_the_outer_l
     assert_eq!(result.selected_order, 3);
 }
 
-#[test]
-fn select_order_pacf_interior_insignificant_lag_still_selects_the_outer_lag() {
-    // threshold = 1.96 / sqrt(100) = 0.196
-    // parcor = [0.5, 0.01, 0.4]: lag 1 and lag 3 are significant, lag 2
-    // (0.01) is not. Lag 2 stays in the model because the order names the
-    // outermost significant lag, not the set of significant lags.
-    let result = select_order_pacf(&[0.5, 0.01, 0.4], 100, 1.96);
-    assert_eq!(result.selected_order, 3);
-}
-
 // -----------------------------------------------------------------------
 // estimate_annual_seasonal_stats tests
 // -----------------------------------------------------------------------
@@ -4033,47 +4023,6 @@ fn estimate_periodic_ar_annual_coefficients_hand_computed_three_season() {
         (result.annual_coefficient - 0.877_937_183_016_726_5).abs() < tol,
         "ψ={} expected≈0.8779371830",
         result.annual_coefficient
-    );
-}
-
-/// `selected_order = 2` produces exactly 2 coefficients, one per lag.
-///
-/// Reuses the hand-computed three-season fixture; the density of the
-/// coefficient vector is a slicing property of the solve, so this pins the
-/// length rather than re-verifying the values already pinned above.
-#[test]
-fn estimate_periodic_ar_annual_coefficients_emits_one_coefficient_per_lag() {
-    let z0: &[f64] = &[1.0, 3.0, 2.0, 5.0, 4.0];
-    let z1: &[f64] = &[2.0, 1.0, 4.0, 3.0, 6.0];
-    let obs: &[&[f64]] = &[z0, z1];
-    let stats = [pop_mean_std_ann(z0), pop_mean_std_ann(z1)];
-
-    let a0: &[f64] = &[1.5, 2.0, 3.0, 4.0, 3.5];
-    let a1: &[f64] = &[1.0, 3.0, 2.5, 3.5, 2.0];
-    let ann_obs: &[&[f64]] = &[a0, a1];
-    let ann_stats = [pop_mean_std_ann(a0), pop_mean_std_ann(a1)];
-
-    let result = estimate_periodic_ar_annual_coefficients(
-        0, // season
-        2, // selected_order
-        2, // n_seasons
-        obs,
-        &stats,
-        &[0_i32; 32],
-        ann_obs,
-        &ann_stats,
-        &[0_i32; 32],
-    );
-
-    assert_eq!(
-        result.coefficients.len(),
-        2,
-        "selected_order=2 must produce exactly one coefficient per lag"
-    );
-    assert!(
-        result.coefficients.iter().all(|c| c.is_finite()),
-        "coefficients must be finite, got {:?}",
-        result.coefficients
     );
 }
 

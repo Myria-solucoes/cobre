@@ -22,8 +22,6 @@ fn ymd(year: i32, month: u32, day: u32) -> NaiveDate {
     NaiveDate::from_ymd_opt(year, month, day).expect("valid calendar date")
 }
 
-/// Pool `pool`'s fixture `priced_state_date`: `2030-01-01` plus `pool`
-/// months.
 fn fixture_priced_date(pool: u32) -> NaiveDate {
     ymd(2030, 1, 1)
         .checked_add_months(chrono::Months::new(pool))

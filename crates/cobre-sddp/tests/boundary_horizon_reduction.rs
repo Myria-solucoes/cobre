@@ -595,7 +595,7 @@ fn horizon_reduction_selects_the_pool_priced_at_the_boundary_date() {
         .expect("the checkpoint this fixture just wrote must read back");
     assert_eq!(
         checkpoint.stage_cuts.len(),
-        4,
+        N_FULL_STAGES,
         "the full study writes one pool per study stage"
     );
 

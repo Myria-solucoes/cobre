@@ -111,9 +111,9 @@ decoded value back off a loaded checkpoint any more — boundary-cut selection
 reads `priced_state_date` instead, which the node-graph-to-calendar switchover
 made the authoritative pool key.
 
-**Owner.** The policy / boundary owner (`crates/cobre-sddp/src/policy/
-policy_export.rs`, `policy_load.rs`; `crates/cobre-io/src/output/policy/
-codec.rs`).
+**Owner.** The policy / boundary owner
+(`crates/cobre-sddp/src/policy/policy_export.rs`, `policy_load.rs`;
+`crates/cobre-io/src/output/policy/codec.rs`).
 
 **Consuming milestone.** The first `cobre-sddp` reader that needs the
 originating node-graph stage id independent of the calendar-derived
