@@ -3077,7 +3077,7 @@ mod faithful_resolution {
         StoppingRuleConfig, TrainingConfig, TrainingSelection, TrainingSolverConfig,
         UpperBoundEvaluationConfig,
     };
-    use cobre_io::{ENTITY_SLOT_DELIVERY_DATE_SENTINEL, StateFamily, decode_slot_date};
+    use cobre_io::{ENTITY_SLOT_DATE_SENTINEL, StateFamily, decode_slot_date};
     use cobre_sddp::study_horizon_end;
 
     use super::common::build_setup_in_code;
@@ -3426,7 +3426,7 @@ mod faithful_resolution {
             .enumerate()
             .filter_map(|(j, slot)| {
                 if slot.entity_type != StateFamily::AnticipatedThermalState.code()
-                    || slot.interval_start == ENTITY_SLOT_DELIVERY_DATE_SENTINEL
+                    || slot.interval_start == ENTITY_SLOT_DATE_SENTINEL
                 {
                     return None;
                 }
@@ -3471,7 +3471,7 @@ mod faithful_resolution {
             .iter()
             .filter_map(|slot| {
                 if slot.entity_type != StateFamily::AnticipatedThermalState.code()
-                    || slot.interval_start == ENTITY_SLOT_DELIVERY_DATE_SENTINEL
+                    || slot.interval_start == ENTITY_SLOT_DATE_SENTINEL
                 {
                     return None;
                 }

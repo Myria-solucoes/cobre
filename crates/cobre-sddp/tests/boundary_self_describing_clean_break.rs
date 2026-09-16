@@ -12,8 +12,8 @@ use std::process::Command;
 
 use chrono::NaiveDate;
 use cobre_io::{
-    ENTITY_SLOT_DELIVERY_DATE_SENTINEL, FORMAT_VERSION, GraphManifest, PolicyCutRecord,
-    ProducerBlock, StageCutsPayload, encode_slot_date, write_policy_checkpoint,
+    ENTITY_SLOT_DATE_SENTINEL, FORMAT_VERSION, GraphManifest, PolicyCutRecord, ProducerBlock,
+    StageCutsPayload, encode_slot_date, write_policy_checkpoint,
 };
 use cobre_sddp::test_support::ymd;
 use cobre_sddp::{BoundaryLoadRequest, SddpError, load_boundary_cuts};
@@ -201,7 +201,7 @@ fn build_pre_self_describing_stage_cuts_bin(
                 "entity_id": 1,
                 "subindex": 0,
                 "was_active": true,
-                "delivery_date": ENTITY_SLOT_DELIVERY_DATE_SENTINEL
+                "delivery_date": ENTITY_SLOT_DATE_SENTINEL
             }
         ]
     });

@@ -41,7 +41,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `BoundaryReconciliationReport::tally_clause` is removed with it; the same
   wording is `summary_line()` minus its `boundary reconciliation: ` prefix,
   and `tally_totals()` still returns the four counts for a caller that wants
-  to render them itself.
+  to render them itself. `cobre_io::ENTITY_SLOT_DELIVERY_DATE_SENTINEL` is
+  renamed `ENTITY_SLOT_DATE_SENTINEL`: the same value now sentinels every
+  `EntitySlot` date field, not only the retired delivery date.
 
 - **`policy.boundary.strict` (default `false`) turns a source pool that
   prices an entity or commitment the study does not model into a hard
@@ -142,7 +144,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   loading study's stages reference, including the synthesized pre-study
   seasons its inflow-lag coefficients reach back into. A genuine
   autoregressive-order difference at a season the study does model still
-  rejects, and the checkpoint file format is unchanged.
+  rejects, and the checkpoint file format is unchanged. Reading a checkpoint
+  now also rejects a season descriptor whose hydro entries are not in
+  ascending id order or whose per-hydro order list does not span the declared
+  season count, before any consumer sees it.
 
 - **A multi-rank `cobre run` now applies the terminal boundary policy on every
   rank.** The cuts loaded from `policy.boundary` were injected only on rank 0

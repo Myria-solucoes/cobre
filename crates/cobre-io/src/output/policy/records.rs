@@ -24,7 +24,7 @@ pub const FORMAT_VERSION: u32 = 2;
 /// the value a reader yields when a field is absent from a buffer older than
 /// that field's own id (see `schemas/policy.fbs` for each field's introducing
 /// id).
-pub const ENTITY_SLOT_DELIVERY_DATE_SENTINEL: i32 = i32::MIN;
+pub const ENTITY_SLOT_DATE_SENTINEL: i32 = i32::MIN;
 
 /// One per-slot entity-identity record for a state-vector dimension.
 ///
@@ -43,22 +43,22 @@ pub struct EntitySlot {
     pub was_active: bool,
     /// `HydroInflowLag`'s reference past stage's `start_date`, `YYYYMMDD`
     /// encoded (`year * 10000 + month * 100 + day`);
-    /// [`ENTITY_SLOT_DELIVERY_DATE_SENTINEL`] for every other family.
+    /// [`ENTITY_SLOT_DATE_SENTINEL`] for every other family.
     pub reference_date: i32,
     /// Half-open delivery/arrival interval's inclusive start, `YYYYMMDD`
     /// encoded: `HydroTransitBucket`'s `arrival_start` or
     /// `AnticipatedThermalState`'s `delivery_start`;
-    /// [`ENTITY_SLOT_DELIVERY_DATE_SENTINEL`] for storage and inflow-lag.
+    /// [`ENTITY_SLOT_DATE_SENTINEL`] for storage and inflow-lag.
     pub interval_start: i32,
     /// Half-open delivery/arrival interval's exclusive end, paired with
     /// [`interval_start`](Self::interval_start);
-    /// [`ENTITY_SLOT_DELIVERY_DATE_SENTINEL`] for storage and inflow-lag.
+    /// [`ENTITY_SLOT_DATE_SENTINEL`] for storage and inflow-lag.
     pub interval_end: i32,
 }
 
 impl EntitySlot {
     /// Builds a slot for `family` with every date field at
-    /// [`ENTITY_SLOT_DELIVERY_DATE_SENTINEL`] — the shared body of the four
+    /// [`ENTITY_SLOT_DATE_SENTINEL`] — the shared body of the four
     /// per-family constructors below.
     fn at_sentinel_dates(
         family: StateFamily,
@@ -71,9 +71,9 @@ impl EntitySlot {
             entity_id,
             subindex,
             was_active,
-            reference_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-            interval_start: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-            interval_end: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            reference_date: ENTITY_SLOT_DATE_SENTINEL,
+            interval_start: ENTITY_SLOT_DATE_SENTINEL,
+            interval_end: ENTITY_SLOT_DATE_SENTINEL,
         }
     }
 
@@ -261,7 +261,7 @@ pub fn encode_slot_date(date: NaiveDate) -> i32 {
 }
 
 /// Decodes `value` from the `YYYYMMDD` encoding [`encode_slot_date`] produces —
-/// its exact inverse. `None` for [`ENTITY_SLOT_DELIVERY_DATE_SENTINEL`]/
+/// its exact inverse. `None` for [`ENTITY_SLOT_DATE_SENTINEL`]/
 /// [`STAGE_CUTS_PRICED_STATE_DATE_SENTINEL`] (`i32::MIN`) and for any other
 /// value that is not a real calendar date; `-1` is deliberately rejected here
 /// too, since it is a distinct non-date sentinel elsewhere in this module
@@ -630,8 +630,7 @@ mod tests {
     use chrono::NaiveDate;
 
     use super::{
-        ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, StateFamily, decode_slot_date,
-        encode_slot_date,
+        ENTITY_SLOT_DATE_SENTINEL, EntitySlot, StateFamily, decode_slot_date, encode_slot_date,
     };
 
     #[test]
@@ -703,9 +702,9 @@ mod tests {
             EntitySlot::transit_bucket(1, 1, true),
             EntitySlot::anticipated(1, 0, true),
         ] {
-            assert_eq!(slot.reference_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL);
-            assert_eq!(slot.interval_start, ENTITY_SLOT_DELIVERY_DATE_SENTINEL);
-            assert_eq!(slot.interval_end, ENTITY_SLOT_DELIVERY_DATE_SENTINEL);
+            assert_eq!(slot.reference_date, ENTITY_SLOT_DATE_SENTINEL);
+            assert_eq!(slot.interval_start, ENTITY_SLOT_DATE_SENTINEL);
+            assert_eq!(slot.interval_end, ENTITY_SLOT_DATE_SENTINEL);
         }
     }
 
@@ -714,7 +713,7 @@ mod tests {
         let dated = EntitySlot::transit_bucket(9, 2, true).with_interval(20_311_201, 20_320_101);
         assert_eq!(dated.interval_start, 20_311_201);
         assert_eq!(dated.interval_end, 20_320_101);
-        assert_eq!(dated.reference_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL);
+        assert_eq!(dated.reference_date, ENTITY_SLOT_DATE_SENTINEL);
     }
 
     #[test]

@@ -37,14 +37,14 @@ use crate::SddpError;
 use crate::cut::pool::CutPool;
 use crate::policy::orchestration::StudySeasonManifest;
 use crate::policy::reconcile::{
-    BoundaryReconciliationReport, build_boundary_fold, build_rebind, build_reconciliation_report,
-    build_source_interval_index, rebind_cut,
+    BoundaryReconciliationReport, SlotKey, build_boundary_fold, build_identity_index, build_rebind,
+    build_reconciliation_report, build_source_interval_index, rebind_cut,
 };
 use crate::setup::{BoundaryStateRequirements, NodeId, NodePos, StudySetup, TypedVec};
 use crate::workspace::CapturedBasis;
 use cobre_io::StateFamily;
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::path::Path;
@@ -861,46 +861,40 @@ fn check_season_compatibility(
 }
 
 /// Rejects a boundary load whose current terminal manifest declares a
-/// `HydroStorage` or `HydroInflowLag` slot with no same-identity `source`
+/// `HydroStorage` or `HydroInflowLag` slot with no same-identity source
 /// counterpart — the state's must-correspond core (see `reconcile`'s module
 /// doc). Checked up front, over the whole `current` manifest at once, rather
 /// than the first miss [`build_rebind`] would otherwise report: storage
 /// first, since a missing reservoir is the louder "different deck" signal and
-/// a deck missing a plant is usually missing its lag block too. A `source`
+/// a deck missing a plant is usually missing its lag block too. A source
 /// slot with no `current` counterpart is a superset drop, not examined here.
 ///
-/// `source`'s slots are hashed once into a membership probe and never
-/// iterated; the missing lists come from a positional walk of `current`, so
-/// their order matches `current`'s own declaration order.
+/// `identity_index` is [`reconcile::build_identity_index`]'s output over the
+/// source manifest, built once by the caller and shared with
+/// [`build_rebind`] so the source is hashed once, not per consumer; only
+/// probed, never iterated. The missing lists come from a positional walk of
+/// `current`, so their order matches `current`'s own declaration order.
 ///
 /// # Errors
 ///
 /// Returns [`SddpError::Validation`] naming every `current` storage slot
-/// (respectively every `current` inflow-lag slot) with no `source`
+/// (respectively every `current` inflow-lag slot) with no source
 /// counterpart, one message per family.
-fn check_topology_subset(source: &[EntitySlot], current: &[EntitySlot]) -> Result<(), SddpError> {
-    let source_keys: HashSet<(u8, i32, u32)> = source
-        .iter()
-        .filter(|slot| {
-            matches!(
-                slot.family(),
-                Some(StateFamily::HydroStorage | StateFamily::HydroInflowLag)
-            )
-        })
-        .map(slot_identity)
-        .collect();
-
+fn check_topology_subset(
+    current: &[EntitySlot],
+    identity_index: &HashMap<SlotKey, usize>,
+) -> Result<(), SddpError> {
     let mut missing_storage: Vec<i32> = Vec::new();
     let mut missing_inflow_lag: Vec<(i32, u32)> = Vec::new();
     for slot in current {
         match slot.family() {
             Some(StateFamily::HydroStorage) => {
-                if !source_keys.contains(&slot_identity(slot)) {
+                if !identity_index.contains_key(&slot_identity(slot)) {
                     missing_storage.push(slot.entity_id);
                 }
             }
             Some(StateFamily::HydroInflowLag) => {
-                if !source_keys.contains(&slot_identity(slot)) {
+                if !identity_index.contains_key(&slot_identity(slot)) {
                     missing_inflow_lag.push((slot.entity_id, slot.subindex));
                 }
             }
@@ -1015,8 +1009,8 @@ fn check_topology_subset(source: &[EntitySlot], current: &[EntitySlot]) -> Resul
 ///   skipped)
 /// - A live anticipated source slot's `interval_start`/`interval_end` fails to
 ///   decode, or decodes to a non-positive span; names the slot's identity and
-///   the raw values (propagated from `build_source_interval_index`, built
-///   separately for the intercept fold and for the rebind/report path)
+///   the raw values (propagated from `build_source_interval_index`, built once
+///   and shared by the intercept fold and the rebind/report path)
 /// - A live forward-family target slot's `interval_start`/`interval_end` fails
 ///   to decode; names the slot's identity and the undecodable raw value (see
 ///   `reconcile::resolve_by_interval_overlap`)
@@ -1093,8 +1087,11 @@ pub fn load_boundary_cuts(
     // Hoisted above `validate_policy_load` so the topology gate below, the
     // intercept fold and the rebind all share one emptiness decision.
     let verifiable = manifest_identity_verifiable(&stage_result.entity_manifest, current_manifest);
-    if verifiable {
-        check_topology_subset(&stage_result.entity_manifest, current_manifest)?;
+    // Shared with `build_rebind` below via `identity_index`, so the two
+    // consumers of `stage_result.entity_manifest`'s identity hash it once.
+    let identity_index = verifiable.then(|| build_identity_index(&stage_result.entity_manifest));
+    if let Some(identity_index) = &identity_index {
+        check_topology_subset(current_manifest, identity_index)?;
     }
 
     // `BoundaryInjection` checks neither `num_stages`, `n_pools`, nor the graph
@@ -1136,10 +1133,13 @@ pub fn load_boundary_cuts(
         )));
     }
 
-    if verifiable {
+    // Built here (the fold's first use) and reused below for the rebind/report
+    // pair, so `stage_result.entity_manifest`'s interval index is hashed once.
+    let source_index = if verifiable {
+        let source_index = build_source_interval_index(&stage_result.entity_manifest)?;
         // The fold reads SOURCE coefficients by source_pos, so it MUST run before
         // rebind_cut replaces record.coefficients with the target-aligned vector.
-        let fold = build_boundary_fold(&stage_result.entity_manifest, fixed_windows)?;
+        let fold = build_boundary_fold(&stage_result.entity_manifest, fixed_windows, &source_index);
         if !fold.is_empty() {
             for record in &mut records {
                 debug_assert_eq!(
@@ -1154,7 +1154,10 @@ pub fn load_boundary_cuts(
                 record.intercept += delta;
             }
         }
-    }
+        Some(source_index)
+    } else {
+        None
+    };
 
     rescale_cut_records_for_load(
         &mut records,
@@ -1162,25 +1165,26 @@ pub fn load_boundary_cuts(
         loading_cost_scale_factor,
     );
 
-    let report = if verifiable {
-        let source_index = build_source_interval_index(&stage_result.entity_manifest)?;
-        let rebind = build_rebind(
-            &stage_result.entity_manifest,
-            current_manifest,
-            boundary_date,
-            &source_index,
-        )?;
-        for record in &mut records {
-            record.coefficients = rebind_cut(record, &rebind);
+    let report = match (&identity_index, &source_index) {
+        (Some(identity_index), Some(source_index)) => {
+            let rebind = build_rebind(
+                &stage_result.entity_manifest,
+                current_manifest,
+                boundary_date,
+                source_index,
+                identity_index,
+            )?;
+            for record in &mut records {
+                record.coefficients = rebind_cut(record, &rebind);
+            }
+            build_reconciliation_report(
+                &stage_result.entity_manifest,
+                current_manifest,
+                &rebind,
+                source_index,
+            )
         }
-        build_reconciliation_report(
-            &stage_result.entity_manifest,
-            current_manifest,
-            &rebind,
-            &source_index,
-        )
-    } else {
-        BoundaryReconciliationReport::default()
+        _ => BoundaryReconciliationReport::default(),
     };
 
     if strict && let Some(summary) = report.superset_summary() {
@@ -1287,8 +1291,8 @@ mod tests {
         BoundaryInjection, BoundaryLoadRequest, BoundaryReconciliationReport,
         BoundaryStateRequirements, CutPool, FullFcf, NodeId, NodePos, PolicyStageManifest,
         TypedVec, ValidatedBoundaryCuts, boundary_policy_required_lag_depth,
-        compare_manifest_slot_identity, inject_boundary_cuts, load_boundary_cuts,
-        validate_policy_load,
+        check_season_compatibility, compare_manifest_slot_identity, inject_boundary_cuts,
+        load_boundary_cuts, validate_policy_load,
     };
     use crate::SddpError;
     use crate::policy::orchestration::{StudyHydroSeasonOrders, StudySeasonManifest};
@@ -2100,23 +2104,17 @@ mod tests {
         );
     }
 
-    /// Given hydro 7 declaring `orders` `[2, 2, 3]` on the study side and
-    /// A source whose per-hydro `orders` vector is shorter than the study's
-    /// rejects on the length, so a truncated descriptor can never pass the
-    /// positional comparison by silently comparing fewer seasons.
+    /// Given hydro 7 declaring `orders` `[2, 2, 3]` on the study side, a
+    /// hand-built source whose `orders` vector is shorter rejects on the
+    /// length, so a truncated descriptor can never pass the positional
+    /// comparison by silently comparing fewer seasons. Called directly with
+    /// a hand-built [`SeasonManifest`], not through [`load_boundary_cuts`]'s
+    /// checkpoint round trip: `cobre_io`'s decode-time shape validation now
+    /// rejects a truncated `orders` vector before this gate ever runs, so a
+    /// wire-sourced manifest can no longer reach this branch — this test
+    /// pins the gate's own defense for a manifest constructed directly.
     #[test]
-    fn boundary_load_rejects_truncated_source_par_orders_for_a_hydro() {
-        let tmp = tempfile::tempdir().unwrap();
-        let source_seasons = seasons(
-            SEASON_CYCLE_CODE_MONTHLY,
-            3,
-            vec![HydroSeasonOrders {
-                hydro_id: 7,
-                orders: vec![2, 2],
-            }],
-        );
-        write_checkpoint_with_manifest_and_seasons(tmp.path(), 1, 1, &[10.0], &[], source_seasons);
-
+    fn check_season_compatibility_rejects_truncated_source_par_orders_for_a_hydro() {
         let study = study_seasons(
             SEASON_CYCLE_CODE_MONTHLY,
             3,
@@ -2125,18 +2123,18 @@ mod tests {
                 orders: vec![Some(2), Some(2), Some(3)],
             }],
         );
-        let result = load_boundary_cuts(
-            &BoundaryLoadRequest::new(
-                tmp.path(),
-                fixture_priced_date(0),
-                1,
-                &[],
-                NEUTRAL_LOADING_FACTOR,
-            )
-            .with_study_seasons(&study),
+        let source = seasons(
+            SEASON_CYCLE_CODE_MONTHLY,
+            3,
+            vec![HydroSeasonOrders {
+                hydro_id: 7,
+                orders: vec![2, 2],
+            }],
         );
 
-        let msg = result.unwrap_err().to_string();
+        let err = check_season_compatibility(std::path::Path::new("boundary.bin"), &study, &source)
+            .expect_err("a hand-built source with a truncated orders vector must be rejected");
+        let msg = err.to_string();
         assert!(msg.contains("hydro 7"), "must name the hydro: {msg}");
         assert!(
             msg.contains("3 PAR orders") && msg.contains("but 2"),

@@ -16,13 +16,13 @@ use super::codec::{
     serialize_stage_basis, serialize_stage_cuts, serialize_stage_states,
 };
 use super::records::{
-    CheckpointManifest, ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, OwnedPolicyBasisRecord,
+    CheckpointManifest, ENTITY_SLOT_DATE_SENTINEL, EntitySlot, OwnedPolicyBasisRecord,
     PolicyBasisRecord, PolicyCheckpoint, StageCutsPayload, StageCutsReadResult, StageStatesPayload,
     StageStatesReadResult, StateFamily, decode_slot_date,
 };
 
 fn is_well_formed_slot_date(value: i32) -> bool {
-    value == ENTITY_SLOT_DELIVERY_DATE_SENTINEL || decode_slot_date(value).is_some()
+    value == ENTITY_SLOT_DATE_SENTINEL || decode_slot_date(value).is_some()
 }
 
 fn slot_date_error(pool_id: u32, slot: &EntitySlot, detail: &str) -> OutputError {
@@ -53,8 +53,8 @@ fn check_well_formed_slot_dates(pool_id: u32, slot: &EntitySlot) -> Result<(), O
 }
 
 fn check_interval_pairing(pool_id: u32, slot: &EntitySlot) -> Result<(), OutputError> {
-    let start_live = slot.interval_start != ENTITY_SLOT_DELIVERY_DATE_SENTINEL;
-    let end_live = slot.interval_end != ENTITY_SLOT_DELIVERY_DATE_SENTINEL;
+    let start_live = slot.interval_start != ENTITY_SLOT_DATE_SENTINEL;
+    let end_live = slot.interval_end != ENTITY_SLOT_DATE_SENTINEL;
     match (start_live, end_live) {
         (true, false) => Err(slot_date_error(
             pool_id,
@@ -73,10 +73,7 @@ fn check_interval_pairing(pool_id: u32, slot: &EntitySlot) -> Result<(), OutputE
 fn check_interval_ordering(pool_id: u32, slot: &EntitySlot) -> Result<(), OutputError> {
     let start = slot.interval_start;
     let end = slot.interval_end;
-    if start != ENTITY_SLOT_DELIVERY_DATE_SENTINEL
-        && end != ENTITY_SLOT_DELIVERY_DATE_SENTINEL
-        && start >= end
-    {
+    if start != ENTITY_SLOT_DATE_SENTINEL && end != ENTITY_SLOT_DATE_SENTINEL && start >= end {
         return Err(slot_date_error(
             pool_id,
             slot,
@@ -87,9 +84,9 @@ fn check_interval_ordering(pool_id: u32, slot: &EntitySlot) -> Result<(), Output
 }
 
 fn check_family_applicability(pool_id: u32, slot: &EntitySlot) -> Result<(), OutputError> {
-    let interval_live = slot.interval_start != ENTITY_SLOT_DELIVERY_DATE_SENTINEL
-        || slot.interval_end != ENTITY_SLOT_DELIVERY_DATE_SENTINEL;
-    let reference_live = slot.reference_date != ENTITY_SLOT_DELIVERY_DATE_SENTINEL;
+    let interval_live = slot.interval_start != ENTITY_SLOT_DATE_SENTINEL
+        || slot.interval_end != ENTITY_SLOT_DATE_SENTINEL;
+    let reference_live = slot.reference_date != ENTITY_SLOT_DATE_SENTINEL;
     match slot.family() {
         Some(StateFamily::HydroStorage) => {
             if reference_live {
@@ -159,7 +156,7 @@ fn check_transit_bucket_monotonicity(pool: &StageCutsReadResult) -> Result<(), O
     let mut by_entity: BTreeMap<i32, Vec<(u32, i32)>> = BTreeMap::new();
     for slot in &pool.entity_manifest {
         if slot.family() == Some(StateFamily::HydroTransitBucket)
-            && slot.interval_start != ENTITY_SLOT_DELIVERY_DATE_SENTINEL
+            && slot.interval_start != ENTITY_SLOT_DATE_SENTINEL
         {
             by_entity
                 .entry(slot.entity_id)

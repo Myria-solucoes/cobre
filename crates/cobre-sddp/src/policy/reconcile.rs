@@ -21,7 +21,7 @@ use std::collections::HashMap;
 
 use chrono::NaiveDate;
 use cobre_core::AnticipatedCommitmentHistory;
-use cobre_io::ENTITY_SLOT_DELIVERY_DATE_SENTINEL;
+use cobre_io::ENTITY_SLOT_DATE_SENTINEL;
 use cobre_io::EntitySlot;
 use cobre_io::OwnedPolicyCutRecord;
 use cobre_io::StateFamily;
@@ -69,10 +69,22 @@ pub(crate) enum RebindOp {
 
 /// `(entity_type, entity_id, subindex)` — the identity a reconciliation join
 /// keys on.
-type SlotKey = (u8, i32, u32);
+pub(crate) type SlotKey = (u8, i32, u32);
 
 fn slot_key(slot: &EntitySlot) -> SlotKey {
     (slot.entity_type, slot.entity_id, slot.subindex)
+}
+
+/// One [`SlotKey`] -> source position index, built once per `source`
+/// manifest and shared by [`build_rebind`]'s identity-keyed resolution arms
+/// and the topology-subset pre-check that runs ahead of it — the same
+/// `source` manifest, so both consumers read one hashing of it.
+pub(crate) fn build_identity_index(source: &[EntitySlot]) -> HashMap<SlotKey, usize> {
+    let mut index = HashMap::with_capacity(source.len());
+    for (pos, slot) in source.iter().enumerate() {
+        index.insert(slot_key(slot), pos);
+    }
+    index
 }
 
 /// One forward-family source slot's decoded delivery/arrival interval and its
@@ -125,7 +137,7 @@ pub(crate) fn build_source_interval_index(
     for (pos, slot) in source.iter().enumerate() {
         let is_forward_family = slot.entity_type == StateFamily::AnticipatedThermalState.code()
             || slot.entity_type == StateFamily::HydroTransitBucket.code();
-        if !is_forward_family || slot.interval_start == ENTITY_SLOT_DELIVERY_DATE_SENTINEL {
+        if !is_forward_family || slot.interval_start == ENTITY_SLOT_DATE_SENTINEL {
             continue;
         }
         let Some(start) = decode_slot_date(slot.interval_start) else {
@@ -169,25 +181,23 @@ pub(crate) fn build_source_interval_index(
 /// MW instead of a state dimension. A window overlapping no source interval
 /// contributes nothing (mirrors [`RebindOp::Zero`], never an error), and only
 /// non-zero factors are emitted — an empty vector is the byte-neutral
-/// no-contribution case the intercept fold relies on.
+/// no-contribution case the intercept fold relies on. `source_index` is
+/// [`build_source_interval_index`]'s output, built once by the caller and
+/// shared with [`build_rebind`]/[`build_reconciliation_report`] so a source
+/// slot's span is never read two different ways.
 ///
 /// Determinism (D5): accumulates into a `source_pos`-indexed `Vec`, iterating
-/// `fixed_windows` and each plant's [`build_source_interval_index`] records in
-/// given order; the sole map use is the index lookup, never a `HashMap`
-/// iteration. The lookup key's family byte is load-bearing: it is the only
-/// thing that keeps a transit slot sharing an `entity_id` with an anticipated
-/// slot out of the fold, so the key must never collapse to the bare
-/// `entity_id` (`boundary_fold_ignores_transit_slots_sharing_an_entity_id`).
-///
-/// # Errors
-///
-/// Propagates [`SddpError::Validation`] from [`build_source_interval_index`]
-/// when a live anticipated `source` slot's interval fails to decode.
+/// `fixed_windows` and each plant's `source_index` records in given order;
+/// the sole map use is the index lookup, never a `HashMap` iteration. The
+/// lookup key's family byte is load-bearing: it is the only thing that keeps
+/// a transit slot sharing an `entity_id` with an anticipated slot out of the
+/// fold, so the key must never collapse to the bare `entity_id`
+/// (`boundary_fold_ignores_transit_slots_sharing_an_entity_id`).
 pub(crate) fn build_boundary_fold(
     source: &[EntitySlot],
     fixed_windows: &[AnticipatedCommitmentHistory],
-) -> Result<Vec<(usize, f64)>, SddpError> {
-    let source_index = build_source_interval_index(source)?;
+    source_index: &HashMap<SourceKey, Vec<SourceInterval>>,
+) -> Vec<(usize, f64)> {
     let mut factor = vec![0.0_f64; source.len()];
     for window in fixed_windows {
         if window.value_mw == 0.0 {
@@ -210,18 +220,20 @@ pub(crate) fn build_boundary_fold(
             }
         }
     }
-    Ok(factor
+    factor
         .into_iter()
         .enumerate()
         .filter(|&(_, f)| f != 0.0)
-        .collect())
+        .collect()
 }
 
 /// Build one [`RebindOp`] per `target` slot, dispatched by family
 /// ([`resolve_target_slot`]). `source_index` is
-/// [`build_source_interval_index`]'s output, built once by the caller and
-/// shared with [`build_reconciliation_report`] so a source slot's span is
-/// never read two different ways.
+/// [`build_source_interval_index`]'s output and `identity_index` is
+/// [`build_identity_index`]'s output, both built once by the caller and
+/// shared with [`build_reconciliation_report`] (`source_index`) and the
+/// topology-subset pre-check (`identity_index`) so a source slot's span or
+/// identity is never read two different ways.
 ///
 /// # Errors
 ///
@@ -237,15 +249,11 @@ pub(crate) fn build_rebind(
     target: &[EntitySlot],
     boundary_date: NaiveDate,
     source_index: &HashMap<SourceKey, Vec<SourceInterval>>,
+    identity_index: &HashMap<SlotKey, usize>,
 ) -> Result<Vec<RebindOp>, SddpError> {
-    let mut by_identity: HashMap<SlotKey, usize> = HashMap::with_capacity(source.len());
-    for (pos, slot) in source.iter().enumerate() {
-        by_identity.insert(slot_key(slot), pos);
-    }
-
     let mut ops = Vec::with_capacity(target.len());
     for (i, slot) in target.iter().enumerate() {
-        match resolve_target_slot(i, slot, source, &by_identity, source_index, boundary_date) {
+        match resolve_target_slot(i, slot, source, identity_index, source_index, boundary_date) {
             RebindOp::Reject { reason } => return Err(SddpError::Validation(reason)),
             op => ops.push(op),
         }
@@ -301,7 +309,7 @@ fn resolve_storage(slot: &EntitySlot, by_identity: &HashMap<SlotKey, usize>) -> 
 /// hydro, the lag depth, and both dates — a "different past" diagnosis,
 /// worded distinctly from the identity-miss reject above so the two failures,
 /// which have different remedies, are never conflated. Either side at
-/// `ENTITY_SLOT_DELIVERY_DATE_SENTINEL` copies by identity regardless: the
+/// `ENTITY_SLOT_DATE_SENTINEL` copies by identity regardless: the
 /// [`reserve_boundary_inflow_lag_slots`](crate::policy_export::reserve_boundary_inflow_lag_slots)
 /// bridge builds slots from a manifest and coefficients, never a calendar, so
 /// it can only ever emit the sentinel.
@@ -331,8 +339,8 @@ fn resolve_inflow_lag(
 
     let target_date = slot.reference_date;
     let source_date = source[pos].reference_date;
-    let target_live = target_date != ENTITY_SLOT_DELIVERY_DATE_SENTINEL;
-    let source_live = source_date != ENTITY_SLOT_DELIVERY_DATE_SENTINEL;
+    let target_live = target_date != ENTITY_SLOT_DATE_SENTINEL;
+    let source_live = source_date != ENTITY_SLOT_DATE_SENTINEL;
 
     match (target_live, source_live) {
         (true, true) if target_date == source_date => RebindOp::Copy(pos),
@@ -396,7 +404,7 @@ fn resolve_by_interval_overlap(
     boundary_date: NaiveDate,
     source_index: &HashMap<SourceKey, Vec<SourceInterval>>,
 ) -> RebindOp {
-    if slot.interval_start == ENTITY_SLOT_DELIVERY_DATE_SENTINEL {
+    if slot.interval_start == ENTITY_SLOT_DATE_SENTINEL {
         return RebindOp::Zero;
     }
     let Some(start_w) = decode_slot_date(slot.interval_start) else {
@@ -801,7 +809,7 @@ fn is_structural_pad(slot: &EntitySlot) -> bool {
         slot.family(),
         Some(StateFamily::AnticipatedThermalState | StateFamily::HydroTransitBucket)
     );
-    is_forward_family && slot.interval_start == ENTITY_SLOT_DELIVERY_DATE_SENTINEL
+    is_forward_family && slot.interval_start == ENTITY_SLOT_DATE_SENTINEL
 }
 
 /// Classify one target slot's `(op, slot)` into `tally`. A `Zero` on a
@@ -882,8 +890,8 @@ mod tests {
 
     use super::{
         BoundaryReconciliationReport, FamilyTally, RebindOp, SlotDetail, build_boundary_fold,
-        build_rebind, build_reconciliation_report, build_source_interval_index,
-        dropped_source_positions, rebind_cut, slot_detail,
+        build_identity_index, build_rebind, build_reconciliation_report,
+        build_source_interval_index, dropped_source_positions, rebind_cut, slot_detail,
     };
     use crate::SddpError;
     use crate::test_support::{
@@ -901,7 +909,14 @@ mod tests {
         boundary_date: NaiveDate,
     ) -> Result<Vec<RebindOp>, SddpError> {
         let source_index = build_source_interval_index(source)?;
-        build_rebind(source, target, boundary_date, &source_index)
+        let identity_index = build_identity_index(source);
+        build_rebind(
+            source,
+            target,
+            boundary_date,
+            &source_index,
+            &identity_index,
+        )
     }
 
     /// [`rebind_via_index`]'s counterpart for
@@ -913,6 +928,16 @@ mod tests {
     ) -> BoundaryReconciliationReport {
         let source_index = build_source_interval_index(source).unwrap();
         build_reconciliation_report(source, target, rebind, &source_index)
+    }
+
+    /// [`build_boundary_fold`]'s index-then-fold call, collapsed into one —
+    /// mirrors [`rebind_via_index`].
+    fn fold_via_index(
+        source: &[EntitySlot],
+        fixed_windows: &[AnticipatedCommitmentHistory],
+    ) -> Vec<(usize, f64)> {
+        let source_index = build_source_interval_index(source).unwrap();
+        build_boundary_fold(source, fixed_windows, &source_index)
     }
 
     fn owned_cut(coefficients: Vec<f64>) -> OwnedPolicyCutRecord {
@@ -2251,7 +2276,7 @@ mod tests {
         let value = 50.0;
         let windows = vec![fixed_window(9, ymd(2026, 4, 8), ymd(2026, 4, 15), value)];
 
-        let fold = build_boundary_fold(&source, &windows).unwrap();
+        let fold = fold_via_index(&source, &windows);
 
         assert_eq!(fold.len(), 1);
         assert_eq!(fold[0].0, k);
@@ -2272,14 +2297,14 @@ mod tests {
     fn boundary_fold_ignores_transit_slots_sharing_an_entity_id() {
         let source = vec![anticipated_slot_at(9, 0, 20_260_401)];
         let windows = vec![fixed_window(9, ymd(2026, 4, 8), ymd(2026, 4, 15), 50.0)];
-        let baseline = build_boundary_fold(&source, &windows).unwrap();
+        let baseline = fold_via_index(&source, &windows);
 
         let mut with_transit = source.clone();
         with_transit.push(transit_bucket_slot(9, 1).with_interval(
             encode_slot_date(ymd(2026, 4, 1)),
             encode_slot_date(ymd(2026, 5, 1)),
         ));
-        let with_transit_fold = build_boundary_fold(&with_transit, &windows).unwrap();
+        let with_transit_fold = fold_via_index(&with_transit, &windows);
 
         assert_eq!(
             baseline, with_transit_fold,
@@ -2294,7 +2319,7 @@ mod tests {
         let source = vec![anticipated_slot_at(9, 0, 20_260_401)];
         let windows = vec![fixed_window(9, ymd(2026, 5, 1), ymd(2026, 5, 8), 50.0)];
 
-        let fold = build_boundary_fold(&source, &windows).unwrap();
+        let fold = fold_via_index(&source, &windows);
 
         assert_eq!(fold, vec![]);
     }
@@ -2306,7 +2331,7 @@ mod tests {
         let source = vec![anticipated_slot_at(9, 0, 20_260_401)];
         let windows = vec![fixed_window(9, ymd(2026, 4, 8), ymd(2026, 4, 15), 0.0)];
 
-        let fold = build_boundary_fold(&source, &windows).unwrap();
+        let fold = fold_via_index(&source, &windows);
 
         assert_eq!(fold, vec![]);
     }
@@ -2324,7 +2349,7 @@ mod tests {
             fixed_window(9, ymd(2026, 4, 20), ymd(2026, 4, 27), value_b),
         ];
 
-        let fold = build_boundary_fold(&source, &windows).unwrap();
+        let fold = fold_via_index(&source, &windows);
 
         assert_eq!(fold.len(), 1, "one source position -> one emitted term");
         assert_eq!(fold[0].0, k);
@@ -2349,8 +2374,8 @@ mod tests {
         let w9 = fixed_window(9, ymd(2026, 4, 8), ymd(2026, 4, 15), 50.0);
         let w7 = fixed_window(7, ymd(2026, 4, 1), ymd(2026, 4, 8), 20.0);
 
-        let fold_ab = build_boundary_fold(&source, &[w9.clone(), w7.clone()]).unwrap();
-        let fold_ba = build_boundary_fold(&source, &[w7, w9]).unwrap();
+        let fold_ab = fold_via_index(&source, &[w9.clone(), w7.clone()]);
+        let fold_ba = fold_via_index(&source, &[w7, w9]);
 
         assert_eq!(fold_ab, fold_ba);
         assert_eq!(fold_ab.len(), 2);

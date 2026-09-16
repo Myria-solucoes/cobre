@@ -100,9 +100,9 @@ pub use initial_conditions::parse_initial_conditions;
 pub use output::policy::codec::{deserialize_checkpoint_manifest, serialize_checkpoint_manifest};
 pub use output::policy::records::CheckpointManifest;
 pub use output::policy::{
-    ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, FORMAT_VERSION, GraphManifest,
-    HydroSeasonOrders, ManifestEdge, ManifestNode, OwnedPolicyBasisRecord, OwnedPolicyCutRecord,
-    PolicyBasisRecord, PolicyCheckpoint, PolicyCutRecord, ProducerBlock, SEASON_CYCLE_CODE_ABSENT,
+    ENTITY_SLOT_DATE_SENTINEL, EntitySlot, FORMAT_VERSION, GraphManifest, HydroSeasonOrders,
+    ManifestEdge, ManifestNode, OwnedPolicyBasisRecord, OwnedPolicyCutRecord, PolicyBasisRecord,
+    PolicyCheckpoint, PolicyCutRecord, ProducerBlock, SEASON_CYCLE_CODE_ABSENT,
     SEASON_CYCLE_CODE_CUSTOM, SEASON_CYCLE_CODE_MONTHLY, SEASON_CYCLE_CODE_WEEKLY,
     STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL, STAGE_CUTS_NODE_ID_SENTINEL,
     STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, STAGE_STATES_NODE_ID_SENTINEL, SeasonManifest,

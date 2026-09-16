@@ -43,8 +43,8 @@ use cobre_io::config::{
     TrainingSolverConfig, UpperBoundEvaluationConfig,
 };
 use cobre_io::{
-    ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, PolicyCutRecord, ProducerBlock,
-    StageCutsPayload, StateFamily, encode_slot_date, write_policy_checkpoint,
+    ENTITY_SLOT_DATE_SENTINEL, EntitySlot, PolicyCutRecord, ProducerBlock, StageCutsPayload,
+    StateFamily, encode_slot_date, write_policy_checkpoint,
 };
 use cobre_sddp::test_support::{
     anticipated_slot_at, chain_graph_manifest, inflow_lag_slot, storage_slot, transit_bucket_slot,
@@ -627,7 +627,7 @@ fn derive_newave_source(manifest: &[EntitySlot]) -> (Vec<EntitySlot>, Vec<f64>) 
     let mut months: BTreeSet<(i32, i32)> = BTreeSet::new();
     for slot in manifest {
         if slot.entity_type == StateFamily::AnticipatedThermalState.code()
-            && slot.interval_start != ENTITY_SLOT_DELIVERY_DATE_SENTINEL
+            && slot.interval_start != ENTITY_SLOT_DATE_SENTINEL
             && months.insert((slot.entity_id, slot.interval_start))
         {
             source.push(anticipated_slot_at(slot.entity_id, 0, slot.interval_start));
@@ -663,7 +663,7 @@ fn run_injected_decomp() -> f64 {
         .iter()
         .filter(|s| {
             s.entity_type == StateFamily::AnticipatedThermalState.code()
-                && s.interval_start != ENTITY_SLOT_DELIVERY_DATE_SENTINEL
+                && s.interval_start != ENTITY_SLOT_DATE_SENTINEL
         })
         .count();
     assert!(

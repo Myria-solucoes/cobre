@@ -417,8 +417,16 @@ one whose basis is cached there, and warm-starting across that boundary reuses a
 basis built against a different LP.
 
 This node-tag check is the **sole** line of defence, not defence in depth:
-**CLP accepts a shape-mismatched (or otherwise wrong) warm basis silently**,
-whereas HiGHS validates and rejects it loudly. A cross-node warm-start is
+**CLP accepts a right-dimension but internally inconsistent warm basis
+silently** (every column and row status `Basic`, over-determining the rank —
+`Clp_dual` repairs it), whereas HiGHS's `isBasisConsistent` check rejects the
+same input loudly with `BasisInconsistent`; a basis with the wrong row count is
+rejected symmetrically by both backends with `BasisRowCountMismatch`, so shape
+alone is not where the asymmetry lives. Pinned by
+`test_solver_clp_solve_accepts_inconsistent_basis_status_combination_silently`,
+`test_solver_highs_solve_rejects_inconsistent_basis_status_combination`, and the
+symmetric pair `test_solver_{clp,highs}_solve_rejects_undersized_row_basis` in
+`crates/cobre-solver/tests/conformance.rs`. A cross-node warm-start is
 therefore a silent wrong-vertex / wrong-dual on the CLP backend with no solver
 backstop — so the check must live in cobre's own apply path, never be delegated
 to the solver. Dropping the `node_id` filter, or comparing pool id instead of the
@@ -469,7 +477,7 @@ warm-vs-cold per-scenario cost bit-identity.
 
 Non-controllable-source availability `α_r(ω) ∈ [0, 1]` is dimensionless. The
 realized cap is `A_r = max_gen · clamp(mean + std·η, 0, 1)`. The
-`non_controllable_models.parquet` stores `(mean, std)` **as factors**, not as MW.
+`non_controllable_stats.parquet` stores `(mean, std)` **as factors**, not as MW.
 Read: `stochastic/noise.rs` (`transform_ncs_noise`, `compute_effective_eta`).
 
 ## Lower-bound evaluation must patch NCS
@@ -975,6 +983,13 @@ alternative this staged form forbids: a single `!=` cannot produce the five
 distinct messages the reject tier requires, and it would report a hydro-SET
 difference (a missing hydro) as if it were a PAR-ORDER difference.
 
+The wire-side `SeasonManifest`'s ascending-`hydro_id` order and each hydro's
+`orders.len() == n_seasons` are no longer assumed from the writer alone: `cobre-io`
+rejects a decoded manifest violating either shape before this gate ever runs,
+pinned by `checkpoint_manifest_rejects_unsorted_season_hydro_orders` and
+`checkpoint_manifest_rejects_season_orders_length_mismatch` in
+`crates/cobre-io/src/output/policy/codec.rs`.
+
 `orchestration::build_season_manifest` (renamed from the file-private
 `season_manifest`, now `pub`) is the single owner both the checkpoint writer
 (`write_checkpoint`) and this gate build their descriptor from via
@@ -1055,7 +1070,7 @@ The topology gate above proves the ENTITY matches; it says nothing about
 WHEN either side's lag points. `resolve_inflow_lag`'s identity hit is
 followed by a `reference_date` check: the two `YYYYMMDD` `i32` stamps
 (`lag_reference_anchor`'s stamped past-stage date, or
-`ENTITY_SLOT_DELIVERY_DATE_SENTINEL`) are compared RAW, never as decoded
+`ENTITY_SLOT_DATE_SENTINEL`) are compared RAW, never as decoded
 `NaiveDate`s. Both dated and equal copies exactly as before; both dated and
 DIFFERENT rejects, naming the hydro, the lag depth, and both dates (each
 rendered through `cobre_io::decode_slot_date`, degrading to the raw integer

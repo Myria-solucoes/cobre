@@ -15,10 +15,10 @@ use flatbuffers::{FlatBufferBuilder, WIPOffset};
 
 use super::super::error::OutputError;
 use super::records::{
-    CheckpointManifest, ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, FORMAT_VERSION,
-    GraphManifest, HydroSeasonOrders, ManifestEdge, ManifestNode, OwnedPolicyBasisRecord,
-    OwnedPolicyCutRecord, PolicyBasisRecord, PolicyCutRecord, ProducerBlock,
-    SEASON_CYCLE_CODE_ABSENT, STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL, STAGE_CUTS_NODE_ID_SENTINEL,
+    CheckpointManifest, ENTITY_SLOT_DATE_SENTINEL, EntitySlot, FORMAT_VERSION, GraphManifest,
+    HydroSeasonOrders, ManifestEdge, ManifestNode, OwnedPolicyBasisRecord, OwnedPolicyCutRecord,
+    PolicyBasisRecord, PolicyCutRecord, ProducerBlock, SEASON_CYCLE_CODE_ABSENT,
+    STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL, STAGE_CUTS_NODE_ID_SENTINEL,
     STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, STAGE_STATES_NODE_ID_SENTINEL, SeasonManifest,
     StageCutsPayload, StageCutsReadResult, StageStatesPayload, StageStatesReadResult,
 };
@@ -765,7 +765,7 @@ fn deserialize_entity_slot_table(buf: &[u8], slot_table_pos: usize) -> Option<En
         ENTITY_SLOT_FIELD_REFERENCE_DATE,
     )
     .and_then(|p| read_i32_le(buf, p))
-    .unwrap_or(ENTITY_SLOT_DELIVERY_DATE_SENTINEL);
+    .unwrap_or(ENTITY_SLOT_DATE_SENTINEL);
 
     let interval_start = field_pos(
         buf,
@@ -774,7 +774,7 @@ fn deserialize_entity_slot_table(buf: &[u8], slot_table_pos: usize) -> Option<En
         ENTITY_SLOT_FIELD_INTERVAL_START,
     )
     .and_then(|p| read_i32_le(buf, p))
-    .unwrap_or(ENTITY_SLOT_DELIVERY_DATE_SENTINEL);
+    .unwrap_or(ENTITY_SLOT_DATE_SENTINEL);
 
     let interval_end = field_pos(
         buf,
@@ -783,7 +783,7 @@ fn deserialize_entity_slot_table(buf: &[u8], slot_table_pos: usize) -> Option<En
         ENTITY_SLOT_FIELD_INTERVAL_END,
     )
     .and_then(|p| read_i32_le(buf, p))
-    .unwrap_or(ENTITY_SLOT_DELIVERY_DATE_SENTINEL);
+    .unwrap_or(ENTITY_SLOT_DATE_SENTINEL);
 
     Some(EntitySlot {
         entity_type,
@@ -980,9 +980,51 @@ fn read_season_manifest(
     let season_table_pos = follow_uoffset(buf, field_pos).ok_or_else(|| {
         OutputError::serialization(ctx, "invalid uoffset for season_manifest table")
     })?;
-    deserialize_season_manifest_table(buf, season_table_pos).ok_or_else(|| {
-        OutputError::serialization(ctx, "season_manifest table truncated or corrupt")
-    })
+    let season_manifest =
+        deserialize_season_manifest_table(buf, season_table_pos).ok_or_else(|| {
+            OutputError::serialization(ctx, "season_manifest table truncated or corrupt")
+        })?;
+    validate_season_manifest_shape(&season_manifest, ctx)?;
+    Ok(season_manifest)
+}
+
+/// Reject a decoded `season_manifest` whose `hydro_orders` is not canonically
+/// ascending by `hydro_id`, or whose per-hydro `orders` length disagrees with
+/// `n_seasons` — the two shape invariants a positional season-identity
+/// comparison assumes without re-checking. A writer-only bug (never observed
+/// from this crate's own writer, which builds `hydro_orders` from a
+/// `BTreeMap`) would otherwise reach a consumer as silent misalignment
+/// instead of a decode-time reject.
+fn validate_season_manifest_shape(manifest: &SeasonManifest, ctx: &str) -> Result<(), OutputError> {
+    if let Some(pair) = manifest
+        .hydro_orders
+        .windows(2)
+        .find(|pair| pair[0].hydro_id >= pair[1].hydro_id)
+    {
+        return Err(OutputError::serialization(
+            ctx,
+            format!(
+                "season_manifest hydro_orders not ascending by hydro_id: {} then {}",
+                pair[0].hydro_id, pair[1].hydro_id
+            ),
+        ));
+    }
+    if let Some(bad) = manifest
+        .hydro_orders
+        .iter()
+        .find(|h| h.orders.len() != manifest.n_seasons as usize)
+    {
+        return Err(OutputError::serialization(
+            ctx,
+            format!(
+                "season_manifest hydro_id {} has {} orders, expected n_seasons={}",
+                bad.hydro_id,
+                bad.orders.len(),
+                manifest.n_seasons
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn deserialize_season_manifest_table(buf: &[u8], table_pos: usize) -> Option<SeasonManifest> {
@@ -1672,17 +1714,17 @@ mod tests {
         assert_eq!(result.entity_manifest[0].reference_date, 20_310_401);
         assert_eq!(
             result.entity_manifest[0].interval_start,
-            ENTITY_SLOT_DELIVERY_DATE_SENTINEL
+            ENTITY_SLOT_DATE_SENTINEL
         );
         assert_eq!(
             result.entity_manifest[0].interval_end,
-            ENTITY_SLOT_DELIVERY_DATE_SENTINEL
+            ENTITY_SLOT_DATE_SENTINEL
         );
         assert_eq!(result.entity_manifest[1].interval_start, 20_311_201);
         assert_eq!(result.entity_manifest[1].interval_end, 20_320_101);
         assert_eq!(
             result.entity_manifest[1].reference_date,
-            ENTITY_SLOT_DELIVERY_DATE_SENTINEL
+            ENTITY_SLOT_DATE_SENTINEL
         );
     }
 
@@ -1814,6 +1856,77 @@ mod tests {
         assert_eq!(
             decoded.season_manifest.hydro_orders[1].orders,
             vec![4, 4, 3, 3, 2, 2, 1, 1, 2, 2, 3, 3]
+        );
+    }
+
+    /// A `season_manifest` whose `hydro_orders` is not canonically ascending
+    /// by `hydro_id` is rejected before any consumer reads it — this crate's
+    /// own writer always emits `BTreeMap` order, so this guards only a
+    /// hand-built or corrupt buffer.
+    #[test]
+    fn checkpoint_manifest_rejects_unsorted_season_hydro_orders() {
+        let manifest = CheckpointManifest {
+            format_version: FORMAT_VERSION,
+            cobre_version: "0.14.0".to_string(),
+            created_at: "2026-09-16T00:00:00Z".to_string(),
+            num_stages: 1,
+            graph_manifest: GraphManifest::default(),
+            producer: minimal_manifest_producer(),
+            season_manifest: SeasonManifest {
+                cycle_code: SEASON_CYCLE_CODE_MONTHLY,
+                n_seasons: 2,
+                hydro_orders: vec![
+                    HydroSeasonOrders {
+                        hydro_id: 9,
+                        orders: vec![1, 1],
+                    },
+                    HydroSeasonOrders {
+                        hydro_id: 3,
+                        orders: vec![1, 1],
+                    },
+                ],
+            },
+        };
+        let buf = serialize_checkpoint_manifest(&manifest);
+
+        let err = deserialize_checkpoint_manifest(&buf)
+            .expect_err("hydro_orders not ascending by hydro_id must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("hydro_orders") && msg.contains("ascending"),
+            "rejection must name the ordering violation: {err}"
+        );
+    }
+
+    /// A `season_manifest` hydro whose `orders` length disagrees with
+    /// `n_seasons` is rejected before any consumer positionally compares it
+    /// against a study's own season-ordinal vector.
+    #[test]
+    fn checkpoint_manifest_rejects_season_orders_length_mismatch() {
+        let manifest = CheckpointManifest {
+            format_version: FORMAT_VERSION,
+            cobre_version: "0.14.0".to_string(),
+            created_at: "2026-09-16T00:00:00Z".to_string(),
+            num_stages: 1,
+            graph_manifest: GraphManifest::default(),
+            producer: minimal_manifest_producer(),
+            season_manifest: SeasonManifest {
+                cycle_code: SEASON_CYCLE_CODE_MONTHLY,
+                n_seasons: 4,
+                hydro_orders: vec![HydroSeasonOrders {
+                    hydro_id: 3,
+                    orders: vec![1, 1, 1],
+                }],
+            },
+        };
+        let buf = serialize_checkpoint_manifest(&manifest);
+
+        let err = deserialize_checkpoint_manifest(&buf)
+            .expect_err("orders.len() != n_seasons must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("hydro_id 3") && msg.contains("n_seasons=4"),
+            "rejection must name the hydro and the expected season count: {err}"
         );
     }
 

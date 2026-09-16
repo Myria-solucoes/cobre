@@ -20,7 +20,7 @@ use cobre_core::System;
 use cobre_core::Thermal;
 use cobre_core::commissioning::{commissioning_active, hydro_operating_active};
 use cobre_io::output::policy::{
-    ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, GraphManifest, ManifestEdge, ManifestNode,
+    ENTITY_SLOT_DATE_SENTINEL, EntitySlot, GraphManifest, ManifestEdge, ManifestNode,
     OwnedPolicyCutRecord, PolicyBasisRecord, PolicyCutRecord, STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL,
     STAGE_CUTS_NODE_ID_SENTINEL, STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, StageCutsPayload,
     StageStatesPayload, StateFamily, encode_slot_date,
@@ -72,10 +72,7 @@ fn reachable_delivery_target(
 /// `YYYYMMDD` interval endpoints ([`encode_slot_date`]) of `start_date`/`end_date`.
 fn slot_interval(stage: Option<&Stage>) -> (i32, i32) {
     stage.map_or(
-        (
-            ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-            ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-        ),
+        (ENTITY_SLOT_DATE_SENTINEL, ENTITY_SLOT_DATE_SENTINEL),
         |stage| {
             (
                 encode_slot_date(stage.start_date),
@@ -97,7 +94,7 @@ fn lag_reference_anchor(all_stages: &[Stage], pool_pos_in_all: Option<usize>, la
     pool_pos_in_all
         .and_then(|t| t.checked_sub(lag))
         .and_then(|idx| all_stages.get(idx))
-        .map_or(ENTITY_SLOT_DELIVERY_DATE_SENTINEL, |s| {
+        .map_or(ENTITY_SLOT_DATE_SENTINEL, |s| {
             encode_slot_date(s.start_date)
         })
 }
@@ -407,6 +404,9 @@ pub fn reserve_boundary_inflow_lag_slots<S: std::hash::BuildHasher>(
         }
     }
 
+    // Lag-major (`for lag { for hydro }`), matching `build_stage_entity_manifest`'s
+    // `StateRegion::Lag` arm — `reserved_cut_coefficients` below must iterate
+    // identically, or a coefficient lands on the wrong slot.
     let reserved_slots: Vec<EntitySlot> = (0..n)
         .flat_map(|lag| {
             storage_slots.iter().map(move |storage| {
@@ -415,6 +415,8 @@ pub fn reserve_boundary_inflow_lag_slots<S: std::hash::BuildHasher>(
         })
         .collect();
 
+    // Same lag-major order as `reserved_slots` above, matching
+    // `build_stage_entity_manifest`'s `StateRegion::Lag` arm.
     let reserved_cut_coefficients: Vec<Vec<f64>> = cut_inflow_lag_coefficients
         .iter()
         .map(|keyed| {
@@ -863,7 +865,7 @@ mod tests {
             ThermalBlockBounds, ThermalStageBounds,
         },
     };
-    use cobre_io::{ENTITY_SLOT_DELIVERY_DATE_SENTINEL, encode_slot_date};
+    use cobre_io::{ENTITY_SLOT_DATE_SENTINEL, encode_slot_date};
 
     const ALL_ENABLED: StageStateConfig = StageStateConfig {
         storage: true,
@@ -1248,7 +1250,7 @@ mod tests {
             (manifest[7].interval_end, "interval_end"),
         ] {
             assert_eq!(
-                field, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+                field, ENTITY_SLOT_DATE_SENTINEL,
                 "lag 2 lands past the extended calendar, so {name} must stay sentinel"
             );
         }
@@ -1477,7 +1479,7 @@ mod tests {
                 })
                 .unwrap_or_else(|| panic!("a subindex-{subindex} inflow-lag slot must exist"));
             assert_eq!(
-                slot.reference_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+                slot.reference_date, ENTITY_SLOT_DATE_SENTINEL,
                 "subindex {subindex} reaches before the earliest declared stage"
             );
         }
@@ -1673,6 +1675,41 @@ mod tests {
         }
     }
 
+    /// `System` with 1 hydro and 1 anticipated thermal (`LeadStages(7)`) over
+    /// four monthly study stages, carrying `post_study`: over a `DeliveryAxis`
+    /// of `n_decision = 4`, [`AnticipatedResolution::resolve`]'s own ring
+    /// depth (`k_max`) is bounded to 4, excising ring-axis targets `4..7`
+    /// ([`PointResolution::ring_index`]) even though the plant's own lead
+    /// reaches 7.
+    fn system_1h_1ant_4monthly_lead7(post_study: PostStudyStages) -> System {
+        let bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 1,
+                n_thermals: 1,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: 4,
+                k_max: 7,
+            },
+            &bounds_defaults(),
+        );
+        SystemBuilder::new()
+            .buses(vec![make_bus()])
+            .hydros(vec![make_hydro(1, None, None)])
+            .thermals(vec![anticipated_thermal(1, 7)])
+            .stages(vec![
+                make_stage_ym(0, 0, 2024, 1),
+                make_stage_ym(1, 1, 2024, 2),
+                make_stage_ym(2, 2, 2024, 3),
+                make_stage_ym(3, 3, 2024, 4),
+            ])
+            .bounds(bounds)
+            .post_study_stages(Some(post_study))
+            .build()
+            .expect("valid 4-stage lead-7 system with post-study calendar")
+    }
+
     /// `System` with 1 hydro and 1 anticipated thermal (`LeadStages(1)`, so
     /// `k_max = 1`) over two study stages: a 14-day first stage, then a
     /// non-month-aligned 35-day (five-week) terminal stage starting
@@ -1800,12 +1837,12 @@ mod tests {
         assert_eq!(manifest.len(), 4);
         assert_eq!(manifest[0].entity_type, StateFamily::HydroStorage.code());
         assert_eq!(
-            manifest[0].interval_start, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            manifest[0].interval_start, ENTITY_SLOT_DATE_SENTINEL,
             "storage slot carries no delivery date"
         );
         assert_eq!(manifest[1].entity_type, StateFamily::HydroInflowLag.code());
         assert_eq!(
-            manifest[1].interval_start, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            manifest[1].interval_start, ENTITY_SLOT_DATE_SENTINEL,
             "inflow-lag slot carries no delivery date"
         );
 
@@ -1825,7 +1862,7 @@ mod tests {
         );
         assert_eq!(manifest[3].subindex, 1);
         assert_eq!(
-            manifest[3].interval_start, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            manifest[3].interval_start, ENTITY_SLOT_DATE_SENTINEL,
             "ring slot 1 (residue 1) next recurs at index 3, past the 3-stage horizon"
         );
     }
@@ -1859,12 +1896,12 @@ mod tests {
         // the 3-stage horizon.
         assert_eq!(manifest[2].subindex, 0);
         assert_eq!(
-            manifest[2].interval_start, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            manifest[2].interval_start, ENTITY_SLOT_DATE_SENTINEL,
             "ring slot 0 next recurs at index 4, past the horizon"
         );
         assert_eq!(manifest[3].subindex, 1);
         assert_eq!(
-            manifest[3].interval_start, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            manifest[3].interval_start, ENTITY_SLOT_DATE_SENTINEL,
             "ring slot 1 next recurs at index 3, past the horizon"
         );
     }
@@ -1897,7 +1934,7 @@ mod tests {
         );
         assert_eq!(manifest[3].subindex, 1);
         assert_eq!(
-            manifest[3].interval_start, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            manifest[3].interval_start, ENTITY_SLOT_DATE_SENTINEL,
             "ring slot 1 (residue 1) next recurs at index 3, past the 3-stage horizon"
         );
     }
@@ -1946,7 +1983,7 @@ mod tests {
         assert_eq!(manifest[4].entity_id, 1, "slot1/plant0 = ℓ=1 plant");
         assert_eq!(manifest[4].subindex, 1);
         assert_eq!(
-            manifest[4].interval_start, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            manifest[4].interval_start, ENTITY_SLOT_DATE_SENTINEL,
             "ℓ=1 plant slot 1 is structural padding beyond its own lead"
         );
 
@@ -1998,12 +2035,12 @@ mod tests {
         );
         assert_eq!(manifest[3].subindex, 1);
         assert_eq!(
-            manifest[3].interval_start, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            manifest[3].interval_start, ENTITY_SLOT_DATE_SENTINEL,
             "ring slot 1 (m=4) lands past the extended calendar"
         );
         assert_eq!(manifest[4].subindex, 2);
         assert_eq!(
-            manifest[4].interval_start, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            manifest[4].interval_start, ENTITY_SLOT_DATE_SENTINEL,
             "ring slot 2 (m=5), the terminal maturing residue, lands past the extended calendar"
         );
     }
@@ -2111,8 +2148,8 @@ mod tests {
         for stage_id in 0..3i32 {
             let manifest = build_stage_entity_manifest(&system, &global, &projection, stage_id);
             for slot in &manifest {
-                let start_live = slot.interval_start != ENTITY_SLOT_DELIVERY_DATE_SENTINEL;
-                let end_live = slot.interval_end != ENTITY_SLOT_DELIVERY_DATE_SENTINEL;
+                let start_live = slot.interval_start != ENTITY_SLOT_DATE_SENTINEL;
+                let end_live = slot.interval_end != ENTITY_SLOT_DATE_SENTINEL;
                 assert_eq!(
                     start_live, end_live,
                     "stage {stage_id} subindex {}: interval_start != SENTINEL must hold iff \
@@ -2204,7 +2241,7 @@ mod tests {
 
         assert_eq!(manifest[3].subindex, 1);
         assert_eq!(
-            manifest[3].interval_start, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            manifest[3].interval_start, ENTITY_SLOT_DATE_SENTINEL,
             "the maturing residue's re-anchored target has no stage in the un-extended calendar"
         );
     }
@@ -2261,7 +2298,7 @@ mod tests {
                     &global.anticipated_resolution.per_plant[0],
                 )
                 .and_then(|m| delivery_stages.get(m))
-                .map_or(ENTITY_SLOT_DELIVERY_DATE_SENTINEL, |s| {
+                .map_or(ENTITY_SLOT_DATE_SENTINEL, |s| {
                     encode_slot_date(s.start_date)
                 });
                 assert_eq!(
@@ -2301,13 +2338,129 @@ mod tests {
                 })
                 .expect("the ℓ=1 plant must own a subindex-1 slot");
             assert_eq!(
-                padding.interval_start, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+                padding.interval_start, ENTITY_SLOT_DATE_SENTINEL,
                 "stage {stage_id}: slot_idx 1 exceeds the ℓ=1 plant's own lead"
             );
         }
     }
 
     // -- Ring-axis excision: dating maps through `physical_target` --
+
+    /// With a fixed post-horizon window (a `LeadStages(7)` lead over
+    /// `n_decision = 4` study stages derives a resolved ring depth `k_max =
+    /// 4`, excising ring-axis targets `4..7`), the terminal-stage ring slots
+    /// whose ring-axis residue search lands in the excised window date at
+    /// their REAL physical post-study stage — never the excised stub the raw
+    /// ring-axis index alone would name.
+    #[test]
+    fn date_ring_slots_in_excised_space_maps_through_physical_target() {
+        let post_study = post_study_stages_from_months(&[
+            (2024, 5),
+            (2024, 6),
+            (2024, 7),
+            (2024, 8),
+            (2024, 9),
+            (2024, 10),
+        ]);
+        let system = system_1h_1ant_4monthly_lead7(post_study);
+
+        let resolution = AnticipatedResolution::resolve(
+            &[LeadTime::Stages(7)],
+            DeliveryAxis {
+                stage_lengths_hours: &[720.0; 10],
+                n_decision: 4,
+                n_delivery: 10,
+            },
+        );
+        assert_eq!(
+            resolution.k_max, 4,
+            "a lead-7 plant over 4 study stages must derive ring depth k_max=4"
+        );
+        let point = &resolution.per_plant[0];
+        assert_eq!(
+            point.ring_index(4),
+            None,
+            "m=4 sits inside the excised window"
+        );
+        assert_eq!(
+            point.ring_index(5),
+            None,
+            "m=5 sits inside the excised window"
+        );
+        assert_eq!(
+            point.ring_index(6),
+            None,
+            "m=6 sits inside the excised window"
+        );
+        assert_eq!(
+            point.physical_target(4),
+            7,
+            "ring index 4 maps past the window to m=7"
+        );
+        assert_eq!(point.physical_target(5), 8);
+        assert_eq!(point.physical_target(6), 9);
+
+        let k_max = resolution.k_max;
+        let mut global = test_support::state_layout_full(1, 1, 1, k_max, vec![k_max]);
+        global.set_anticipated_resolution(resolution);
+        let projection = CutStateProjection::new(&global, ALL_ENABLED);
+
+        // Terminal study stage (index 3, 2024-04).
+        let manifest = build_stage_entity_manifest(&system, &global, &projection, 3);
+        let study_stages: Vec<&Stage> = system.stages().iter().filter(|s| s.id >= 0).collect();
+        let post_study_calendar = post_study_delivery_calendar(&system);
+        let delivery_stages = extended_delivery_stages(&study_stages, &post_study_calendar);
+
+        // Layout N=1, L=1, A=1, k_max=4: storage j=0, lag j=1, anticipated j=2..6.
+        assert_eq!(manifest.len(), 6);
+
+        assert_eq!(manifest[2].subindex, 0);
+        assert_eq!(
+            manifest[2].interval_start,
+            encode_slot_date(delivery_stages[7].start_date),
+            "ring slot 0 (ring index 4) dates at the real physical target m=7 (2024-08), not \
+             the excised 2024-05 stub"
+        );
+        assert_eq!(
+            manifest[2].interval_end,
+            encode_slot_date(delivery_stages[7].end_date)
+        );
+
+        assert_eq!(manifest[3].subindex, 1);
+        assert_eq!(
+            manifest[3].interval_start,
+            encode_slot_date(delivery_stages[8].start_date),
+            "ring slot 1 (ring index 5) dates at the real physical target m=8 (2024-09), not \
+             the excised 2024-06 stub"
+        );
+        assert_eq!(
+            manifest[3].interval_end,
+            encode_slot_date(delivery_stages[8].end_date)
+        );
+
+        assert_eq!(manifest[4].subindex, 2);
+        assert_eq!(
+            manifest[4].interval_start,
+            encode_slot_date(delivery_stages[9].start_date),
+            "ring slot 2 (ring index 6) dates at the real physical target m=9 (2024-10), not \
+             the excised 2024-07 stub"
+        );
+        assert_eq!(
+            manifest[4].interval_end,
+            encode_slot_date(delivery_stages[9].end_date)
+        );
+
+        // Ring slot 3's ring-axis target r=7 (slot_idx 3 at outgoing anchor
+        // t_out=4, k_max=4) sits at n_decision+g=7, past the excised window's
+        // far edge, so physical_target shifts it to m=10 — one past the
+        // 10-stage extended calendar (n_delivery=10) — sentinel, not the
+        // in-study terminal anchor a raw ring-axis reading might suggest.
+        assert_eq!(manifest[5].subindex, 3);
+        assert_eq!(
+            manifest[5].interval_start, ENTITY_SLOT_DATE_SENTINEL,
+            "ring slot 3 (ring index 7) maps past the extended calendar (m=10 >= n_delivery=10)"
+        );
+    }
 
     /// With no fixed post-horizon window (`g = 0`), `physical_target` is the
     /// identity, so `reachable_delivery_target` returns exactly
@@ -2822,7 +2975,7 @@ mod tests {
                 slot.was_active, active,
                 "lag slot {i} inherits storage was_active"
             );
-            assert_eq!(slot.interval_start, ENTITY_SLOT_DELIVERY_DATE_SENTINEL);
+            assert_eq!(slot.interval_start, ENTITY_SLOT_DATE_SENTINEL);
         }
 
         // Trailing anticipated slot survives unchanged, now at index 6.

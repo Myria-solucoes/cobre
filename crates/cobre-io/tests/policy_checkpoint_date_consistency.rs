@@ -9,9 +9,9 @@
 )]
 
 use cobre_io::{
-    CheckpointManifest, ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, FORMAT_VERSION,
-    GraphManifest, ProducerBlock, STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, SeasonManifest,
-    StageCutsPayload, read_policy_checkpoint, write_policy_checkpoint,
+    CheckpointManifest, ENTITY_SLOT_DATE_SENTINEL, EntitySlot, FORMAT_VERSION, GraphManifest,
+    ProducerBlock, STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, SeasonManifest, StageCutsPayload,
+    read_policy_checkpoint, write_policy_checkpoint,
 };
 
 fn metadata() -> CheckpointManifest {
@@ -156,7 +156,7 @@ fn anticipated_thermal_state_non_monotone_dates_accepted() {
 fn half_populated_interval_rejected_naming_slot_and_endpoint() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = [EntitySlot::transit_bucket(42, 0, true)
-        .with_interval(20_320_101, ENTITY_SLOT_DELIVERY_DATE_SENTINEL)];
+        .with_interval(20_320_101, ENTITY_SLOT_DATE_SENTINEL)];
     write_fixture(dir.path(), 0, &manifest);
 
     let err =

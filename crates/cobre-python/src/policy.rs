@@ -12,7 +12,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use cobre_io::{
-    CheckpointManifest, ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, FORMAT_VERSION,
+    CheckpointManifest, ENTITY_SLOT_DATE_SENTINEL, EntitySlot, FORMAT_VERSION,
     GraphManifest, ManifestEdge, ManifestNode, PolicyBasisRecord, PolicyCutRecord, ProducerBlock,
     STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL, STAGE_CUTS_NODE_ID_SENTINEL,
     STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, STAGE_STATES_NODE_ID_SENTINEL, SeasonManifest,
@@ -29,11 +29,11 @@ pub(crate) struct PyEntitySlot {
     entity_id: i32,
     subindex: u32,
     was_active: bool,
-    #[pyo3(default = ENTITY_SLOT_DELIVERY_DATE_SENTINEL)]
+    #[pyo3(default = ENTITY_SLOT_DATE_SENTINEL)]
     reference_date: i32,
-    #[pyo3(default = ENTITY_SLOT_DELIVERY_DATE_SENTINEL)]
+    #[pyo3(default = ENTITY_SLOT_DATE_SENTINEL)]
     interval_start: i32,
-    #[pyo3(default = ENTITY_SLOT_DELIVERY_DATE_SENTINEL)]
+    #[pyo3(default = ENTITY_SLOT_DATE_SENTINEL)]
     interval_end: i32,
 }
 
@@ -55,9 +55,9 @@ impl From<&PyEntitySlot> for EntitySlot {
                 entity_id: slot.entity_id,
                 subindex: slot.subindex,
                 was_active: slot.was_active,
-                reference_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-                interval_start: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-                interval_end: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+                reference_date: ENTITY_SLOT_DATE_SENTINEL,
+                interval_start: ENTITY_SLOT_DATE_SENTINEL,
+                interval_end: ENTITY_SLOT_DATE_SENTINEL,
             },
         };
         converted

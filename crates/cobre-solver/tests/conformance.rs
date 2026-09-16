@@ -24,7 +24,7 @@ use cobre_solver::{Basis, SolverInterface};
 use cobre_solver::{HighsSolver, SolutionView, SolverError};
 
 #[cfg(feature = "clp")]
-use cobre_solver::ClpSolver;
+use cobre_solver::{ClpSolver, SolverError};
 
 // Gated identically to its only consumers (the HiGHS option-poking tests) so the
 // clp+test-support build does not see an unused import.
@@ -1575,5 +1575,194 @@ fn test_solver_clp_warm_start_roundtrip() {
         (warm_view.objective - 100.0).abs() < 1e-8,
         "warm-start objective must equal 100.0, got {}",
         warm_view.objective
+    );
+}
+
+// ─── CLP/HiGHS basis-validation asymmetry conformance tests ─────────────────
+//
+// Pins the two malformed-warm-basis shapes of the CLP/HiGHS basis-validation
+// asymmetry contract, through the public `SolverInterface`
+// API only. Shape 1 (row-count mismatch) is symmetric: both backends reject
+// via `SolverError::BasisRowCountMismatch` before the basis ever reaches the
+// native solver. Shape 2 (right dimensions, invalid status combination) is
+// the asymmetry itself: `HighsSolver::solve` validates via `isBasisConsistent`
+// and rejects with `SolverError::BasisInconsistent`; `ClpSolver::solve`
+// installs the offered basis element-by-element with no consistency check and
+// lets `Clp_dual` repair it, returning `Ok` with the correct optimum.
+
+/// Offering a basis with fewer row entries than the LP has rows, after
+/// `add_rows` grows SS1.1 from 2 to 4 rows, is rejected with
+/// `Err(SolverError::BasisRowCountMismatch { lp_rows: 4, basis_rows: 2 })` —
+/// symmetric with the `CLP` behavior pinned by
+/// `test_solver_clp_solve_rejects_undersized_row_basis`; row-count mismatch is
+/// not where the `CLP`/`HiGHS` basis-validation asymmetry lives.
+#[cfg(feature = "highs")]
+#[test]
+fn test_solver_highs_solve_rejects_undersized_row_basis() {
+    let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
+    let template = make_fixture_stage_template();
+    solver.load_model(&template);
+    solver.solve(None).expect("cold solve must succeed");
+    solver.add_rows(&make_fixture_row_batch());
+
+    let undersized = Basis::new(template.num_cols, template.num_rows);
+    let result = solver.solve(Some(&undersized));
+
+    match result {
+        Err(SolverError::BasisRowCountMismatch {
+            lp_rows,
+            basis_rows,
+        }) => {
+            assert_eq!(lp_rows, 4, "lp_rows must equal the post-add_rows row count");
+            assert_eq!(
+                basis_rows, 2,
+                "basis_rows must equal the offered SS1.1 row count"
+            );
+        }
+        other => panic!(
+            "HiGHS must reject an undersized row basis with BasisRowCountMismatch \
+             (lp_rows: 4, basis_rows: 2), got {other:?}"
+        ),
+    }
+}
+
+/// Offering a basis with fewer row entries than the LP has rows, after
+/// `add_rows` grows SS1.1 from 2 to 4 rows, is rejected with
+/// `Err(SolverError::BasisRowCountMismatch { lp_rows: 4, basis_rows: 2 })` —
+/// symmetric with the `HiGHS` behavior pinned by
+/// `test_solver_highs_solve_rejects_undersized_row_basis`.
+#[cfg(feature = "clp")]
+#[test]
+fn test_solver_clp_solve_rejects_undersized_row_basis() {
+    let mut solver = ClpSolver::new().expect("ClpSolver::new() must succeed");
+    let template = make_fixture_stage_template();
+    solver.load_model(&template);
+    solver.solve(None).expect("cold solve must succeed");
+    solver.add_rows(&make_fixture_row_batch());
+
+    let undersized = Basis::new(template.num_cols, template.num_rows);
+    let result = solver.solve(Some(&undersized));
+
+    match result {
+        Err(SolverError::BasisRowCountMismatch {
+            lp_rows,
+            basis_rows,
+        }) => {
+            assert_eq!(lp_rows, 4, "lp_rows must equal the post-add_rows row count");
+            assert_eq!(
+                basis_rows, 2,
+                "basis_rows must equal the offered SS1.1 row count"
+            );
+        }
+        other => panic!(
+            "CLP must reject an undersized row basis with BasisRowCountMismatch \
+             (lp_rows: 4, basis_rows: 2), got {other:?}"
+        ),
+    }
+}
+
+/// Offering a basis with the SS1.1 LP's exact dimensions (3 cols, 2 rows) but
+/// every column and row status set `Basic` (5 basics against rank 2) is
+/// rejected with `Err(SolverError::BasisInconsistent { num_row: 2,
+/// total_basic: 5, col_basic: 3, row_basic: 2 })` — `HiGHS` validates the
+/// offered basis via `isBasisConsistent` and rejects it loudly, unlike `CLP`
+/// (`test_solver_clp_solve_accepts_inconsistent_basis_status_combination_silently`).
+#[cfg(feature = "highs")]
+#[test]
+fn test_solver_highs_solve_rejects_inconsistent_basis_status_combination() {
+    use cobre_solver::BasisStatus;
+
+    let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
+    let template = make_fixture_stage_template();
+    solver.load_model(&template);
+
+    let mut bad_basis = Basis::new(template.num_cols, template.num_rows);
+    bad_basis
+        .col_status
+        .iter_mut()
+        .for_each(|v| *v = BasisStatus::Basic);
+    bad_basis
+        .row_status
+        .iter_mut()
+        .for_each(|v| *v = BasisStatus::Basic);
+
+    let result = solver.solve(Some(&bad_basis));
+
+    match result {
+        Err(SolverError::BasisInconsistent {
+            num_row,
+            total_basic,
+            col_basic,
+            row_basic,
+        }) => {
+            assert_eq!(num_row, 2, "num_row must match the SS1.1 LP row count");
+            assert_eq!(total_basic, 5, "total_basic must be col_basic + row_basic");
+            assert_eq!(col_basic, 3, "col_basic must count the 3 BASIC columns");
+            assert_eq!(row_basic, 2, "row_basic must count the 2 BASIC rows");
+        }
+        other => panic!(
+            "HiGHS must reject an over-determined (right-dimension, invalid \
+             status combination) basis loudly with BasisInconsistent \
+             (num_row: 2, total_basic: 5, col_basic: 3, row_basic: 2); got {other:?} \
+             instead of the documented CLP-silently-accepts / HiGHS-rejects-loudly split"
+        ),
+    }
+}
+
+/// Offering a basis with the SS1.1 LP's exact dimensions (3 cols, 2 rows) but
+/// every column and row status set `Basic` (5 basics against rank 2) is
+/// accepted silently: `ClpSolver::install_basis` has no consistency check
+/// (unlike `HighsSolver::solve`'s `isBasisConsistent` gate — see
+/// `test_solver_highs_solve_rejects_inconsistent_basis_status_combination`),
+/// so `Clp_dual` repairs the inconsistent starting basis internally and
+/// returns `Ok` with the same objective and primal solution a cold solve
+/// reaches. This is the CLP/HiGHS basis-validation asymmetry contract:
+/// `CLP` accepts an internally inconsistent warm basis silently,
+/// `HiGHS` validates and rejects it loudly.
+#[cfg(feature = "clp")]
+#[test]
+fn test_solver_clp_solve_accepts_inconsistent_basis_status_combination_silently() {
+    use cobre_solver::BasisStatus;
+
+    let mut solver = ClpSolver::new().expect("ClpSolver::new() must succeed");
+    let template = make_fixture_stage_template();
+    solver.load_model(&template);
+
+    let mut bad_basis = Basis::new(template.num_cols, template.num_rows);
+    bad_basis
+        .col_status
+        .iter_mut()
+        .for_each(|v| *v = BasisStatus::Basic);
+    bad_basis
+        .row_status
+        .iter_mut()
+        .for_each(|v| *v = BasisStatus::Basic);
+
+    let view = solver.solve(Some(&bad_basis)).unwrap_or_else(|e| {
+        panic!(
+            "CLP is expected to accept an over-determined (right-dimension, \
+             invalid status combination) basis silently and repair it via \
+             Clp_dual, not reject it (contradicts the CLP-silently-accepts / \
+             HiGHS-rejects-loudly basis-validation asymmetry contract); \
+             got Err({e:?})"
+        )
+    });
+
+    assert!(
+        (view.objective - 100.0).abs() < 1e-8,
+        "CLP's silent repair of the inconsistent basis must still reach the \
+         SS1.1 optimum 100.0, got {}",
+        view.objective
+    );
+    let primals = &view.primal;
+    assert!(
+        (primals[0] - 6.0).abs() < 1e-8
+            && (primals[1] - 0.0).abs() < 1e-8
+            && (primals[2] - 2.0).abs() < 1e-8,
+        "expected primal [6.0, 0.0, 2.0] after CLP's silent repair, got \
+         [{}, {}, {}]",
+        primals[0],
+        primals[1],
+        primals[2]
     );
 }

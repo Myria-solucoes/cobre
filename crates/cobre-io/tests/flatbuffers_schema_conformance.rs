@@ -27,16 +27,15 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use cobre_io::{
-    CheckpointManifest, ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, FORMAT_VERSION,
-    GraphManifest, HydroSeasonOrders, ManifestEdge, ManifestNode, OwnedPolicyBasisRecord,
-    OwnedPolicyCutRecord, PolicyBasisRecord, PolicyCutRecord, ProducerBlock,
-    SEASON_CYCLE_CODE_MONTHLY, SEASON_CYCLE_CODE_WEEKLY, STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL,
-    STAGE_CUTS_NODE_ID_SENTINEL, STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
-    STAGE_STATES_NODE_ID_SENTINEL, SeasonManifest, StageCutsPayload, StageCutsReadResult,
-    StageStatesPayload, StageStatesReadResult, deserialize_checkpoint_manifest,
-    deserialize_stage_basis, deserialize_stage_cuts, deserialize_stage_states,
-    serialize_checkpoint_manifest, serialize_stage_basis, serialize_stage_cuts,
-    serialize_stage_states,
+    CheckpointManifest, ENTITY_SLOT_DATE_SENTINEL, EntitySlot, FORMAT_VERSION, GraphManifest,
+    HydroSeasonOrders, ManifestEdge, ManifestNode, OwnedPolicyBasisRecord, OwnedPolicyCutRecord,
+    PolicyBasisRecord, PolicyCutRecord, ProducerBlock, SEASON_CYCLE_CODE_MONTHLY,
+    SEASON_CYCLE_CODE_WEEKLY, STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL, STAGE_CUTS_NODE_ID_SENTINEL,
+    STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, STAGE_STATES_NODE_ID_SENTINEL, SeasonManifest,
+    StageCutsPayload, StageCutsReadResult, StageStatesPayload, StageStatesReadResult,
+    deserialize_checkpoint_manifest, deserialize_stage_basis, deserialize_stage_cuts,
+    deserialize_stage_states, serialize_checkpoint_manifest, serialize_stage_basis,
+    serialize_stage_cuts, serialize_stage_states,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -1292,17 +1291,17 @@ fn entity_slot_per_family_dates_round_trip() {
     assert_eq!(result.entity_manifest[0].reference_date, 20_310_401);
     assert_eq!(
         result.entity_manifest[0].interval_start,
-        ENTITY_SLOT_DELIVERY_DATE_SENTINEL
+        ENTITY_SLOT_DATE_SENTINEL
     );
     assert_eq!(
         result.entity_manifest[0].interval_end,
-        ENTITY_SLOT_DELIVERY_DATE_SENTINEL
+        ENTITY_SLOT_DATE_SENTINEL
     );
     assert_eq!(result.entity_manifest[1].interval_start, 20_311_201);
     assert_eq!(result.entity_manifest[1].interval_end, 20_320_101);
     assert_eq!(
         result.entity_manifest[1].reference_date,
-        ENTITY_SLOT_DELIVERY_DATE_SENTINEL
+        ENTITY_SLOT_DATE_SENTINEL
     );
 
     let json = flatc_decode(&buf, "StageCuts");
@@ -1415,15 +1414,15 @@ table StageCuts {
     assert_eq!(result.entity_manifest.len(), 2);
     for (i, slot) in result.entity_manifest.iter().enumerate() {
         assert_eq!(
-            slot.reference_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            slot.reference_date, ENTITY_SLOT_DATE_SENTINEL,
             "pre-interval slot {i} reference_date must read back as the sentinel"
         );
         assert_eq!(
-            slot.interval_start, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            slot.interval_start, ENTITY_SLOT_DATE_SENTINEL,
             "pre-interval slot {i} interval_start must read back as the sentinel"
         );
         assert_eq!(
-            slot.interval_end, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            slot.interval_end, ENTITY_SLOT_DATE_SENTINEL,
             "pre-interval slot {i} interval_end must read back as the sentinel"
         );
     }

@@ -217,8 +217,8 @@ mod anticipated_fanout_readback {
 
     use chrono::NaiveDate;
     use cobre_io::{
-        ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, PolicyCutRecord, ProducerBlock,
-        StageCutsPayload, StateFamily, decode_slot_date, encode_slot_date, write_policy_checkpoint,
+        ENTITY_SLOT_DATE_SENTINEL, EntitySlot, PolicyCutRecord, ProducerBlock, StageCutsPayload,
+        StateFamily, decode_slot_date, encode_slot_date, write_policy_checkpoint,
     };
     use cobre_sddp::test_support::{anticipated_slot_at, chain_graph_manifest};
     use cobre_sddp::{BoundaryLoadRequest, load_boundary_cuts};
@@ -232,7 +232,7 @@ mod anticipated_fanout_readback {
     /// grouping several weekly `interval_start` slots that fall in the same
     /// month — not a wire field. Preserves the sentinel.
     fn month_anchor_of(date: i32) -> i32 {
-        if date == ENTITY_SLOT_DELIVERY_DATE_SENTINEL {
+        if date == ENTITY_SLOT_DATE_SENTINEL {
             return date;
         }
         (date / 100) * 100 + 1
