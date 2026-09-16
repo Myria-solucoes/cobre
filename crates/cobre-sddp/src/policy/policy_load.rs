@@ -36,9 +36,8 @@ use cobre_solver::{Basis, BasisStatus};
 use crate::SddpError;
 use crate::cut::pool::CutPool;
 use crate::policy::reconcile::{
-    BoundaryReconciliationReport, RebindOp, build_boundary_fold, build_rebind,
-    build_reconciliation_report, build_source_interval_index, dropped_source_positions,
-    family_label, rebind_cut,
+    BoundaryReconciliationReport, build_boundary_fold, build_rebind, build_reconciliation_report,
+    build_source_interval_index, rebind_cut,
 };
 use crate::setup::{BoundaryStateRequirements, NodeId, NodePos, StudySetup, TypedVec};
 use crate::workspace::CapturedBasis;
@@ -482,26 +481,13 @@ fn slot_identity(slot: &EntitySlot) -> (u8, i32, u32) {
 }
 
 /// Whether `source`/`current` can be identity-verified at all: an empty
-/// manifest on either side (a pre-manifest checkpoint) cannot be verified —
-/// warn once and answer `false`, leaving the caller's `state_dimension` check
-/// as the sole compatibility guard. Shared by [`compare_manifest_slot_identity`]
-/// (the [`FullFcf`] exact-match path) and [`load_boundary_cuts`]'s reconcile
-/// path, so the two report the identical warning on an absent manifest.
-fn manifest_identity_verifiable(
-    source: &[EntitySlot],
-    current: &[EntitySlot],
-    on_warning: &mut dyn FnMut(&str),
-) -> bool {
-    if source.is_empty() || current.is_empty() {
-        on_warning(&format!(
-            "entity manifest absent (source slots: {}, current slots: {}); slot identity \
-             could not be verified, relying on state_dimension alone",
-            source.len(),
-            current.len(),
-        ));
-        return false;
-    }
-    true
+/// manifest on either side (a pre-manifest checkpoint) cannot be verified.
+/// Answers the emptiness question only — the caller decides how to report a
+/// `false` result, leaving `state_dimension` as the sole compatibility guard
+/// either way. Shared by [`compare_manifest_slot_identity`] (the [`FullFcf`]
+/// exact-match path) and [`load_boundary_cuts`]'s reconcile path.
+fn manifest_identity_verifiable(source: &[EntitySlot], current: &[EntitySlot]) -> bool {
+    !source.is_empty() && !current.is_empty()
 }
 
 /// Compare two entity manifests slot-for-slot by `slot_identity`.
@@ -524,7 +510,13 @@ pub fn compare_manifest_slot_identity(
     current: &[EntitySlot],
     on_warning: &mut dyn FnMut(&str),
 ) -> Result<(), SddpError> {
-    if !manifest_identity_verifiable(source, current, on_warning) {
+    if !manifest_identity_verifiable(source, current) {
+        on_warning(&format!(
+            "entity manifest absent (source slots: {}, current slots: {}); slot identity \
+             could not be verified, relying on state_dimension alone",
+            source.len(),
+            current.len(),
+        ));
         return Ok(());
     }
 
@@ -578,10 +570,9 @@ fn boundary_cut_lag_depth(manifest: &[EntitySlot]) -> u32 {
 /// The deepest inflow-lag slot any cut pool in the boundary policy at
 /// `boundary_path` references — the number of inflow-lag state slots the current
 /// study must reserve so the loaded cuts project without truncation. Taken as the
-/// max over every pool (not a chosen `source_stage`): the inflow-lag block is a
-/// property of the policy's one state space, so the deepest slot is pool-invariant
-/// for a coherent policy and the max never under-reserves. `0` when the policy
-/// carries no inflow-lag slot.
+/// max over every pool: the inflow-lag block is a property of the policy's one
+/// state space, so the deepest slot is pool-invariant for a coherent policy and
+/// the max never under-reserves. `0` when the policy carries no inflow-lag slot.
 ///
 /// # Errors
 ///
@@ -651,12 +642,14 @@ pub struct BoundaryLoadRequest<'a> {
     fixed_windows: &'a [AnticipatedCommitmentHistory],
     inflow_lag_depth: Option<u32>,
     study_seasons: Option<&'a SeasonManifest>,
+    strict: bool,
 }
 
 impl<'a> BoundaryLoadRequest<'a> {
     /// Builds a request from the five values every [`load_boundary_cuts`]
-    /// caller must supply; `fixed_windows` defaults to an empty slice and
-    /// `inflow_lag_depth` to `None` until a `with_*` call overrides them.
+    /// caller must supply; `fixed_windows` defaults to an empty slice,
+    /// `inflow_lag_depth` to `None`, and `strict` to `false` until a `with_*`
+    /// call overrides them.
     #[must_use]
     pub fn new(
         boundary_path: &'a Path,
@@ -674,6 +667,7 @@ impl<'a> BoundaryLoadRequest<'a> {
             fixed_windows: &[],
             inflow_lag_depth: None,
             study_seasons: None,
+            strict: false,
         }
     }
 
@@ -709,6 +703,12 @@ impl<'a> BoundaryLoadRequest<'a> {
             ..self
         }
     }
+
+    /// Returns `self` with `strict` replaced; every other field is unchanged.
+    #[must_use]
+    pub fn with_strict(self, strict: bool) -> Self {
+        Self { strict, ..self }
+    }
 }
 
 /// A checkpoint whose every pool carries
@@ -724,10 +724,10 @@ fn boundary_checkpoint_undated(boundary_path: &Path) -> SddpError {
 }
 
 /// Selects the unique pool in `checkpoint` whose own `priced_state_date`
-/// equals `boundary_date` — the index-based `source_stage -> pool` lookup
-/// this replaces could silently pick a different, wrong future-cost function
-/// whose reconciliation tally is identical, so only a calendar equality
-/// check catches the off-by-one. Encodes the study side ONCE via
+/// equals `boundary_date` — an index-based pool lookup could silently pick a
+/// different, wrong future-cost function whose reconciliation tally is
+/// identical, so only a calendar equality check catches the off-by-one.
+/// Encodes the study side ONCE via
 /// [`encode_slot_date`] and compares integers; never decodes a pool's stamp
 /// to compare `NaiveDate` values, so a malformed stamp can never compare
 /// equal to a real date. See [`load_boundary_cuts`]'s `# Errors` for the
@@ -897,7 +897,9 @@ fn check_season_compatibility(
 /// missing reservoir is the louder "different deck" signal and a deck
 /// missing a plant is usually missing its lag block too. A `source` slot
 /// with no `current` counterpart is not examined here; that is a superset
-/// drop, reported separately by [`warn_dropped_source_couplings`].
+/// drop, reported separately by
+/// [`BoundaryReconciliationReport::superset_summary`] and, under
+/// `policy.boundary.strict`, rejected by [`load_boundary_cuts`] itself.
 ///
 /// `source`'s storage and inflow-lag slots are hashed once into a membership
 /// probe and never iterated; the missing lists come entirely from a
@@ -1001,13 +1003,15 @@ fn check_topology_subset(source: &[EntitySlot], current: &[EntitySlot]) -> Resul
 /// [`StudySetup::build_terminal_entity_manifest`](crate::StudySetup::build_terminal_entity_manifest))
 /// reaches past `boundary_date` fans out against the source's own priced
 /// intervals of the SAME family by calendar overlap.
-/// An empty manifest on either side skips reconciliation and warns, relying
-/// on `state_dimension` alone; a `was_active == false` boundary slot whose
-/// current counterpart is active warns and loads. Wraps the result in a
+/// An empty manifest on either side skips reconciliation, relying on
+/// `state_dimension` alone; a `was_active == false` boundary slot whose
+/// current counterpart is active loads unchecked — `BoundaryInjection`
+/// never runs the exact slot-identity comparison. Wraps the result in a
 /// [`ValidatedBoundaryCuts`] — the sole constructor [`inject_boundary_cuts`]
 /// accepts — carrying a [`crate::policy::reconcile::build_reconciliation_report`]
 /// tally on the reconcile path, or the `reconciled: false` default on the
-/// skipped path; read via [`ValidatedBoundaryCuts::report`].
+/// skipped path; read via [`ValidatedBoundaryCuts::report`]. The path never
+/// warns: every outcome is either an `Err` reject or `Ok` cuts plus report.
 ///
 /// `effective_inflow_lag_depth` is the resolved lag depth the current state
 /// layout reserves — inferred from this boundary policy via
@@ -1051,6 +1055,15 @@ fn check_topology_subset(source: &[EntitySlot], current: &[EntitySlot]) -> Resul
 /// intercept bit-identical, and an unverifiable manifest skips the fold (it
 /// shares the rebind's gate).
 ///
+/// A superset boundary — a source pricing state this study does not model —
+/// is recorded in the returned [`ValidatedBoundaryCuts::report`] either way;
+/// the two `strict` branches differ only in whether the load itself
+/// proceeds. With `strict` unset (the default), it loads and prints nothing.
+/// With `policy.boundary.strict` set, it rejects, naming the total dropped
+/// count and every dropping family
+/// ([`crate::policy::reconcile::BoundaryReconciliationReport::superset_summary`]).
+/// `strict` changes no coefficient, no tally, and no other reject.
+///
 /// # Errors
 ///
 /// Returns [`SddpError::Validation`] if:
@@ -1086,6 +1099,9 @@ fn check_topology_subset(source: &[EntitySlot], current: &[EntitySlot]) -> Resul
 /// - A live forward-family target slot's `interval_start`/`interval_end` fails
 ///   to decode; names the slot's identity and the undecodable raw value (see
 ///   `reconcile::resolve_by_interval_overlap`)
+/// - `strict` is set and the load's reconciliation report carries a nonzero
+///   `dropped_source` tally (a superset boundary); names the boundary path,
+///   the total dropped count and every dropping family
 ///
 /// A live forward-family target slot whose interval ends at or before
 /// `boundary_date` is NOT an error: it is an in-study delivery the boundary
@@ -1093,7 +1109,6 @@ fn check_topology_subset(source: &[EntitySlot], current: &[EntitySlot]) -> Resul
 /// `reconcile::resolve_by_interval_overlap`).
 pub fn load_boundary_cuts(
     request: &BoundaryLoadRequest<'_>,
-    on_warning: &mut dyn FnMut(&str),
 ) -> Result<ValidatedBoundaryCuts, SddpError> {
     let BoundaryLoadRequest {
         boundary_path,
@@ -1104,6 +1119,7 @@ pub fn load_boundary_cuts(
         fixed_windows,
         inflow_lag_depth: effective_inflow_lag_depth,
         study_seasons,
+        strict,
     } = *request;
 
     let checkpoint = read_policy_checkpoint(boundary_path).map_err(|e| {
@@ -1157,11 +1173,9 @@ pub fn load_boundary_cuts(
         )?;
     }
 
-    // Hoisted above `validate_policy_load` so both the topology gate below and
-    // the later fold/rebind branches share this one emptiness check — a second
-    // call would double-fire the absent-manifest warning.
-    let verifiable =
-        manifest_identity_verifiable(&stage_result.entity_manifest, current_manifest, on_warning);
+    // Hoisted above `validate_policy_load` so the topology gate below, the
+    // intercept fold and the rebind all share one emptiness decision.
+    let verifiable = manifest_identity_verifiable(&stage_result.entity_manifest, current_manifest);
     if verifiable {
         check_topology_subset(&stage_result.entity_manifest, current_manifest)?;
     }
@@ -1184,9 +1198,12 @@ pub fn load_boundary_cuts(
         graph: &empty_graph,
     };
     let proof = validate_policy_load::<BoundaryInjection>(&source, &current)?;
-    for warning in &proof.warnings {
-        on_warning(warning);
-    }
+    debug_assert!(
+        proof.warnings.is_empty(),
+        "BoundaryInjection sets every CHECK_* flag false, so validate_policy_load never \
+         populates proof.warnings on this path: {:?}",
+        proof.warnings
+    );
 
     let mut records = stage_result.cuts.clone();
 
@@ -1243,7 +1260,6 @@ pub fn load_boundary_cuts(
         for record in &mut records {
             record.coefficients = rebind_cut(record, &rebind);
         }
-        warn_dropped_source_couplings(&stage_result.entity_manifest, &rebind, on_warning);
         build_reconciliation_report(
             &stage_result.entity_manifest,
             current_manifest,
@@ -1255,46 +1271,15 @@ pub fn load_boundary_cuts(
         BoundaryReconciliationReport::default()
     };
 
-    Ok(ValidatedBoundaryCuts { records, report })
-}
+    if strict && let Some(summary) = report.superset_summary() {
+        return Err(SddpError::Validation(format!(
+            "boundary policy at {} is a superset: {summary}; see the reconciliation report \
+             or set policy.boundary.strict = false",
+            boundary_path.display()
+        )));
+    }
 
-/// Warn — never reject — when a boundary SOURCE cut couples a state slot the current
-/// study does not model, so its coefficient is dropped during reconciliation. A
-/// superset source (more plants/arcs than this study declares) drops legitimately,
-/// so this is informational and the load proceeds; it exists to make the drop
-/// visible rather than silent (the transit-bucket family is the motivating case, but
-/// the drop is family-blind). Rejecting would break a legitimate superset boundary,
-/// and no widening path can fabricate a slot the study's topology never declared.
-fn warn_dropped_source_couplings(
-    source: &[EntitySlot],
-    rebind: &[RebindOp],
-    on_warning: &mut dyn FnMut(&str),
-) {
-    let dropped = dropped_source_positions(source.len(), rebind);
-    if dropped.is_empty() {
-        return;
-    }
-    let mut by_family: std::collections::BTreeMap<&'static str, (usize, Vec<String>)> =
-        std::collections::BTreeMap::new();
-    for pos in dropped {
-        if let Some(slot) = source.get(pos) {
-            let entry = by_family.entry(family_label(slot.family())).or_default();
-            entry.0 += 1;
-            if entry.1.len() < 5 {
-                entry.1.push(format!(
-                    "(id {}, subindex {})",
-                    slot.entity_id, slot.subindex
-                ));
-            }
-        }
-    }
-    for (label, (count, examples)) in by_family {
-        on_warning(&format!(
-            "boundary policy prices {count} {label} state slot(s) this study does not model \
-             (e.g. {}); their coupling is dropped",
-            examples.join(", ")
-        ));
-    }
+    Ok(ValidatedBoundaryCuts { records, report })
 }
 
 /// Boundary cut records that passed [`validate_policy_load`]'s
@@ -1709,16 +1694,13 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             write_checkpoint_with_scale(tmp.path(), 0, at_rest_intercept, &at_rest_coefficients);
 
-            let cuts = load_boundary_cuts(
-                &BoundaryLoadRequest::new(
-                    tmp.path(),
-                    fixture_priced_date(0),
-                    2,
-                    &[],
-                    loading_factor,
-                ),
-                &mut ignore_warnings(),
-            )
+            let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+                tmp.path(),
+                fixture_priced_date(0),
+                2,
+                &[],
+                loading_factor,
+            ))
             .unwrap();
 
             assert_eq!(cuts.len(), 1);
@@ -1964,16 +1946,13 @@ mod tests {
         let intercepts = vec![10.0, 20.0, 30.0];
         write_minimal_checkpoint(tmp.path(), 12, 10, &intercepts);
 
-        let cuts = load_boundary_cuts(
-            &BoundaryLoadRequest::new(
-                tmp.path(),
-                fixture_priced_date(2),
-                10,
-                &[],
-                NEUTRAL_LOADING_FACTOR,
-            ),
-            &mut ignore_warnings(),
-        )
+        let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+            tmp.path(),
+            fixture_priced_date(2),
+            10,
+            &[],
+            NEUTRAL_LOADING_FACTOR,
+        ))
         .unwrap();
 
         assert_eq!(cuts.len(), 3, "should return all 3 cuts from stage 2");
@@ -2000,10 +1979,13 @@ mod tests {
         write_minimal_checkpoint(tmp.path(), 5, 10, &[1.0]);
         let unmatched_date = fixture_priced_date(99);
 
-        let result = load_boundary_cuts(
-            &BoundaryLoadRequest::new(tmp.path(), unmatched_date, 10, &[], 1_000_000.0),
-            &mut ignore_warnings(),
-        );
+        let result = load_boundary_cuts(&BoundaryLoadRequest::new(
+            tmp.path(),
+            unmatched_date,
+            10,
+            &[],
+            1_000_000.0,
+        ));
 
         assert!(
             result.is_err(),
@@ -2028,10 +2010,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_minimal_checkpoint(tmp.path(), 5, 10, &[1.0]);
 
-        let result = load_boundary_cuts(
-            &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 5, &[], 1_000_000.0),
-            &mut ignore_warnings(),
-        );
+        let result = load_boundary_cuts(&BoundaryLoadRequest::new(
+            tmp.path(),
+            fixture_priced_date(0),
+            5,
+            &[],
+            1_000_000.0,
+        ));
 
         assert!(result.is_err(), "should fail for dimension mismatch");
         let msg = result.unwrap_err().to_string();
@@ -2045,16 +2030,13 @@ mod tests {
     /// returns `Err(SddpError::Validation)` with a message describing the failure.
     #[test]
     fn load_boundary_cuts_nonexistent_path_returns_error() {
-        let result = load_boundary_cuts(
-            &BoundaryLoadRequest::new(
-                std::path::Path::new("/nonexistent/path/to/policy"),
-                fixture_priced_date(0),
-                10,
-                &[],
-                1_000_000.0,
-            ),
-            &mut ignore_warnings(),
-        );
+        let result = load_boundary_cuts(&BoundaryLoadRequest::new(
+            std::path::Path::new("/nonexistent/path/to/policy"),
+            fixture_priced_date(0),
+            10,
+            &[],
+            1_000_000.0,
+        ));
 
         assert!(result.is_err(), "should fail for non-existent path");
         let msg = result.unwrap_err().to_string();
@@ -2108,7 +2090,6 @@ mod tests {
         let result = load_boundary_cuts(
             &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 2, &current, 1_000_000.0)
                 .with_inflow_lag_depth(Some(6)),
-            &mut ignore_warnings(),
         );
 
         assert!(
@@ -2143,7 +2124,6 @@ mod tests {
         let cuts = load_boundary_cuts(
             &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 2, &current, 1_000_000.0)
                 .with_inflow_lag_depth(Some(12)),
-            &mut ignore_warnings(),
         )
         .unwrap();
 
@@ -2187,7 +2167,6 @@ mod tests {
                 NEUTRAL_LOADING_FACTOR,
             )
             .with_study_seasons(&study_seasons),
-            &mut ignore_warnings(),
         );
 
         let msg = result.unwrap_err().to_string();
@@ -2217,7 +2196,6 @@ mod tests {
                 NEUTRAL_LOADING_FACTOR,
             )
             .with_study_seasons(&study_seasons),
-            &mut ignore_warnings(),
         );
 
         let msg = result.unwrap_err().to_string();
@@ -2257,7 +2235,6 @@ mod tests {
                 NEUTRAL_LOADING_FACTOR,
             )
             .with_study_seasons(&study_seasons),
-            &mut ignore_warnings(),
         );
 
         let msg = result.unwrap_err().to_string();
@@ -2301,7 +2278,6 @@ mod tests {
                 NEUTRAL_LOADING_FACTOR,
             )
             .with_study_seasons(&study_seasons),
-            &mut ignore_warnings(),
         );
 
         let msg = result.unwrap_err().to_string();
@@ -2344,7 +2320,6 @@ mod tests {
                 NEUTRAL_LOADING_FACTOR,
             )
             .with_study_seasons(&study_seasons),
-            &mut ignore_warnings(),
         );
 
         let msg = result.unwrap_err().to_string();
@@ -2381,7 +2356,6 @@ mod tests {
                 NEUTRAL_LOADING_FACTOR,
             )
             .with_study_seasons(&study_seasons),
-            &mut ignore_warnings(),
         );
 
         let msg = result.unwrap_err().to_string();
@@ -2404,16 +2378,13 @@ mod tests {
         );
         write_checkpoint_with_manifest_and_seasons(tmp.path(), 1, 1, &[10.0], &[], source_seasons);
 
-        let cuts = load_boundary_cuts(
-            &BoundaryLoadRequest::new(
-                tmp.path(),
-                fixture_priced_date(0),
-                1,
-                &[],
-                NEUTRAL_LOADING_FACTOR,
-            ),
-            &mut ignore_warnings(),
-        )
+        let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+            tmp.path(),
+            fixture_priced_date(0),
+            1,
+            &[],
+            NEUTRAL_LOADING_FACTOR,
+        ))
         .unwrap();
 
         assert_eq!(cuts.len(), 1, "the load proceeds without the season gate");
@@ -2475,20 +2446,16 @@ mod tests {
         write_checkpoint_with_manifest(tmp.path(), 5, 2, &[10.0, 20.0], &manifest);
 
         let current = storage_manifest(1, 2);
-        let mut warnings: Vec<String> = Vec::new();
-        let cuts = load_boundary_cuts(
-            &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 2, &current, 1_000_000.0),
-            &mut |m| {
-                warnings.push(m.to_string());
-            },
-        )
+        let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+            tmp.path(),
+            fixture_priced_date(0),
+            2,
+            &current,
+            1_000_000.0,
+        ))
         .unwrap();
 
         assert_eq!(cuts.len(), 2, "matching manifest must load all cuts");
-        assert!(
-            warnings.is_empty(),
-            "a slot-for-slot match must emit no warning: {warnings:?}"
-        );
     }
 
     /// Given a current terminal storage slot for hydro `9`, absent from a
@@ -2502,10 +2469,13 @@ mod tests {
         write_checkpoint_with_manifest(tmp.path(), 5, 2, &[10.0, 20.0], &boundary);
 
         let current = storage_manifest(9, 2);
-        let result = load_boundary_cuts(
-            &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 2, &current, 1_000_000.0),
-            &mut ignore_warnings(),
-        );
+        let result = load_boundary_cuts(&BoundaryLoadRequest::new(
+            tmp.path(),
+            fixture_priced_date(0),
+            2,
+            &current,
+            1_000_000.0,
+        ));
 
         assert!(result.is_err(), "an unpriced hydro must reject");
         let msg = result.unwrap_err().to_string();
@@ -2530,10 +2500,13 @@ mod tests {
         write_checkpoint_with_manifest(tmp.path(), 5, 2, &[10.0, 20.0], &boundary);
 
         let current = storage_manifest(1, 2);
-        let result = load_boundary_cuts(
-            &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 2, &current, 1_000_000.0),
-            &mut ignore_warnings(),
-        );
+        let result = load_boundary_cuts(&BoundaryLoadRequest::new(
+            tmp.path(),
+            fixture_priced_date(0),
+            2,
+            &current,
+            1_000_000.0,
+        ));
 
         assert!(
             result.is_err(),
@@ -2557,10 +2530,13 @@ mod tests {
         write_checkpoint_with_manifest(tmp.path(), 1, 1, &[10.0], &boundary);
 
         let current = vec![storage_slot(0), storage_slot(3), storage_slot(7)];
-        let result = load_boundary_cuts(
-            &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 3, &current, 1_000_000.0),
-            &mut ignore_warnings(),
-        );
+        let result = load_boundary_cuts(&BoundaryLoadRequest::new(
+            tmp.path(),
+            fixture_priced_date(0),
+            3,
+            &current,
+            1_000_000.0,
+        ));
 
         assert!(result.is_err(), "two unpriced hydros must reject");
         let msg = result.unwrap_err().to_string();
@@ -2591,10 +2567,13 @@ mod tests {
             inflow_lag_slot(2, 1),
             inflow_lag_slot(2, 2),
         ];
-        let result = load_boundary_cuts(
-            &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 3, &current, 1_000_000.0),
-            &mut ignore_warnings(),
-        );
+        let result = load_boundary_cuts(&BoundaryLoadRequest::new(
+            tmp.path(),
+            fixture_priced_date(0),
+            3,
+            &current,
+            1_000_000.0,
+        ));
 
         assert!(result.is_err(), "a missing lag depth must reject");
         let msg = result.unwrap_err().to_string();
@@ -2613,10 +2592,13 @@ mod tests {
         write_checkpoint_with_manifest(tmp.path(), 1, 2, &[10.0], &boundary);
 
         let current = vec![storage_slot(1)];
-        let cuts = load_boundary_cuts(
-            &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 1, &current, 1_000_000.0),
-            &mut ignore_warnings(),
-        )
+        let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+            tmp.path(),
+            fixture_priced_date(0),
+            1,
+            &current,
+            1_000_000.0,
+        ))
         .unwrap();
 
         assert_eq!(
@@ -2630,30 +2612,87 @@ mod tests {
         );
     }
 
+    /// Given the same superset fixture as
+    /// [`boundary_load_superset_source_passes_the_topology_gate`] and a
+    /// default (non-strict) request, when `load_boundary_cuts` runs, then it
+    /// returns `Ok`, emits no warning, and the dropped source slot is still
+    /// visible in the reconciliation report.
+    #[test]
+    fn load_boundary_cuts_superset_source_loads_silently_and_is_reported() {
+        let tmp = tempfile::tempdir().unwrap();
+        let boundary = vec![storage_slot(1), storage_slot(2)];
+        write_checkpoint_with_manifest(tmp.path(), 1, 2, &[10.0], &boundary);
+
+        let current = vec![storage_slot(1)];
+        let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+            tmp.path(),
+            fixture_priced_date(0),
+            1,
+            &current,
+            1_000_000.0,
+        ))
+        .unwrap();
+
+        assert_eq!(cuts.len(), 1, "a superset source must load, never reject");
+        assert!(
+            cuts.report().tally_totals().3 > 0,
+            "the dropped source slot must still be reported"
+        );
+    }
+
+    /// Given the same fixture with `.with_strict(true)`, when
+    /// `load_boundary_cuts` runs, then it rejects naming the boundary path,
+    /// the total dropped count and every dropping family, and no cuts are
+    /// returned.
+    #[test]
+    fn load_boundary_cuts_strict_superset_source_rejects_naming_families() {
+        let tmp = tempfile::tempdir().unwrap();
+        let boundary = vec![storage_slot(1), storage_slot(2)];
+        write_checkpoint_with_manifest(tmp.path(), 1, 2, &[10.0], &boundary);
+
+        let current = vec![storage_slot(1)];
+        let result = load_boundary_cuts(
+            &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 1, &current, 1_000_000.0)
+                .with_strict(true),
+        );
+
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains(&format!(
+                "boundary policy at {} is a superset: 1 source slot(s) price entities this \
+                 study does not model (storage: 1); see the reconciliation report or set \
+                 policy.boundary.strict = false",
+                tmp.path().display()
+            )),
+            "must name the path, the total and the dropping family, and state the remedy: {msg}"
+        );
+    }
+
     /// Given a boundary checkpoint with an empty manifest and a matching
     /// `current_state_dimension`, `load_boundary_cuts` returns `Ok` (no hard fail on
-    /// absence) and surfaces an "identity could not be verified" warning.
+    /// absence), emits no warning, and reports the load as dimension-only.
     #[test]
-    fn load_boundary_cuts_absent_manifest_loads_with_warning() {
+    fn load_boundary_cuts_absent_manifest_loads_reporting_dimension_only() {
         let tmp = tempfile::tempdir().unwrap();
         write_checkpoint_with_manifest(tmp.path(), 5, 2, &[10.0, 20.0], &[]);
 
         let current = storage_manifest(1, 2);
-        let mut warnings: Vec<String> = Vec::new();
-        let cuts = load_boundary_cuts(
-            &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 2, &current, 1_000_000.0),
-            &mut |m| {
-                warnings.push(m.to_string());
-            },
-        )
+        let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+            tmp.path(),
+            fixture_priced_date(0),
+            2,
+            &current,
+            1_000_000.0,
+        ))
         .unwrap();
 
         assert_eq!(cuts.len(), 2, "absent manifest must still load cuts");
-        assert_eq!(warnings.len(), 1, "absence must surface one warning");
+        let report = cuts.report();
+        assert!(!report.reconciled);
         assert!(
-            warnings[0].contains("manifest absent"),
-            "warning must flag the absent manifest: {}",
-            warnings[0]
+            report.summary_line().contains("dimension-only"),
+            "must state a dimension-only load: {}",
+            report.summary_line()
         );
     }
 
@@ -2661,30 +2700,27 @@ mod tests {
     /// current manifest whose storage slots the (absent) source manifest can
     /// neither confirm nor deny, when `load_boundary_cuts` runs with a
     /// matching `state_dimension`, then the topology gate is skipped — no
-    /// per-hydro reject — the absent-manifest warning fires exactly once,
-    /// and the `state_dimension` fallback lets the load proceed.
+    /// per-hydro reject, no warning — and the `state_dimension` fallback
+    /// lets the load proceed.
     #[test]
     fn boundary_load_absent_manifest_skips_the_topology_gate() {
         let tmp = tempfile::tempdir().unwrap();
         write_checkpoint_with_manifest(tmp.path(), 1, 2, &[10.0, 20.0], &[]);
 
         let current = vec![storage_slot(1), storage_slot(2)];
-        let mut warnings: Vec<String> = Vec::new();
-        let cuts = load_boundary_cuts(
-            &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 2, &current, 1_000_000.0),
-            &mut |m| warnings.push(m.to_string()),
-        )
+        let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+            tmp.path(),
+            fixture_priced_date(0),
+            2,
+            &current,
+            1_000_000.0,
+        ))
         .unwrap();
 
         assert_eq!(
             cuts.len(),
             2,
             "an unverifiable manifest must fall back to state_dimension, not reject"
-        );
-        assert_eq!(
-            warnings.len(),
-            1,
-            "the absent-manifest warning must fire exactly once: {warnings:?}"
         );
     }
 
@@ -2701,20 +2737,16 @@ mod tests {
         write_checkpoint_with_manifest(tmp.path(), 5, 2, &[10.0, 20.0], &boundary);
 
         let current = storage_manifest(1, 2);
-        let mut warnings: Vec<String> = Vec::new();
-        let cuts = load_boundary_cuts(
-            &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 2, &current, 1_000_000.0),
-            &mut |m| {
-                warnings.push(m.to_string());
-            },
-        )
+        let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+            tmp.path(),
+            fixture_priced_date(0),
+            2,
+            &current,
+            1_000_000.0,
+        ))
         .unwrap();
 
         assert_eq!(cuts.len(), 2, "was_active divergence must still load cuts");
-        assert!(
-            warnings.is_empty(),
-            "a dormant-to-active transition is expected, not warned: {warnings:?}"
-        );
     }
 
     /// A manifest carrying a `HydroTransitBucket` slot (`entity_type 3`, the
@@ -2733,23 +2765,19 @@ mod tests {
         write_checkpoint_with_manifest(tmp.path(), 5, 2, &[10.0, 20.0], &manifest);
 
         let current = vec![storage_slot(1), transit_bucket_slot_over(2, 1, start, end)];
-        let mut warnings: Vec<String> = Vec::new();
-        let cuts = load_boundary_cuts(
-            &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 2, &current, 1.0),
-            &mut |m| {
-                warnings.push(m.to_string());
-            },
-        )
+        let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+            tmp.path(),
+            fixture_priced_date(0),
+            2,
+            &current,
+            1.0,
+        ))
         .unwrap();
 
         assert_eq!(
             cuts.len(),
             2,
             "matching bucket arrival interval must load all cuts"
-        );
-        assert!(
-            warnings.is_empty(),
-            "an identical-interval bucket match must emit no warning: {warnings:?}"
         );
         for cut in cuts.iter() {
             assert_eq!(
@@ -2773,16 +2801,13 @@ mod tests {
         write_checkpoint_with_manifest(tmp.path(), 5, 2, &[10.0, 20.0], &boundary);
 
         let current = vec![storage_slot(1), transit_bucket_slot(2, 1)];
-        let cuts = load_boundary_cuts(
-            &BoundaryLoadRequest::new(
-                tmp.path(),
-                fixture_priced_date(0),
-                2,
-                &current,
-                NEUTRAL_LOADING_FACTOR,
-            ),
-            &mut ignore_warnings(),
-        )
+        let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+            tmp.path(),
+            fixture_priced_date(0),
+            2,
+            &current,
+            NEUTRAL_LOADING_FACTOR,
+        ))
         .expect(
             "a transit-bucket slot with no source counterpart must default to zero, not reject",
         );
@@ -2809,16 +2834,13 @@ mod tests {
         write_checkpoint_with_manifest(tmp.path(), 5, 2, &[10.0, 20.0], &storage_manifest(1, 2));
 
         let current = vec![storage_slot(1), storage_slot(2), transit_bucket_slot(2, 1)];
-        let cuts = load_boundary_cuts(
-            &BoundaryLoadRequest::new(
-                tmp.path(),
-                fixture_priced_date(0),
-                3,
-                &current,
-                NEUTRAL_LOADING_FACTOR,
-            ),
-            &mut ignore_warnings(),
-        )
+        let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+            tmp.path(),
+            fixture_priced_date(0),
+            3,
+            &current,
+            NEUTRAL_LOADING_FACTOR,
+        ))
         .expect("a differing-dimension load with a reconcilable manifest must load, not reject");
 
         assert_eq!(cuts.len(), 2, "both cuts must load");
@@ -2903,16 +2925,13 @@ mod tests {
         let intercepts = vec![10.0, 20.0];
         write_minimal_checkpoint(tmp.path(), 2, 2, &intercepts);
 
-        let cuts = load_boundary_cuts(
-            &BoundaryLoadRequest::new(
-                tmp.path(),
-                fixture_priced_date(1),
-                2,
-                &[],
-                NEUTRAL_LOADING_FACTOR,
-            ),
-            &mut ignore_warnings(),
-        )
+        let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+            tmp.path(),
+            fixture_priced_date(1),
+            2,
+            &[],
+            NEUTRAL_LOADING_FACTOR,
+        ))
         .unwrap();
 
         assert_eq!(cuts.len(), 2, "must load pool 1's two cuts");
@@ -2930,10 +2949,13 @@ mod tests {
         write_minimal_checkpoint(tmp.path(), 2, 2, &[10.0, 20.0]);
         let unmatched = fixture_priced_date(2);
 
-        let result = load_boundary_cuts(
-            &BoundaryLoadRequest::new(tmp.path(), unmatched, 2, &[], NEUTRAL_LOADING_FACTOR),
-            &mut ignore_warnings(),
-        );
+        let result = load_boundary_cuts(&BoundaryLoadRequest::new(
+            tmp.path(),
+            unmatched,
+            2,
+            &[],
+            NEUTRAL_LOADING_FACTOR,
+        ));
 
         assert!(result.is_err(), "an unmatched boundary date must reject");
         let msg = result.unwrap_err().to_string();
@@ -2964,16 +2986,13 @@ mod tests {
             &[(2, tie_date, &[10.0]), (5, tie_date, &[20.0])],
         );
 
-        let result = load_boundary_cuts(
-            &BoundaryLoadRequest::new(
-                tmp.path(),
-                fixture_priced_date(0),
-                1,
-                &[],
-                NEUTRAL_LOADING_FACTOR,
-            ),
-            &mut ignore_warnings(),
-        );
+        let result = load_boundary_cuts(&BoundaryLoadRequest::new(
+            tmp.path(),
+            fixture_priced_date(0),
+            1,
+            &[],
+            NEUTRAL_LOADING_FACTOR,
+        ));
 
         assert!(result.is_err(), "a date tie between two pools must reject");
         let msg = result.unwrap_err().to_string();
@@ -2998,16 +3017,13 @@ mod tests {
             ],
         );
 
-        let result = load_boundary_cuts(
-            &BoundaryLoadRequest::new(
-                tmp.path(),
-                fixture_priced_date(0),
-                1,
-                &[],
-                NEUTRAL_LOADING_FACTOR,
-            ),
-            &mut ignore_warnings(),
-        );
+        let result = load_boundary_cuts(&BoundaryLoadRequest::new(
+            tmp.path(),
+            fixture_priced_date(0),
+            1,
+            &[],
+            NEUTRAL_LOADING_FACTOR,
+        ));
 
         assert!(
             result.is_err(),
@@ -3351,16 +3367,13 @@ mod tests {
             anticipated_slot(9, 1, first_month).with_interval(first_month, second_month),
         ];
 
-        let cuts = load_boundary_cuts(
-            &BoundaryLoadRequest::new(
-                tmp.path(),
-                fixture_priced_date(0),
-                current_reordered.len() as u32,
-                &current_reordered,
-                1_000_000.0,
-            ),
-            &mut ignore_warnings(),
-        )
+        let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+            tmp.path(),
+            fixture_priced_date(0),
+            current_reordered.len() as u32,
+            &current_reordered,
+            1_000_000.0,
+        ))
         .expect("the same lane-era source must load under BoundaryInjection by identity + date");
 
         assert_eq!(cuts.len(), 2, "both boundary cuts must load");
@@ -3415,10 +3428,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_checkpoint_with_manifest(tmp.path(), 1, 2, &[10.0, 20.0], &[]);
 
-        let result = load_boundary_cuts(
-            &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 3, &[], 1_000_000.0),
-            &mut ignore_warnings(),
-        );
+        let result = load_boundary_cuts(&BoundaryLoadRequest::new(
+            tmp.path(),
+            fixture_priced_date(0),
+            3,
+            &[],
+            1_000_000.0,
+        ));
 
         assert!(
             matches!(result, Err(SddpError::Validation(_))),
@@ -3915,7 +3931,6 @@ mod tests {
         let cuts = load_boundary_cuts(
             &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 2, &current, s)
                 .with_fixed_windows(&windows),
-            &mut ignore_warnings(),
         )
         .unwrap();
 
@@ -3946,10 +3961,13 @@ mod tests {
         );
 
         let current = vec![storage_slot(1), anticipated_slot(9, 0, 20_260_301)];
-        let cuts = load_boundary_cuts(
-            &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 2, &current, s),
-            &mut ignore_warnings(),
-        )
+        let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+            tmp.path(),
+            fixture_priced_date(0),
+            2,
+            &current,
+            s,
+        ))
         .unwrap();
 
         assert_eq!(
@@ -3960,13 +3978,12 @@ mod tests {
     }
 
     /// An empty (unverifiable) source manifest with a non-empty `fixed_windows`
-    /// applies no fold — the fold shares the rebind's `verifiable` gate — and the
-    /// hoisted `manifest_identity_verifiable` call fires the absent-manifest
-    /// warning exactly once (a second call would double-fire it). The loaded
-    /// intercept is the plain marked rescale (`raw / loading_factor`) with no
-    /// fold term added, isolating the fold-skip from the mandatory rescale.
+    /// applies no fold — the fold shares the rebind's `verifiable` gate — and
+    /// emits no warning. The loaded intercept is the plain marked rescale
+    /// (`raw / loading_factor`) with no fold term added, isolating the
+    /// fold-skip from the mandatory rescale.
     #[test]
-    fn load_boundary_cuts_unverifiable_manifest_skips_fold_and_warns_once() {
+    fn load_boundary_cuts_unverifiable_manifest_skips_fold_without_warning() {
         let tmp = tempfile::tempdir().unwrap();
         let raw_intercept = 42.0;
         write_checkpoint_with_manifest(tmp.path(), 1, 2, &[raw_intercept], &[]);
@@ -3974,7 +3991,6 @@ mod tests {
         let current = storage_manifest(1, 2);
         let windows = vec![fixed_window(9, ymd(2026, 3, 1), ymd(2026, 4, 1), 50.0)];
         let loading_cost_scale_factor = 1_000_000.0;
-        let mut warnings: Vec<String> = Vec::new();
         let cuts = load_boundary_cuts(
             &BoundaryLoadRequest::new(
                 tmp.path(),
@@ -3984,7 +4000,6 @@ mod tests {
                 loading_cost_scale_factor,
             )
             .with_fixed_windows(&windows),
-            &mut |m| warnings.push(m.to_string()),
         )
         .unwrap();
 
@@ -3993,11 +4008,6 @@ mod tests {
             (raw_intercept / loading_cost_scale_factor).to_bits(),
             "an unverifiable manifest must skip the fold, leaving the intercept equal to the \
              plain marked rescale with no fold term added"
-        );
-        assert_eq!(
-            warnings.len(),
-            1,
-            "the absent-manifest warning must fire exactly once (single hoisted gate): {warnings:?}"
         );
     }
 
@@ -4034,7 +4044,6 @@ mod tests {
         let cuts = load_boundary_cuts(
             &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 2, &current, s)
                 .with_fixed_windows(&[fixed_window(9, ws, we, v)]),
-            &mut ignore_warnings(),
         )
         .unwrap();
 
@@ -4064,7 +4073,6 @@ mod tests {
             load_boundary_cuts(
                 &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 2, &current, s)
                     .with_fixed_windows(windows),
-                &mut ignore_warnings(),
             )
             .unwrap()
         };
@@ -4098,7 +4106,6 @@ mod tests {
             load_boundary_cuts(
                 &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 2, &current, s)
                     .with_fixed_windows(windows),
-                &mut ignore_warnings(),
             )
             .unwrap()
         };
@@ -4154,7 +4161,6 @@ mod tests {
         let cuts = load_boundary_cuts(
             &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 3, &current, s)
                 .with_fixed_windows(&[fixed_window(9, ws, we, v)]),
-            &mut ignore_warnings(),
         )
         .unwrap();
 

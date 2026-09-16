@@ -610,19 +610,24 @@ pub(crate) fn rebind_cut(cut: &OwnedPolicyCutRecord, rebind: &[RebindOp]) -> Vec
 }
 
 /// `source` positions no [`RebindOp::Copy`] or `Blend`/`Renormalize` term in
-/// `rebind` ever references.
-pub(crate) fn dropped_source_positions(source_len: usize, rebind: &[RebindOp]) -> Vec<usize> {
-    let mut referenced = vec![false; source_len];
+/// `rebind` ever references, excluding a structural pad
+/// ([`is_structural_pad`]) — the source-side counterpart to [`classify_op`]'s
+/// target-side pad exclusion: a pad prices nothing, so an unreferenced pad is
+/// not a genuinely dropped coefficient, and `dropped_source` counts only
+/// coefficients a study genuinely does not model.
+fn dropped_source_positions(source: &[EntitySlot], rebind: &[RebindOp]) -> Vec<usize> {
+    let len = source.len();
+    let mut referenced = vec![false; len];
     for op in rebind {
         match op {
             RebindOp::Copy(pos) => {
-                if *pos < source_len {
+                if *pos < len {
                     referenced[*pos] = true;
                 }
             }
             RebindOp::Blend(terms) | RebindOp::Renormalize(terms) => {
                 for &(pos, _) in terms {
-                    if pos < source_len {
+                    if pos < len {
                         referenced[pos] = true;
                     }
                 }
@@ -633,15 +638,17 @@ pub(crate) fn dropped_source_positions(source_len: usize, rebind: &[RebindOp]) -
     referenced
         .into_iter()
         .enumerate()
-        .filter_map(|(pos, was_referenced)| (!was_referenced).then_some(pos))
+        .filter_map(|(pos, was_referenced)| {
+            (!was_referenced && !is_structural_pad(&source[pos])).then_some(pos)
+        })
         .collect()
 }
 
 /// Human-readable name for a slot's state family — the single owner of every
 /// family's rendered name, shared by [`BoundaryReconciliationReport::families`]
-/// (and therefore [`BoundaryReconciliationReport::detail_lines`] and
-/// [`slot_detail`]) and `policy_load`'s dropped-coupling warning.
-pub(crate) fn family_label(family: Option<StateFamily>) -> &'static str {
+/// (and therefore [`BoundaryReconciliationReport::detail_lines`],
+/// [`slot_detail`], and [`BoundaryReconciliationReport::superset_summary`]).
+fn family_label(family: Option<StateFamily>) -> &'static str {
     match family {
         Some(StateFamily::HydroStorage) => "storage",
         Some(StateFamily::HydroInflowLag) => "inflow-lag",
@@ -833,6 +840,31 @@ impl BoundaryReconciliationReport {
         format!("boundary reconciliation: {}", self.tally_clause())
     }
 
+    /// The dropped-source counts behind a superset boundary (a source
+    /// pricing state this study does not model): one `{family}: {n}` clause
+    /// per family with a nonzero [`FamilyTally::dropped_source`], in
+    /// [`Self::families`] order, or `None` when every family's count is
+    /// zero. Carries no framing and no per-slot examples — the caller
+    /// supplies the framing, and [`Self::dropped_source_slots`] is the
+    /// per-slot detail behind this summary.
+    #[must_use]
+    pub fn superset_summary(&self) -> Option<String> {
+        let families = self.families();
+        let total: usize = families.iter().map(|(_, tally)| tally.dropped_source).sum();
+        if total == 0 {
+            return None;
+        }
+        let per_family = families
+            .iter()
+            .filter(|(_, tally)| tally.dropped_source > 0)
+            .map(|(name, tally)| format!("{name}: {}", tally.dropped_source))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Some(format!(
+            "{total} source slot(s) price entities this study does not model ({per_family})"
+        ))
+    }
+
     /// Per-family reconciliation breakdown (one COPY / FAN-OUT / DEFAULT-0.0 /
     /// DROP line per family, then the anticipated coverage line), followed by
     /// up to [`DETAIL_LINES_SLOT_CAP`] `dropped:` lines and up to
@@ -897,16 +929,23 @@ fn push_capped_slot_lines(lines: &mut Vec<String>, prefix: &str, details: &[Slot
     }
 }
 
-/// Classify one target slot's `(family, op)` into `tally`: `Copy` → COPY;
+/// A sentinel-interval forward-family slot — the ring buffer's structural
+/// pad: it carries no delivery or arrival and prices nothing, so it is
+/// excluded from both [`classify_op`]'s target-side `default_zero` tally and
+/// [`dropped_source_positions`]'s source-side `dropped_source` tally.
+fn is_structural_pad(slot: &EntitySlot) -> bool {
+    let is_forward_family = matches!(
+        slot.family(),
+        Some(StateFamily::AnticipatedThermalState | StateFamily::HydroTransitBucket)
+    );
+    is_forward_family && slot.interval_start == ENTITY_SLOT_DELIVERY_DATE_SENTINEL
+}
+
+/// Classify one target slot's `(op, slot)` into `tally`: `Copy` → COPY;
 /// `Blend`/`Renormalize` → FAN-OUT (`Renormalize` also STRADDLING); `Zero` on
-/// a sentinel forward-family slot is a structural pad, excluded from every
-/// tally; every other `Zero` → DEFAULT-0.0.
-fn classify_op(
-    op: &RebindOp,
-    family: Option<StateFamily>,
-    slot: &EntitySlot,
-    tally: &mut FamilyTally,
-) {
+/// a structural pad ([`is_structural_pad`]) is excluded from every tally;
+/// every other `Zero` → DEFAULT-0.0.
+fn classify_op(op: &RebindOp, slot: &EntitySlot, tally: &mut FamilyTally) {
     match op {
         RebindOp::Copy(_) => tally.copy += 1,
         RebindOp::Blend(_) => tally.fan_out += 1,
@@ -915,13 +954,7 @@ fn classify_op(
             tally.straddling += 1;
         }
         RebindOp::Zero => {
-            let is_forward_family = matches!(
-                family,
-                Some(StateFamily::AnticipatedThermalState | StateFamily::HydroTransitBucket)
-            );
-            let sentinel_forward_pad =
-                is_forward_family && slot.interval_start == ENTITY_SLOT_DELIVERY_DATE_SENTINEL;
-            if !sentinel_forward_pad {
+            if !is_structural_pad(slot) {
                 tally.default_zero += 1;
             }
         }
@@ -991,11 +1024,11 @@ pub(crate) fn build_reconciliation_report(
         if matches!(op, RebindOp::Renormalize(_)) {
             report.straddling_slots.push(slot_detail(slot));
         }
-        classify_op(op, family, slot, report.tally_mut(family));
+        classify_op(op, slot, report.tally_mut(family));
     }
     report.anticipated_coverage.target_span = target_span;
 
-    for pos in dropped_source_positions(source.len(), rebind) {
+    for pos in dropped_source_positions(source, rebind) {
         if let Some(slot) = source.get(pos) {
             report.tally_mut(slot.family()).dropped_source += 1;
             report.dropped_source_slots.push(slot_detail(slot));
@@ -1354,11 +1387,42 @@ mod tests {
 
     #[test]
     fn dropped_source_positions_reports_unreferenced_source_slots() {
+        let source = vec![storage_slot(1), storage_slot(2), storage_slot(3)];
         let rebind = vec![RebindOp::Copy(1)];
 
-        let dropped = dropped_source_positions(3, &rebind);
+        let dropped = dropped_source_positions(&source, &rebind);
 
         assert_eq!(dropped, vec![0, 2]);
+    }
+
+    /// A storage slot no op references is a genuine superset drop, never a
+    /// structural pad — `is_structural_pad` never widens to storage.
+    #[test]
+    fn dropped_source_positions_still_reports_an_unreferenced_storage_slot() {
+        let source = vec![storage_slot(1), storage_slot(2)];
+        let rebind = vec![RebindOp::Copy(0)];
+
+        let dropped = dropped_source_positions(&source, &rebind);
+
+        assert_eq!(dropped, vec![1]);
+    }
+
+    /// Given a source mixing a referenced storage slot, an unreferenced
+    /// dated anticipated slot, and an unreferenced sentinel anticipated pad,
+    /// when `dropped_source_positions` runs, then only the dated slot's
+    /// position is returned — the pad is a structural pad and is excluded.
+    #[test]
+    fn dropped_source_positions_excludes_sentinel_forward_family_pads() {
+        let source = vec![
+            storage_slot(1),
+            anticipated_dated_slot(9, 1, 20_320_101),
+            anticipated_sentinel_slot(9, 2),
+        ];
+        let rebind = vec![RebindOp::Copy(0)];
+
+        let dropped = dropped_source_positions(&source, &rebind);
+
+        assert_eq!(dropped, vec![1]);
     }
 
     /// Given a target transit-bucket slot at the sentinel `interval_start`,
@@ -1906,21 +1970,23 @@ mod tests {
         }
     }
 
-    /// Given a source carrying a transit-bucket slot and an anticipated slot
-    /// that no target rebind entry references (the target has neither
-    /// family), when `dropped_source_positions` runs, then both positions are
-    /// reported dropped.
+    /// Given a source carrying a DATED transit bucket and a DATED anticipated
+    /// slot that no target op references (the target has neither family),
+    /// when `dropped_source_positions` runs, then both positions are reported
+    /// dropped, in ascending order: a dated forward-family slot prices a real
+    /// interval the study does not model, so it is a genuine superset drop and
+    /// not a structural pad (`is_structural_pad`).
     #[test]
     fn dropped_source_positions_reports_unreferenced_transit_and_anticipated_source_slots() {
         let source = vec![
             storage_slot(1),
-            transit_bucket_slot(2, 1),
-            anticipated_sentinel_slot(9, 0),
+            transit_bucket_slot_over(2, 1, 20_260_401, 20_260_501),
+            anticipated_dated_slot(9, 0, 20_260_401),
         ];
         let target = vec![storage_slot(1)];
         let rebind = rebind_via_index(&source, &target, arbitrary_boundary_date()).unwrap();
 
-        let dropped = dropped_source_positions(source.len(), &rebind);
+        let dropped = dropped_source_positions(&source, &rebind);
 
         assert_eq!(dropped, vec![1, 2]);
     }
@@ -1931,12 +1997,18 @@ mod tests {
     /// still is.
     #[test]
     fn dropped_source_positions_blend_and_renormalize_referenced_slots_are_not_dropped() {
+        let source = vec![
+            storage_slot(1),
+            storage_slot(2),
+            storage_slot(3),
+            storage_slot(4),
+        ];
         let rebind = vec![
             RebindOp::Blend(vec![(0, 0.5), (1, 0.5)]),
             RebindOp::Renormalize(vec![(2, 1.0)]),
         ];
 
-        let dropped = dropped_source_positions(4, &rebind);
+        let dropped = dropped_source_positions(&source, &rebind);
 
         assert_eq!(
             dropped,
@@ -2320,6 +2392,91 @@ mod tests {
         assert_eq!(
             report.summary_line(),
             format!("boundary reconciliation: {}", report.tally_clause())
+        );
+    }
+
+    /// Given a report whose `storage.dropped_source` is 2 and whose
+    /// `anticipated.dropped_source` is 1, when `superset_summary` runs, then
+    /// it names both dropping families with their counts, with no prefix,
+    /// suffix, or trailing punctuation.
+    #[test]
+    fn superset_summary_names_every_dropping_family_with_its_count() {
+        let report = BoundaryReconciliationReport {
+            reconciled: true,
+            storage: FamilyTally {
+                dropped_source: 2,
+                ..FamilyTally::default()
+            },
+            anticipated: FamilyTally {
+                dropped_source: 1,
+                ..FamilyTally::default()
+            },
+            ..BoundaryReconciliationReport::default()
+        };
+
+        assert_eq!(
+            report.superset_summary(),
+            Some(
+                "3 source slot(s) price entities this study does not model (storage: 2, \
+                 anticipated: 1)"
+                    .to_string()
+            )
+        );
+    }
+
+    /// A reconciled report whose every family's `dropped_source` is `0`
+    /// carries no superset — `superset_summary` returns `None`.
+    #[test]
+    fn superset_summary_is_none_when_nothing_dropped() {
+        let report = BoundaryReconciliationReport {
+            reconciled: true,
+            storage: FamilyTally {
+                copy: 4,
+                ..FamilyTally::default()
+            },
+            ..BoundaryReconciliationReport::default()
+        };
+
+        assert_eq!(report.superset_summary(), None);
+    }
+
+    /// Given a report dropping more in `anticipated` than in `storage`, when
+    /// `superset_summary` runs, then `storage` still appears first — the
+    /// structural-families-first ordering is [`Self::families`]'s
+    /// declaration order, not a count sort.
+    #[test]
+    fn superset_summary_orders_storage_before_anticipated() {
+        let report = BoundaryReconciliationReport {
+            reconciled: true,
+            storage: FamilyTally {
+                dropped_source: 1,
+                ..FamilyTally::default()
+            },
+            anticipated: FamilyTally {
+                dropped_source: 5,
+                ..FamilyTally::default()
+            },
+            ..BoundaryReconciliationReport::default()
+        };
+
+        assert_eq!(
+            report.superset_summary(),
+            Some(
+                "6 source slot(s) price entities this study does not model (storage: 1, \
+                 anticipated: 5)"
+                    .to_string()
+            )
+        );
+    }
+
+    /// The unreconciled default report ([`BoundaryReconciliationReport::default`],
+    /// the shape `load_boundary_cuts` stores on its skip path) carries every
+    /// tally at zero, so `superset_summary` returns `None` by construction.
+    #[test]
+    fn superset_summary_is_none_on_the_unreconciled_default_report() {
+        assert_eq!(
+            BoundaryReconciliationReport::default().superset_summary(),
+            None
         );
     }
 

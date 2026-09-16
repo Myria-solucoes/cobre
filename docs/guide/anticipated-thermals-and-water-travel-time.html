@@ -737,9 +737,9 @@ it sits exactly at the cap).</p>
 
 <p><code>config.json</code> — the NEWAVE future-cost function DECOMP couples to, converted to a cobre
 checkpoint, is the terminal boundary:</p>
-<pre><code>"policy": { "boundary": { "path": "boundary", "source_stage": 3 } }</code></pre>
-<p><code>source_stage</code> names the source stage whose cut pool to load; omit it and the loader matches
-the source's dated stages against the study's terminal calendar.</p>
+<pre><code>"policy": { "boundary": { "path": "boundary" } }</code></pre>
+<p>The loader picks the source pool whose priced state date equals this study's last stage
+<code>end_date</code>; there is no stage index to set.</p>
 
 <h4>Step 4 — the ring</h4>
 
@@ -767,9 +767,10 @@ is a genuine costed decision: the commitment column is bounded by the delivery s
 <code>thermal_bounds</code> cell, charged that stage's <code>cost_per_mwh</code> × hours, and discounted by
 the cumulative factor <strong>continued over the real post-study durations</strong> — week 10's decision is
 discounted to 16 May and the June remainder's to 6 June, not to the horizon. The terminal state is the four
-post-horizon decisions per plant, dated in the policy manifest at their month anchors
-(<code>20260501</code> three times, then <code>20260601</code>). The three fixed windows never appear in
-it.</p>
+post-horizon decisions per plant, dated in the policy manifest by their delivery interval: week 10's
+<code>[2026-05-16, 2026-05-23)</code>, week 11's <code>[2026-05-23, 2026-05-30)</code>, week 12's
+<code>[2026-05-30, 2026-06-06)</code>, then the June remainder's <code>[2026-06-06, 2026-06-30)</code>. The
+three fixed windows never appear in it.</p>
 
 <h4>Step 5 — pricing at the boundary</h4>
 
@@ -791,7 +792,11 @@ objective or in any cost output (sunk, §3.6).</p>
 <p>Reading it: the 6 fanned-out slots are the three May weeks of each plant; the 2 defaulted slots are each
 plant's June remainder — this source checkpoint prices April and May only, so the June delivery is valued at
 zero, which is the thing to check whenever a delivery you expected priced comes back defaulted; the 2
-dropped source slots are April months nothing in the study delivers into, a benign drop.
+dropped source slots are April months nothing in the study delivers into, a benign drop. A dropped
+source slot never triggers a warning: its detail lives in the reconciliation report's per-family
+<code>dropped_source</code> tally and in <code>dropped_source_slots</code>, which lists every dropped
+slot's entity and interval. Setting <code>policy.boundary.strict: true</code> (default <code>false</code>)
+turns a non-zero drop into a reject naming every dropping family and its count, instead of loading it.
 <code>cobre validate --json</code> returns the same tally per state family. Without
 <code>config.policy.boundary</code> at all, setup warns once, naming SANTA CRUZ (a non-zero fixed value)
 and both plants (carried decisions): everything post-horizon prices at zero terminal value.</p>
@@ -1102,9 +1107,12 @@ through the same writer, so the two are identical by construction.</p>
   <li><code>HydroTransitBucket</code> — an in-transit water bucket (subindex = maturity lag, entity =
   the downstream hydro).</li>
 </ul>
-<p>Each slot also carries a <code>delivery_date</code> (YYYYMMDD, day pinned to <code>01</code> for the
-month-granular anticipated anchors), so cross-study boundary reconciliation can join deliveries by
-date.</p>
+<p>Storage slots carry no per-slot date; the source policy pool itself is selected by date
+(<code>priced_state_date</code>, matched against the study's last-stage <code>end_date</code>). An
+inflow-lag slot carries the reference date of the past stage it realizes. A transit-bucket slot carries a
+half-open <code>[interval_start, interval_end)</code> arrival interval, and an anticipated-thermal slot the
+analogous delivery interval; cross-study boundary reconciliation joins both by interval overlap, not by a
+single date.</p>
 
 <footer>
   <p><strong>Where to go next.</strong> The companion reference,

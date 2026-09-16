@@ -195,10 +195,13 @@ fn boundary_injection_storage_lag_identity_match_succeeds() {
     write_checkpoint(tmp.path(), &manifest, &[10.0, 20.0]);
 
     let current = vec![storage_slot(1), inflow_lag_slot(1, 1)];
-    let cuts = load_boundary_cuts(
-        &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 2, &current, 1.0),
-        &mut |_| {},
-    )
+    let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+        tmp.path(),
+        fixture_priced_date(0),
+        2,
+        &current,
+        1.0,
+    ))
     .expect("an identity-matching boundary must load");
 
     assert_eq!(cuts.len(), 1);
@@ -220,10 +223,13 @@ fn boundary_injection_differing_lag_reference_date_rejects() {
     write_checkpoint(tmp.path(), &manifest, &[10.0]);
 
     let current = vec![inflow_lag_slot_at(1, 2, 20_300_401)];
-    let result = load_boundary_cuts(
-        &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 1, &current, 1.0),
-        &mut |_| {},
-    );
+    let result = load_boundary_cuts(&BoundaryLoadRequest::new(
+        tmp.path(),
+        fixture_priced_date(0),
+        1,
+        &current,
+        1.0,
+    ));
 
     let msg = result
         .expect_err("differing lag reference dates must reject")
@@ -254,16 +260,13 @@ fn boundary_injection_matching_lag_reference_date_tally_matches_sentinel() {
     let dated_manifest = vec![inflow_lag_slot_at(1, 2, 20_300_301)];
     write_checkpoint(tmp_dated.path(), &dated_manifest, &[10.0]);
     let dated_current = vec![inflow_lag_slot_at(1, 2, 20_300_301)];
-    let dated_cuts = load_boundary_cuts(
-        &BoundaryLoadRequest::new(
-            tmp_dated.path(),
-            fixture_priced_date(0),
-            1,
-            &dated_current,
-            1.0,
-        ),
-        &mut |_| {},
-    )
+    let dated_cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+        tmp_dated.path(),
+        fixture_priced_date(0),
+        1,
+        &dated_current,
+        1.0,
+    ))
     .expect("matching dated reference dates must load");
     assert_eq!(dated_cuts.len(), 1);
     assert_eq!(dated_cuts[0].coefficients, vec![10.0]);
@@ -272,16 +275,13 @@ fn boundary_injection_matching_lag_reference_date_tally_matches_sentinel() {
     let sentinel_manifest = vec![undated_inflow_lag_slot(1, 2)];
     write_checkpoint(tmp_sentinel.path(), &sentinel_manifest, &[10.0]);
     let sentinel_current = vec![undated_inflow_lag_slot(1, 2)];
-    let sentinel_cuts = load_boundary_cuts(
-        &BoundaryLoadRequest::new(
-            tmp_sentinel.path(),
-            fixture_priced_date(0),
-            1,
-            &sentinel_current,
-            1.0,
-        ),
-        &mut |_| {},
-    )
+    let sentinel_cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+        tmp_sentinel.path(),
+        fixture_priced_date(0),
+        1,
+        &sentinel_current,
+        1.0,
+    ))
     .expect("sentinel reference dates must load");
     assert_eq!(sentinel_cuts.len(), 1);
     assert_eq!(sentinel_cuts[0].coefficients, vec![10.0]);
@@ -305,41 +305,31 @@ fn boundary_injection_undated_source_lag_still_copies() {
     write_checkpoint(tmp.path(), &manifest, &[10.0]);
 
     let current = vec![inflow_lag_slot_at(1, 2, 20_300_301)];
-    let mut warnings: Vec<String> = Vec::new();
-    let cuts = load_boundary_cuts(
-        &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 1, &current, 1.0),
-        &mut |w| warnings.push(w.to_string()),
-    )
+    let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+        tmp.path(),
+        fixture_priced_date(0),
+        1,
+        &current,
+        1.0,
+    ))
     .expect("an undated source lag must still copy by identity");
     assert_eq!(cuts.len(), 1);
     assert_eq!(cuts[0].coefficients, vec![10.0]);
-    assert!(
-        warnings.is_empty(),
-        "an undated-source lag copy must not warn: {warnings:?}"
-    );
 
     let tmp_symmetric = tempfile::tempdir().expect("tempdir");
     let symmetric_manifest = vec![inflow_lag_slot_at(1, 2, 20_300_301)];
     write_checkpoint(tmp_symmetric.path(), &symmetric_manifest, &[10.0]);
     let symmetric_current = vec![undated_inflow_lag_slot(1, 2)];
-    let mut symmetric_warnings: Vec<String> = Vec::new();
-    let symmetric_cuts = load_boundary_cuts(
-        &BoundaryLoadRequest::new(
-            tmp_symmetric.path(),
-            fixture_priced_date(0),
-            1,
-            &symmetric_current,
-            1.0,
-        ),
-        &mut |w| symmetric_warnings.push(w.to_string()),
-    )
+    let symmetric_cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+        tmp_symmetric.path(),
+        fixture_priced_date(0),
+        1,
+        &symmetric_current,
+        1.0,
+    ))
     .expect("an undated-target lag must still copy by identity");
     assert_eq!(symmetric_cuts.len(), 1);
     assert_eq!(symmetric_cuts[0].coefficients, vec![10.0]);
-    assert!(
-        symmetric_warnings.is_empty(),
-        "an undated-target lag copy must not warn: {symmetric_warnings:?}"
-    );
 }
 
 /// Given a current terminal storage slot for a hydro the boundary source
@@ -352,10 +342,13 @@ fn boundary_injection_different_hydro_source_rejects_naming_hydro() {
     write_checkpoint(tmp.path(), &manifest, &[10.0]);
 
     let current = vec![storage_slot(42)];
-    let result = load_boundary_cuts(
-        &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 1, &current, 1.0),
-        &mut |_| {},
-    );
+    let result = load_boundary_cuts(&BoundaryLoadRequest::new(
+        tmp.path(),
+        fixture_priced_date(0),
+        1,
+        &current,
+        1.0,
+    ));
 
     let msg = result
         .expect_err("an unpriced hydro must reject")
@@ -425,10 +418,13 @@ fn boundary_injection_transit_bucket_defaults_to_zero() {
             encode_slot_date(ymd(2026, 4, 15)),
         ),
     ];
-    let cuts = load_boundary_cuts(
-        &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 2, &current, 1.0),
-        &mut |_| {},
-    )
+    let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+        tmp.path(),
+        fixture_priced_date(0),
+        2,
+        &current,
+        1.0,
+    ))
     .expect("a transit-only-target load must succeed via the default-zero arm");
 
     assert_eq!(cuts.len(), 1);
@@ -443,12 +439,12 @@ fn boundary_injection_transit_bucket_defaults_to_zero() {
 /// downstream hydro 2 the current study's own transit-bucket target does not
 /// overlap in calendar time (same entity, same state dimension, disjoint
 /// arrival intervals), when the `BoundaryInjection` load runs, then the
-/// source coupling is dropped (its coefficient discarded) BUT the load
-/// succeeds and emits a warning naming the dropped family and slot — the
-/// previously-silent C17 source-drop is now visible. The target's own
-/// transit slot still defaults to `0.0`.
+/// source coupling is dropped (its coefficient discarded) and the load
+/// succeeds with no warning — the C17 source-drop is surfaced only in the
+/// reconciliation report. The target's own transit slot still defaults to
+/// `0.0`.
 #[test]
-fn boundary_injection_dropped_source_transit_coupling_warns_and_loads() {
+fn boundary_injection_dropped_source_transit_coupling_loads_silently_and_is_reported() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let manifest = vec![
         storage_slot(1),
@@ -470,12 +466,14 @@ fn boundary_injection_dropped_source_transit_coupling_warns_and_loads() {
             encode_slot_date(ymd(2026, 6, 1)),
         ),
     ];
-    let mut warnings: Vec<String> = Vec::new();
-    let cuts = load_boundary_cuts(
-        &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 2, &current, 1.0),
-        &mut |w| warnings.push(w.to_string()),
-    )
-    .expect("a dropped source coupling must warn, never reject");
+    let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+        tmp.path(),
+        fixture_priced_date(0),
+        2,
+        &current,
+        1.0,
+    ))
+    .expect("a dropped source coupling must load, never reject, by default");
 
     assert_eq!(cuts.len(), 1);
     assert_eq!(
@@ -483,18 +481,12 @@ fn boundary_injection_dropped_source_transit_coupling_warns_and_loads() {
         vec![10.0, 0.0],
         "the target's own non-overlapping transit slot still defaults to 0.0"
     );
-    assert!(
-        warnings
-            .iter()
-            .any(|w| w.contains("transit-bucket") && w.contains("id 2")),
-        "the dropped source transit-bucket coupling must be surfaced: {warnings:?}"
-    );
 
     let report = cuts.report();
     assert_eq!(
         report.dropped_source_slots.len(),
         1,
-        "the report must also name the dropped transit bucket: {:?}",
+        "the report must still name the dropped transit bucket: {:?}",
         report.dropped_source_slots
     );
     let dropped = &report.dropped_source_slots[0];
@@ -504,6 +496,59 @@ fn boundary_injection_dropped_source_transit_coupling_warns_and_loads() {
         dropped.interval,
         Some((ymd(2026, 4, 1), ymd(2026, 5, 1))),
         "the dropped slot's own arrival interval, not the target's non-overlapping one"
+    );
+}
+
+/// Given the same boundary source and target as
+/// [`boundary_injection_dropped_source_transit_coupling_loads_silently_and_is_reported`]
+/// but a request built with `.with_strict(true)`, when the `BoundaryInjection`
+/// load runs, then it rejects naming the boundary path, the dropped total and
+/// the dropping family, and no cuts are returned.
+#[test]
+fn boundary_injection_dropped_source_transit_coupling_rejects_under_strict() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let manifest = vec![
+        storage_slot(1),
+        transit_bucket_slot_over(
+            2,
+            1,
+            encode_slot_date(ymd(2026, 4, 1)),
+            encode_slot_date(ymd(2026, 5, 1)),
+        ),
+    ];
+    write_checkpoint(tmp.path(), &manifest, &[10.0, 20.0]);
+
+    let current = vec![
+        storage_slot(1),
+        transit_bucket_slot_over(
+            2,
+            9,
+            encode_slot_date(ymd(2026, 5, 1)),
+            encode_slot_date(ymd(2026, 6, 1)),
+        ),
+    ];
+    let result = load_boundary_cuts(
+        &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 2, &current, 1.0)
+            .with_strict(true),
+    );
+
+    let err = result
+        .expect_err("a dropped source coupling must reject under strict")
+        .to_string();
+    assert!(
+        err.contains(&format!("boundary policy at {}", tmp.path().display())),
+        "must name the boundary path: {err}"
+    );
+    assert!(
+        err.contains(
+            "is a superset: 1 source slot(s) price entities this study does not model \
+             (transit-bucket: 1)"
+        ),
+        "must name the total and the dropping family: {err}"
+    );
+    assert!(
+        err.contains("; see the reconciliation report or set policy.boundary.strict = false"),
+        "must state the remedy: {err}"
     );
 }
 
@@ -518,10 +563,13 @@ fn boundary_injection_sentinel_anticipated_defaults_to_zero() {
     write_checkpoint(tmp.path(), &manifest, &[10.0, 20.0]);
 
     let current = vec![storage_slot(1), sentinel_anticipated_slot(9, 0)];
-    let cuts = load_boundary_cuts(
-        &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 2, &current, 1.0),
-        &mut |_| {},
-    )
+    let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+        tmp.path(),
+        fixture_priced_date(0),
+        2,
+        &current,
+        1.0,
+    ))
     .expect("a sentinel-anticipated-target load must succeed via the default-zero arm");
 
     assert_eq!(cuts.len(), 1);
@@ -550,10 +598,13 @@ fn boundary_injection_target_shaped_source_reconciles_bit_identically() {
     write_checkpoint(tmp.path(), &manifest, &coefficients);
 
     let current = manifest.clone();
-    let cuts = load_boundary_cuts(
-        &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 3, &current, 1.0),
-        &mut |_| {},
-    )
+    let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+        tmp.path(),
+        fixture_priced_date(0),
+        3,
+        &current,
+        1.0,
+    ))
     .expect("a target-shaped source must load");
 
     assert_eq!(cuts.len(), 1);
@@ -585,10 +636,13 @@ fn boundary_injection_transit_bucket_blends_on_identical_arrival_interval() {
     write_checkpoint(tmp.path(), &manifest, &[10.0, 30.0]);
 
     let current = vec![storage_slot(1), transit_bucket_slot_over(2, 1, start, end)];
-    let cuts = load_boundary_cuts(
-        &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 2, &current, 1.0),
-        &mut |_| {},
-    )
+    let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+        tmp.path(),
+        fixture_priced_date(0),
+        2,
+        &current,
+        1.0,
+    ))
     .expect("a matching transit-bucket boundary must load");
 
     assert_eq!(cuts.len(), 1);
@@ -668,10 +722,13 @@ fn boundary_injection_dated_anticipated_fan_out_matrix() {
         ),
     ];
 
-    let cuts = load_boundary_cuts(
-        &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 5, &current, 1.0),
-        &mut |_| {},
-    )
+    let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+        tmp.path(),
+        fixture_priced_date(0),
+        5,
+        &current,
+        1.0,
+    ))
     .expect("a fully-covered dated anticipated fan-out must load");
 
     assert_eq!(cuts.len(), 1);
@@ -739,10 +796,13 @@ fn boundary_injection_dated_anticipated_interior_weeks_conservation() {
         ),
     ];
 
-    let cuts = load_boundary_cuts(
-        &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 4, &current, 1.0),
-        &mut |_| {},
-    )
+    let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+        tmp.path(),
+        fixture_priced_date(0),
+        4,
+        &current,
+        1.0,
+    ))
     .expect("a fully-covered dated anticipated fan-out must load");
 
     assert_eq!(cuts.len(), 1);
@@ -799,10 +859,13 @@ fn boundary_injection_report_fan_out_matrix_coverage() {
         ),
     ];
 
-    let cuts = load_boundary_cuts(
-        &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 5, &current, 1.0),
-        &mut |_| {},
-    )
+    let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+        tmp.path(),
+        fixture_priced_date(0),
+        5,
+        &current,
+        1.0,
+    ))
     .expect("a fully-covered dated anticipated fan-out must load");
 
     let report = cuts.report();
@@ -832,22 +895,13 @@ fn boundary_injection_report_fan_out_matrix_coverage() {
         report.straddling_slots
     );
     // The source's three undated ring-buffer pad slots (subindex 1..=3,
-    // alongside the one priced month at subindex 0) are themselves never
-    // referenced by any op — every fanned Blend term draws from the single
-    // priced month, so the pads surface here too, distinct from the fanned
-    // slot.
-    assert_eq!(
-        report
-            .dropped_source_slots
-            .iter()
-            .map(|d| (d.family, d.entity_id, d.subindex, d.interval))
-            .collect::<Vec<_>>(),
-        vec![
-            ("anticipated", 9, 1, None),
-            ("anticipated", 9, 2, None),
-            ("anticipated", 9, 3, None),
-        ],
-        "the three undated pad slots, in ascending source position: {:?}",
+    // alongside the one priced month at subindex 0) are structural pads
+    // (`is_structural_pad`): unreferenced by any op, like the fanned month's
+    // slot, but excluded from the drop tally because they price nothing.
+    assert!(
+        report.dropped_source_slots.is_empty(),
+        "a fully-covered fan-out's only unreferenced source slots are structural pads, which \
+         are never reported dropped: {:?}",
         report.dropped_source_slots
     );
 }
@@ -868,10 +922,13 @@ fn boundary_injection_report_target_shaped_superset_is_copy_only() {
     write_checkpoint(tmp.path(), &manifest, &coefficients);
 
     let current = manifest.clone();
-    let cuts = load_boundary_cuts(
-        &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 3, &current, 1.0),
-        &mut |_| {},
-    )
+    let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+        tmp.path(),
+        fixture_priced_date(0),
+        3,
+        &current,
+        1.0,
+    ))
     .expect("a target-shaped source must load");
 
     let report = cuts.report();
@@ -891,17 +948,14 @@ fn boundary_injection_report_target_shaped_superset_is_copy_only() {
         "an all-Copy/Zero reconciliation straddles nothing: {:?}",
         report.straddling_slots
     );
-    // The sentinel anticipated slot copies nothing (it resolves to `Zero`,
-    // excluded from every tally per its own classification) and so, like any
-    // other slot no op references, surfaces as dropped.
-    assert_eq!(
-        report
-            .dropped_source_slots
-            .iter()
-            .map(|d| (d.family, d.entity_id, d.subindex, d.interval))
-            .collect::<Vec<_>>(),
-        vec![("anticipated", 9, 0, None)],
-        "the target-shaped source's own sentinel pad, never referenced: {:?}",
+    // The sentinel anticipated slot resolves to `Zero` and is never
+    // referenced by any op, but it is a structural pad
+    // (`is_structural_pad`): it prices nothing, so it is excluded from the
+    // drop tally exactly as it is excluded from `default_zero`.
+    assert!(
+        report.dropped_source_slots.is_empty(),
+        "the target-shaped source's own sentinel pad is a structural pad, never reported \
+         dropped: {:?}",
         report.dropped_source_slots
     );
 }
@@ -918,11 +972,14 @@ fn boundary_injection_report_lists_every_dropped_slot_with_its_interval() {
     write_checkpoint(tmp.path(), &source_manifest, &[10.0, 300.0]);
 
     let current = vec![storage_slot(1)];
-    let cuts = load_boundary_cuts(
-        &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 1, &current, 1.0),
-        &mut |_| {},
-    )
-    .expect("a superset source the target does not model must warn, never reject");
+    let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+        tmp.path(),
+        fixture_priced_date(0),
+        1,
+        &current,
+        1.0,
+    ))
+    .expect("a superset source must load, never reject");
 
     let report = cuts.report();
     assert_eq!(report.anticipated.dropped_source, 1);
@@ -949,10 +1006,13 @@ fn boundary_injection_report_empty_manifest_is_unreconciled() {
     write_checkpoint(tmp.path(), &[], &[10.0, 20.0]);
 
     let current = vec![storage_slot(1), storage_slot(2)];
-    let cuts = load_boundary_cuts(
-        &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 2, &current, 1.0),
-        &mut |_| {},
-    )
+    let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+        tmp.path(),
+        fixture_priced_date(0),
+        2,
+        &current,
+        1.0,
+    ))
     .expect("an absent manifest must still load cuts");
 
     let report = cuts.report();
@@ -1000,10 +1060,13 @@ fn boundary_injection_ring_sourced_post_study_fan_out_matches_pre_switchover() {
         ),
     ];
 
-    let cuts = load_boundary_cuts(
-        &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 3, &current, 1.0),
-        &mut |_| {},
-    )
+    let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+        tmp.path(),
+        fixture_priced_date(0),
+        3,
+        &current,
+        1.0,
+    ))
     .expect("a ring-sourced post-study dated fan-out must load");
 
     assert_eq!(cuts.len(), 1);
@@ -1050,10 +1113,13 @@ fn boundary_injection_dated_target_interval_ending_at_the_boundary_date_yields_z
         ),
     ];
 
-    let cuts = load_boundary_cuts(
-        &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 2, &current, 1.0),
-        &mut |_| {},
-    )
+    let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+        tmp.path(),
+        fixture_priced_date(0),
+        2,
+        &current,
+        1.0,
+    ))
     .expect("an in-study ring slot ending at the boundary date must load, defaulting to 0.0");
 
     assert_eq!(cuts.len(), 1);

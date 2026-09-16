@@ -1234,7 +1234,6 @@ pub(crate) fn apply_training_policy_mode(
                 case_dir.display()
             )
         })?;
-        let mut on_warning = |msg: &str| eprintln!("cobre-python: boundary cut warning: {msg}");
         // The depth the state layout already reserved (read off the constructed
         // setup, not re-inferred from the checkpoint) — a defensive guard on the
         // load, never a user error.
@@ -1250,11 +1249,16 @@ pub(crate) fn apply_training_policy_mode(
             )
             .with_fixed_windows(&fixed_windows)
             .with_inflow_lag_depth(effective_inflow_lag_depth)
-            .with_study_seasons(&study_seasons),
-            &mut on_warning,
+            .with_study_seasons(&study_seasons)
+            .with_strict(bp.strict),
         )
         .map_err(|e| format!("boundary cut error: {e}"))?;
         inject_boundary_cuts(setup, &boundary_records);
+        let cut_count = boundary_records.len();
+        eprintln!(
+            "cobre-python: boundary cuts: {cut_count} loaded from {} (priced at {boundary_date})",
+            boundary_path.display()
+        );
         eprintln!("cobre-python: {}", boundary_records.report().summary_line());
     }
 

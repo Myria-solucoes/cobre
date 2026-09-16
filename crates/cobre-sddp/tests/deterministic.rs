@@ -7357,7 +7357,6 @@ mod boundary_season_gate_round_trip {
                 setup.stage_data.stage_templates.cost_scale_factor,
             )
             .with_study_seasons(&study_seasons),
-            &mut |_| {},
         )
         .expect(
             "the study's own checkpoint must reconcile against its own season descriptor and \
@@ -10713,7 +10712,7 @@ mod water_terminal_fcf_valuation {
     fn boundary_policy() -> BoundaryPolicy {
         BoundaryPolicy {
             path: "unused".to_string(),
-            source_stage: None,
+            strict: false,
         }
     }
 
@@ -10847,10 +10846,13 @@ mod water_terminal_fcf_valuation {
         coefficients[bucket_col] = BETA;
         write_synthetic_boundary(dir, state_dimension, ALPHA, &coefficients);
 
-        let boundary_cuts = load_boundary_cuts(
-            &BoundaryLoadRequest::new(dir, fixture_priced_date(0), state_dimension, &[], 1.0),
-            &mut |_msg| {},
-        )
+        let boundary_cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+            dir,
+            fixture_priced_date(0),
+            state_dimension,
+            &[],
+            1.0,
+        ))
         .expect("boundary cut must load");
         inject_boundary_cuts(setup, &boundary_cuts);
     }

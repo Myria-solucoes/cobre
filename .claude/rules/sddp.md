@@ -811,8 +811,10 @@ entry point; there is no opt-out or bypass path. Its check matrix keys off
 `PolicyLoadKind`: `state_dimension` equality is hard-rejected only for `FullFcf`
 (`CHECK_STATE_DIMENSION`); a `BoundaryInjection` load skips it in
 `validate_policy_load` and defers to the per-slot reconciliation in
-`load_boundary_cuts` as the authority — the C17 source-drop warning
-(`warn_dropped_source_couplings`) is what makes relaxing it safe, letting a
+`load_boundary_cuts` as the authority — the C17 source-drop surfacing
+(`BoundaryReconciliationReport::superset_summary`, `FamilyTally::dropped_source`/
+`dropped_source_slots`, serialized by `cobre validate --json`, and rejected
+outright under `policy.boundary.strict`) is what makes relaxing it safe, letting a
 NEWAVE-shaped source (no transit buckets, monthly anticipated slots) feed a
 DECOMP-shaped current study at a differing state dimension. That deferral holds
 only while the entity manifest is verifiable; an absent (empty) manifest cannot
@@ -982,7 +984,9 @@ manifest's, and rejects naming EVERY missing entity in one message per family
 "different deck" signal, and a deck missing a plant is usually missing its lag
 block too), rather than the first one `reconcile::build_rebind` would otherwise
 report. A source slot with no current counterpart is a superset drop, not
-examined here — that is `warn_dropped_source_couplings`'s concern.
+examined here — that is `BoundaryReconciliationReport::superset_summary`'s and
+`load_boundary_cuts`'s own `policy.boundary.strict` gate's concern; the boundary
+path emits no warning for a dropped source slot.
 
 `reconcile::resolve_storage`/`resolve_inflow_lag`'s own `RebindOp::Reject` arms
 are UNCHANGED: through `load_boundary_cuts` they are now unreachable once the
@@ -1212,7 +1216,7 @@ interval ending at or before the boundary date resolves to `Zero`, not a
 reject, even when a source month would overlap it), and the constant
 intercept fold's own regressions
 `boundary_fold_marked_frame_moves_intercept_by_hand_computed_delta`,
-`boundary_fold_legacy_frame_moves_intercept_by_hand_computed_delta`,
+`boundary_fold_multi_month_window_sums_contributions`,
 `boundary_fold_no_overlap_window_leaves_intercept_bit_identical`, and
 `boundary_fold_empty_windows_intercept_bit_identical`, all in
 `policy/policy_load.rs`. The transit-bucket join shares every one of the
@@ -1228,6 +1232,25 @@ round trip `load_boundary_cuts_matching_transit_bucket_arrival_interval_round_tr
 (`policy/policy_load.rs`) and
 `boundary_injection_transit_bucket_blends_on_identical_arrival_interval`
 (`tests/boundary_reconcile_defaults.rs`).
+
+A sentinel-interval forward-family slot is a structural ring pad on BOTH sides
+of reconciliation, not just the target: `dropped_source_positions` excludes it
+from the source-side `dropped_source` tally exactly as `classify_op` excludes
+it from the target-side `default_zero` tally above, through the single shared
+`is_structural_pad` predicate — the two tallies can never disagree on what
+counts as a pad. Counting an unreferenced pad as a genuine drop is the
+wrong-but-compiling alternative: a target-shaped or fully-covered source's own
+ring pads are then never referenced by any op, so its `dropped_source` reads
+non-zero on a load that is otherwise bit-identical, and would wrongly fire a
+superset-source warning on a faithful reload of a study's own terminal
+manifest. Pinned by
+`dropped_source_positions_excludes_sentinel_forward_family_pads` and
+`dropped_source_positions_still_reports_an_unreferenced_storage_slot`
+(`policy/reconcile.rs`), and by
+`boundary_injection_report_target_shaped_superset_is_copy_only` and
+`boundary_injection_report_fan_out_matrix_coverage`
+(`tests/boundary_reconcile_defaults.rs`), each asserting an empty
+`dropped_source_slots` where the only unreferenced source positions are pads.
 
 ## Initial-state seeding resolves IDs through a position map, never `binary_search`
 
@@ -1923,9 +1946,9 @@ excision itself is additionally pinned by the collision/identity regressions
 `excision_keeps_each_study_stage_fishing_its_own_seed`,
 `zero_gap_with_post_study_resolves_an_identity_ring_and_occupancy_depth`, and
 `zero_gap_carry_slot_addressing_matches_the_open_coded_identity_formula`, all
-in `tests/anticipated_core.rs`, and the excised-space manifest-dating
-regression `date_ring_slots_in_excised_space_maps_through_physical_target`
-(`policy/policy_export.rs`).
+in `tests/anticipated_core.rs`, and the excised-space `physical_target`/`ring_index`
+contract, pinned by `ring_index_excises_the_fixed_post_horizon_window` and
+`physical_target_is_the_left_inverse_of_ring_index` (`lead_time/tests.rs`).
 
 ### In-study maturity always fishes; carry-to-terminal is the post-study-targeted ring slot's alone
 

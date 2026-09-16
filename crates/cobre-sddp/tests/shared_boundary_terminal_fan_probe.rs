@@ -177,17 +177,13 @@ fn single_node_source_injects_into_the_one_pool_every_terminal_fan_leaf_shares()
         state_dimension,
     );
 
-    let mut warnings: Vec<String> = Vec::new();
-    let boundary_cuts = load_boundary_cuts(
-        &BoundaryLoadRequest::new(
-            &source_dir,
-            fixture_priced_date(0),
-            state_dimension,
-            &[],
-            LEGACY_COST_SCALE_FACTOR,
-        ),
-        &mut |msg: &str| warnings.push(msg.to_string()),
-    )
+    let boundary_cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+        &source_dir,
+        fixture_priced_date(0),
+        state_dimension,
+        &[],
+        LEGACY_COST_SCALE_FACTOR,
+    ))
     .expect(
         "a single-node source boundary must load into a fanned terminal target, not reject on \
          node-count or graph identity",
@@ -233,16 +229,13 @@ fn multi_node_source_stage_is_rejected() {
     // pool's own node_id reads the STAGE_CUTS_NODE_ID_SENTINEL.
     write_synthetic_checkpoint(&source_dir, &[(200, 5, 0), (201, 5, 0)], 0, &[7.0, 11.0], 2);
 
-    let result = load_boundary_cuts(
-        &BoundaryLoadRequest::new(
-            &source_dir,
-            fixture_priced_date(0),
-            2,
-            &[],
-            LEGACY_COST_SCALE_FACTOR,
-        ),
-        &mut |_| {},
-    );
+    let result = load_boundary_cuts(&BoundaryLoadRequest::new(
+        &source_dir,
+        fixture_priced_date(0),
+        2,
+        &[],
+        LEGACY_COST_SCALE_FACTOR,
+    ));
 
     let err = result.expect_err(
         "a source pool shared by multiple nodes must be rejected, not silently resolved to one \

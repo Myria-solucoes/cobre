@@ -35,7 +35,8 @@ impl std::fmt::Display for PolicyMode {
 ///
 /// When present, the solver loads rows from a source Cobre policy
 /// checkpoint and injects them as fixed boundary conditions at the
-/// terminal stage of the current study.
+/// terminal stage of the current study. The loader selects the source pool
+/// whose priced state date equals this study's last stage `end_date`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -45,12 +46,14 @@ pub struct BoundaryPolicy {
     /// other input; an absolute path is used as-is. NOT relative to this run's
     /// output directory.
     pub path: String,
-    /// 0-based stage index in the source checkpoint to load rows from. When
-    /// present, overrides auto-resolution; when absent, the loader resolves it
-    /// by matching the source checkpoint's dated stages against the current
-    /// study's terminal calendar.
+
+    /// A source slot pricing an entity or commitment this study does not
+    /// model is dropped during reconciliation either way. Left `false`, the
+    /// drop is recorded in the reconciliation report and the load proceeds;
+    /// set `true`, the load is rejected, naming every dropping family and
+    /// its count.
     #[serde(default)]
-    pub source_stage: Option<u32>,
+    pub strict: bool,
 }
 
 impl BoundaryPolicy {

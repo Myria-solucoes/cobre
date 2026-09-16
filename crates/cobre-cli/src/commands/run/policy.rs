@@ -273,13 +273,6 @@ pub(super) fn apply_training_policy(
                     already_rendered: false,
                 });
             };
-            let stderr = &ctx.stderr;
-            let quiet = ctx.quiet;
-            let mut on_warning = |msg: &str| {
-                if !quiet {
-                    let _ = stderr.write_line(&format!("warning: {msg}"));
-                }
-            };
             // The depth the state layout already reserved (read off the constructed
             // setup, not re-inferred from the checkpoint), so the load-time depth
             // guard is a defensive check, never a user error.
@@ -295,8 +288,8 @@ pub(super) fn apply_training_policy(
                 )
                 .with_fixed_windows(&fixed_windows)
                 .with_inflow_lag_depth(effective_inflow_lag_depth)
-                .with_study_seasons(&study_seasons),
-                &mut on_warning,
+                .with_study_seasons(&study_seasons)
+                .with_strict(bp.strict),
             )
             .map_err(CliError::from)?;
             if !ctx.quiet {

@@ -24,7 +24,7 @@ cobre-sddp = { version = "0.15.0", path = "../cobre-sddp", default-features = fa
 cobre-solver = { version = "0.15.0", path = "../cobre-solver", default-features = false }
 cobre-comm = { version = "0.15.0", path = "../cobre-comm" }
 cobre-stochastic = { version = "0.15.0", path = "../cobre-stochastic" }
-chrono = { version = "0.4", default-features = false, features = ["std"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "serde"] }
 clap = { version = "4", features = ["derive"] }
 postcard = { version = "1", features = ["alloc"] }
 console = "0.16"

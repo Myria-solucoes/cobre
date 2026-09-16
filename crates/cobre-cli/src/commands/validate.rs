@@ -27,6 +27,7 @@
 
 use std::path::{Path, PathBuf};
 
+use chrono::NaiveDate;
 use clap::Args;
 use cobre_core::System;
 use cobre_io::{BoundaryPolicy, Config, LoadError, validate_case_with_artifacts};
@@ -57,19 +58,32 @@ pub struct ValidateArgs {
 }
 
 /// `cobre validate --json`'s stdout payload. On success, populates
-/// `configured` (`report` stays `None` — an explicit absent marker, not a
-/// crash — when `configured` is `Some(false)`). On a failure that aborts
-/// before boundary status is ever resolved, `configured`/`report` stay
-/// `None` and `error` is populated instead — the two outcomes never overlap.
+/// `configured`, `boundary_date` and `report` together (`boundary_date`/
+/// `report` stay `None` — an explicit absent marker, not a crash — when
+/// `configured` is `Some(false)`). On a failure that aborts before boundary
+/// status is ever resolved, all three stay `None` and `error` is populated
+/// instead — the two outcomes never overlap.
 #[derive(Debug, Serialize)]
 struct ValidateBoundaryOutput {
     /// Whether `policy.boundary` is configured in this case's `config.json`.
     configured: Option<bool>,
+    /// The date the boundary pool was selected against, when `configured`
+    /// is `Some(true)`.
+    boundary_date: Option<NaiveDate>,
     /// The reconciliation report when `configured` is `Some(true)`.
     report: Option<BoundaryReconciliationReport>,
     /// The failing phase and message, populated only on an early abort.
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<ValidateErrorOutput>,
+}
+
+/// The date `reconcile_boundary` selected the boundary pool against, paired
+/// with the reconciliation outcome — computed once, carried to both the
+/// `--json` object and the human-mode render.
+#[derive(Debug)]
+struct BoundaryOutcome {
+    boundary_date: NaiveDate,
+    report: BoundaryReconciliationReport,
 }
 
 /// One `cobre validate --json` early-abort failure: `phase` is
@@ -84,10 +98,13 @@ struct ValidateErrorOutput {
 }
 
 impl ValidateBoundaryOutput {
-    fn success(report: Option<BoundaryReconciliationReport>) -> Self {
+    fn success(outcome: Option<BoundaryOutcome>) -> Self {
+        let configured = Some(outcome.is_some());
+        let boundary_date = outcome.as_ref().map(|o| o.boundary_date);
         Self {
-            configured: Some(report.is_some()),
-            report,
+            configured,
+            boundary_date,
+            report: outcome.map(|o| o.report),
             error: None,
         }
     }
@@ -95,6 +112,7 @@ impl ValidateBoundaryOutput {
     fn error(phase: &str, message: &str) -> Self {
         Self {
             configured: None,
+            boundary_date: None,
             report: None,
             error: Some(ValidateErrorOutput {
                 phase: phase.to_string(),
@@ -181,8 +199,6 @@ fn format_boundary_error(term: &Term, err: &SddpError, case_dir: &Path) -> Strin
 
 /// Build a `StudySetup` from the parsed config and reconcile
 /// `config.policy.boundary` against its terminal manifest, without solving.
-/// `stdout` is `None` under `--json`, suppressing every advisory/warning line
-/// this prints in human mode.
 fn reconcile_boundary(
     case_dir: &Path,
     config: &Config,
@@ -190,8 +206,7 @@ fn reconcile_boundary(
     system: &System,
     stochastic: StochasticContext,
     hydro_models: PrepareHydroModelsResult,
-    stdout: Option<&Term>,
-) -> Result<BoundaryReconciliationReport, SddpError> {
+) -> Result<BoundaryOutcome, SddpError> {
     let boundary_path = bp.checkpoint_path(case_dir);
 
     // Resolve the boundary state requirements before building the layout, so
@@ -223,11 +238,6 @@ fn reconcile_boundary(
         )));
     };
 
-    let mut on_warning = |msg: &str| {
-        if let Some(term) = stdout {
-            let _ = term.write_line(&format!("{} {msg}", style("warning:").yellow().bold()));
-        }
-    };
     let study_seasons = orchestration::build_season_manifest(system);
     let boundary_cuts = load_boundary_cuts(
         &BoundaryLoadRequest::new(
@@ -239,11 +249,14 @@ fn reconcile_boundary(
         )
         .with_fixed_windows(&fixed_windows)
         .with_inflow_lag_depth(setup.boundary_requirements().inflow_lag_depth())
-        .with_study_seasons(&study_seasons),
-        &mut on_warning,
+        .with_study_seasons(&study_seasons)
+        .with_strict(bp.strict),
     )?;
 
-    Ok(boundary_cuts.report().clone())
+    Ok(BoundaryOutcome {
+        boundary_date,
+        report: boundary_cuts.report().clone(),
+    })
 }
 
 /// Reconcile `config.policy.boundary` when configured, mapping a reject into
@@ -257,21 +270,13 @@ fn run_boundary_check(
     stochastic: StochasticContext,
     hydro_models: PrepareHydroModelsResult,
     stdout: Option<&Term>,
-) -> Result<Option<BoundaryReconciliationReport>, CliError> {
+) -> Result<Option<BoundaryOutcome>, CliError> {
     let Some(bp) = config.policy.boundary.as_ref() else {
         return Ok(None);
     };
 
-    match reconcile_boundary(
-        case_dir,
-        config,
-        bp,
-        system,
-        stochastic,
-        hydro_models,
-        stdout,
-    ) {
-        Ok(report) => Ok(Some(report)),
+    match reconcile_boundary(case_dir, config, bp, system, stochastic, hydro_models) {
+        Ok(outcome) => Ok(Some(outcome)),
         Err(err) => {
             let Some(term) = stdout else {
                 return Err(CliError::from(err));
@@ -446,7 +451,7 @@ pub fn execute(args: ValidateArgs) -> Result<(), CliError> {
         }
     }
 
-    let boundary_report = run_boundary_check(
+    let boundary_outcome = run_boundary_check(
         &args.case_dir,
         &config,
         &prepared.system,
@@ -456,10 +461,14 @@ pub fn execute(args: ValidateArgs) -> Result<(), CliError> {
     )?;
 
     if args.json {
-        emit_validate_json(&ValidateBoundaryOutput::success(boundary_report))?;
-    } else if let Some(report) = &boundary_report {
-        let _ = stdout.write_line(&report.summary_line());
-        for line in report.detail_lines() {
+        emit_validate_json(&ValidateBoundaryOutput::success(boundary_outcome))?;
+    } else if let Some(outcome) = &boundary_outcome {
+        let _ = stdout.write_line(&format!(
+            "boundary policy priced at {}",
+            outcome.boundary_date
+        ));
+        let _ = stdout.write_line(&outcome.report.summary_line());
+        for line in outcome.report.detail_lines() {
             tracing::debug!("{line}");
         }
     }

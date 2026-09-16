@@ -2504,7 +2504,7 @@ mod water_travel_time_gate_byte_neutrality {
         let setup_on = fresh_setup_with(&case_dir(), |cfg| {
             cfg.policy.boundary = Some(BoundaryPolicy {
                 path: "unused".to_string(),
-                source_stage: None,
+                strict: false,
             });
         });
 

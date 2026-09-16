@@ -441,10 +441,13 @@ fn inject_ring_boundary(setup: &mut cobre_sddp::StudySetup, dir: &Path) {
     coefficients[slot] = BETA;
     write_synthetic_boundary(dir, state_dimension, ALPHA, &coefficients);
 
-    let boundary_cuts = load_boundary_cuts(
-        &BoundaryLoadRequest::new(dir, fixture_priced_date(0), state_dimension, &[], 1.0),
-        &mut |_msg| {},
-    )
+    let boundary_cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+        dir,
+        fixture_priced_date(0),
+        state_dimension,
+        &[],
+        1.0,
+    ))
     .expect("boundary cut must load");
     inject_boundary_cuts(setup, &boundary_cuts);
 }

@@ -496,16 +496,13 @@ mod anticipated_fanout_readback {
 
         let source_state_dimension =
             u32::try_from(source_coefficients.len()).expect("small coefficient count");
-        let cuts = load_boundary_cuts(
-            &BoundaryLoadRequest::new(
-                tmp.path(),
-                fixture_priced_date(near_anchor, 0),
-                source_state_dimension,
-                &id86_manifest,
-                1_000_000.0,
-            ),
-            &mut |_| {},
-        )
+        let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+            tmp.path(),
+            fixture_priced_date(near_anchor, 0),
+            source_state_dimension,
+            &id86_manifest,
+            1_000_000.0,
+        ))
         .expect("the synthetic 2-month source must reconcile against the read-back id-86 lane");
         assert_eq!(cuts.len(), 1);
         let fanned = &cuts[0].coefficients;

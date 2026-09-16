@@ -121,7 +121,7 @@ fn producer_block() -> ProducerBlock {
 }
 
 /// A 1-stage chain graph manifest (node id == stage id == pool id) — the shape
-/// `load_boundary_cuts`'s `source_stage -> pool` resolution walks.
+/// `load_boundary_cuts`'s `select_boundary_pool` resolution walks.
 fn single_stage_manifest() -> GraphManifest {
     GraphManifest {
         n_pools: 1,
@@ -277,16 +277,13 @@ fn newave_source_reconciles_into_decomp_current() {
         "DECOMP current state dimension"
     );
 
-    let cuts = load_boundary_cuts(
-        &BoundaryLoadRequest::new(
-            tmp.path(),
-            fixture_priced_date(0),
-            current_state_dimension,
-            &current,
-            RUN_LOADING_FACTOR,
-        ),
-        &mut |_| {},
-    )
+    let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+        tmp.path(),
+        fixture_priced_date(0),
+        current_state_dimension,
+        &current,
+        RUN_LOADING_FACTOR,
+    ))
     .expect("the differing-dimension NEWAVE source must reconcile into the DECOMP current");
 
     for record in cuts.iter() {
@@ -650,7 +647,7 @@ fn run_config() -> Config {
         policy: PolicyConfig {
             boundary: Some(BoundaryPolicy {
                 path: "unused-boundary-checkpoint".to_string(),
-                source_stage: None,
+                strict: false,
             }),
             ..PolicyConfig::default()
         },
@@ -763,7 +760,6 @@ fn run_injected_decomp() -> f64 {
             RUN_LOADING_FACTOR,
         )
         .with_fixed_windows(&fixed),
-        &mut |_| {},
     )
     .expect("the derived NEWAVE source must reconcile into the DECOMP terminal manifest");
     for record in cuts.iter() {

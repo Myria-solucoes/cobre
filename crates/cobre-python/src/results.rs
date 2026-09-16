@@ -1568,8 +1568,9 @@ pub fn load_simulation_arrow(
 /// ```python
 /// {
 ///     "metadata": {
-///         "format_version": 1,
+///         "format_version": 2,
 ///         "cobre_version": "1.0.0",
+///         "created_at": "2026-01-15T12:00:00Z",
 ///         "num_stages": 60,
 ///         "graph_manifest": { "n_pools": 60, "nodes": [ ... ], "edges": [ ... ] },
 ///         "producer": {
@@ -1594,9 +1595,9 @@ pub fn load_simulation_arrow(
 ///                     "entity_id": 0,
 ///                     "subindex": 0,
 ///                     "was_active": True,
-///                     "reference_date": -1,
-///                     "interval_start": -1,
-///                     "interval_end": -1,
+///                     "reference_date": -2147483648,
+///                     "interval_start": -2147483648,
+///                     "interval_end": -2147483648,
 ///                 },
 ///                 ...
 ///             ],

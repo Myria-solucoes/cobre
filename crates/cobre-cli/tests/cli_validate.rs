@@ -552,8 +552,9 @@ fn append_boundary_policy(dir: &Path, boundary_policy_dir: &Path) {
 }
 
 /// A compatible boundary (the case's own just-produced checkpoint) prints the
-/// one-line reconciliation summary and exits 0, without a solve. The per-family
-/// breakdown is gated behind `RUST_LOG=debug`, so it is absent from default stdout.
+/// selected boundary date, then the one-line reconciliation summary, and
+/// exits 0, without a solve. The per-family breakdown is gated behind
+/// `RUST_LOG=debug`, so it is absent from default stdout.
 #[test]
 fn boundary_report_summary_prints_and_exits_0() {
     let dir = TempDir::new().unwrap();
@@ -561,12 +562,19 @@ fn boundary_report_summary_prints_and_exits_0() {
     run_case(dir.path());
     append_boundary_policy(dir.path(), &dir.path().join("output/policy"));
 
-    cobre()
+    let output = cobre()
         .args(["validate", dir.path().to_str().unwrap()])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("boundary reconciliation:"))
-        .stdout(predicate::str::contains("storage: COPY=").not());
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let date_pos = stdout.find("boundary policy priced at 2024-03-01");
+    let summary_pos = stdout.find("boundary reconciliation:");
+    assert!(
+        date_pos.is_some() && summary_pos.is_some() && date_pos < summary_pos,
+        "boundary date line must precede the reconciliation summary: {stdout}"
+    );
+    assert!(!stdout.contains("storage: COPY="));
 }
 
 /// A RELATIVE `policy.boundary.path` resolves against the CASE (input) directory,
@@ -603,6 +611,7 @@ fn boundary_json_mode_emits_parseable_object_with_tallies() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(value["configured"], serde_json::json!(true));
+    assert_eq!(value["boundary_date"], serde_json::json!("2024-03-01"));
     assert_eq!(value["report"]["storage"]["copy"], serde_json::json!(1));
 }
 
@@ -621,6 +630,7 @@ fn boundary_absent_json_marks_absent_marker() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(value["configured"], serde_json::json!(false));
+    assert!(value["boundary_date"].is_null());
     assert!(value["report"].is_null());
 }
 

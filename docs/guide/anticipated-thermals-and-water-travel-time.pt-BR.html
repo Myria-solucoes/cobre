@@ -758,9 +758,9 @@ divida-a no fim do horizonte. Os 500 MW também precisam estar dentro do
 
 <p><code>config.json</code> — a função de custo futuro do NEWAVE à qual o DECOMP se acopla, convertida em um
 checkpoint do cobre, é a fronteira terminal:</p>
-<pre><code>"policy": { "boundary": { "path": "boundary", "source_stage": 3 } }</code></pre>
-<p><code>source_stage</code> nomeia o estágio da fonte cujo pool de cortes carregar; omita-o e o carregador
-casa os estágios datados da fonte com o calendário terminal do estudo.</p>
+<pre><code>"policy": { "boundary": { "path": "boundary" } }</code></pre>
+<p>O carregador escolhe o pool da fonte cuja data de precificação do estado é igual à
+<code>end_date</code> do último estágio deste estudo; não há índice de estágio a definir.</p>
 
 <h4>Passo 4 — o buffer</h4>
 
@@ -791,8 +791,9 @@ de <code>thermal_bounds</code> do estágio de entrega, cobrada pelo <code>cost_p
 estágio, e descontada pelo fator cumulativo <strong>continuado sobre as durações reais pós-estudo</strong>
 — a decisão da semana 10 é descontada para 16 de maio e a do restante de junho para 6 de junho, não para
 o horizonte. O estado terminal são as quatro decisões pós-horizonte por usina, datadas no manifesto da
-política pelas suas âncoras mensais (<code>20260501</code> três vezes, depois <code>20260601</code>). As
-três janelas fixas nunca aparecem nele.</p>
+política pelo seu intervalo de entrega: o da semana 10, <code>[2026-05-16, 2026-05-23)</code>; o da semana
+11, <code>[2026-05-23, 2026-05-30)</code>; o da semana 12, <code>[2026-05-30, 2026-06-06)</code>; e o do
+restante de junho, <code>[2026-06-06, 2026-06-30)</code>. As três janelas fixas nunca aparecem nele.</p>
 
 <h4>Passo 5 — precificação na fronteira</h4>
 
@@ -816,9 +817,14 @@ na função objetivo nem em qualquer saída de custo (custo afundado, §3.6).</p
 de junho de cada usina — este checkpoint-fonte precifica apenas abril e maio, então a entrega de junho é
 valorada em zero, e é isso que se deve conferir sempre que uma entrega que você esperava precificada volta
 em zero; os 2 slots da fonte descartados são meses de abril nos quais nada do estudo entrega, um descarte
-benigno. <code>cobre validate --json</code> devolve a mesma contagem por família de estado. Sem nenhum
-<code>config.policy.boundary</code>, o setup avisa uma vez, nomeando SANTA CRUZ (um valor fixo não nulo) e
-as duas usinas (decisões carregadas): tudo o que é pós-horizonte é precificado com valor terminal zero.</p>
+benigno. Um slot da fonte descartado nunca dispara um aviso: seu detalhe vive na contagem por família
+<code>dropped_source</code> do relatório de reconciliação e em <code>dropped_source_slots</code>, que lista
+a entidade e o intervalo de cada slot descartado. Definir <code>policy.boundary.strict: true</code> (padrão
+<code>false</code>) transforma um descarte não nulo em uma rejeição que nomeia cada família que descarta e
+sua contagem, em vez de carregar o slot. <code>cobre validate --json</code> devolve a mesma contagem por
+família de estado. Sem nenhum <code>config.policy.boundary</code>, o setup avisa uma vez, nomeando SANTA
+CRUZ (um valor fixo não nulo) e as duas usinas (decisões carregadas): tudo o que é pós-horizonte é
+precificado com valor terminal zero.</p>
 
 <h4>Passo 6 — o que você lê de volta</h4>
 
@@ -1131,9 +1137,12 @@ possa alinhar as dimensões por identidade:</p>
   <li><code>HydroTransitBucket</code> — um balde de água em trânsito (subíndice = defasagem de realização,
   entidade = a hidrelétrica de jusante).</li>
 </ul>
-<p>Cada slot também carrega um <code>delivery_date</code> (YYYYMMDD, dia fixado em <code>01</code> para as
-âncoras antecipadas com granularidade mensal), para que a reconciliação de fronteira entre estudos possa
-juntar as entregas por data.</p>
+<p>Slots de armazenamento não carregam data própria; o próprio pool de política de origem é selecionado
+por data (<code>priced_state_date</code>, comparado ao <code>end_date</code> do último estágio do estudo).
+Um slot de defasagem de afluência carrega a data de referência do estágio passado que ele realiza. Um slot
+de balde em trânsito carrega um intervalo de chegada meio-aberto <code>[interval_start, interval_end)</code>,
+e um slot de térmica antecipada o intervalo de entrega análogo; a reconciliação de fronteira entre estudos
+junta ambos por sobreposição de intervalo, não por uma única data.</p>
 
 <footer>
   <p><strong>Para onde ir depois.</strong> A referência complementar,

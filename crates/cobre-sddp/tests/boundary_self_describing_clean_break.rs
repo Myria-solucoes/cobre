@@ -30,11 +30,6 @@ fn fixture_priced_date(pool: u32) -> NaiveDate {
         .unwrap()
 }
 
-/// Discard warnings: a `&mut dyn FnMut(&str)` for tests asserting only the `Result`.
-fn ignore_warnings() -> impl FnMut(&str) {
-    |_| {}
-}
-
 /// A minimal producer block for artifact-writing test helpers. Its own
 /// `cost_scale_factor` is deliberately `None` in every fixture below: the
 /// boundary path no longer reads it, so leaving it absent proves the load
@@ -101,10 +96,13 @@ fn boundary_load_reads_cost_scale_from_bin() {
     write_policy_checkpoint(tmp.path(), &[payload], &[], &metadata, &[]).unwrap();
 
     let loading_factor = 2_500_000.0;
-    let cuts = load_boundary_cuts(
-        &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 2, &[], loading_factor),
-        &mut ignore_warnings(),
-    )
+    let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+        tmp.path(),
+        fixture_priced_date(0),
+        2,
+        &[],
+        loading_factor,
+    ))
     .expect(
         "a self-describing checkpoint with metadata.producer.cost_scale_factor: None must \
          still load via the .bin's own marked cost_scale_factor",
@@ -296,10 +294,13 @@ fn boundary_load_rejects_pre_self_describing_checkpoint() {
     let pre_change_buf = build_pre_self_describing_stage_cuts_bin(0, 7.0, 3.5);
     std::fs::write(tmp.path().join("cuts/000.bin"), &pre_change_buf).unwrap();
 
-    let result = load_boundary_cuts(
-        &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 1, &[], 1_000_000.0),
-        &mut ignore_warnings(),
-    );
+    let result = load_boundary_cuts(&BoundaryLoadRequest::new(
+        tmp.path(),
+        fixture_priced_date(0),
+        1,
+        &[],
+        1_000_000.0,
+    ));
 
     let err = result.expect_err("a pre-self-describing .bin must reject, never load silently");
     assert!(

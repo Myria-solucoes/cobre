@@ -165,18 +165,15 @@ mod boundary_cuts {
         let (mut setup_c, system_c) = build_setup(&case_dir, &config_5iter);
         let state_dim = setup_c.fcf.state_dimension as u32;
         let current_manifest = setup_c.build_terminal_entity_manifest(&system_c);
-        let mut warnings: Vec<String> = Vec::new();
-        let boundary_records = cobre_sddp::load_boundary_cuts(
-            &cobre_sddp::BoundaryLoadRequest::new(
+        let boundary_records =
+            cobre_sddp::load_boundary_cuts(&cobre_sddp::BoundaryLoadRequest::new(
                 &source_policy_dir,
                 boundary_date,
                 state_dim,
                 &current_manifest,
                 1_000_000.0,
-            ),
-            &mut |msg: &str| warnings.push(msg.to_string()),
-        )
-        .expect("load_boundary_cuts");
+            ))
+            .expect("load_boundary_cuts");
         assert!(
             !boundary_records.is_empty(),
             "source stage must have cuts after training"
