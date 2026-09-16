@@ -21,13 +21,10 @@ use super::records::{
     StageStatesReadResult, StateFamily, decode_slot_date,
 };
 
-/// Whether a slot date field is [`ENTITY_SLOT_DELIVERY_DATE_SENTINEL`] or
-/// decodes as a valid `YYYYMMDD` date.
 fn is_well_formed_slot_date(value: i32) -> bool {
     value == ENTITY_SLOT_DELIVERY_DATE_SENTINEL || decode_slot_date(value).is_some()
 }
 
-/// Formats a date-consistency error naming `pool_id`, `slot`'s identity and `detail`.
 fn slot_date_error(pool_id: u32, slot: &EntitySlot, detail: &str) -> OutputError {
     OutputError::serialization(
         "policy_checkpoint_dates",

@@ -37,7 +37,6 @@ use pyo3::types::{PyBool, PyDict, PyList, PyString};
 
 use crate::errors::{ErrorSource, convert_error};
 
-/// Canonicalize a path and return an appropriate Python error on failure.
 fn canonicalize_dir(path: &Path) -> PyResult<PathBuf> {
     path.canonicalize().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
@@ -48,7 +47,6 @@ fn canonicalize_dir(path: &Path) -> PyResult<PathBuf> {
     })
 }
 
-/// Convert a `serde_json::Value` to a Python object recursively.
 fn json_value_to_py(py: Python<'_>, val: &serde_json::Value) -> PyResult<Py<PyAny>> {
     match val {
         serde_json::Value::Null => Ok(py.None()),
@@ -97,7 +95,6 @@ fn json_value_to_py(py: Python<'_>, val: &serde_json::Value) -> PyResult<Py<PyAn
     }
 }
 
-/// Read a JSON file and return its contents as a `serde_json::Value`.
 fn read_json_file(path: &std::path::Path) -> PyResult<serde_json::Value> {
     let content = fs::read_to_string(path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
@@ -483,8 +480,6 @@ fn open_stochastic_parquet(path: &Path) -> PyResult<fs::File> {
     })
 }
 
-/// Extract a typed column from `batch` by name, mapping a missing column or a
-/// type mismatch to `OSError`.
 fn stochastic_column<'a, T: Array + 'static>(
     batch: &'a RecordBatch,
     file: &str,
@@ -781,7 +776,6 @@ pub fn load_stochastic(py: Python<'_>, output_dir: PathBuf) -> PyResult<Stochast
     })
 }
 
-/// Extract a column from a batch and downcast to its expected type, or return an error.
 fn get_column_by_name<'a, T: Array + 'static>(
     batch: &'a RecordBatch,
     name: &str,
@@ -865,7 +859,6 @@ fn arrow_value_to_py(py: Python<'_>, col: &dyn Array, i: usize) -> PyResult<Py<P
     }
 }
 
-/// Convert a value to a Python object, mapping errors appropriately.
 fn into_py<'py, T>(py: Python<'py>, val: T) -> PyResult<Py<PyAny>>
 where
     T: pyo3::IntoPyObject<'py>,
@@ -1425,7 +1418,6 @@ fn load_entity_type_as_batch(
     Ok(Some((concatenated, schema)))
 }
 
-/// Serialize a `RecordBatch` to an Arrow IPC stream buffer.
 fn batch_to_ipc_bytes(batch: &RecordBatch, schema: &Schema) -> PyResult<Vec<u8>> {
     let mut buf = Vec::new();
     let mut writer = StreamWriter::try_new(&mut buf, schema)
@@ -1452,7 +1444,6 @@ fn entity_type_ipc_bytes(entity_dir: &Path) -> PyResult<Vec<u8>> {
     }
 }
 
-/// Reconstruct a `pyarrow.Table` from a raw Arrow IPC stream buffer.
 fn ipc_bytes_to_py_table<'py>(
     py: Python<'py>,
     ipc_bytes: &[u8],

@@ -1462,8 +1462,6 @@ mod tests {
         write_policy_checkpoint(tmp.path(), &stage_cuts, &[], &make_metadata(1, 1), &[])
             .expect("write must succeed");
 
-        // Overwrite manifest.bin with a stale format_version and corrupt the
-        // payload, proving the version gate fires before any payload parse.
         let mut stale = make_metadata(1, 1);
         stale.format_version = FORMAT_VERSION + 1;
         std::fs::write(
@@ -1494,8 +1492,6 @@ mod tests {
         write_policy_checkpoint(tmp.path(), &stage_cuts, &[], &make_metadata(1, 1), &[])
             .expect("write must succeed");
 
-        // Overwrite manifest.bin with an older format_version and corrupt the
-        // payload, proving the version gate fires before any payload parse.
         let mut older = make_metadata(1, 1);
         older.format_version = FORMAT_VERSION - 1;
         std::fs::write(

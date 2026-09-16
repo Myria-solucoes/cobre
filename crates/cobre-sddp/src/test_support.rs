@@ -725,17 +725,8 @@ pub fn trivial_full_fcf_proof(state_dimension: u32, num_stages: u32) -> PolicyLo
         .expect("trivial matching manifest cannot fail validate_policy_load")
 }
 
-/// Assemble the [`CheckpointManifest`] for a checkpoint fixture:
-/// the three invariant fields (`format_version` = [`FORMAT_VERSION`],
-/// `cobre_version` matching the production writer, a fixed `created_at` no
-/// consumer reads) are filled here — the sole owner of the manifest literal for
-/// `cobre-sddp` tests — `num_stages`/`graph_manifest`/`producer` are
-/// forwarded verbatim, and `season_manifest` stays the absent default. Delegates
-/// to [`checkpoint_metadata_with_seasons`] for a caller that needs a present
-/// descriptor.
-///
-/// [`CheckpointManifest`]: cobre_io::CheckpointManifest
-/// [`FORMAT_VERSION`]: cobre_io::FORMAT_VERSION
+/// [`checkpoint_metadata_with_seasons`] with the absent `season_manifest`
+/// default, for the fixtures that never exercise the season gate.
 #[must_use]
 pub fn checkpoint_metadata(
     num_stages: u32,
@@ -750,9 +741,14 @@ pub fn checkpoint_metadata(
     )
 }
 
-/// [`checkpoint_metadata`] with an explicit `season_manifest`, for a fixture
-/// that must exercise the boundary-load season/PAR-identity gate
-/// (`policy::policy_load::check_season_compatibility`).
+/// Assemble the [`CheckpointManifest`] for a checkpoint fixture: the three
+/// invariant fields (`format_version` = [`FORMAT_VERSION`], `cobre_version`
+/// matching the production writer, a fixed `created_at` no consumer reads) are
+/// filled here — the sole owner of the manifest literal for `cobre-sddp`
+/// tests; `num_stages`/`graph_manifest`/`producer`/`season_manifest` are
+/// forwarded verbatim. A present descriptor is what the boundary-load
+/// season/PAR-identity gate (`policy::policy_load::check_season_compatibility`)
+/// compares against.
 ///
 /// [`CheckpointManifest`]: cobre_io::CheckpointManifest
 /// [`FORMAT_VERSION`]: cobre_io::FORMAT_VERSION

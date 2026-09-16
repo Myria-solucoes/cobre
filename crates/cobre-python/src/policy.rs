@@ -261,7 +261,6 @@ impl From<PyPolicyCheckpointMetadata> for CheckpointManifest {
     }
 }
 
-/// Convert a length to `u32`, naming `what` in the overflow error.
 fn checked_u32_len(len: usize, what: &str) -> PyResult<u32> {
     u32::try_from(len)
         .map_err(|_| PyValueError::new_err(format!("{what} has {len} entries, exceeding u32::MAX")))

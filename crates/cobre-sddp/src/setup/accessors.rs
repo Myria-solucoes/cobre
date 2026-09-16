@@ -116,8 +116,8 @@ impl StudySetup {
     /// `terminal_idx` is a pool ordinal (`== n_pools - 1`); its owning stage
     /// resolves through `node_graph.pool_stage`, never `study_stage_ids[terminal_idx]`,
     /// which is OOB once `n_pools > n_stages` on a branching graph. Sole owner of
-    /// this resolution so [`Self::build_terminal_entity_manifest`] dates and
-    /// intervals every slot at the SAME stage.
+    /// this resolution so [`Self::build_terminal_entity_manifest`] resolves the
+    /// pool's stage once, consistently.
     fn terminal_pool_stage_id(&self) -> (usize, i32) {
         let terminal_idx = self.stage_data.cut_state_layouts.len() - 1;
         let stage_id = self.study_stage_ids[self.node_graph.pool_stage[terminal_idx].0];

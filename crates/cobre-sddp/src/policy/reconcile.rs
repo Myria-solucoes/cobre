@@ -70,7 +70,7 @@ pub(crate) enum RebindOp {
     /// An hours-weighted blend of source positions: [`rebind_cut`] applies
     /// `Σ cut.coefficients[p] · w` over the `(source_position, weight)`
     /// terms. [`build_rebind`] constructs this for a live, dated
-    /// `AnticipatedThermalState` target slot fully covered by priced source
+    /// forward-family target slot fully covered by priced source
     /// intervals, `weight = overlap(w, m) / H_m` per covered source interval
     /// `m` — the `÷H_m` distribute. A target fully inside one source
     /// interval yields a single `1.0` term (copy-equivalent).
