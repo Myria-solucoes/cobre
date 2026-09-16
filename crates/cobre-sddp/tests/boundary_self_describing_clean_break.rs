@@ -15,17 +15,12 @@ use cobre_io::{
     ENTITY_SLOT_DELIVERY_DATE_SENTINEL, FORMAT_VERSION, GraphManifest, PolicyCutRecord,
     ProducerBlock, StageCutsPayload, encode_slot_date, write_policy_checkpoint,
 };
+use cobre_sddp::test_support::ymd;
 use cobre_sddp::{BoundaryLoadRequest, SddpError, load_boundary_cuts};
 use serde_json::json;
 
-fn ymd(year: i32, month: u32, day: u32) -> NaiveDate {
-    NaiveDate::from_ymd_opt(year, month, day).expect("valid calendar date")
-}
-
 fn fixture_priced_date(pool: u32) -> NaiveDate {
-    ymd(2030, 1, 1)
-        .checked_add_months(chrono::Months::new(pool))
-        .unwrap()
+    cobre_sddp::test_support::fixture_priced_date(ymd(2030, 1, 1), pool)
 }
 
 /// A minimal producer block for artifact-writing test helpers. Its own
@@ -35,17 +30,9 @@ fn fixture_priced_date(pool: u32) -> NaiveDate {
 fn producer_block() -> ProducerBlock {
     ProducerBlock {
         completed_iterations: 1,
-        final_lower_bound: 0.0,
-        best_upper_bound: None,
         max_iterations: 1,
         forward_passes: 1,
-        warm_start_cuts: 0,
-        warm_start_counts: vec![],
-        rng_seed: 0,
-        total_visited_states: 0,
-        training_block_mode: "parallel".to_string(),
-        training_block_mode_per_stage: vec![],
-        cost_scale_factor: None,
+        ..cobre_sddp::test_support::producer_block()
     }
 }
 

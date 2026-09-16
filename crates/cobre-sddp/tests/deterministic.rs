@@ -10675,10 +10675,7 @@ mod water_terminal_fcf_valuation {
     use chrono::NaiveDate;
     use cobre_core::EntityId;
     use cobre_core::temporal::StageStateConfig;
-    use cobre_io::{
-        BoundaryPolicy, GraphManifest, ManifestNode, PolicyCutRecord, ProducerBlock,
-        StageCutsPayload, encode_slot_date, write_policy_checkpoint,
-    };
+    use cobre_io::BoundaryPolicy;
     use cobre_sddp::indexer::CutStateProjection;
     use cobre_sddp::setup::{NodeId, StageIdx};
     use cobre_sddp::test_support::{patch_backward_opening_for_probe, solve_stage_for_probe};
@@ -10770,72 +10767,10 @@ mod water_terminal_fcf_valuation {
     /// Pool `pool`'s fixture `priced_state_date`: `2030-01-01` plus `pool`
     /// months.
     fn fixture_priced_date(pool: u32) -> NaiveDate {
-        NaiveDate::from_ymd_opt(2030, 1, 1)
-            .unwrap()
-            .checked_add_months(chrono::Months::new(pool))
-            .unwrap()
-    }
-
-    /// Write a synthetic single-cut boundary checkpoint carrying `intercept`
-    /// and the explicit per-slot `coefficients`, unscaled (`cost_scale_factor:
-    /// Some(1.0)`). No entity manifest: the loader's identity check
-    /// short-circuits with a warning (`right_boundary_pricing.rs`'s pattern).
-    fn write_synthetic_boundary(
-        dir: &Path,
-        state_dimension: u32,
-        intercept: f64,
-        coefficients: &[f64],
-    ) {
-        let cuts = vec![PolicyCutRecord {
-            cut_id: 0,
-            slot_index: 0,
-            iteration: 0,
-            forward_pass_index: 0,
-            intercept,
-            coefficients,
-            is_active: true,
-        }];
-        let payload = StageCutsPayload {
-            stage_id: 0,
-            state_dimension,
-            capacity: 1,
-            warm_start_count: 0,
-            cuts: &cuts,
-            active_cut_indices: &[0],
-            populated_count: 1,
-            entity_manifest: &[],
-            cost_scale_factor: 1_000_000.0,
-            node_id: 100,
-            graph_stage_id: -1,
-            priced_state_date: encode_slot_date(fixture_priced_date(0)),
-        };
-        let metadata = cobre_sddp::test_support::checkpoint_metadata(
-            1,
-            GraphManifest {
-                n_pools: 1,
-                nodes: vec![ManifestNode {
-                    id: 100,
-                    stage_id: 0,
-                    pool_id: 0,
-                }],
-                edges: vec![],
-            },
-            ProducerBlock {
-                completed_iterations: 0,
-                final_lower_bound: 0.0,
-                best_upper_bound: None,
-                max_iterations: 0,
-                forward_passes: 0,
-                warm_start_cuts: 0,
-                warm_start_counts: vec![],
-                rng_seed: 0,
-                total_visited_states: 0,
-                training_block_mode: "parallel".to_string(),
-                training_block_mode_per_stage: vec![],
-                cost_scale_factor: Some(1.0),
-            },
-        );
-        write_policy_checkpoint(dir, &[payload], &[], &metadata, &[]).expect("write checkpoint");
+        cobre_sddp::test_support::fixture_priced_date(
+            cobre_sddp::test_support::ymd(2030, 1, 1),
+            pool,
+        )
     }
 
     /// Load a bucket-only boundary (`BETA` on `bucket_col`, zero elsewhere,
@@ -10844,7 +10779,13 @@ mod water_terminal_fcf_valuation {
         let state_dimension = setup.fcf.state_dimension as u32;
         let mut coefficients = vec![0.0_f64; state_dimension as usize];
         coefficients[bucket_col] = BETA;
-        write_synthetic_boundary(dir, state_dimension, ALPHA, &coefficients);
+        cobre_sddp::test_support::write_synthetic_boundary(
+            dir,
+            state_dimension,
+            ALPHA,
+            &coefficients,
+            fixture_priced_date(0),
+        );
 
         let boundary_cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
             dir,

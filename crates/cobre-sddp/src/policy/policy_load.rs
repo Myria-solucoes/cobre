@@ -107,11 +107,8 @@ pub(crate) fn rescale_cut_records_for_load(
     }
 }
 
-/// `rescale_cut_records_for_load` applied to every stage of a full policy
-/// checkpoint — the [`FullFcf`] load path (training warm-start/resume and
-/// simulation-only runs both route through this before the records reach
-/// [`crate::FutureCostFunction::from_deserialized`] /
-/// [`crate::FutureCostFunction::new_with_warm_start`]).
+/// [`rescale_cut_records_for_load`] applied to every stage of a full policy
+/// checkpoint — the [`FullFcf`] load path.
 pub fn rescale_checkpoint_cuts_for_load(
     stage_cuts: &mut [StageCutsReadResult],
     source_cost_scale_factor: Option<f64>,
@@ -181,20 +178,15 @@ mod sealed {
 /// never a third, uncatalogued one.
 pub trait PolicyLoadKind: sealed::Sealed {
     /// Whether `state_dimension` equality is hard-rejected for this kind.
-    /// `false` ([`BoundaryInjection`]) defers to the per-slot reconciliation in
-    /// [`load_boundary_cuts`], which tolerates a differing source/current
-    /// dimension.
     const CHECK_STATE_DIMENSION: bool;
     /// Whether `num_stages` equality is hard-rejected for this kind.
     const CHECK_NUM_STAGES: bool;
     /// Whether the pool count and graph-manifest identity are hard-rejected for
-    /// this kind. The pool-count analogue of [`Self::CHECK_NUM_STAGES`].
+    /// this kind.
     const CHECK_N_POOLS: bool;
     /// Whether per-slot identity is checked here as an EXACT positional match
-    /// ([`compare_manifest_slot_identity`]). `false` means the kind reconciles
-    /// slot identity by its own mechanism instead, confined to its own load
-    /// path (currently only [`BoundaryInjection`], via
-    /// [`crate::policy::reconcile::build_rebind`] in [`load_boundary_cuts`]).
+    /// ([`compare_manifest_slot_identity`]); `false` means the kind reconciles
+    /// it by its own mechanism instead.
     const CHECK_SLOT_IDENTITY_EXACT: bool;
 }
 
@@ -244,18 +236,11 @@ pub struct PolicyLoadProof<K: PolicyLoadKind> {
 }
 
 /// Validate that `source`'s state layout is compatible with `current`'s, per
-/// `K`'s check matrix: `state_dimension` equality is hard-rejected only when
-/// `K::CHECK_STATE_DIMENSION` ([`FullFcf`]); [`BoundaryInjection`] skips it and
-/// defers to the per-slot reconciliation in [`load_boundary_cuts`]. `num_stages`
-/// equality is hard-rejected only when `K::CHECK_NUM_STAGES` ([`FullFcf`]).
-/// Per-slot identity is an EXACT positional match (delegated to
-/// [`compare_manifest_slot_identity`]) only when `K::CHECK_SLOT_IDENTITY_EXACT`
-/// ([`FullFcf`]); [`BoundaryInjection`] skips it here — its slot identity is
-/// RECONCILED separately, by [`crate::policy::reconcile::build_rebind`] in
-/// [`load_boundary_cuts`], never by this lower-level manifest check.
-/// `col_scale`/scaling is never a compatibility dimension. This is the single
-/// entry point for policy-load validation — its success is the only way to
-/// construct a [`PolicyLoadProof<K>`], so every load path routes through it.
+/// `K`'s check matrix ([`FullFcf`], [`BoundaryInjection`]). `col_scale`/scaling
+/// is never a compatibility dimension: a state variable's identity and physical
+/// unit are independent of how the LP happens to scale its column. This is the
+/// single entry point for policy-load validation — its success is the only way
+/// to construct a [`PolicyLoadProof<K>`], so every load path routes through it.
 ///
 /// # Errors
 ///
@@ -370,14 +355,12 @@ pub fn compare_graph_manifest_identity(
     Ok(())
 }
 
-/// Build a basis cache from deserialized checkpoint basis records.
+/// Build a basis cache from deserialized checkpoint basis records: one entry
+/// per canonical node position, `None` where no record matches.
 ///
-/// Returns a `Vec<Option<CapturedBasis>>` of length `n_nodes` (`== node_ids.len()`),
-/// one entry per canonical node position; nodes without a matching record get
-/// `None`. Each basis record is keyed by its own node ordinal (its `stage_id`),
-/// so leaves sharing a pool land in distinct node slots — no `>= num_stages`
-/// drop, no cross-node collision, both of which the pre-branching per-stage
-/// sizing produced once `n_nodes > n_stages`. `u8` status codes decode via
+/// Each basis record is keyed by its own node ordinal (its `stage_id`), so
+/// leaves sharing a pool land in distinct node slots — no `>= num_stages` drop,
+/// no cross-node collision. `u8` status codes decode via
 /// `from_discriminant_code`, the mirror of `convert_basis_cache`'s export-side
 /// `to_discriminant_code`; a pre-existing checkpoint (bytes `0..=4`) decodes
 /// identically, since that range means the same in the canonical and `HiGHS`
@@ -401,11 +384,9 @@ pub fn compare_graph_manifest_identity(
 /// all-template behavior (empty `cut_row_slots`; every cut row reconstructs
 /// BASIC). This changes only the warm-start solve path, never the optimum.
 ///
-/// `node_ids` / `node_pools` are the CURRENT study's `NodeGraph::node_ids` and
-/// `NodeGraph::node_pool_ids` (both length `n_nodes`): a resume/warm-start
-/// continues the SAME node topology, so each reconstructed basis's `node_id` is
-/// `node_ids[node]` and its owning pool is `node_pools[node]` — never a value
-/// recovered from the checkpoint itself (the checkpoint wire carries no node id).
+/// `node_ids` / `node_pools` are the CURRENT study's, since a resume/warm-start
+/// continues the SAME node topology — never a value recovered from the
+/// checkpoint itself, whose wire carries no node id.
 #[must_use]
 pub fn build_basis_cache_from_checkpoint(
     stage_bases: &[OwnedPolicyBasisRecord],
@@ -482,25 +463,20 @@ fn slot_identity(slot: &EntitySlot) -> (u8, i32, u32) {
 }
 
 /// Whether `source`/`current` can be identity-verified at all: an empty
-/// manifest on either side (a pre-manifest checkpoint) cannot be verified.
-/// Answers the emptiness question only — the caller decides how to report a
-/// `false` result, leaving `state_dimension` as the sole compatibility guard
-/// either way. Shared by [`compare_manifest_slot_identity`] (the [`FullFcf`]
-/// exact-match path) and [`load_boundary_cuts`]'s reconcile path.
+/// manifest on either side (a pre-manifest checkpoint) cannot be. Answers the
+/// emptiness question only — each caller decides how to report a `false`
+/// result, leaving `state_dimension` as the sole compatibility guard.
 fn manifest_identity_verifiable(source: &[EntitySlot], current: &[EntitySlot]) -> bool {
     !source.is_empty() && !current.is_empty()
 }
 
 /// Compare two entity manifests slot-for-slot by `slot_identity`.
 ///
-/// `source` (a loaded policy's manifest) and `current` (the current study's
-/// terminal manifest) describe the same-length state vector of two studies. A
-/// per-slot `(entity_type, entity_id, subindex)` mismatch means a cut coefficient
-/// would attach to the wrong state variable and is REJECTED. `was_active` is
-/// excluded from `slot_identity`, so a `source`-dormant slot now active only warns.
-/// An empty manifest on either side (a pre-manifest checkpoint) cannot be
-/// verified: warn and return `Ok`, leaving the caller's `state_dimension` check
-/// standing.
+/// A per-slot [`slot_identity`] mismatch means a cut coefficient would attach
+/// to the wrong state variable and is REJECTED; a `source`-dormant slot now
+/// active only warns. An unverifiable manifest
+/// ([`manifest_identity_verifiable`]) warns and returns `Ok`, leaving the
+/// caller's `state_dimension` check standing.
 ///
 /// # Errors
 ///
@@ -629,10 +605,10 @@ fn boundary_predates_self_describing_cuts(boundary_path: &Path) -> SddpError {
     ))
 }
 
-/// The parameter carrier for [`load_boundary_cuts`]. Fields are private, so
-/// the parameter set can grow or shrink without forcing every call site that
-/// does not supply the changed field to change — mirrors [`EntitySlot`]'s
-/// `storage(..).with_interval(..)` builder shape.
+/// The parameter carrier for [`load_boundary_cuts`]. Fields are private and
+/// reached through the `with_*` builders below, each of which leaves every
+/// other field unchanged, so the parameter set can grow without touching call
+/// sites that do not supply the new field.
 #[derive(Debug, Clone, Copy)]
 pub struct BoundaryLoadRequest<'a> {
     boundary_path: &'a Path,
@@ -647,10 +623,8 @@ pub struct BoundaryLoadRequest<'a> {
 }
 
 impl<'a> BoundaryLoadRequest<'a> {
-    /// Builds a request from the five values every [`load_boundary_cuts`]
-    /// caller must supply; `fixed_windows` defaults to an empty slice,
-    /// `inflow_lag_depth` to `None`, and `strict` to `false` until a `with_*`
-    /// call overrides them.
+    /// Builds a request from the values every [`load_boundary_cuts`] caller
+    /// must supply; the rest default until a `with_*` call overrides them.
     #[must_use]
     pub fn new(
         boundary_path: &'a Path,
@@ -672,8 +646,7 @@ impl<'a> BoundaryLoadRequest<'a> {
         }
     }
 
-    /// Returns `self` with `fixed_windows` replaced; every other field is
-    /// unchanged.
+    /// Returns `self` with `fixed_windows` replaced.
     #[must_use]
     pub fn with_fixed_windows(self, fixed_windows: &'a [AnticipatedCommitmentHistory]) -> Self {
         Self {
@@ -682,8 +655,7 @@ impl<'a> BoundaryLoadRequest<'a> {
         }
     }
 
-    /// Returns `self` with `inflow_lag_depth` replaced; every other field is
-    /// unchanged.
+    /// Returns `self` with `inflow_lag_depth` replaced.
     #[must_use]
     pub fn with_inflow_lag_depth(self, inflow_lag_depth: Option<u32>) -> Self {
         Self {
@@ -692,8 +664,7 @@ impl<'a> BoundaryLoadRequest<'a> {
         }
     }
 
-    /// Returns `self` with `study_seasons` set to `Some(study_seasons)`; every
-    /// other field is unchanged. Build `study_seasons` with
+    /// Returns `self` with `study_seasons` set. Build it with
     /// [`crate::policy::orchestration::build_season_manifest`] — the same
     /// function the checkpoint writer calls — so the study and source sides
     /// are never constructed by diverging code paths.
@@ -705,7 +676,7 @@ impl<'a> BoundaryLoadRequest<'a> {
         }
     }
 
-    /// Returns `self` with `strict` replaced; every other field is unchanged.
+    /// Returns `self` with `strict` replaced.
     #[must_use]
     pub fn with_strict(self, strict: bool) -> Self {
         Self { strict, ..self }
@@ -731,9 +702,8 @@ fn boundary_checkpoint_undated(boundary_path: &Path) -> SddpError {
 /// Encodes the study side ONCE via
 /// [`encode_slot_date`] and compares integers; never decodes a pool's stamp
 /// to compare `NaiveDate` values, so a malformed stamp can never compare
-/// equal to a real date. See [`load_boundary_cuts`]'s `# Errors` for the
-/// three rejects this enforces (the fourth, `cost_scale_factor`/`node_id`,
-/// runs after selection on the winning pool).
+/// equal to a real date. [`load_boundary_cuts`]'s `# Errors` catalogues the
+/// rejects this enforces.
 fn select_boundary_pool<'a>(
     checkpoint: &'a PolicyCheckpoint,
     boundary_path: &Path,
@@ -810,8 +780,7 @@ fn season_cycle_label(code: u8) -> &'static str {
 /// ([`orchestration::build_season_manifest`](crate::policy::orchestration::build_season_manifest)) —
 /// and looks each hydro up in `source.hydro_orders` by binary search, never a
 /// `HashMap`. A hydro present only in `source` is a superset drop and is
-/// never examined here. Allocates nothing on the passing path; a message is
-/// built only once a reject is certain.
+/// never examined here.
 fn check_season_compatibility(
     boundary_path: &Path,
     study: &StudySeasonManifest,
@@ -895,20 +864,14 @@ fn check_season_compatibility(
 /// `HydroStorage` or `HydroInflowLag` slot with no same-identity `source`
 /// counterpart — the state's must-correspond core (see `reconcile`'s module
 /// doc). Checked up front, over the whole `current` manifest at once, rather
-/// than the first miss [`build_rebind`] would otherwise report: every
-/// missing storage hydro is named in one message, then every missing
-/// inflow-lag `(hydro, depth)` pair in a second — storage first, since a
-/// missing reservoir is the louder "different deck" signal and a deck
-/// missing a plant is usually missing its lag block too. A `source` slot
-/// with no `current` counterpart is not examined here; that is a superset
-/// drop, reported separately by
-/// [`BoundaryReconciliationReport::superset_summary`] and, under
-/// `policy.boundary.strict`, rejected by [`load_boundary_cuts`] itself.
+/// than the first miss [`build_rebind`] would otherwise report: storage
+/// first, since a missing reservoir is the louder "different deck" signal and
+/// a deck missing a plant is usually missing its lag block too. A `source`
+/// slot with no `current` counterpart is a superset drop, not examined here.
 ///
-/// `source`'s storage and inflow-lag slots are hashed once into a membership
-/// probe and never iterated; the missing lists come entirely from a
-/// positional walk of `current`, so their order matches `current`'s own
-/// declaration order.
+/// `source`'s slots are hashed once into a membership probe and never
+/// iterated; the missing lists come from a positional walk of `current`, so
+/// their order matches `current`'s own declaration order.
 ///
 /// # Errors
 ///
@@ -974,99 +937,53 @@ fn check_topology_subset(source: &[EntitySlot], current: &[EntitySlot]) -> Resul
 /// Load boundary cuts from the pool of a source Cobre policy checkpoint that
 /// prices the state at the study's boundary date.
 ///
-/// Pool selection and the source cost scale are read entirely from the
-/// resolved pool's own `cuts/<pool>.bin` — its `priced_state_date` and
-/// `cost_scale_factor` self-describing facts — never from `metadata.json`'s
-/// `graph_manifest`/`producer.cost_scale_factor`. Cobre encodes
-/// [`BoundaryLoadRequest`]'s `boundary_date` once via
-/// [`cobre_io::encode_slot_date`] and selects the unique pool whose
-/// `priced_state_date` equals it, comparing the encoded integers — never by
-/// decoding a pool's own stamp, so a malformed stamp can never compare equal
-/// to a real date (see the four selection rejects in `# Errors` below). A
-/// resolved pool whose `cost_scale_factor` reads `None` predates those facts
-/// and REJECTS: there is no silent default and no `metadata.json` fallback. A
-/// resolved pool shared by more than one node (`node_id ==
-/// STAGE_CUTS_NODE_ID_SENTINEL`) REJECTS too — a boundary source must be a
-/// single-node terminal pool.
+/// Pool selection ([`select_boundary_pool`]) and the source cost scale are
+/// read entirely from the resolved pool's own `cuts/<pool>.bin`, never from
+/// `metadata.json`'s `graph_manifest`/`producer.cost_scale_factor`. A resolved
+/// pool whose `cost_scale_factor` reads `None`, or which is shared by more
+/// than one node (`node_id == STAGE_CUTS_NODE_ID_SENTINEL`), REJECTS: there is
+/// no silent default and no `metadata.json` fallback, and a boundary source
+/// must be a single-node terminal pool.
 ///
-/// Compares the source pool's manifest against the current TERMINAL-stage
+/// The source pool's manifest is compared against the current TERMINAL-stage
 /// manifest (`current_manifest`, built via
 /// [`StudySetup::build_terminal_entity_manifest`](crate::StudySetup::build_terminal_entity_manifest));
-/// `num_stages` may differ. `state_dimension`/`num_stages` compatibility
-/// routes through [`validate_policy_load`] typed to [`BoundaryInjection`];
-/// per-slot identity is then RECONCILED, never exact-matched, via
-/// [`crate::policy::reconcile::build_rebind`]/`rebind_cut` — storage and
-/// inflow-lag first fail through `check_topology_subset` below, which reports
-/// every offending hydro or lag depth in one message per family before any
-/// coefficient moves; `build_rebind`'s own per-slot storage/inflow-lag
-/// rejects remain its postcondition for a direct in-crate caller, but are
-/// unreachable through this function once the gate has passed (the entity is
-/// never relaxed). A live target slot of EITHER forward-dated family
-/// (`AnticipatedThermalState` or `HydroTransitBucket`) whose OWN
-/// `interval_start`/`interval_end` (`current_manifest` — built via
-/// [`StudySetup::build_terminal_entity_manifest`](crate::StudySetup::build_terminal_entity_manifest))
-/// reaches past `boundary_date` fans out against the source's own priced
-/// intervals of the SAME family by calendar overlap.
+/// `num_stages` may differ. Per-slot identity is RECONCILED, never
+/// exact-matched, via [`crate::policy::reconcile::build_rebind`]/`rebind_cut`.
 /// An empty manifest on either side skips reconciliation, relying on
-/// `state_dimension` alone; a `was_active == false` boundary slot whose
-/// current counterpart is active loads unchecked — `BoundaryInjection`
-/// never runs the exact slot-identity comparison. Wraps the result in a
-/// [`ValidatedBoundaryCuts`] — the sole constructor [`inject_boundary_cuts`]
-/// accepts — carrying a [`crate::policy::reconcile::build_reconciliation_report`]
-/// tally on the reconcile path, or the `reconciled: false` default on the
-/// skipped path; read via [`ValidatedBoundaryCuts::report`]. The path never
-/// warns: every outcome is either an `Err` reject or `Ok` cuts plus report.
+/// `state_dimension` alone. The path never warns: every outcome is either an
+/// `Err` reject or `Ok` cuts plus a
+/// [`ValidatedBoundaryCuts::report`] tally.
 ///
-/// `effective_inflow_lag_depth` is the resolved lag depth the current state
-/// layout reserves — inferred from this boundary policy via
-/// [`resolve_boundary_state_requirements`]. A cut
-/// referencing inflow-lag state deeper than it is a coupling regression (the
-/// layout should have been sized to hold the loaded cuts), rejected before the
-/// manifest checks so the lag-depth-specific message wins over the generic
-/// `state_dimension` reject.
+/// The three gates ahead of [`validate_policy_load`] are ordered so each one's
+/// specific message wins over the generic `state_dimension` reject:
+/// `effective_inflow_lag_depth` (a cut reaching deeper than the layout
+/// reserves is a coupling regression, since the layout is itself sized from
+/// this boundary via [`resolve_boundary_state_requirements`]), then
+/// [`check_season_compatibility`], then [`check_topology_subset`]. The last
+/// shares the manifest-verifiability gate with the intercept fold and the
+/// rebind, so an unverifiable manifest defers to `state_dimension` throughout.
 ///
-/// `study_seasons`, when present and not [`SEASON_CYCLE_CODE_ABSENT`], gates
-/// the load on season-cycle and per-hydro PAR-order identity against the
-/// checkpoint's own `metadata.season_manifest`
-/// ([`check_season_compatibility`]), run after the lag-depth guard and before
-/// [`validate_policy_load`] so this gate's specific message wins over the
-/// generic `state_dimension` reject. Build `study_seasons` with
-/// [`crate::policy::orchestration::build_season_manifest`], the same builder
-/// [`crate::policy::orchestration::write_checkpoint`] calls, so the two sides
-/// can never be constructed by diverging code. This is the one study-global
-/// fact this function reads from `metadata.json` rather than a resolved
-/// pool's own `cuts/<pool>.bin`: unlike `cost_scale_factor` and the graph, a
-/// season cycle is genuinely study-global (one per study, not one per pool),
-/// has no per-pool counterpart to go stale against, and duplicating it onto
-/// every pool would itself be the drift hazard.
-///
-/// `check_topology_subset` runs immediately after the (hoisted) manifest
-/// verifiability check that also gates the intercept fold and the rebind
-/// below, and before [`validate_policy_load`], so this gate's specific,
-/// every-missing-entity message wins over the generic `state_dimension`
-/// reject. It is skipped on the same unverifiable (empty-manifest) path
-/// those later steps skip, deferring entirely to the `state_dimension`
-/// fallback there.
+/// `check_season_compatibility` is the one study-global fact read from
+/// `metadata.json` rather than a resolved pool's own `cuts/<pool>.bin`: unlike
+/// `cost_scale_factor` and the graph, a season cycle is genuinely study-global
+/// (one per study, not one per pool), has no per-pool counterpart to go stale
+/// against, and duplicating it onto every pool would itself be the drift
+/// hazard.
 ///
 /// `fixed_windows` are the current study's fixed post-horizon anticipated
 /// commitments (built via
 /// [`StudySetup::build_terminal_fixed_post_horizon_windows`](crate::StudySetup::build_terminal_fixed_post_horizon_windows)).
-/// When the manifest is verifiable,
 /// [`crate::policy::reconcile::build_boundary_fold`] folds their displacement
 /// value into each boundary cut's intercept on the RAW records, BEFORE
 /// `rescale_cut_records_for_load`, so the folded term rides both rescale
 /// transforms with the rest of the intercept; an empty fold leaves every
-/// intercept bit-identical, and an unverifiable manifest skips the fold (it
-/// shares the rebind's gate).
+/// intercept bit-identical.
 ///
 /// A superset boundary — a source pricing state this study does not model —
-/// is recorded in the returned [`ValidatedBoundaryCuts::report`] either way;
-/// the two `strict` branches differ only in whether the load itself
-/// proceeds. With `strict` unset (the default), it loads and prints nothing.
-/// With `policy.boundary.strict` set, it rejects, naming the total dropped
-/// count and every dropping family
-/// ([`crate::policy::reconcile::BoundaryReconciliationReport::superset_summary`]).
-/// `strict` changes no coefficient, no tally, and no other reject.
+/// is recorded in the returned report either way; `strict` changes only
+/// whether the load itself proceeds, never a coefficient, a tally, or another
+/// reject.
 ///
 /// # Errors
 ///
@@ -1139,9 +1056,6 @@ pub fn load_boundary_cuts(
         return Err(boundary_predates_self_describing_cuts(boundary_path));
     };
 
-    // A shared pool (more than one owning node, `node_id ==
-    // STAGE_CUTS_NODE_ID_SENTINEL`) can never be a boundary source — there is
-    // no single terminal leaf its state belongs to.
     if stage_result.node_id == STAGE_CUTS_NODE_ID_SENTINEL {
         return Err(SddpError::Validation(format!(
             "boundary policy at {}: a boundary source must be a single-node terminal pool; the \
@@ -1164,9 +1078,8 @@ pub fn load_boundary_cuts(
         }
     }
 
-    // Skipped when the study side is absent: no declared season map means no
-    // PAR context to compare and, having no inflow models, no lag slots to
-    // protect.
+    // A study declaring no season map has no PAR context to compare and, having
+    // no inflow models, no lag slots to protect.
     if let Some(study_seasons) = study_seasons
         && study_seasons.cycle_code != SEASON_CYCLE_CODE_ABSENT
     {
@@ -1184,8 +1097,8 @@ pub fn load_boundary_cuts(
         check_topology_subset(&stage_result.entity_manifest, current_manifest)?;
     }
 
-    // `BoundaryInjection` checks neither `num_stages`, `n_pools`, nor the
-    // graph manifest, so these unchecked fields carry placeholders.
+    // `BoundaryInjection` checks neither `num_stages`, `n_pools`, nor the graph
+    // manifest, so those fields carry placeholders.
     let empty_graph = GraphManifest::default();
     let source = PolicyStageManifest {
         state_dimension: stage_result.state_dimension,
@@ -1224,10 +1137,8 @@ pub fn load_boundary_cuts(
     }
 
     if verifiable {
-        // The fold reads SOURCE coefficients by source_pos and MUST run before rebind_cut
-        // replaces record.coefficients with the target-aligned vector; placed before rescale
-        // so the folded future-cost term rides both rescale transforms with the rest of the
-        // intercept.
+        // The fold reads SOURCE coefficients by source_pos, so it MUST run before
+        // rebind_cut replaces record.coefficients with the target-aligned vector.
         let fold = build_boundary_fold(&stage_result.entity_manifest, fixed_windows)?;
         if !fold.is_empty() {
             for record in &mut records {
@@ -1252,8 +1163,6 @@ pub fn load_boundary_cuts(
     );
 
     let report = if verifiable {
-        // Built once and shared by both calls below, so a source slot's delivery span is
-        // never read two different ways.
         let source_index = build_source_interval_index(&stage_result.entity_manifest)?;
         let rebind = build_rebind(
             &stage_result.entity_manifest,
@@ -1267,7 +1176,6 @@ pub fn load_boundary_cuts(
         build_reconciliation_report(
             &stage_result.entity_manifest,
             current_manifest,
-            boundary_date,
             &rebind,
             &source_index,
         )
@@ -1286,12 +1194,14 @@ pub fn load_boundary_cuts(
     Ok(ValidatedBoundaryCuts { records, report })
 }
 
-/// Boundary cut records that passed [`validate_policy_load`]'s
-/// [`BoundaryInjection`] check matrix. The private fields mean the only way to
-/// obtain one is [`load_boundary_cuts`], so [`inject_boundary_cuts`] cannot
-/// compile against a bare, unvalidated `Vec<OwnedPolicyCutRecord>`. Derefs to
-/// `[OwnedPolicyCutRecord]` for read access; carries the load's
-/// [`BoundaryReconciliationReport`], read via [`Self::report`].
+/// Boundary cut records validated by [`load_boundary_cuts`] on the reading
+/// rank, or reconstructed by [`Self::from_broadcast_records`] on a peer rank
+/// that received them over MPI from a rank that ran it. The private fields
+/// mean only these two named constructors can produce one, so
+/// [`inject_boundary_cuts`] cannot compile against a bare, unvalidated
+/// `Vec<OwnedPolicyCutRecord>`. Derefs to `[OwnedPolicyCutRecord]` for read
+/// access; carries the load's [`BoundaryReconciliationReport`], read via
+/// [`Self::report`].
 #[derive(Debug, Clone)]
 pub struct ValidatedBoundaryCuts {
     records: Vec<OwnedPolicyCutRecord>,
@@ -1338,8 +1248,9 @@ impl Deref for ValidatedBoundaryCuts {
 /// `warm_start_count` is what makes the forward pass treat the terminal
 /// stage as boundary-loaded (`terminal_has_boundary_cuts`) and skip theta zeroing.
 ///
-/// `boundary_cuts` must come from [`load_boundary_cuts`] — its private field
-/// means a bare `Vec<OwnedPolicyCutRecord>`/slice cannot substitute, so an
+/// `boundary_cuts` must come from [`load_boundary_cuts`] or
+/// [`ValidatedBoundaryCuts::from_broadcast_records`] — its private fields
+/// mean a bare `Vec<OwnedPolicyCutRecord>`/slice cannot substitute, so an
 /// unvalidated boundary load cannot compile.
 ///
 /// ```compile_fail
@@ -1357,8 +1268,6 @@ pub fn inject_boundary_cuts(setup: &mut StudySetup, boundary_cuts: &ValidatedBou
     let terminal_idx = fcf.pools.len() - 1;
     let state_dimension = fcf.state_dimension;
     let forward_passes = fcf.forward_passes;
-    // The terminal pool never receives a new cut (a leaf generates none), so
-    // `max_iterations = 0` reserves no growable training capacity.
     fcf.pools[terminal_idx] =
         CutPool::new_with_warm_start(state_dimension, forward_passes, 0, boundary_cuts);
 }
@@ -1369,10 +1278,9 @@ mod tests {
     use chrono::NaiveDate;
     use cobre_core::{AnticipatedCommitmentHistory, EntityId};
     use cobre_io::{
-        EntitySlot, GraphManifest, HydroSeasonOrders, ManifestEdge, ManifestNode, ProducerBlock,
-        SEASON_CYCLE_CODE_MONTHLY, SEASON_CYCLE_CODE_WEEKLY, STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
-        SeasonManifest, StageCutsPayload, decode_slot_date, encode_slot_date,
-        read_policy_checkpoint,
+        EntitySlot, GraphManifest, HydroSeasonOrders, ProducerBlock, SEASON_CYCLE_CODE_MONTHLY,
+        SEASON_CYCLE_CODE_WEEKLY, STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, SeasonManifest,
+        StageCutsPayload, decode_slot_date, encode_slot_date, read_policy_checkpoint,
     };
 
     use super::{
@@ -1389,38 +1297,16 @@ mod tests {
 
     // ── helpers ───────────────────────────────────────────────────────────────
 
+    use crate::test_support::{
+        anticipated_slot_at, chain_graph_manifest, inflow_lag_slot, next_month_anchor,
+        storage_slot, transit_bucket_slot, transit_bucket_slot_over, ymd,
+    };
+
     /// Pool `pool`'s fixture `priced_state_date`: `2030-01-01` plus `pool`
     /// months, so every pool in a multi-pool checkpoint written by this
     /// module's fixtures carries a distinct, non-sentinel date.
     fn fixture_priced_date(pool: u32) -> NaiveDate {
-        NaiveDate::from_ymd_opt(2030, 1, 1)
-            .unwrap()
-            .checked_add_months(chrono::Months::new(pool))
-            .unwrap()
-    }
-
-    fn ymd(year: i32, month: u32, day: u32) -> NaiveDate {
-        NaiveDate::from_ymd_opt(year, month, day).expect("valid calendar date")
-    }
-
-    /// A single `AnticipatedThermalState` slot (`entity_type 2`), carrying its
-    /// own calendar-month `[month_anchor, next_month_anchor(month_anchor))`
-    /// delivery interval anchored at `month_anchor` (`YYYYMM01`).
-    fn anticipated_slot(thermal_id: i32, ring_slot: u32, month_anchor: i32) -> EntitySlot {
-        EntitySlot::anticipated(thermal_id, ring_slot, true)
-            .with_interval(month_anchor, next_month_anchor(month_anchor))
-    }
-
-    /// The following month's day-01 `YYYYMMDD` anchor of `month_anchor`
-    /// (itself a day-01 anchor) — mirrors the same-named helper in `tests/`.
-    fn next_month_anchor(month_anchor: i32) -> i32 {
-        let year = month_anchor / 10_000;
-        let month = (month_anchor / 100) % 100;
-        if month == 12 {
-            (year + 1) * 10_000 + 101
-        } else {
-            year * 10_000 + (month + 1) * 100 + 1
-        }
+        test_support::fixture_priced_date(ymd(2030, 1, 1), pool)
     }
 
     /// Discard warnings: a `&mut dyn FnMut(&str)` for tests asserting only the
@@ -1441,41 +1327,9 @@ mod tests {
     fn producer_block() -> ProducerBlock {
         ProducerBlock {
             completed_iterations: 10,
-            final_lower_bound: 0.0,
-            best_upper_bound: None,
             max_iterations: 50,
             forward_passes: 1,
-            warm_start_cuts: 0,
-            warm_start_counts: vec![],
-            rng_seed: 0,
-            total_visited_states: 0,
-            training_block_mode: "parallel".to_string(),
-            training_block_mode_per_stage: vec![],
-            cost_scale_factor: None,
-        }
-    }
-
-    /// A 1:1 chain graph manifest over `n_stages` nodes (node id == stage id ==
-    /// pool id) — the shape a chain-degenerate study writes.
-    fn chain_manifest(n_stages: u32) -> GraphManifest {
-        let nodes = (0..n_stages)
-            .map(|t| ManifestNode {
-                id: i32::try_from(t).unwrap(),
-                stage_id: i32::try_from(t).unwrap(),
-                pool_id: t,
-            })
-            .collect();
-        let edges = (0..n_stages.saturating_sub(1))
-            .map(|t| ManifestEdge {
-                source_id: i32::try_from(t).unwrap(),
-                target_id: i32::try_from(t + 1).unwrap(),
-                probability: 1.0,
-            })
-            .collect();
-        GraphManifest {
-            n_pools: n_stages,
-            nodes,
-            edges,
+            ..test_support::producer_block()
         }
     }
 
@@ -1520,8 +1374,11 @@ mod tests {
         cut_intercepts: &[f64],
         manifest: &[EntitySlot],
     ) {
-        let metadata =
-            test_support::checkpoint_metadata(n_stages, chain_manifest(n_stages), producer_block());
+        let metadata = test_support::checkpoint_metadata(
+            n_stages,
+            chain_graph_manifest(n_stages),
+            producer_block(),
+        );
         write_checkpoint_with_manifest_metadata(
             dir,
             n_stages,
@@ -1543,12 +1400,14 @@ mod tests {
         manifest: &[EntitySlot],
         season_manifest: cobre_io::SeasonManifest,
     ) {
-        let metadata = test_support::checkpoint_metadata_with_seasons(
-            n_stages,
-            chain_manifest(n_stages),
-            producer_block(),
+        let metadata = cobre_io::CheckpointManifest {
             season_manifest,
-        );
+            ..test_support::checkpoint_metadata(
+                n_stages,
+                chain_graph_manifest(n_stages),
+                producer_block(),
+            )
+        };
         write_checkpoint_with_manifest_metadata(
             dir,
             n_stages,
@@ -1560,8 +1419,8 @@ mod tests {
     }
 
     /// Shared body for [`write_checkpoint_with_manifest`] and
-    /// [`write_checkpoint_with_manifest_and_seasons`]: builds the payloads and
-    /// writes the checkpoint under the caller-supplied `metadata`.
+    /// [`write_checkpoint_with_manifest_and_seasons`], under the
+    /// caller-supplied `metadata`.
     fn write_checkpoint_with_manifest_metadata(
         dir: &std::path::Path,
         n_stages: u32,
@@ -1679,7 +1538,7 @@ mod tests {
         };
         let metadata = test_support::checkpoint_metadata(
             stage_id + 1,
-            chain_manifest(stage_id + 1),
+            chain_graph_manifest(stage_id + 1),
             producer_block(),
         );
         cobre_io::write_policy_checkpoint(dir, &[payload], &[], &metadata, &[]).unwrap();
@@ -2054,29 +1913,6 @@ mod tests {
     /// Build a 2-slot storage manifest with the given hydro ids, both active.
     fn storage_manifest(id0: i32, id1: i32) -> Vec<EntitySlot> {
         vec![storage_slot(id0), storage_slot(id1)]
-    }
-
-    /// A single active `HydroStorage` slot (`entity_type 0`, `subindex 0`).
-    fn storage_slot(id: i32) -> EntitySlot {
-        EntitySlot::storage(id, true)
-    }
-
-    /// A single active `HydroTransitBucket` slot (`entity_type 3`): `id` is the
-    /// downstream hydro, `lag` the maturity subindex.
-    fn transit_bucket_slot(id: i32, lag: u32) -> EntitySlot {
-        EntitySlot::transit_bucket(id, lag, true)
-    }
-
-    /// Like [`transit_bucket_slot`] but carrying a real `[start, end)`
-    /// arrival interval instead of the sentinel.
-    fn transit_bucket_slot_over(id: i32, lag: u32, start: i32, end: i32) -> EntitySlot {
-        transit_bucket_slot(id, lag).with_interval(start, end)
-    }
-
-    /// A single active `HydroInflowLag` slot (`entity_type 1`): `id` is the
-    /// hydro, `lag_depth` the 1-based lag (as `build_stage_entity_manifest` emits).
-    fn inflow_lag_slot(id: i32, lag_depth: u32) -> EntitySlot {
-        EntitySlot::inflow_lag(id, lag_depth, true)
     }
 
     /// A boundary cut at depth 12 reaching `load_boundary_cuts` with a reserved
@@ -3452,11 +3288,11 @@ mod tests {
         let third_month = encode_slot_date(fixture_priced_date(2));
         let lane_era = vec![
             storage_slot(1),
-            anticipated_slot(9, 0, first_month),
-            anticipated_slot(9, 1, second_month),
+            anticipated_slot_at(9, 0, first_month),
+            anticipated_slot_at(9, 1, second_month),
         ];
 
-        let current_narrow = vec![storage_slot(1), anticipated_slot(9, 0, first_month)];
+        let current_narrow = vec![storage_slot(1), anticipated_slot_at(9, 0, first_month)];
         let full_fcf = validate_policy_load::<FullFcf>(
             &psm(lane_era.len() as u32, 12, &lane_era),
             &psm(current_narrow.len() as u32, 12, &current_narrow),
@@ -3481,9 +3317,9 @@ mod tests {
         );
 
         let current_reordered = vec![
-            anticipated_slot(9, 0, second_month).with_interval(second_month, third_month),
+            anticipated_slot_at(9, 0, second_month).with_interval(second_month, third_month),
             storage_slot(1),
-            anticipated_slot(9, 1, first_month).with_interval(first_month, second_month),
+            anticipated_slot_at(9, 1, first_month).with_interval(first_month, second_month),
         ];
 
         let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
@@ -4010,7 +3846,7 @@ mod tests {
         };
         let metadata = test_support::checkpoint_metadata(
             1,
-            chain_manifest(1),
+            chain_graph_manifest(1),
             ProducerBlock {
                 cost_scale_factor: Some(cost_scale_factor),
                 ..producer_block()
@@ -4033,7 +3869,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let raw_intercept = 1000.0;
         let raw_coefficients = [7.0, 3.0];
-        let manifest = vec![storage_slot(1), anticipated_slot(9, 0, 20_260_301)];
+        let manifest = vec![storage_slot(1), anticipated_slot_at(9, 0, 20_260_301)];
         let s = 1_000_000.0;
         write_marked_checkpoint_with_manifest(
             tmp.path(),
@@ -4043,7 +3879,7 @@ mod tests {
             s,
         );
 
-        let current = vec![storage_slot(1), anticipated_slot(9, 0, 20_260_301)];
+        let current = vec![storage_slot(1), anticipated_slot_at(9, 0, 20_260_301)];
         let value_mw = 50.0;
         let windows = vec![fixed_window(9, ymd(2026, 3, 1), ymd(2026, 4, 1), value_mw)];
 
@@ -4069,7 +3905,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let raw_intercept = 1000.0;
         let raw_coefficients = [7.0, 3.0];
-        let manifest = vec![storage_slot(1), anticipated_slot(9, 0, 20_260_301)];
+        let manifest = vec![storage_slot(1), anticipated_slot_at(9, 0, 20_260_301)];
         let s = 1_000_000.0;
         write_marked_checkpoint_with_manifest(
             tmp.path(),
@@ -4079,7 +3915,7 @@ mod tests {
             s,
         );
 
-        let current = vec![storage_slot(1), anticipated_slot(9, 0, 20_260_301)];
+        let current = vec![storage_slot(1), anticipated_slot_at(9, 0, 20_260_301)];
         let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
             tmp.path(),
             fixture_priced_date(0),
@@ -4151,7 +3987,7 @@ mod tests {
     fn boundary_fold_marked_frame_moves_intercept_by_hand_computed_delta() {
         let tmp = tempfile::tempdir().unwrap();
         let anchor = 20_260_401; // April 2026
-        let manifest = vec![storage_slot(1), anticipated_slot(9, 0, anchor)];
+        let manifest = vec![storage_slot(1), anticipated_slot_at(9, 0, anchor)];
         let c = 3.0;
         let raw_intercept = 200.0;
         let s = 2_000_000.0;
@@ -4183,7 +4019,7 @@ mod tests {
     fn boundary_fold_no_overlap_window_leaves_intercept_bit_identical() {
         let tmp = tempfile::tempdir().unwrap();
         let anchor = 20_260_401; // April 2026
-        let manifest = vec![storage_slot(1), anticipated_slot(9, 0, anchor)];
+        let manifest = vec![storage_slot(1), anticipated_slot_at(9, 0, anchor)];
         let s = 2_000_000.0;
         write_marked_checkpoint_with_manifest(tmp.path(), 1000.0, &[1.0, 3.0], &manifest, s);
 
@@ -4216,7 +4052,7 @@ mod tests {
     fn boundary_fold_empty_windows_intercept_bit_identical() {
         let tmp = tempfile::tempdir().unwrap();
         let anchor = 20_260_401; // April 2026
-        let manifest = vec![storage_slot(1), anticipated_slot(9, 0, anchor)];
+        let manifest = vec![storage_slot(1), anticipated_slot_at(9, 0, anchor)];
         let s = 2_000_000.0;
         write_marked_checkpoint_with_manifest(tmp.path(), 1000.0, &[1.0, 3.0], &manifest, s);
 
@@ -4259,8 +4095,8 @@ mod tests {
         let april = 20_260_401; // 30 days
         let manifest = vec![
             storage_slot(1),
-            anticipated_slot(9, 0, march),
-            anticipated_slot(9, 1, april),
+            anticipated_slot_at(9, 0, march),
+            anticipated_slot_at(9, 1, april),
         ];
         let c_march = 3.0;
         let c_april = 7.0;

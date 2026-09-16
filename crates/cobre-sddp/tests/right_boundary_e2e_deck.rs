@@ -217,10 +217,10 @@ mod anticipated_fanout_readback {
 
     use chrono::NaiveDate;
     use cobre_io::{
-        ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, GraphManifest, ManifestEdge, ManifestNode,
-        PolicyCutRecord, ProducerBlock, StageCutsPayload, StateFamily, decode_slot_date,
-        encode_slot_date, write_policy_checkpoint,
+        ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, PolicyCutRecord, ProducerBlock,
+        StageCutsPayload, StateFamily, decode_slot_date, encode_slot_date, write_policy_checkpoint,
     };
+    use cobre_sddp::test_support::{anticipated_slot_at, chain_graph_manifest};
     use cobre_sddp::{BoundaryLoadRequest, load_boundary_cuts};
 
     use crate::common::fresh_setup_with;
@@ -245,50 +245,9 @@ mod anticipated_fanout_readback {
 
     fn producer_block() -> ProducerBlock {
         ProducerBlock {
-            completed_iterations: 0,
-            final_lower_bound: 0.0,
-            best_upper_bound: None,
             max_iterations: 1,
             forward_passes: 1,
-            warm_start_cuts: 0,
-            warm_start_counts: vec![],
-            rng_seed: 0,
-            total_visited_states: 0,
-            training_block_mode: "parallel".to_string(),
-            training_block_mode_per_stage: vec![],
-            cost_scale_factor: None,
-        }
-    }
-
-    /// A 1-stage chain graph manifest (node id == stage id == pool id) — the
-    /// synthetic source checkpoint's own graph, unrelated to the deck's.
-    fn single_stage_manifest() -> GraphManifest {
-        GraphManifest {
-            n_pools: 1,
-            nodes: vec![ManifestNode {
-                id: 0,
-                stage_id: 0,
-                pool_id: 0,
-            }],
-            edges: Vec::<ManifestEdge>::new(),
-        }
-    }
-
-    fn anticipated_source_slot(thermal_id: i32, ring_slot: u32, month_anchor: i32) -> EntitySlot {
-        EntitySlot::anticipated(thermal_id, ring_slot, true)
-            .with_interval(month_anchor, next_month_anchor(month_anchor))
-    }
-
-    /// The following month's day-01 `YYYYMMDD` anchor of `month_anchor`
-    /// (itself a day-01 anchor) — mirrors
-    /// `boundary_reconcile_defaults.rs`'s same-named helper.
-    fn next_month_anchor(month_anchor: i32) -> i32 {
-        let year = month_anchor / 10_000;
-        let month = (month_anchor / 100) % 100;
-        if month == 12 {
-            (year + 1) * 10_000 + 101
-        } else {
-            year * 10_000 + (month + 1) * 100 + 1
+            ..cobre_sddp::test_support::producer_block()
         }
     }
 
@@ -298,10 +257,8 @@ mod anticipated_fanout_readback {
     /// date-driven boundary selector never zeroes the coefficients this
     /// mod's fan-out assertions read) plus `pool` months.
     fn fixture_priced_date(base_anchor: i32, pool: u32) -> NaiveDate {
-        decode_slot_date(base_anchor)
-            .expect("base_anchor is a valid YYYYMMDD anchor")
-            .checked_add_months(chrono::Months::new(pool))
-            .unwrap()
+        let base = decode_slot_date(base_anchor).expect("base_anchor is a valid YYYYMMDD anchor");
+        cobre_sddp::test_support::fixture_priced_date(base, pool)
     }
 
     /// Mirrors `boundary_reconcile_defaults.rs`'s same-named helper: a single-stage,
@@ -340,7 +297,7 @@ mod anticipated_fanout_readback {
         };
         let metadata = cobre_sddp::test_support::checkpoint_metadata(
             1,
-            single_stage_manifest(),
+            chain_graph_manifest(1),
             producer_block(),
         );
         write_policy_checkpoint(dir, &[payload], &[], &metadata, &[]).expect("write checkpoint");
@@ -481,8 +438,8 @@ mod anticipated_fanout_readback {
         let near_coefficient = 100.0_f64;
         let far_coefficient = 42.5_f64;
         let source_manifest = vec![
-            anticipated_source_slot(DECK_THERMAL_ID, 0, near_anchor),
-            anticipated_source_slot(DECK_THERMAL_ID, 1, far_anchor),
+            anticipated_slot_at(DECK_THERMAL_ID, 0, near_anchor),
+            anticipated_slot_at(DECK_THERMAL_ID, 1, far_anchor),
         ];
         let source_coefficients = vec![near_coefficient, far_coefficient];
 

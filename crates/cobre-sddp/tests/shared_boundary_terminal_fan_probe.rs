@@ -21,7 +21,7 @@ use std::path::Path;
 
 use chrono::NaiveDate;
 use cobre_io::{
-    GraphManifest, PolicyCutRecord, ProducerBlock, STAGE_CUTS_NODE_ID_SENTINEL, StageCutsPayload,
+    GraphManifest, PolicyCutRecord, STAGE_CUTS_NODE_ID_SENTINEL, StageCutsPayload,
     encode_slot_date, write_policy_checkpoint,
 };
 use cobre_sddp::setup::{NodeGraph, NodePos};
@@ -33,10 +33,7 @@ use cobre_sddp::{
 /// Pool `pool`'s fixture `priced_state_date`: `2030-01-01` plus `pool`
 /// months.
 fn fixture_priced_date(pool: u32) -> NaiveDate {
-    NaiveDate::from_ymd_opt(2030, 1, 1)
-        .unwrap()
-        .checked_add_months(chrono::Months::new(pool))
-        .unwrap()
+    cobre_sddp::test_support::fixture_priced_date(cobre_sddp::test_support::ymd(2030, 1, 1), pool)
 }
 
 /// Write a synthetic single-pool policy checkpoint whose pool's own
@@ -108,20 +105,7 @@ fn write_synthetic_checkpoint(
     let metadata = cobre_sddp::test_support::checkpoint_metadata(
         1,
         GraphManifest::default(),
-        ProducerBlock {
-            completed_iterations: 0,
-            final_lower_bound: 0.0,
-            best_upper_bound: None,
-            max_iterations: 0,
-            forward_passes: 0,
-            warm_start_cuts: 0,
-            warm_start_counts: vec![],
-            rng_seed: 0,
-            total_visited_states: 0,
-            training_block_mode: "parallel".to_string(),
-            training_block_mode_per_stage: vec![],
-            cost_scale_factor: None,
-        },
+        cobre_sddp::test_support::producer_block(),
     );
     write_policy_checkpoint(dir, &[payload], &[], &metadata, &[]).expect("write checkpoint");
 }

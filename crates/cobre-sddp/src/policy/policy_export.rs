@@ -34,40 +34,27 @@ use crate::lp_builder::delivery_ring::DeliveryRing;
 use crate::setup::{NodeGraph, NodePos, extended_delivery_stages, post_study_delivery_calendar};
 use crate::training::TrainingResult;
 
-/// The ring slot's RING-AXIS delivery target `r` at anchor stage index
-/// `anchor_stage_idx`: the next `r >= anchor_stage_idx` whose residue
-/// `r mod k_max` equals `slot_idx`
-/// (`delta = (slot_idx + k_max − anchor_stage_idx mod k_max) mod k_max`,
-/// `r = anchor_stage_idx + delta`). The residue search runs on the ring axis;
-/// [`reachable_delivery_target`] maps `r` to the physical delivery target
-/// through [`PointResolution::physical_target`]. This primitive takes the
-/// residue at whichever `anchor_stage_idx` its caller passes — every
-/// production call site passes the OUTGOING anchor (`current_stage_idx + 1`,
-/// via [`resolve_delivery_stage`]'s `outgoing_anchor`), never the entering
-/// `current_stage_idx` itself. Sole owner of the residue arithmetic that a
-/// ring slot's `interval_start`/`interval_end` (stamped by
-/// [`build_stage_entity_manifest`] from the resolved stage) derive from — a
-/// second copy of the formula is how a slot fans out undated or zeroes a
-/// dated one.
+/// The ring slot's RING-AXIS delivery target: the next `r >= anchor_stage_idx`
+/// whose residue `r mod k_max` equals `slot_idx`. Every production call site
+/// passes the OUTGOING anchor (`current_stage_idx + 1`,
+/// [`build_stage_entity_manifest`]'s `outgoing_anchor`), never the entering
+/// `current_stage_idx`. Sole owner of the residue arithmetic a ring slot's
+/// `interval_start`/`interval_end` derive from — a second copy of the formula
+/// is how a slot fans out undated or zeroes a dated one.
 fn modular_delivery_target(slot_idx: usize, anchor_stage_idx: usize, k_max: usize) -> usize {
     let delta = (slot_idx + k_max - anchor_stage_idx % k_max) % k_max;
     anchor_stage_idx + delta
 }
 
-/// The reachable ring slot's PHYSICAL delivery target: [`modular_delivery_target`]'s
-/// ring-axis index — the residue taken at whichever `anchor_stage_idx` the
-/// caller passes (every production call site passes the OUTGOING anchor; see
-/// [`modular_delivery_target`]) — mapped through
-/// [`PointResolution::physical_target`], or `None`
-/// when the slot is structural padding beyond the plant's own lead
-/// (`slot_idx >= k_i`, frozen `[0, 0]`, not a real commitment even when its
-/// target still lands in-horizon). [`build_stage_entity_manifest`] composes
-/// reachability and the physical mapping through this one helper for the
-/// manifest's `interval_start`/`interval_end` fields. Dating on the raw
-/// ring-axis index instead of mapping it through `physical_target` is the
-/// wrong-but-compiling alternative: it lands on the excised fixed
-/// post-horizon window's stub stage whenever a plant
-/// declares one ([`PointResolution::ring_index`]).
+/// The reachable ring slot's PHYSICAL delivery target:
+/// [`modular_delivery_target`] mapped through
+/// [`PointResolution::physical_target`], or `None` when the slot is structural
+/// padding beyond the plant's own lead (`slot_idx >= k_i`, frozen `[0, 0]`,
+/// not a real commitment even when its target still lands in-horizon). Dating
+/// on the raw ring-axis index instead of mapping it through `physical_target`
+/// is the wrong-but-compiling alternative: it lands on the excised fixed
+/// post-horizon window's stub stage whenever a plant declares one
+/// ([`PointResolution::ring_index`]).
 fn reachable_delivery_target(
     slot_idx: usize,
     k_i: usize,
@@ -98,23 +85,6 @@ fn slot_interval(stage: Option<&Stage>) -> (i32, i32) {
     )
 }
 
-/// Resolves ring slot `slot_idx`'s reachable physical delivery target through
-/// [`reachable_delivery_target`] against `outgoing_anchor`, then reads that
-/// target's own delivery stage out of `delivery_stages` — the single step
-/// [`build_stage_entity_manifest`]'s anticipated slot derives its
-/// `interval_start`/`interval_end` from.
-fn resolve_delivery_stage<'a>(
-    slot_idx: usize,
-    k_i: usize,
-    outgoing_anchor: usize,
-    k_max: usize,
-    resolution: &PointResolution,
-    delivery_stages: &[&'a Stage],
-) -> Option<(usize, &'a Stage)> {
-    let m = reachable_delivery_target(slot_idx, k_i, outgoing_anchor, k_max, resolution)?;
-    delivery_stages.get(m).map(|&stage| (m, stage))
-}
-
 /// The inflow-lag slot's reference stage: pool `p` prices the state leaving
 /// stage `p` (`training::backward`'s stage convention, the same outgoing state
 /// `cut::row` prices into each cut row), so 1-based lag `1` (`lag == 0` here) is
@@ -123,7 +93,7 @@ fn resolve_delivery_stage<'a>(
 /// when `pool_pos_in_all` is `None` or the walk reaches before the earliest
 /// declared stage. The returned anchor is [`encode_slot_date`] of the referenced
 /// stage's own `start_date` — its full date, not the enclosing calendar month.
-fn lag_reference_anchor(all_stages: &[&Stage], pool_pos_in_all: Option<usize>, lag: usize) -> i32 {
+fn lag_reference_anchor(all_stages: &[Stage], pool_pos_in_all: Option<usize>, lag: usize) -> i32 {
     pool_pos_in_all
         .and_then(|t| t.checked_sub(lag))
         .and_then(|idx| all_stages.get(idx))
@@ -132,11 +102,9 @@ fn lag_reference_anchor(all_stages: &[&Stage], pool_pos_in_all: Option<usize>, l
         })
 }
 
-/// The in-study anticipated ring's slot-major/plant-minor addressing (see
-/// `lp_builder::delivery_ring`) over `commit_out`/`commit_in` — always their
-/// full width, since a ring slot is the commitment-hold region's sole
-/// surviving carrier. The sole ring builder [`build_stage_entity_manifest`]
-/// consults.
+/// The in-study anticipated ring's slot-major/plant-minor addressing over
+/// `commit_out`/`commit_in`, always at their full width — a ring slot is the
+/// commitment-hold region's only carrier.
 fn anticipated_ring_for(global_layout: &StateSpace) -> DeliveryRing {
     let n_ant_state = global_layout.n_anticipated * global_layout.k_max;
     DeliveryRing::new(
@@ -162,21 +130,13 @@ fn anticipated_ring_for(global_layout: &StateSpace) -> DeliveryRing {
 /// post-study-targeted delivery is carried by a ring slot, never a separate
 /// post-horizon lane.
 ///
-/// An in-study ring slot's `interval_start`/`interval_end` are the
-/// day-accurate `YYYYMMDD` anchors of its modular delivery stage's own
-/// `start_date` and exclusive `end_date` — every live slot, in-study targets
-/// included, not only post-study ones — resolved against the OUTGOING anchor
-/// (`current_stage_idx + 1`, the state leaving this pool's own stage — the
-/// same state a cut couples to) rather than the entering `current_stage_idx`,
-/// against the delivery calendar `study_stages` extended by
-/// [`post_study_delivery_calendar`] when the study declares one: a slot whose
-/// modular target lands on a post-study stage carries that stage's real
-/// interval, a target past the extended calendar or a padding slot beyond the
-/// plant's own lead carries the sentinel for both fields. With no post-study
-/// stages the calendar is study-only, so every interval is byte-identical to
-/// a study-stages-only walk. `load_boundary_cuts`'s boundary-date-driven
-/// anticipated reconciliation (`policy::reconcile::resolve_by_interval_overlap`)
-/// reads these fields directly.
+/// A ring slot's `interval_start`/`interval_end` are the day-accurate
+/// `YYYYMMDD` anchors of its modular delivery stage — resolved against the
+/// OUTGOING anchor (`current_stage_idx + 1`, the state leaving this pool's own
+/// stage, the same state a cut couples to), over `study_stages` extended by
+/// [`post_study_delivery_calendar`]. A target past that calendar, or a padding
+/// slot beyond the plant's own lead, carries the sentinel for both fields.
+/// With no post-study stages the walk is byte-identical to a study-only one.
 ///
 /// An inflow-lag slot's `reference_date` is the referenced past stage's own
 /// full `start_date`, [`encode_slot_date`]-encoded, via
@@ -215,16 +175,10 @@ pub fn build_stage_entity_manifest(
     // Full stage ordering (pre-study stages included) — the basis
     // `lag_reference_anchor` walks, since a deep lag can reach into the
     // pre-study window `study_stages` excludes.
-    let all_stages: Vec<&Stage> = system.stages().iter().collect();
-    let pool_pos_in_all = all_stages.iter().position(|s| s.id == stage_id);
-    // Delivery calendar: study stages, then the post-study calendar (empty when
-    // none is declared, so the walk is byte-identical to a study-only one). A
-    // ring slot maturing past the horizon then dates onto its real post-study
-    // stage instead of the sentinel.
+    let pool_pos_in_all = system.stages().iter().position(|s| s.id == stage_id);
     let post_study_calendar = post_study_delivery_calendar(system);
     let delivery_stages = extended_delivery_stages(&study_stages, &post_study_calendar);
-    // The water ring now dates against the SAME extended calendar as the
-    // anticipated ring — `b_d^out(t)` arrives at stage `t + d`, never `t + 1 + d`.
+    // `b_d^out(t)` arrives at stage `t + d`, never `t + 1 + d`.
     let bucket_arrival_stage =
         |lag: usize| current_stage_idx.and_then(|t| delivery_stages.get(t + lag).copied());
 
@@ -232,33 +186,26 @@ pub fn build_stage_entity_manifest(
         let (slot_idx, plant_pos) = anticipated_ring.slot_lane_at(offset);
         let plant = anticipated_thermals[plant_pos];
         // `slot_idx` is the ring's modular residue, NOT a distance-to-maturity:
-        // `reachable_delivery_target` finds the next RING-AXIS target `r >= t`
-        // in that residue class, then maps `r` to the physical delivery `m` via
-        // `PointResolution::physical_target`, so the slot maturing at `t` is
-        // `t mod k_max` delivering at `m = t` — matching the producer
-        // `fill_anticipated_fishing_entries`. Dating the slot at `t + slot_idx`
-        // (the retired shift-ring form) is wrong whenever `t mod k_max != 0`.
+        // dating the slot at `t + slot_idx` is wrong whenever `t mod k_max != 0`.
         // Reachability uses the SAME per-plant bound the LP masking itself uses
         // (`anticipated_lead_stages[plant_pos]`): a slot beyond it is structural
-        // padding (frozen `[0, 0]`), not a real commitment, even when `m` itself
-        // still lands inside the horizon — the multi-plant heterogeneous-lead case.
+        // padding (frozen `[0, 0]`), not a real commitment, even when its target
+        // still lands inside the horizon.
         let k_i = global_layout.anticipated_lead_stages[plant_pos];
         let resolved = outgoing_anchor.and_then(|t| {
-            resolve_delivery_stage(
+            let m = reachable_delivery_target(
                 slot_idx,
                 k_i,
                 t,
                 global_layout.k_max,
                 &global_layout.anticipated_resolution.per_plant[plant_pos],
-                &delivery_stages,
-            )
-            .map(|(m, stage)| (t, m, stage))
+            )?;
+            delivery_stages.get(m).map(|&stage| (t, m, stage))
         });
         if let Some((t, m, _)) = resolved {
-            // Defensive cross-check against the resolver (the single owner
-            // of c(m), from `resolve_point`): a within-study decider must
-            // have already fired by `t`; a pre-study (IC-seeded) delivery
-            // has no decider entry and is exempt.
+            // Cross-check against `resolve_point`, the single owner of c(m):
+            // a within-study decider must have fired by `t`; a pre-study
+            // (IC-seeded) delivery has no decider entry and is exempt.
             debug_assert!(
                 global_layout
                     .anticipated_resolution
@@ -312,7 +259,7 @@ pub fn build_stage_entity_manifest(
                     ),
                 )
                 .with_reference_date(lag_reference_anchor(
-                    &all_stages,
+                    system.stages(),
                     pool_pos_in_all,
                     lag,
                 ))
@@ -414,10 +361,8 @@ pub fn reserve_boundary_inflow_lag_slots<S: std::hash::BuildHasher>(
     }
     let n = inflow_lag_depth as usize;
 
-    // The storage slots are the state's must-correspond hydro core; the lag
-    // block spans exactly those same hydros. Require them to be the non-empty
-    // leading contiguous block the canonical manifest emits — the position the
-    // lag block inserts after.
+    // The lag block spans exactly the storage hydros and inserts after them, so
+    // they must be the non-empty leading contiguous block.
     let storage_count = manifest
         .iter()
         .take_while(|s| s.entity_type == StateFamily::HydroStorage.code())
@@ -442,8 +387,8 @@ pub fn reserve_boundary_inflow_lag_slots<S: std::hash::BuildHasher>(
     let storage_slots = &manifest[..storage_count];
     let storage_ids: HashSet<i32> = storage_slots.iter().map(|s| s.entity_id).collect();
 
-    // Reject any unplaceable keyed term BEFORE building, so a pi_qafl for an
-    // unknown hydro or a depth past `N` fails the write rather than dropping.
+    // Reject an unplaceable keyed term BEFORE building, so it fails the write
+    // rather than dropping.
     for (c, keyed) in cut_inflow_lag_coefficients.iter().enumerate() {
         for (&hydro_id, coeffs) in keyed {
             if !storage_ids.contains(&hydro_id) {
@@ -462,9 +407,6 @@ pub fn reserve_boundary_inflow_lag_slots<S: std::hash::BuildHasher>(
         }
     }
 
-    // Family-specific reserved block: N HydroInflowLag slots per storage hydro,
-    // lag-major, 1-based subindex, inheriting the storage slot's was_active — the
-    // shape build_stage_entity_manifest's Lag arm emits.
     let reserved_slots: Vec<EntitySlot> = (0..n)
         .flat_map(|lag| {
             storage_slots.iter().map(move |storage| {
@@ -473,8 +415,6 @@ pub fn reserve_boundary_inflow_lag_slots<S: std::hash::BuildHasher>(
         })
         .collect();
 
-    // Per-cut reserved coefficients: each keyed lag term at its (hydro, depth)
-    // slot in the same lag-major order, 0.0 elsewhere.
     let reserved_cut_coefficients: Vec<Vec<f64>> = cut_inflow_lag_coefficients
         .iter()
         .map(|keyed| {
@@ -511,10 +451,8 @@ pub fn reserve_boundary_inflow_lag_slots<S: std::hash::BuildHasher>(
 /// coefficient vector at `anchor_count` — after the leading anchor block, before
 /// the tail — keeping both positionally aligned. Family-independent: the caller
 /// builds `reserved_slots` and the per-cut `reserved_cut_coefficients` for its own
-/// family (anchor detection, slot bodies, keyed placement), and this owns only the
-/// splice and the coefficient-alignment guard, so a second boundary state family
-/// reuses it unchanged. Returns the widened manifest and one extended coefficient
-/// vector per cut.
+/// family, and this owns only the splice and the coefficient-alignment guard, so
+/// a second boundary state family reuses it unchanged.
 ///
 /// # Errors
 ///
@@ -745,8 +683,6 @@ pub fn build_stage_cuts_payloads<'a>(
 /// `0..=4`) decode identically — while a CLP-captured `Superbasic`/`Fixed`, which
 /// `to_highs_code` would fold, now survives reload. Mirrored on load by
 /// `build_basis_cache_from_checkpoint`'s `from_discriminant_code`.
-///
-/// Returns `(col_status_bytes, row_status_bytes)`.
 #[must_use]
 pub fn convert_basis_cache(training_result: &TrainingResult) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
     training_result
@@ -913,7 +849,7 @@ mod tests {
         NodeGraph, NodeId, NodeOpenings, NodePos, NodeRuntime, NodeSuccessor, OpeningSource,
         StageIdx, extended_delivery_stages, post_study_delivery_calendar, year_month_day_anchor,
     };
-    use crate::test_support;
+    use crate::test_support::{self, anticipated_slot};
     use crate::visited_states::VisitedStatesArchive;
     use cobre_core::commissioning::hydro_operating_active;
     use cobre_core::temporal::StageStateConfig;
@@ -2072,7 +2008,7 @@ mod tests {
         );
     }
 
-    // -- Manifest-carried intervals (ticket-012) --
+    // -- Manifest-carried intervals --
 
     /// A live anticipated slot's `interval_start`/`interval_end` are the
     /// resolved delivery stage's own `start_date`/`end_date` anchors, over
@@ -2840,10 +2776,6 @@ mod tests {
     }
 
     // ── reserve_boundary_inflow_lag_slots ────────────────────────────────────
-
-    fn anticipated_slot(id: i32, subindex: u32) -> EntitySlot {
-        EntitySlot::anticipated(id, subindex, true)
-    }
 
     /// A depth-2 reservation over a 2-storage manifest inserts the lag block in
     /// canonical lag-major / 1-based-subindex order immediately after storage,

@@ -1244,7 +1244,7 @@ the `Blend`/`Renormalize` variants), `policy/policy_export.rs`
 (`build_stage_entity_manifest`, intervalling each ring slot at its modular
 delivery stage via `slot_lane_at`), `policy/policy_load.rs` (`load_boundary_cuts` builds one
 `source_index` shared by `build_rebind`/`build_reconciliation_report`, threads
-`boundary_date` through, and applies the fold before rescale).
+`boundary_date` into `build_rebind`, and applies the fold before rescale).
 Pinned by the `hm_distribute_conservation` fixtures in
 `tests/anticipated_core.rs` (coeff ratio equals `H_w / H_M`, invariant to the
 delivery stage's hours), the `Blend`/`Renormalize` `rebind_cut` unit tests (both

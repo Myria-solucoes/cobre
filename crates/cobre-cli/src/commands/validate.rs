@@ -147,7 +147,6 @@ fn describe_prep_error(phase: PrepPhase, err: &SddpError) -> (&'static str, Stri
     (kind, format!("{file_label}: {err}"))
 }
 
-/// Print a pre-solver preparation error's `report` line to `term`.
 fn print_prep_error(term: &Term, report: &str, case_dir: &Path) {
     let _ = term.write_line(&format!(
         "Validation: 1 errors, 0 warnings in {}",
@@ -156,9 +155,8 @@ fn print_prep_error(term: &Term, report: &str, case_dir: &Path) {
     let _ = term.write_line(&format!("{} {report}", style("error:").red().bold()));
 }
 
-/// Handle a pre-solver preparation-phase failure: print the human report to
-/// `stdout_sink` (`None` under `--json`), emit the `--json` error object when
-/// `json`, and return the [`CliError`] for the caller to propagate.
+/// Handle a pre-solver preparation-phase failure. `stdout_sink` is `None`
+/// under `--json`, where the error object replaces the human report.
 fn prep_error_to_cli_error(
     stdout_sink: Option<&Term>,
     json: bool,
@@ -177,6 +175,27 @@ fn prep_error_to_cli_error(
         report,
         already_rendered: true,
     })
+}
+
+/// Run a pre-solver preparation phase; an `Err` is reported (human and
+/// `--json`) before it is returned.
+fn run_prep_phase<T>(
+    result: Result<T, SddpError>,
+    stdout_sink: Option<&Term>,
+    json: bool,
+    phase: PrepPhase,
+    case_dir: &Path,
+) -> Result<T, CliError> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(ref err) => Err(prep_error_to_cli_error(
+            stdout_sink,
+            json,
+            phase,
+            err,
+            case_dir,
+        )?),
+    }
 }
 
 /// Print a boundary-reconciliation error to `term` and return the
@@ -361,18 +380,13 @@ pub fn execute(args: ValidateArgs) -> Result<(), CliError> {
     let config_path = args.case_dir.join("config.json");
     let config = cobre_io::parse_config(&config_path).map_err(CliError::from)?;
 
-    let study_params = match StudyParams::from_config(&config) {
-        Ok(p) => p,
-        Err(ref err) => {
-            return Err(prep_error_to_cli_error(
-                stdout_sink,
-                args.json,
-                PrepPhase::Config,
-                err,
-                &args.case_dir,
-            )?);
-        }
-    };
+    let study_params = run_prep_phase(
+        StudyParams::from_config(&config),
+        stdout_sink,
+        args.json,
+        PrepPhase::Config,
+        &args.case_dir,
+    )?;
 
     let seed = study_params.seed;
 
@@ -385,40 +399,29 @@ pub fn execute(args: ValidateArgs) -> Result<(), CliError> {
     // The most expensive step (PAR estimation, opening trees); validate runs it
     // anyway so an exit-0 guarantees full parity with `run`.
     let boundary_requirements = resolve_boundary_state_requirements(&args.case_dir, &config)?;
-    let prepared = match prepare_stochastic(
-        system,
+    let prepared = run_prep_phase(
+        prepare_stochastic(
+            system,
+            &args.case_dir,
+            &config,
+            seed,
+            &training_source,
+            boundary_requirements.inflow_lag_depth(),
+        ),
+        stdout_sink,
+        args.json,
+        PrepPhase::Stochastic,
         &args.case_dir,
-        &config,
-        seed,
-        &training_source,
-        boundary_requirements.inflow_lag_depth(),
-    ) {
-        Ok(p) => p,
-        Err(ref err) => {
-            return Err(prep_error_to_cli_error(
-                stdout_sink,
-                args.json,
-                PrepPhase::Stochastic,
-                err,
-                &args.case_dir,
-            )?);
-        }
-    };
+    )?;
 
-    // Reuses the already-parsed artifacts bundle to avoid re-reading disk.
-    let hydro_models =
-        match prepare_hydro_models_from_artifacts(&prepared.system, &artifacts, false, None) {
-            Ok(hm) => hm,
-            Err(ref err) => {
-                return Err(prep_error_to_cli_error(
-                    stdout_sink,
-                    args.json,
-                    PrepPhase::HydroModels,
-                    err,
-                    &args.case_dir,
-                )?);
-            }
-        };
+    // `&artifacts` reuses the already-parsed bundle instead of re-reading disk.
+    let hydro_models = run_prep_phase(
+        prepare_hydro_models_from_artifacts(&prepared.system, &artifacts, false, None),
+        stdout_sink,
+        args.json,
+        PrepPhase::HydroModels,
+        &args.case_dir,
+    )?;
 
     if !args.json {
         let _ = stdout.write_line(&format!(

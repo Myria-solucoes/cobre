@@ -2,39 +2,20 @@
 //! operations that map a source cut's coefficients onto a target manifest of
 //! possibly different shape than `source`.
 //!
-//! [`build_rebind`] resolves one [`RebindOp`] per target slot, dispatched by
-//! `entity_type`; [`rebind_cut`] applies the resolved ops to one source cut's
-//! coefficients. Storage and inflow-lag are the state's must-correspond core:
-//! a target slot of either family with no source counterpart is
-//! [`RebindOp::Reject`] — the entity (`entity_type`/`entity_id`) is never
-//! relaxed, only matched exactly. Inflow-lag additionally validates a
-//! matched slot's `reference_date` ([`resolve_inflow_lag`]), so identity
-//! alone does not guarantee a `Copy`. The two forward-dated families —
-//! `AnticipatedThermalState` and `HydroTransitBucket` — both dispatch to
-//! [`resolve_by_interval_overlap`] on the target slot's OWN
-//! `interval_start`/`interval_end` against the caller-supplied
-//! `boundary_date`, never on `subindex` identity: `interval_start ==
-//! SENTINEL` (pre-fan-out padding) always defaults to `Zero`; a live
-//! interval ending at or before `boundary_date` is an in-study delivery the
-//! terminal boundary does not price and also yields `Zero`; a live interval
-//! reaching past `boundary_date` fans out against `source_index`'s own
-//! decoded intervals of the SAME family by calendar overlap — full coverage
-//! yields [`RebindOp::Blend`] (the `÷H_M` distribute), a boundary-edge slot
-//! straddling into unpriced time yields [`RebindOp::Renormalize`]
-//! (anti-deflation over the covered span), and no covered interval yields
-//! `Zero` — the expected outcome for a `HydroTransitBucket` target when the
-//! source is NEWAVE-shaped and carries no transit arcs at all, exactly as an
-//! `AnticipatedThermalState` target's `Zero` there instead usually means an
-//! in-study delivery already discharged. Every remaining family falls back
-//! to the identity-reject default, pending its own arm. When every
-//! storage/lag/unclassified target slot has a same-identity source
-//! counterpart and every forward-family slot is still sentinel-dated — the
-//! shape an already target-aligned, pre-fan-out boundary policy has — the
-//! rebind reproduces the source cut's own coefficients bit-for-bit: `Copy`
-//! at the matching position for every identity-resolved family, and `Zero`
-//! for each sentinel forward-family slot, whose source coefficient there is
-//! itself always `0.0` (a masked state dimension never holds a value). This
-//! is the strict-superset guarantee.
+//! Storage and inflow-lag are the state's must-correspond core: a target slot
+//! of either family with no source counterpart is [`RebindOp::Reject`] — the
+//! entity (`entity_type`/`entity_id`) is never relaxed, only matched exactly.
+//! Inflow-lag additionally validates a matched slot's `reference_date`
+//! ([`resolve_inflow_lag`]), so identity alone does not guarantee a `Copy`.
+//! Only a forward-dated family's calendar `subindex` is relaxed, by
+//! [`resolve_by_interval_overlap`].
+//!
+//! Strict-superset guarantee: when every storage/lag/unclassified target slot
+//! has a same-identity source counterpart and every forward-family slot is
+//! still sentinel-dated — the shape an already target-aligned, pre-fan-out
+//! boundary policy has — the rebind reproduces the source cut's own
+//! coefficients bit-for-bit, the sentinel slots' `Zero` included: a masked
+//! state dimension's source coefficient is itself always `0.0`.
 
 use std::collections::HashMap;
 
@@ -69,28 +50,17 @@ pub(crate) enum RebindOp {
     Zero,
     /// An hours-weighted blend of source positions: [`rebind_cut`] applies
     /// `Σ cut.coefficients[p] · w` over the `(source_position, weight)`
-    /// terms. [`build_rebind`] constructs this for a live, dated
-    /// forward-family target slot fully covered by priced source
-    /// intervals, `weight = overlap(w, m) / H_m` per covered source interval
-    /// `m` — the `÷H_m` distribute. A target fully inside one source
-    /// interval yields a single `1.0` term (copy-equivalent).
+    /// terms, whose weights [`resolve_by_interval_overlap`] owns.
     Blend(Vec<(usize, f64)>),
-    /// A [`Self::Blend`] re-normalized over its covered overlap span:
-    /// [`rebind_cut`] applies the identical weighted sum, but each term's
-    /// weight is additionally scaled by `H_w / Σ_covered overlap(w, m)` so
-    /// the covered intervals' density replicates across the target slot's
-    /// uncovered span instead of deflating it with an implicit `0.0` term.
-    /// [`build_rebind`] constructs this for a target slot whose interval
-    /// straddles a priced source interval and an unpriced span.
+    /// A [`Self::Blend`] whose weights are additionally scaled by
+    /// `H_w / Σ_covered overlap` so a partially covered target slot
+    /// replicates the covered intervals' density across its uncovered span
+    /// instead of deflating it with an implicit `0.0` term.
     Renormalize(Vec<(usize, f64)>),
-    /// The target slot cannot be resolved from `source`: either no
-    /// same-identity counterpart exists under a family that requires one
-    /// (storage, inflow-lag, the identity fallback — the entity is never
-    /// relaxed), or a dated `AnticipatedThermalState` slot has no resolved
-    /// delivery interval (an invariant violation, never expected on real
-    /// input). A sentinel: [`build_rebind`] converts this into an
-    /// [`SddpError::Validation`] rather than returning it, so it never
-    /// appears in a successfully built op vector.
+    /// The target slot cannot be resolved from `source`. A sentinel:
+    /// [`build_rebind`] converts this into an [`SddpError::Validation`]
+    /// rather than returning it, so it never appears in a successfully built
+    /// op vector.
     Reject {
         /// Human-readable rejection reason.
         reason: String,
@@ -105,10 +75,8 @@ fn slot_key(slot: &EntitySlot) -> SlotKey {
     (slot.entity_type, slot.entity_id, slot.subindex)
 }
 
-/// One forward-family source slot's decoded delivery/arrival interval:
-/// `source_pos` is its position in `source`; `[start, end)` and `hours` come
-/// from decoding the slot's own `interval_start`/`interval_end`
-/// ([`build_source_interval_index`]).
+/// One forward-family source slot's decoded delivery/arrival interval and its
+/// position in `source`.
 #[derive(Debug)]
 pub(crate) struct SourceInterval {
     source_pos: usize,
@@ -140,14 +108,9 @@ pub(crate) fn overlap_hours(a: (NaiveDate, NaiveDate), b: (NaiveDate, NaiveDate)
     positive_hours(a.0.max(b.0), a.1.min(b.1))
 }
 
-/// Index every LIVE (non-sentinel) source slot of EITHER forward-dated
-/// family — `AnticipatedThermalState` or `HydroTransitBucket` — selected by
-/// `interval_start != ENTITY_SLOT_DELIVERY_DATE_SENTINEL` — by its owning
-/// [`SourceKey`], decoding its own `interval_start`/`interval_end` into the
-/// `[start, end)` span [`resolve_by_interval_overlap`] and
-/// [`build_boundary_fold`] compute `overlap(w, m)` against. The two
-/// families' entries stay disjoint because `SourceKey`'s first component is
-/// the family byte.
+/// Index every LIVE (non-sentinel) forward-family source slot by its owning
+/// [`SourceKey`], decoding the `[start, end)` span from the slot's own
+/// `interval_start`/`interval_end` rather than reconstructing a month anchor.
 ///
 /// # Errors
 ///
@@ -202,13 +165,11 @@ pub(crate) fn build_source_interval_index(
 
 /// The boundary intercept-fold vector `(source_pos, factor)` pricing a study's
 /// fixed post-horizon commitments, reusing [`resolve_by_interval_overlap`]'s
-/// per-source-interval `÷H_m` distribute (`overlap_hours(w, m) / H_m`) applied to each
-/// fixed window's declared MW instead of a state dimension. A window
-/// overlapping no source interval contributes nothing (mirrors
-/// [`RebindOp::Zero`], never an error), a `value_mw == 0.0` window is skipped,
-/// and only non-zero factors are emitted — an empty vector is the byte-neutral
-/// no-contribution case the intercept fold relies on, so zero-factor entries
-/// must never be emitted.
+/// per-source-interval `÷H_m` distribute against each fixed window's declared
+/// MW instead of a state dimension. A window overlapping no source interval
+/// contributes nothing (mirrors [`RebindOp::Zero`], never an error), and only
+/// non-zero factors are emitted — an empty vector is the byte-neutral
+/// no-contribution case the intercept fold relies on.
 ///
 /// Determinism (D5): accumulates into a `source_pos`-indexed `Vec`, iterating
 /// `fixed_windows` and each plant's [`build_source_interval_index`] records in
@@ -256,25 +217,11 @@ pub(crate) fn build_boundary_fold(
         .collect())
 }
 
-/// Build one [`RebindOp`] per `target` slot, dispatched per target slot's
-/// `entity_type` to [`resolve_storage`], [`resolve_inflow_lag`],
-/// [`resolve_by_interval_overlap`] (both forward-dated families), or the
-/// identity fallback [`resolve_by_identity`]. `boundary_date` is the study's
-/// boundary date, read by [`resolve_by_interval_overlap`] against each
-/// forward-family target slot's OWN `interval_start`/`interval_end` fields —
-/// the calendar span it resolves `overlap(w, m)` against `source_index`'s
-/// own decoded intervals of the SAME family. `source_index` is
+/// Build one [`RebindOp`] per `target` slot, dispatched by family
+/// ([`resolve_target_slot`]). `source_index` is
 /// [`build_source_interval_index`]'s output, built once by the caller and
 /// shared with [`build_reconciliation_report`] so a source slot's span is
 /// never read two different ways.
-///
-/// For a `target` whose every storage/lag/unclassified slot has a
-/// same-identity `source` counterpart, and whose every forward-family slot
-/// is still sentinel-dated (pre-fan-out) — the shape a still target-aligned
-/// boundary policy has — the rebind reproduces the `source` cut's own
-/// coefficients bit-for-bit: `Copy` at the matching position for every
-/// identity-resolved family, and `Zero` for each sentinel forward-family
-/// slot (see the module doc for why that still matches `source`).
 ///
 /// # Errors
 ///
@@ -306,16 +253,7 @@ pub(crate) fn build_rebind(
     Ok(ops)
 }
 
-/// Dispatch one target slot to its family's resolution rule, by
-/// `entity_type`. Storage and inflow-lag are each indexed by their own
-/// identity shape (storage ignores `subindex`, always `0`; lag includes it);
-/// both share the one `by_identity` map, since it already keys on the full
-/// `(entity_type, entity_id, subindex)` triple. The two forward-dated
-/// families — anticipated and transit-bucket — never consult `by_identity`;
-/// dispatch is on the slot's own `interval_start`/`interval_end` against
-/// `boundary_date`, joined against `source_index`. `source` is threaded
-/// through for [`resolve_inflow_lag`]'s own `reference_date` validation; no
-/// other arm reads it.
+/// Dispatch one target slot to its family's resolution rule.
 fn resolve_target_slot(
     i: usize,
     slot: &EntitySlot,
@@ -334,9 +272,8 @@ fn resolve_target_slot(
     }
 }
 
-/// `HydroStorage` resolution: matched by `(entity_type, entity_id)` identity;
-/// unmatched rejects naming the hydro the boundary policy does not price.
-/// Through [`load_boundary_cuts`](crate::policy::policy_load::load_boundary_cuts),
+/// `HydroStorage` resolution, by `(entity_type, entity_id)` identity. Through
+/// [`load_boundary_cuts`](crate::policy::policy_load::load_boundary_cuts),
 /// the `check_topology_subset` gate normally reports this condition first,
 /// over every missing hydro at once; this arm remains the enforcement of
 /// [`build_rebind`]'s own postcondition for a caller that invokes it
@@ -354,40 +291,29 @@ fn resolve_storage(slot: &EntitySlot, by_identity: &HashMap<SlotKey, usize>) -> 
     }
 }
 
-/// `HydroInflowLag` resolution: matched by `(entity_type, entity_id,
-/// subindex)` identity; unmatched rejects as a lag-depth incompatibility,
-/// naming the offending hydro and lag depth. Through
-/// [`load_boundary_cuts`](crate::policy::policy_load::load_boundary_cuts),
-/// the `check_topology_subset` gate normally reports this condition first,
-/// over every missing `(hydro, lag depth)` pair at once; this arm remains
-/// the enforcement of [`build_rebind`]'s own postcondition for a caller that
-/// invokes it directly.
+/// `HydroInflowLag` resolution, by `(entity_type, entity_id, subindex)`
+/// identity, under the same `check_topology_subset` relationship as
+/// [`resolve_storage`].
 ///
-/// An identity hit is then validated on `reference_date` (the two raw `i32`
-/// stamps, never decoded `NaiveDate`s — an unparseable stamp must degrade to
-/// its raw form in the message, not fold two undecodable stamps into a
-/// spurious equality): both sides dated and equal copies, unchanged; both
-/// dated and DIFFERENT rejects, naming the hydro, the lag depth, and both
-/// dates — a "different past" diagnosis, worded distinctly from the
-/// identity-miss reject above so the two failures, which have different
-/// remedies, are never conflated. Either side at
+/// An identity hit is then validated on `reference_date`: the two raw `i32`
+/// stamps, never decoded `NaiveDate`s — two undecodable stamps must not fold
+/// into a spurious equality. Both dated and DIFFERENT rejects, naming the
+/// hydro, the lag depth, and both dates — a "different past" diagnosis,
+/// worded distinctly from the identity-miss reject above so the two failures,
+/// which have different remedies, are never conflated. Either side at
 /// `ENTITY_SLOT_DELIVERY_DATE_SENTINEL` copies by identity regardless: the
 /// [`reserve_boundary_inflow_lag_slots`](crate::policy_export::reserve_boundary_inflow_lag_slots)
-/// bridge carve-out — that DECOMP-bootstrap path builds slots from a
-/// manifest and coefficients, never a calendar, so it can only ever emit the
-/// sentinel, and rejecting on it would break the boundary bridge with no
-/// replacement path.
+/// bridge builds slots from a manifest and coefficients, never a calendar, so
+/// it can only ever emit the sentinel.
 ///
 /// Two wrong-but-compiling alternatives: rejecting whenever either side is
-/// undated buys date evidence
-/// [`reserve_boundary_inflow_lag_slots`](crate::policy_export::reserve_boundary_inflow_lag_slots)
-/// cannot supply, at the cost of the only supported external-authoring path;
+/// undated breaks that bridge, the only supported external-authoring path;
 /// keying the join on `(hydro, reference_date)` instead of `(hydro,
-/// lag-index)` would make every undated slot unjoinable — breaking the same
-/// carve-out — to guard against a lag-index convention difference that
+/// lag-index)` would make every undated slot unjoinable, to guard against a
+/// convention drift
 /// [`build_stage_entity_manifest`](crate::policy_export::build_stage_entity_manifest)
-/// never lets occur, since it is the sole owner of the 1-based `subindex`
-/// convention on both sides.
+/// already precludes as the sole owner of the 1-based `subindex` convention
+/// on both sides.
 fn resolve_inflow_lag(
     slot: &EntitySlot,
     source: &[EntitySlot],
@@ -434,57 +360,37 @@ fn render_reference_date(raw: i32) -> String {
 /// Forward-dated resolution shared by `AnticipatedThermalState` and
 /// `HydroTransitBucket` target slots — the two families whose delivery/
 /// arrival intervals, not `subindex` identity, determine which source
-/// position(s) a target coefficient draws from. Decodes `slot.interval_start`/
-/// `interval_end` ONCE, at the top: `interval_start == SENTINEL` (pre-fan-out
-/// padding) always resolves to `Zero`. A live interval that fails to decode
-/// (never expected past `read_policy_checkpoint`'s date validation, but not
-/// ruled out by the type system) is [`RebindOp::Reject`], naming the slot's
-/// identity and the undecodable raw value — loud rather than silently `Zero`.
-/// A live, decoded interval whose `interval_end` is at or before
-/// `boundary_date` is an IN-STUDY slot — an anticipated commitment delivered
-/// WITHIN the current horizon (e.g. a matured commitment fished at the
-/// terminal stage, or a `K = 0` sub-stage-lead delivery self-delivered
-/// there), or a transit bucket whose maturity lands before the terminal
-/// boundary — and resolves to `Zero`: the terminal boundary FCF prices only
-/// post-study obligations, so a within-horizon delivery, already discharged
-/// inside the study, contributes nothing.
+/// position(s) a target coefficient draws from. `subindex` plays no part in
+/// the join for either family: two transit buckets of one downstream plant at
+/// different maturity lags, or two anticipated ring slots of one thermal, are
+/// told apart entirely by their disjoint intervals.
+///
+/// `interval_start == SENTINEL` (pre-fan-out padding) resolves to `Zero`. A
+/// live interval that fails to decode (never expected past
+/// `read_policy_checkpoint`'s date validation, but not ruled out by the type
+/// system) is [`RebindOp::Reject`] — loud rather than silently `Zero`. A live
+/// interval ending at or before `boundary_date` is an IN-STUDY delivery,
+/// already discharged inside the study, and resolves to `Zero`, never a
+/// reject: the terminal boundary FCF prices only post-study obligations, and
+/// rejecting here aborts a legitimate boundary load the moment any
+/// anticipated thermal delivers in-horizon (the `K = 0` sub-stage-lead case).
 ///
 /// Under a shared stage calendar, a live interval reaching past
-/// `boundary_date` always STARTS at or after it too: a slot's delivery stage
-/// is either a study stage (ending at or before `boundary_date`, which IS
-/// the study's last stage's `end_date`) or a post-study stage (the
-/// post-study calendar begins at the horizon end), so no live interval
-/// straddles `boundary_date`. That is asserted by a `debug_assert!` on this
-/// branch rather than enforced by clipping — a case the calendar forbids
-/// needs no machinery, and clipping would mask a producer bug the assertion
+/// `boundary_date` always STARTS at or after it too, so none straddles the
+/// boundary. That is asserted by a `debug_assert!` rather than enforced by
+/// clipping to `[max(start, boundary_date), end)` — clipping adds machinery
+/// for a case the calendar forbids and masks the producer bug the assertion
 /// surfaces.
 ///
-/// A live interval reaching past `boundary_date` fans out against
-/// `source_index`'s calendar-overlap-weighted intervals of the SAME family
-/// (the family byte in [`SourceKey`] keeps the two families' entries
-/// disjoint, so no `subindex` or other discriminator is needed to tell them
-/// apart): no covered interval yields `Zero` — the expected outcome for a
-/// `HydroTransitBucket` target when the source is NEWAVE-shaped and carries
-/// no transit arcs at all, exactly as an `AnticipatedThermalState` target's
-/// `Zero` there instead usually expresses an in-study delivery already
-/// discharged; full coverage yields [`RebindOp::Blend`] (`weight =
+/// Such an interval fans out against `source_index`'s same-family intervals:
+/// no covered interval yields `Zero` — the expected outcome for a
+/// `HydroTransitBucket` target against a NEWAVE-shaped source carrying no
+/// transit arcs at all, an expected boundary shape rather than an
+/// incompatibility; full coverage yields [`RebindOp::Blend`] (`weight =
 /// overlap(w, m) / H_m`, the `÷H_m` distribute); partial coverage (a
 /// boundary-edge slot straddling into unpriced time) yields
 /// [`RebindOp::Renormalize`], scaling the covered intervals' density up to
-/// the full slot instead of an implicit `0.0` deflation term. Neither `Zero`
-/// case is a reject: a NEWAVE-shaped source missing every transit arc, or a
-/// within-horizon delivery, is an expected boundary shape, not one the
-/// current study is incompatible with. `subindex` plays no part in this join
-/// for either family — two transit buckets of one downstream plant at
-/// different maturity lags, or two anticipated ring slots of one thermal,
-/// are told apart entirely by their disjoint arrival intervals.
-///
-/// Two wrong-but-compiling alternatives: [`RebindOp::Reject`] on an in-study
-/// delivery aborts a legitimate boundary load the moment any anticipated
-/// thermal delivers in-horizon (a sub-stage lead at the terminal stage — the
-/// `K = 0` case); clipping a live interval to `[max(start, boundary_date),
-/// end)` instead of asserting adds machinery for a case the calendar
-/// forbids.
+/// the full slot instead of an implicit `0.0` deflation term.
 fn resolve_by_interval_overlap(
     slot: &EntitySlot,
     boundary_date: NaiveDate,
@@ -609,12 +515,10 @@ pub(crate) fn rebind_cut(cut: &OwnedPolicyCutRecord, rebind: &[RebindOp]) -> Vec
         .collect()
 }
 
-/// `source` positions no [`RebindOp::Copy`] or `Blend`/`Renormalize` term in
-/// `rebind` ever references, excluding a structural pad
-/// ([`is_structural_pad`]) — the source-side counterpart to [`classify_op`]'s
-/// target-side pad exclusion: a pad prices nothing, so an unreferenced pad is
-/// not a genuinely dropped coefficient, and `dropped_source` counts only
-/// coefficients a study genuinely does not model.
+/// `source` positions no op in `rebind` ever references, excluding a
+/// structural pad ([`is_structural_pad`]) — the source-side counterpart to
+/// [`classify_op`]'s target-side pad exclusion: a pad prices nothing, so an
+/// unreferenced pad is not a genuinely dropped coefficient.
 fn dropped_source_positions(source: &[EntitySlot], rebind: &[RebindOp]) -> Vec<usize> {
     let len = source.len();
     let mut referenced = vec![false; len];
@@ -645,9 +549,7 @@ fn dropped_source_positions(source: &[EntitySlot], rebind: &[RebindOp]) -> Vec<u
 }
 
 /// Human-readable name for a slot's state family — the single owner of every
-/// family's rendered name, shared by [`BoundaryReconciliationReport::families`]
-/// (and therefore [`BoundaryReconciliationReport::detail_lines`],
-/// [`slot_detail`], and [`BoundaryReconciliationReport::superset_summary`]).
+/// family's rendered name.
 fn family_label(family: Option<StateFamily>) -> &'static str {
     match family {
         Some(StateFamily::HydroStorage) => "storage",
@@ -659,11 +561,7 @@ fn family_label(family: Option<StateFamily>) -> &'static str {
 }
 
 /// Per-family tally of one [`BoundaryReconciliationReport`]'s per-operation
-/// classification: `copy` ([`RebindOp::Copy`]), `fan_out`
-/// (`Blend` + `Renormalize` target slots), `straddling` (the `Renormalize`
-/// subset of `fan_out` — the boundary-edge sub-case), `default_zero`
-/// (target-only `Zero`, excluding a sentinel-anticipated pad), and
-/// `dropped_source` (this family's own [`dropped_source_positions`]).
+/// classification ([`classify_op`]).
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct FamilyTally {
     /// Target slots resolved by [`RebindOp::Copy`].
@@ -678,28 +576,16 @@ pub struct FamilyTally {
     pub dropped_source: usize,
 }
 
-/// Anticipated-family fan-out coverage: the source's own priced
-/// delivery-interval span and the target's live delivery-interval span.
-/// Paired with the sibling [`BoundaryReconciliationReport::anticipated`]
-/// tally's `fan_out`/`straddling`/`default_zero`, this is everything
-/// [`BoundaryReconciliationReport::detail_lines`] needs to render the
-/// coverage line.
+/// Anticipated-family fan-out coverage.
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct AnticipatedCoverage {
     /// Live, dated anticipated source slots contributing a decoded delivery interval.
     pub source_interval_count: usize,
-    /// `[earliest start, latest end)` across those source intervals.
-    pub source_span: Option<(NaiveDate, NaiveDate)>,
-    /// `[earliest start, latest end)` across live, dated anticipated target intervals.
-    pub target_span: Option<(NaiveDate, NaiveDate)>,
 }
 
 /// One [`EntitySlot`]'s identity and dating, as rendered into
 /// [`BoundaryReconciliationReport::dropped_source_slots`] and
-/// [`BoundaryReconciliationReport::straddling_slots`]. `interval` is
-/// populated for `HydroTransitBucket`/`AnticipatedThermalState`,
-/// `reference_date` for `HydroInflowLag`; both are `None` for `HydroStorage`
-/// and for an unrecognized family — see [`slot_detail`].
+/// [`BoundaryReconciliationReport::straddling_slots`].
 #[derive(Debug, Clone, Serialize)]
 pub struct SlotDetail {
     /// This slot's state family, via [`family_label`].
@@ -718,9 +604,9 @@ pub struct SlotDetail {
 }
 
 /// Builds `slot`'s [`SlotDetail`], decoding only the date field(s) `slot`'s
-/// own family populates ([`EntitySlot`]'s field docs). A stamp that fails to
-/// decode yields `None`, never an error — the report is a diagnostic and
-/// must never fail a load that otherwise succeeded.
+/// own family populates. A stamp that fails to decode yields `None`, never an
+/// error — the report is a diagnostic and must never fail a load that
+/// otherwise succeeded.
 fn slot_detail(slot: &EntitySlot) -> SlotDetail {
     let family = slot.family();
     let interval = matches!(
@@ -742,10 +628,8 @@ fn slot_detail(slot: &EntitySlot) -> SlotDetail {
 }
 
 /// The "which boundary policy we have + what got reconciled" diagnostic:
-/// [`build_reconciliation_report`]'s pure tally of one
-/// `load_boundary_cuts` reconciliation, by family. `reconciled` is `false`
-/// only on the empty-manifest / dimension-only skip path, where every tally
-/// stays at its zero [`Default`].
+/// [`build_reconciliation_report`]'s pure per-family tally of one
+/// `load_boundary_cuts` reconciliation.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct BoundaryReconciliationReport {
     /// `false` on the skipped (dimension-only) load path; `true` when rebind ran.
@@ -764,11 +648,9 @@ pub struct BoundaryReconciliationReport {
     pub other_identity: FamilyTally,
     /// Every dropped source slot's own identity and dating, in ascending
     /// source position — [`dropped_source_positions`] made readable.
-    /// Uncapped; [`Self::detail_lines`] caps its own rendering of it.
     pub dropped_source_slots: Vec<SlotDetail>,
     /// Every straddling ([`RebindOp::Renormalize`]) target slot's own
-    /// identity and dating, in ascending target position. Uncapped;
-    /// [`Self::detail_lines`] caps its own rendering of it.
+    /// identity and dating, in ascending target position.
     pub straddling_slots: Vec<SlotDetail>,
 }
 
@@ -803,8 +685,7 @@ impl BoundaryReconciliationReport {
     }
 
     /// The four aggregate tallies (copy, fan-out, default-zero, dropped-source)
-    /// summed across every family — shared by [`Self::tally_clause`]'s wording
-    /// and the CLI's own compact rendering of the same totals.
+    /// summed across every family, shared with the CLI's own rendering.
     #[must_use]
     pub fn tally_totals(&self) -> (usize, usize, usize, usize) {
         let families = self.families();
@@ -815,21 +696,8 @@ impl BoundaryReconciliationReport {
         (copy, fan_out, default_zero, dropped)
     }
 
-    /// The four-total tally clause, with no leading "boundary reconciliation: "
-    /// prefix — [`Self::summary_line`]'s payload. Reconciled totals only; the
-    /// dimension-only notice is [`Self::summary_line`]'s own early return.
-    #[must_use]
-    pub fn tally_clause(&self) -> String {
-        let (total_copy, total_fan_out, total_default_zero, total_dropped) = self.tally_totals();
-        format!(
-            "{total_copy} copied, {total_fan_out} fanned out, {total_default_zero} defaulted \
-             to 0.0, {total_dropped} source slots dropped"
-        )
-    }
-
     /// One-line reconciliation summary: the dimension-only notice on the skip
-    /// path, otherwise the totals across every family. The per-family breakdown
-    /// lives in [`Self::detail_lines`].
+    /// path, otherwise the totals across every family.
     #[must_use]
     pub fn summary_line(&self) -> String {
         if !self.reconciled {
@@ -837,16 +705,17 @@ impl BoundaryReconciliationReport {
                     per-family fan-out tally"
                 .to_string();
         }
-        format!("boundary reconciliation: {}", self.tally_clause())
+        let (total_copy, total_fan_out, total_default_zero, total_dropped) = self.tally_totals();
+        format!(
+            "boundary reconciliation: {total_copy} copied, {total_fan_out} fanned out, \
+             {total_default_zero} defaulted to 0.0, {total_dropped} source slots dropped"
+        )
     }
 
-    /// The dropped-source counts behind a superset boundary (a source
-    /// pricing state this study does not model): one `{family}: {n}` clause
-    /// per family with a nonzero [`FamilyTally::dropped_source`], in
-    /// [`Self::families`] order, or `None` when every family's count is
-    /// zero. Carries no framing and no per-slot examples — the caller
-    /// supplies the framing, and [`Self::dropped_source_slots`] is the
-    /// per-slot detail behind this summary.
+    /// The dropped-source counts behind a superset boundary (a source pricing
+    /// state this study does not model), or `None` when every family's count
+    /// is zero. Carries no framing and no per-slot examples — the caller
+    /// supplies the framing.
     #[must_use]
     pub fn superset_summary(&self) -> Option<String> {
         let families = self.families();
@@ -865,14 +734,10 @@ impl BoundaryReconciliationReport {
         ))
     }
 
-    /// Per-family reconciliation breakdown (one COPY / FAN-OUT / DEFAULT-0.0 /
-    /// DROP line per family, then the anticipated coverage line), followed by
-    /// up to [`DETAIL_LINES_SLOT_CAP`] `dropped:` lines and up to
-    /// [`DETAIL_LINES_SLOT_CAP`] `straddling:` lines (each with its own
-    /// `"... and N more"` remainder line past the cap) — the verbose detail
-    /// behind [`Self::summary_line`]. The cap is a rendering concern only:
-    /// [`Self::dropped_source_slots`] and [`Self::straddling_slots`]
-    /// themselves stay uncapped. Empty on the dimension-only skip path.
+    /// Per-family reconciliation breakdown, the anticipated coverage line,
+    /// then the capped `dropped:`/`straddling:` slot lines — the verbose
+    /// detail behind [`Self::summary_line`]. Empty on the dimension-only skip
+    /// path.
     #[must_use]
     pub fn detail_lines(&self) -> Vec<String> {
         if !self.reconciled {
@@ -882,7 +747,7 @@ impl BoundaryReconciliationReport {
         let mut lines = Vec::with_capacity(families.len() + 1 + 2 * (DETAIL_LINES_SLOT_CAP + 1));
         for (name, tally) in families {
             lines.push(format!(
-                "{name}: COPY={}, FAN-OUT=({}, rule = distribute), DEFAULT-0.0={}, DROP={}",
+                "{name}: COPY={}, FAN-OUT={}, DEFAULT-0.0={}, DROP={}",
                 tally.copy, tally.fan_out, tally.default_zero, tally.dropped_source
             ));
         }
@@ -905,10 +770,8 @@ impl BoundaryReconciliationReport {
 /// only; the report's own vectors stay uncapped.
 const DETAIL_LINES_SLOT_CAP: usize = 5;
 
-/// Renders `details`' first [`DETAIL_LINES_SLOT_CAP`] entries as
-/// `"{prefix}: {family} {entity_id}/{subindex} @ [{start}, {end})"` (or `@
-/// {reference_date}`, or no date clause for storage), appending a `"... and N
-/// more"` line when `details` is longer than the cap.
+/// Renders `details`' first [`DETAIL_LINES_SLOT_CAP`] entries, appending a
+/// `"... and N more"` line past the cap.
 fn push_capped_slot_lines(lines: &mut Vec<String>, prefix: &str, details: &[SlotDetail]) {
     for detail in details.iter().take(DETAIL_LINES_SLOT_CAP) {
         let date_clause = match (detail.interval, detail.reference_date) {
@@ -941,10 +804,8 @@ fn is_structural_pad(slot: &EntitySlot) -> bool {
     is_forward_family && slot.interval_start == ENTITY_SLOT_DELIVERY_DATE_SENTINEL
 }
 
-/// Classify one target slot's `(op, slot)` into `tally`: `Copy` → COPY;
-/// `Blend`/`Renormalize` → FAN-OUT (`Renormalize` also STRADDLING); `Zero` on
-/// a structural pad ([`is_structural_pad`]) is excluded from every tally;
-/// every other `Zero` → DEFAULT-0.0.
+/// Classify one target slot's `(op, slot)` into `tally`. A `Zero` on a
+/// structural pad ([`is_structural_pad`]) is excluded from every tally.
 fn classify_op(op: &RebindOp, slot: &EntitySlot, tally: &mut FamilyTally) {
     match op {
         RebindOp::Copy(_) => tally.copy += 1,
@@ -965,34 +826,11 @@ fn classify_op(op: &RebindOp, slot: &EntitySlot, tally: &mut FamilyTally) {
     }
 }
 
-/// Widen `span` to also cover `interval`, when present; a no-op for `None`
-/// (a sentinel or otherwise interval-less slot).
-fn fold_span(span: &mut Option<(NaiveDate, NaiveDate)>, interval: Option<(NaiveDate, NaiveDate)>) {
-    let Some((start, end)) = interval else {
-        return;
-    };
-    *span = Some(match *span {
-        Some((cur_start, cur_end)) => (cur_start.min(start), cur_end.max(end)),
-        None => (start, end),
-    });
-}
-
 /// Build a [`BoundaryReconciliationReport`] over one `load_boundary_cuts`
 /// reconciliation: a pure pass over the aligned `target`/`rebind` vectors,
-/// `source` (for [`dropped_source_positions`]), and `source_index` (for the
-/// source interval span) — the same [`build_source_interval_index`] output
-/// [`build_rebind`] resolved against, so a source slot's span is read exactly
-/// once, never re-decoded here. [`AnticipatedCoverage`] is anticipated-only,
-/// so the source-span pass filters `source_index` to the
-/// `AnticipatedThermalState` family byte even though the shared index also
-/// carries `HydroTransitBucket` entries. The target span folds each live
-/// anticipated `target` slot's OWN `interval_start`/`interval_end` — the same
-/// set [`build_rebind`] fanned out against — reaching past `boundary_date`.
-/// [`BoundaryReconciliationReport::dropped_source_slots`] is built in the
-/// same dropped-positions loop, in ascending source position;
-/// [`BoundaryReconciliationReport::straddling_slots`] in the same target
-/// pass, in ascending target position — both positional orders, never
-/// sorted. No I/O, no mutation, not on any hot path.
+/// against the same [`build_source_interval_index`] output [`build_rebind`]
+/// resolved against. The two slot-detail vectors are filled in ascending
+/// source and target position respectively — positional orders, never sorted.
 ///
 /// # Panics
 ///
@@ -1001,7 +839,6 @@ fn fold_span(span: &mut Option<(NaiveDate, NaiveDate)>, interval: Option<(NaiveD
 pub(crate) fn build_reconciliation_report(
     source: &[EntitySlot],
     target: &[EntitySlot],
-    boundary_date: NaiveDate,
     rebind: &[RebindOp],
     source_index: &HashMap<SourceKey, Vec<SourceInterval>>,
 ) -> BoundaryReconciliationReport {
@@ -1010,23 +847,13 @@ pub(crate) fn build_reconciliation_report(
         ..BoundaryReconciliationReport::default()
     };
 
-    let mut target_span = None;
     for (slot, op) in target.iter().zip(rebind) {
         let family = slot.family();
-        if family == Some(StateFamily::AnticipatedThermalState)
-            && slot.interval_start != ENTITY_SLOT_DELIVERY_DATE_SENTINEL
-            && let Some(start) = decode_slot_date(slot.interval_start)
-            && let Some(end) = decode_slot_date(slot.interval_end)
-            && end > boundary_date
-        {
-            fold_span(&mut target_span, Some((start, end)));
-        }
         if matches!(op, RebindOp::Renormalize(_)) {
             report.straddling_slots.push(slot_detail(slot));
         }
         classify_op(op, slot, report.tally_mut(family));
     }
-    report.anticipated_coverage.target_span = target_span;
 
     for pos in dropped_source_positions(source, rebind) {
         if let Some(slot) = source.get(pos) {
@@ -1035,23 +862,16 @@ pub(crate) fn build_reconciliation_report(
         }
     }
 
-    let mut source_span = None;
     let mut source_interval_count = 0;
-    // Anticipated-only: the family byte in the key filters out the shared
-    // index's HydroTransitBucket entries, which AnticipatedCoverage excludes.
-    // Map-order iteration is safe here only because a count and a min/max span
-    // are exactly commutative; never accumulate a float sum this way.
+    // AnticipatedCoverage is anticipated-only; the shared index also carries
+    // HydroTransitBucket entries.
     for (&(family_byte, _), intervals) in source_index {
         if family_byte != StateFamily::AnticipatedThermalState.code() {
             continue;
         }
-        for interval in intervals {
-            source_interval_count += 1;
-            fold_span(&mut source_span, Some((interval.start, interval.end)));
-        }
+        source_interval_count += intervals.len();
     }
     report.anticipated_coverage.source_interval_count = source_interval_count;
-    report.anticipated_coverage.source_span = source_span;
 
     report
 }
@@ -1066,56 +886,15 @@ mod tests {
         dropped_source_positions, rebind_cut, slot_detail,
     };
     use crate::SddpError;
+    use crate::test_support::{
+        anticipated_slot, anticipated_slot_at, inflow_lag_slot, storage_slot, transit_bucket_slot,
+        transit_bucket_slot_over, ymd,
+    };
     use cobre_core::{AnticipatedCommitmentHistory, EntityId};
     use cobre_io::{EntitySlot, OwnedPolicyCutRecord, encode_slot_date};
 
-    fn storage_slot(id: i32) -> EntitySlot {
-        EntitySlot::storage(id, true)
-    }
-
-    fn inflow_lag_slot(id: i32, lag_depth: u32) -> EntitySlot {
-        EntitySlot::inflow_lag(id, lag_depth, true)
-    }
-
-    fn transit_bucket_slot(downstream_hydro_id: i32, lag: u32) -> EntitySlot {
-        EntitySlot::transit_bucket(downstream_hydro_id, lag, true)
-    }
-
-    /// Like [`transit_bucket_slot`] but carrying a real `[start, end)`
-    /// arrival interval instead of the sentinel.
-    fn transit_bucket_slot_over(
-        downstream_hydro_id: i32,
-        lag: u32,
-        start: i32,
-        end: i32,
-    ) -> EntitySlot {
-        transit_bucket_slot(downstream_hydro_id, lag).with_interval(start, end)
-    }
-
-    fn anticipated_sentinel_slot(thermal_id: i32, ring_slot: u32) -> EntitySlot {
-        EntitySlot::anticipated(thermal_id, ring_slot, true)
-    }
-
-    fn anticipated_dated_slot(thermal_id: i32, ring_slot: u32, month_anchor: i32) -> EntitySlot {
-        EntitySlot::anticipated(thermal_id, ring_slot, true)
-            .with_interval(month_anchor, next_month_anchor(month_anchor))
-    }
-
-    /// The following month's day-01 `YYYYMMDD` anchor of `month_anchor`
-    /// (itself a day-01 anchor) — mirrors the same-named helper in `tests/`.
-    fn next_month_anchor(month_anchor: i32) -> i32 {
-        let year = month_anchor / 10_000;
-        let month = (month_anchor / 100) % 100;
-        if month == 12 {
-            (year + 1) * 10_000 + 101
-        } else {
-            year * 10_000 + (month + 1) * 100 + 1
-        }
-    }
-
-    /// Builds `source`'s interval index and resolves [`build_rebind`] against
-    /// it — the two-step call `load_boundary_cuts` performs, collapsed for
-    /// tests that only assert on the resulting ops.
+    /// The two-step index-then-rebind call `load_boundary_cuts` performs,
+    /// collapsed into one.
     fn rebind_via_index(
         source: &[EntitySlot],
         target: &[EntitySlot],
@@ -1125,17 +904,15 @@ mod tests {
         build_rebind(source, target, boundary_date, &source_index)
     }
 
-    /// Builds `source`'s interval index and resolves
-    /// [`build_reconciliation_report`] against it, mirroring
-    /// [`rebind_via_index`].
+    /// [`rebind_via_index`]'s counterpart for
+    /// [`build_reconciliation_report`].
     fn report_via_index(
         source: &[EntitySlot],
         target: &[EntitySlot],
-        boundary_date: NaiveDate,
         rebind: &[RebindOp],
     ) -> BoundaryReconciliationReport {
         let source_index = build_source_interval_index(source).unwrap();
-        build_reconciliation_report(source, target, boundary_date, rebind, &source_index)
+        build_reconciliation_report(source, target, rebind, &source_index)
     }
 
     fn owned_cut(coefficients: Vec<f64>) -> OwnedPolicyCutRecord {
@@ -1150,15 +927,10 @@ mod tests {
         }
     }
 
-    /// An arbitrary boundary date for tests exercising only the identity
-    /// families or a sentinel-padded anticipated slot, neither of which reads
-    /// `boundary_date`.
+    /// For tests exercising only the identity families or a sentinel-padded
+    /// forward-family slot, none of which reads `boundary_date`.
     fn arbitrary_boundary_date() -> NaiveDate {
         NaiveDate::from_ymd_opt(2026, 1, 1).expect("valid calendar date")
-    }
-
-    fn ymd(year: i32, month: u32, day: u32) -> NaiveDate {
-        NaiveDate::from_ymd_opt(year, month, day).expect("valid calendar date")
     }
 
     fn fixed_window(
@@ -1415,8 +1187,8 @@ mod tests {
     fn dropped_source_positions_excludes_sentinel_forward_family_pads() {
         let source = vec![
             storage_slot(1),
-            anticipated_dated_slot(9, 1, 20_320_101),
-            anticipated_sentinel_slot(9, 2),
+            anticipated_slot_at(9, 1, 20_320_101),
+            anticipated_slot(9, 2),
         ];
         let rebind = vec![RebindOp::Copy(0)];
 
@@ -1468,7 +1240,7 @@ mod tests {
              coefficient bit-for-bit"
         );
 
-        let report = report_via_index(&source, &target, boundary_date, &rebind);
+        let report = report_via_index(&source, &target, &rebind);
         assert_eq!(
             report.transit_bucket.fan_out, 1,
             "an interval-join match tallies as fan_out, not copy"
@@ -1592,7 +1364,7 @@ mod tests {
         let rebind = rebind_via_index(&source, &target, boundary_date).unwrap();
         assert_eq!(rebind, vec![RebindOp::Zero]);
 
-        let report = report_via_index(&source, &target, boundary_date, &rebind);
+        let report = report_via_index(&source, &target, &rebind);
         assert_eq!(
             report.transit_bucket.default_zero, 0,
             "a sentinel-interval Zero must be excluded from the default_zero tally"
@@ -1627,8 +1399,8 @@ mod tests {
     /// proving the sentinel case is dispatched purely on the interval.
     #[test]
     fn build_rebind_sentinel_anticipated_target_is_always_zero() {
-        let source = vec![storage_slot(1), anticipated_sentinel_slot(9, 0)];
-        let target = vec![storage_slot(1), anticipated_sentinel_slot(9, 0)];
+        let source = vec![storage_slot(1), anticipated_slot(9, 0)];
+        let target = vec![storage_slot(1), anticipated_slot(9, 0)];
 
         let rebind = rebind_via_index(&source, &target, arbitrary_boundary_date()).unwrap();
 
@@ -1641,9 +1413,9 @@ mod tests {
     /// weighted `overlap/H_M`.
     #[test]
     fn build_rebind_dated_anticipated_target_fully_covered_yields_blend() {
-        let source = vec![anticipated_dated_slot(9, 0, 20_260_301)];
+        let source = vec![anticipated_slot_at(9, 0, 20_260_301)];
         let boundary_date = ymd(2026, 3, 1);
-        let target = vec![anticipated_dated_slot(9, 100, 20_260_301).with_interval(
+        let target = vec![anticipated_slot_at(9, 100, 20_260_301).with_interval(
             encode_slot_date(boundary_date),
             encode_slot_date(ymd(2026, 4, 1)),
         )];
@@ -1671,12 +1443,12 @@ mod tests {
     /// with a fractional `overlap/H_M` weight.
     #[test]
     fn build_rebind_anticipated_partial_month_yields_blend_fractional_weight() {
-        let source = vec![storage_slot(1), anticipated_dated_slot(9, 0, 20_260_401)];
+        let source = vec![storage_slot(1), anticipated_slot_at(9, 0, 20_260_401)];
         let start_w = ymd(2026, 4, 8);
         let end_w = ymd(2026, 4, 15);
         let target = vec![
             storage_slot(1),
-            anticipated_dated_slot(9, 100, 20_260_401)
+            anticipated_slot_at(9, 100, 20_260_401)
                 .with_interval(encode_slot_date(start_w), encode_slot_date(end_w)),
         ];
 
@@ -1709,11 +1481,11 @@ mod tests {
         let start = ymd(2026, 4, 1);
         let end = ymd(2026, 4, 8);
         let source = vec![
-            anticipated_dated_slot(9, 0, 20_260_401)
+            anticipated_slot_at(9, 0, 20_260_401)
                 .with_interval(encode_slot_date(start), encode_slot_date(end)),
         ];
         let target = vec![
-            anticipated_dated_slot(9, 100, 20_260_401)
+            anticipated_slot_at(9, 100, 20_260_401)
                 .with_interval(encode_slot_date(start), encode_slot_date(end)),
         ];
 
@@ -1735,7 +1507,7 @@ mod tests {
     #[test]
     fn source_interval_index_rejects_an_undecodable_live_interval() {
         let source =
-            vec![anticipated_dated_slot(9, 0, 20_260_301).with_interval(20_261_301, 20_260_401)];
+            vec![anticipated_slot_at(9, 0, 20_260_301).with_interval(20_261_301, 20_260_401)];
 
         let err = build_source_interval_index(&source).unwrap_err();
 
@@ -1754,11 +1526,11 @@ mod tests {
     #[test]
     fn build_rebind_anticipated_straddle_into_unpriced_yields_renormalize_no_zero_term() {
         let source_coeff = 300.0;
-        let source = vec![anticipated_dated_slot(9, 0, 20_260_301)];
+        let source = vec![anticipated_slot_at(9, 0, 20_260_301)];
         let start_w = ymd(2026, 2, 26);
         let end_w = ymd(2026, 3, 5);
         let target = vec![
-            anticipated_dated_slot(9, 100, 20_260_301)
+            anticipated_slot_at(9, 100, 20_260_301)
                 .with_interval(encode_slot_date(start_w), encode_slot_date(end_w)),
         ];
 
@@ -1799,11 +1571,11 @@ mod tests {
     /// resolves to `Zero` — no covered month, nothing to reconcile to.
     #[test]
     fn build_rebind_anticipated_no_covered_month_yields_zero() {
-        let source = vec![anticipated_dated_slot(9, 0, 20_260_301)];
+        let source = vec![anticipated_slot_at(9, 0, 20_260_301)];
         let start_w = ymd(2026, 5, 1);
         let end_w = ymd(2026, 5, 8);
         let target = vec![
-            anticipated_dated_slot(9, 100, 20_260_301)
+            anticipated_slot_at(9, 100, 20_260_301)
                 .with_interval(encode_slot_date(start_w), encode_slot_date(end_w)),
         ];
 
@@ -1818,9 +1590,9 @@ mod tests {
     /// vector would have.
     #[test]
     fn anticipated_target_reads_its_own_manifest_interval() {
-        let source = vec![anticipated_dated_slot(9, 0, 20_260_301)];
+        let source = vec![anticipated_slot_at(9, 0, 20_260_301)];
         let boundary_date = ymd(2026, 3, 1);
-        let target = vec![anticipated_dated_slot(9, 100, 20_260_301).with_interval(
+        let target = vec![anticipated_slot_at(9, 100, 20_260_301).with_interval(
             encode_slot_date(ymd(2026, 3, 1)),
             encode_slot_date(ymd(2026, 3, 15)),
         )];
@@ -1855,11 +1627,11 @@ mod tests {
     /// were wrongly fanned out.
     #[test]
     fn anticipated_target_ending_at_the_boundary_date_zeroes() {
-        let source = vec![storage_slot(1), anticipated_dated_slot(9, 0, 20_260_301)];
+        let source = vec![storage_slot(1), anticipated_slot_at(9, 0, 20_260_301)];
         let boundary_date = ymd(2026, 4, 1);
         let target = vec![
             storage_slot(1),
-            anticipated_dated_slot(9, 0, 20_260_301).with_interval(
+            anticipated_slot_at(9, 0, 20_260_301).with_interval(
                 encode_slot_date(ymd(2026, 3, 1)),
                 encode_slot_date(boundary_date),
             ),
@@ -1875,9 +1647,9 @@ mod tests {
     /// overlapping source month, never zeroes.
     #[test]
     fn anticipated_target_reaching_past_the_boundary_date_fans_out() {
-        let source = vec![anticipated_dated_slot(9, 0, 20_260_301)];
+        let source = vec![anticipated_slot_at(9, 0, 20_260_301)];
         let boundary_date = ymd(2026, 2, 1);
-        let target = vec![anticipated_dated_slot(9, 100, 20_260_301).with_interval(
+        let target = vec![anticipated_slot_at(9, 100, 20_260_301).with_interval(
             encode_slot_date(ymd(2026, 3, 1)),
             encode_slot_date(ymd(2026, 4, 1)),
         )];
@@ -1897,14 +1669,14 @@ mod tests {
     /// excludes it from every tally — the structural-pad exclusion.
     #[test]
     fn anticipated_sentinel_interval_is_a_structural_pad() {
-        let source = vec![anticipated_dated_slot(9, 0, 20_260_301)];
-        let target = vec![anticipated_sentinel_slot(9, 100)];
+        let source = vec![anticipated_slot_at(9, 0, 20_260_301)];
+        let target = vec![anticipated_slot(9, 100)];
         let boundary_date = arbitrary_boundary_date();
 
         let rebind = rebind_via_index(&source, &target, boundary_date).unwrap();
         assert_eq!(rebind, vec![RebindOp::Zero]);
 
-        let report = report_via_index(&source, &target, boundary_date, &rebind);
+        let report = report_via_index(&source, &target, &rebind);
         assert_eq!(
             report.anticipated.default_zero, 0,
             "a sentinel-interval Zero must be excluded from the default_zero tally"
@@ -1920,9 +1692,9 @@ mod tests {
     /// the undecodable raw value.
     #[test]
     fn anticipated_undecodable_interval_rejects_naming_the_slot() {
-        let source = vec![anticipated_dated_slot(9, 0, 20_260_301)];
+        let source = vec![anticipated_slot_at(9, 0, 20_260_301)];
         let target =
-            vec![anticipated_dated_slot(9, 100, 20_260_301).with_interval(20_261_301, 20_260_401)];
+            vec![anticipated_slot_at(9, 100, 20_260_301).with_interval(20_261_301, 20_260_401)];
 
         let err = rebind_via_index(&source, &target, ymd(2026, 3, 1)).unwrap_err();
 
@@ -1951,7 +1723,7 @@ mod tests {
         let source = vec![
             storage_slot(1),
             inflow_lag_slot(1, 1),
-            anticipated_sentinel_slot(9, 0),
+            anticipated_slot(9, 0),
         ];
         let target = source.clone();
         let rebind = rebind_via_index(&source, &target, arbitrary_boundary_date()).unwrap();
@@ -1981,7 +1753,7 @@ mod tests {
         let source = vec![
             storage_slot(1),
             transit_bucket_slot_over(2, 1, 20_260_401, 20_260_501),
-            anticipated_dated_slot(9, 0, 20_260_401),
+            anticipated_slot_at(9, 0, 20_260_401),
         ];
         let target = vec![storage_slot(1)];
         let rebind = rebind_via_index(&source, &target, arbitrary_boundary_date()).unwrap();
@@ -2025,21 +1797,21 @@ mod tests {
     /// `0`, and the coverage line renders the expected shape.
     #[test]
     fn build_reconciliation_report_full_coverage_fan_out_matches_target_slot_count() {
-        let source = vec![anticipated_dated_slot(9, 0, 20_260_401)];
+        let source = vec![anticipated_slot_at(9, 0, 20_260_401)];
         let boundary_date = ymd(2026, 4, 1);
         let target = vec![
-            anticipated_dated_slot(9, 100, 20_260_401).with_interval(
+            anticipated_slot_at(9, 100, 20_260_401).with_interval(
                 encode_slot_date(ymd(2026, 4, 1)),
                 encode_slot_date(ymd(2026, 4, 16)),
             ),
-            anticipated_dated_slot(9, 101, 20_260_401).with_interval(
+            anticipated_slot_at(9, 101, 20_260_401).with_interval(
                 encode_slot_date(ymd(2026, 4, 16)),
                 encode_slot_date(ymd(2026, 5, 1)),
             ),
         ];
         let rebind = rebind_via_index(&source, &target, boundary_date).unwrap();
 
-        let report = report_via_index(&source, &target, boundary_date, &rebind);
+        let report = report_via_index(&source, &target, &rebind);
 
         assert_eq!(
             report.anticipated.fan_out, 2,
@@ -2070,9 +1842,9 @@ mod tests {
     /// counted in `fan_out`.
     #[test]
     fn build_reconciliation_report_renormalize_counts_in_fan_out_and_straddling() {
-        let source = vec![anticipated_dated_slot(9, 0, 20_260_301)];
+        let source = vec![anticipated_slot_at(9, 0, 20_260_301)];
         let boundary_date = ymd(2026, 2, 26);
-        let target = vec![anticipated_dated_slot(9, 100, 20_260_301).with_interval(
+        let target = vec![anticipated_slot_at(9, 100, 20_260_301).with_interval(
             encode_slot_date(ymd(2026, 2, 26)),
             encode_slot_date(ymd(2026, 3, 5)),
         )];
@@ -2082,7 +1854,7 @@ mod tests {
             "fixture must straddle into unpriced time"
         );
 
-        let report = report_via_index(&source, &target, boundary_date, &rebind);
+        let report = report_via_index(&source, &target, &rebind);
 
         assert_eq!(
             report.anticipated.fan_out, 1,
@@ -2097,19 +1869,19 @@ mod tests {
     /// `default_zero` while the sentinel slot is excluded — not a default.
     #[test]
     fn build_reconciliation_report_dated_zero_defaults_sentinel_zero_excluded() {
-        let source = vec![anticipated_dated_slot(9, 0, 20_260_301)];
+        let source = vec![anticipated_slot_at(9, 0, 20_260_301)];
         let boundary_date = ymd(2026, 5, 1);
         let target = vec![
-            anticipated_dated_slot(9, 100, 20_260_301).with_interval(
+            anticipated_slot_at(9, 100, 20_260_301).with_interval(
                 encode_slot_date(ymd(2026, 5, 1)),
                 encode_slot_date(ymd(2026, 5, 8)),
             ),
-            anticipated_sentinel_slot(9, 101),
+            anticipated_slot(9, 101),
         ];
         let rebind = rebind_via_index(&source, &target, boundary_date).unwrap();
         assert_eq!(rebind, vec![RebindOp::Zero, RebindOp::Zero]);
 
-        let report = report_via_index(&source, &target, boundary_date, &rebind);
+        let report = report_via_index(&source, &target, &rebind);
 
         assert_eq!(
             report.anticipated.default_zero, 1,
@@ -2129,13 +1901,13 @@ mod tests {
         let source = vec![
             storage_slot(1),
             inflow_lag_slot(1, 1),
-            anticipated_sentinel_slot(9, 0),
+            anticipated_slot(9, 0),
         ];
         let target = source.clone();
         let boundary_date = arbitrary_boundary_date();
         let rebind = rebind_via_index(&source, &target, boundary_date).unwrap();
 
-        let report = report_via_index(&source, &target, boundary_date, &rebind);
+        let report = report_via_index(&source, &target, &rebind);
 
         assert_eq!(report.storage.copy, 1);
         assert_eq!(report.inflow_lag.copy, 1);
@@ -2157,7 +1929,7 @@ mod tests {
     /// interval.
     #[test]
     fn dropped_slot_detail_carries_the_anticipated_interval() {
-        let slot = anticipated_dated_slot(33, 1, 20_320_101);
+        let slot = anticipated_slot_at(33, 1, 20_320_101);
 
         let detail = slot_detail(&slot);
 
@@ -2208,9 +1980,9 @@ mod tests {
     /// month it straddles into.
     #[test]
     fn straddling_slot_detail_carries_the_target_span() {
-        let source = vec![anticipated_dated_slot(9, 0, 20_260_301)];
+        let source = vec![anticipated_slot_at(9, 0, 20_260_301)];
         let boundary_date = ymd(2026, 2, 26);
-        let target = vec![anticipated_dated_slot(9, 100, 20_260_301).with_interval(
+        let target = vec![anticipated_slot_at(9, 100, 20_260_301).with_interval(
             encode_slot_date(ymd(2026, 2, 26)),
             encode_slot_date(ymd(2026, 3, 5)),
         )];
@@ -2220,7 +1992,7 @@ mod tests {
             "fixture must straddle into unpriced time"
         );
 
-        let report = report_via_index(&source, &target, boundary_date, &rebind);
+        let report = report_via_index(&source, &target, &rebind);
 
         assert_eq!(report.anticipated.straddling, 1);
         assert_eq!(report.straddling_slots.len(), 1);
@@ -2252,17 +2024,17 @@ mod tests {
             encode_slot_date(ymd(2026, 4, 1)),
             encode_slot_date(ymd(2026, 5, 1)),
         );
-        let anticipated = anticipated_dated_slot(9, 0, 20_320_101);
+        let anticipated = anticipated_slot_at(9, 0, 20_320_101);
         let target = vec![storage_slot(1)];
         let boundary_date = arbitrary_boundary_date();
 
         let source_a = vec![storage_slot(1), transit.clone(), anticipated.clone()];
         let rebind_a = rebind_via_index(&source_a, &target, boundary_date).unwrap();
-        let report_a = report_via_index(&source_a, &target, boundary_date, &rebind_a);
+        let report_a = report_via_index(&source_a, &target, &rebind_a);
 
         let source_b = vec![storage_slot(1), anticipated.clone(), transit.clone()];
         let rebind_b = rebind_via_index(&source_b, &target, boundary_date).unwrap();
-        let report_b = report_via_index(&source_b, &target, boundary_date, &rebind_b);
+        let report_b = report_via_index(&source_b, &target, &rebind_b);
 
         assert_eq!(report_a.dropped_source_slots.len(), 2);
         assert_eq!(report_b.dropped_source_slots.len(), 2);
@@ -2353,12 +2125,9 @@ mod tests {
     }
 
     /// `summary_line()`'s reconciled-path wording is a correctness contract for
-    /// `cobre validate` (asserted byte-exact by `cli_validate.rs`) — the
-    /// `tally_clause()` extraction must not change a single byte of it, and
-    /// `tally_clause()` itself is exactly that wording minus the leading
-    /// "boundary reconciliation: " prefix.
+    /// `cobre validate` (asserted byte-exact by `cli_validate.rs`).
     #[test]
-    fn summary_line_reconciled_wording_is_byte_identical_after_tally_clause_extraction() {
+    fn summary_line_reconciled_wording_is_byte_exact() {
         let report = BoundaryReconciliationReport {
             reconciled: true,
             storage: FamilyTally {
@@ -2384,14 +2153,6 @@ mod tests {
             report.summary_line(),
             "boundary reconciliation: 2184 copied, 1 fanned out, 1 defaulted to 0.0, 2 source \
              slots dropped"
-        );
-        assert_eq!(
-            report.tally_clause(),
-            "2184 copied, 1 fanned out, 1 defaulted to 0.0, 2 source slots dropped"
-        );
-        assert_eq!(
-            report.summary_line(),
-            format!("boundary reconciliation: {}", report.tally_clause())
         );
     }
 
@@ -2485,7 +2246,7 @@ mod tests {
     /// at the source month's own position.
     #[test]
     fn build_boundary_fold_single_window_yields_hand_computed_factor() {
-        let source = vec![storage_slot(1), anticipated_dated_slot(9, 0, 20_260_401)];
+        let source = vec![storage_slot(1), anticipated_slot_at(9, 0, 20_260_401)];
         let k = 1;
         let value = 50.0;
         let windows = vec![fixed_window(9, ymd(2026, 4, 8), ymd(2026, 4, 15), value)];
@@ -2509,7 +2270,7 @@ mod tests {
     /// keeps a future transit-widened index from double-counting.
     #[test]
     fn boundary_fold_ignores_transit_slots_sharing_an_entity_id() {
-        let source = vec![anticipated_dated_slot(9, 0, 20_260_401)];
+        let source = vec![anticipated_slot_at(9, 0, 20_260_401)];
         let windows = vec![fixed_window(9, ymd(2026, 4, 8), ymd(2026, 4, 15), 50.0)];
         let baseline = build_boundary_fold(&source, &windows).unwrap();
 
@@ -2530,7 +2291,7 @@ mod tests {
     /// contributes nothing — mirrors `RebindOp::Zero`, an empty fold.
     #[test]
     fn build_boundary_fold_no_overlapping_source_month_is_empty() {
-        let source = vec![anticipated_dated_slot(9, 0, 20_260_401)];
+        let source = vec![anticipated_slot_at(9, 0, 20_260_401)];
         let windows = vec![fixed_window(9, ymd(2026, 5, 1), ymd(2026, 5, 8), 50.0)];
 
         let fold = build_boundary_fold(&source, &windows).unwrap();
@@ -2542,7 +2303,7 @@ mod tests {
     /// nothing, keeping the fold empty for the all-zero horizon-end stub.
     #[test]
     fn build_boundary_fold_zero_value_window_is_empty() {
-        let source = vec![anticipated_dated_slot(9, 0, 20_260_401)];
+        let source = vec![anticipated_slot_at(9, 0, 20_260_401)];
         let windows = vec![fixed_window(9, ymd(2026, 4, 8), ymd(2026, 4, 15), 0.0)];
 
         let fold = build_boundary_fold(&source, &windows).unwrap();
@@ -2554,7 +2315,7 @@ mod tests {
     /// emitted term at that source position — a per-position accumulation.
     #[test]
     fn build_boundary_fold_accumulates_windows_at_one_source_position() {
-        let source = vec![storage_slot(1), anticipated_dated_slot(9, 0, 20_260_401)];
+        let source = vec![storage_slot(1), anticipated_slot_at(9, 0, 20_260_401)];
         let k = 1;
         let value_a = 30.0;
         let value_b = 60.0;
@@ -2582,8 +2343,8 @@ mod tests {
     #[test]
     fn build_boundary_fold_is_order_invariant() {
         let source = vec![
-            anticipated_dated_slot(9, 0, 20_260_401),
-            anticipated_dated_slot(7, 0, 20_260_401),
+            anticipated_slot_at(9, 0, 20_260_401),
+            anticipated_slot_at(7, 0, 20_260_401),
         ];
         let w9 = fixed_window(9, ymd(2026, 4, 8), ymd(2026, 4, 15), 50.0);
         let w7 = fixed_window(7, ymd(2026, 4, 1), ymd(2026, 4, 8), 20.0);

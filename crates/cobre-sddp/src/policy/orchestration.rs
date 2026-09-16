@@ -69,13 +69,11 @@ fn training_block_provenance(modes: &[BlockMode]) -> (String, Vec<String>) {
 /// observes it. `orders[s] == None` means no inflow model of this hydro maps
 /// to a stage on dense season ordinal `s` — the study has no PAR opinion
 /// there. `orders[s] == Some(k)` is a fitted order, including `Some(0)`.
-/// Element type of [`StudySeasonManifest::hydro_orders`].
 #[derive(Debug, Clone)]
 pub struct StudyHydroSeasonOrders {
     /// Owning hydro's id.
     pub hydro_id: i32,
-    /// Fitted AR order per dense season ordinal, or `None` where the study
-    /// references no stage on that season. Length equals
+    /// Fitted AR order per dense season ordinal. Length equals
     /// [`StudySeasonManifest::n_seasons`].
     pub orders: Vec<Option<u32>>,
 }
@@ -87,8 +85,6 @@ pub struct StudyHydroSeasonOrders {
 /// seasons; this type lets the boundary-load season/PAR-identity gate tell
 /// "the study never reached this season" from "the study fitted order zero
 /// here", which a dense `u32` vector cannot.
-/// [`to_season_manifest`](Self::to_season_manifest) projects this onto the
-/// unchanged wire type for the checkpoint writer.
 #[derive(Debug, Clone)]
 pub struct StudySeasonManifest {
     /// Season cycle discriminant; one of the `SEASON_CYCLE_CODE_*` constants.
@@ -101,8 +97,7 @@ pub struct StudySeasonManifest {
 }
 
 impl Default for StudySeasonManifest {
-    /// The absent descriptor: [`SEASON_CYCLE_CODE_ABSENT`], zero seasons, no
-    /// hydros — mirrors [`SeasonManifest`]'s own `Default`.
+    /// The absent descriptor, mirroring [`SeasonManifest`]'s own `Default`.
     fn default() -> Self {
         Self {
             cycle_code: SEASON_CYCLE_CODE_ABSENT,
@@ -114,10 +109,8 @@ impl Default for StudySeasonManifest {
 
 impl StudySeasonManifest {
     /// Projects this descriptor onto the checkpoint wire type, mapping each
-    /// `None` entry to `0`. The "no opinion" state lives only on this
-    /// study-side type; the wire `SeasonManifest` this produces is
-    /// byte-identical to what [`build_season_manifest`] wrote before this
-    /// type existed.
+    /// `None` entry to `0`: the "no opinion" state lives only on this
+    /// study-side type, never on the wire.
     #[must_use]
     pub fn to_season_manifest(&self) -> SeasonManifest {
         SeasonManifest {
@@ -225,11 +218,9 @@ pub struct CheckpointParams {
 /// Write the trained policy (cuts, bases, visited states, metadata) to
 /// `policy_dir` as `FlatBuffers` files.
 ///
-/// This is the single implementation shared by the CLI and the Python
-/// bindings — both call this function so the on-disk format and write
-/// ordering (including the per-slot entity manifest) cannot drift between them.
-///
-/// `system` is passed explicitly because [`StudySetup`] does not own it.
+/// The single implementation shared by the CLI and the Python bindings, so the
+/// on-disk format and write ordering cannot drift between them. `system` is
+/// passed explicitly because [`StudySetup`] does not own it.
 ///
 /// # Errors
 ///
@@ -245,11 +236,9 @@ pub fn write_checkpoint(
     params: &CheckpointParams,
 ) -> Result<(), OutputError> {
     let fcf = &setup.fcf;
-    // `n_pools` sizes the pool-indexed vectors below (`fcf.pools`,
-    // `cut_state_layouts`, `stage_manifests`); `n_stages` (the true study stage
-    // count, from `setup.num_stages()` — NOT `fcf.pools.len()`, which counts
-    // pools, equal to the stage count only on the chain degeneracy) is the
-    // checkpoint metadata's own field.
+    // `n_pools` sizes the pool-indexed vectors below; `n_stages` is the metadata
+    // field and comes from `setup.num_stages()` — NOT `fcf.pools.len()`, which
+    // counts pools, equal to the stage count only on the chain degeneracy.
     let n_pools = fcf.pools.len();
     let n_stages = setup.num_stages();
 
@@ -372,14 +361,9 @@ pub fn write_checkpoint(
 /// through the caller-supplied `on_warning` callback and does not prevent
 /// the remaining files (or training) from proceeding.
 ///
-/// Files written:
-/// - `noise_openings.parquet` — always
-/// - `inflow_seasonal_stats.parquet` — always
-/// - `inflow_ar_coefficients.parquet` — always
-/// - `inflow_annual_component.parquet` — always
-/// - `correlation.json` — always
-/// - `load_seasonal_stats.parquet` — only when any load model has `std_mw > 0`
-/// - `fitting_report.json` — only when `estimation_report` is `Some`
+/// Every file is written unconditionally except `load_seasonal_stats.parquet`
+/// (only when a load model has `std_mw > 0`) and `fitting_report.json` (only
+/// when `estimation_report` is `Some`).
 pub fn export_stochastic_artifacts(
     output_dir: &Path,
     stochastic: &StochasticContext,

@@ -23,7 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   alike — with no migration path; re-export the source policy with a
   current Cobre. `cobre validate --json`'s
   `report.anticipated_coverage.source_month_count` field is renamed
-  `source_interval_count`.
+  `source_interval_count`. That same object drops its `source_span` and
+  `target_span` keys; the report's `dropped_source_slots` and
+  `straddling_slots` arrays carry each affected slot's own dating instead.
 
 - **BREAKING — `cobre_sddp::resolve_boundary_source_stage` is removed, and
   `load_boundary_cuts` now takes a single request object instead of a long
@@ -36,6 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   together with their reconciliation report, with no warning callback — a
   caller that previously observed superset warnings through the callback
   now reads them from the returned report instead.
+  `BoundaryReconciliationReport::tally_clause` is removed with it; the same
+  wording is `summary_line()` minus its `boundary reconciliation: ` prefix,
+  and `tally_totals()` still returns the four counts for a caller that wants
+  to render them itself.
 
 - **`policy.boundary.strict` (default `false`) turns a source pool that
   prices an entity or commitment the study does not model into a hard

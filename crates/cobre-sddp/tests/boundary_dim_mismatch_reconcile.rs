@@ -43,8 +43,12 @@ use cobre_io::config::{
     TrainingSolverConfig, UpperBoundEvaluationConfig,
 };
 use cobre_io::{
-    ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, GraphManifest, ManifestNode, PolicyCutRecord,
-    ProducerBlock, StageCutsPayload, StateFamily, encode_slot_date, write_policy_checkpoint,
+    ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, PolicyCutRecord, ProducerBlock,
+    StageCutsPayload, StateFamily, encode_slot_date, write_policy_checkpoint,
+};
+use cobre_sddp::test_support::{
+    anticipated_slot_at, chain_graph_manifest, inflow_lag_slot, storage_slot, transit_bucket_slot,
+    ymd,
 };
 use cobre_sddp::{BoundaryLoadRequest, inject_boundary_cuts, load_boundary_cuts};
 use cobre_solver::ActiveSolver;
@@ -58,79 +62,21 @@ use common::builders::{
 
 // ── shared source-checkpoint helpers ────────────────────────────────────────
 
-fn ymd(year: i32, month: u32, day: u32) -> NaiveDate {
-    NaiveDate::from_ymd_opt(year, month, day).expect("valid calendar date")
-}
-
 /// Pool `pool`'s fixture `priced_state_date`: `2026-04-01` plus `pool`
 /// months — at or before the April/May 2026 span the NEWAVE source fixture
 /// prices, so the boundary-date-driven anticipated predicate never zeroes
 /// the fan-out coefficients `newave_source_reconciles_into_decomp_current`
 /// asserts on.
 fn fixture_priced_date(pool: u32) -> NaiveDate {
-    ymd(2026, 4, 1)
-        .checked_add_months(chrono::Months::new(pool))
-        .unwrap()
-}
-
-fn storage_slot(id: i32) -> EntitySlot {
-    EntitySlot::storage(id, true)
-}
-
-fn inflow_lag_slot(id: i32, lag_depth: u32) -> EntitySlot {
-    EntitySlot::inflow_lag(id, lag_depth, true)
-}
-
-fn transit_bucket_slot(downstream_hydro_id: i32, lag: u32) -> EntitySlot {
-    EntitySlot::transit_bucket(downstream_hydro_id, lag, true)
-}
-
-fn dated_anticipated_slot(thermal_id: i32, ring_slot: u32, month_anchor: i32) -> EntitySlot {
-    EntitySlot::anticipated(thermal_id, ring_slot, true)
-        .with_interval(month_anchor, next_month_anchor(month_anchor))
-}
-
-/// The following month's day-01 `YYYYMMDD` anchor of `month_anchor` (itself a
-/// day-01 anchor) — mirrors `boundary_reconcile_defaults.rs`'s same-named
-/// helper.
-fn next_month_anchor(month_anchor: i32) -> i32 {
-    let year = month_anchor / 10_000;
-    let month = (month_anchor / 100) % 100;
-    if month == 12 {
-        (year + 1) * 10_000 + 101
-    } else {
-        year * 10_000 + (month + 1) * 100 + 1
-    }
+    cobre_sddp::test_support::fixture_priced_date(ymd(2026, 4, 1), pool)
 }
 
 fn producer_block() -> ProducerBlock {
     ProducerBlock {
         completed_iterations: 10,
-        final_lower_bound: 0.0,
-        best_upper_bound: None,
         max_iterations: 50,
         forward_passes: 1,
-        warm_start_cuts: 0,
-        warm_start_counts: vec![],
-        rng_seed: 0,
-        total_visited_states: 0,
-        training_block_mode: "parallel".to_string(),
-        training_block_mode_per_stage: vec![],
-        cost_scale_factor: None,
-    }
-}
-
-/// A 1-stage chain graph manifest (node id == stage id == pool id) — the shape
-/// `load_boundary_cuts`'s `select_boundary_pool` resolution walks.
-fn single_stage_manifest() -> GraphManifest {
-    GraphManifest {
-        n_pools: 1,
-        nodes: vec![ManifestNode {
-            id: 0,
-            stage_id: 0,
-            pool_id: 0,
-        }],
-        edges: Vec::new(),
+        ..cobre_sddp::test_support::producer_block()
     }
 }
 
@@ -170,7 +116,7 @@ fn write_source_checkpoint(
     };
     let metadata = cobre_sddp::test_support::checkpoint_metadata(
         1,
-        single_stage_manifest(),
+        chain_graph_manifest(1),
         ProducerBlock {
             cost_scale_factor,
             ..producer_block()
@@ -199,8 +145,8 @@ fn newave_source_manifest() -> Vec<EntitySlot> {
     for lag in 1..=LAG_DEPTH {
         manifest.push(inflow_lag_slot(HYDRO_ID, lag));
     }
-    manifest.push(dated_anticipated_slot(THERMAL_ID, 0, 20_260_401));
-    manifest.push(dated_anticipated_slot(THERMAL_ID, 1, 20_260_501));
+    manifest.push(anticipated_slot_at(THERMAL_ID, 0, 20_260_401));
+    manifest.push(anticipated_slot_at(THERMAL_ID, 1, 20_260_501));
     manifest
 }
 
@@ -230,13 +176,13 @@ fn decomp_current_manifest() -> Vec<EntitySlot> {
         manifest.push(inflow_lag_slot(HYDRO_ID, lag));
     }
     manifest.push(
-        dated_anticipated_slot(THERMAL_ID, 100, 20_260_401).with_interval(
+        anticipated_slot_at(THERMAL_ID, 100, 20_260_401).with_interval(
             encode_slot_date(ymd(2026, 4, 1)),
             encode_slot_date(ymd(2026, 4, 8)),
         ),
     );
     manifest.push(
-        dated_anticipated_slot(THERMAL_ID, 101, 20_260_501).with_interval(
+        anticipated_slot_at(THERMAL_ID, 101, 20_260_501).with_interval(
             encode_slot_date(ymd(2026, 5, 1)),
             encode_slot_date(ymd(2026, 5, 8)),
         ),
@@ -684,11 +630,7 @@ fn derive_newave_source(manifest: &[EntitySlot]) -> (Vec<EntitySlot>, Vec<f64>) 
             && slot.interval_start != ENTITY_SLOT_DELIVERY_DATE_SENTINEL
             && months.insert((slot.entity_id, slot.interval_start))
         {
-            source.push(dated_anticipated_slot(
-                slot.entity_id,
-                0,
-                slot.interval_start,
-            ));
+            source.push(anticipated_slot_at(slot.entity_id, 0, slot.interval_start));
             coefficients.push(next);
             next += 1.0;
         }

@@ -45,9 +45,8 @@ use super::RunContext;
 /// routes through [`cobre_sddp::validate_policy_load`] typed to [`FullFcf`],
 /// checking `state_dimension` and `num_stages`, then the checkpoint terminal
 /// manifest against the current study's terminal manifest — rejecting a
-/// same-dimension-different-entity policy the dims check alone would pass.
-/// Returns the checkpoint alongside the resulting [`PolicyLoadProof<FullFcf>`],
-/// the sole credential
+/// same-dimension-different-entity policy the dims check alone would pass. The
+/// returned [`PolicyLoadProof<FullFcf>`] is the sole credential
 /// [`FutureCostFunction::new_with_warm_start`](cobre_sddp::FutureCostFunction::new_with_warm_start)
 /// and
 /// [`FutureCostFunction::from_deserialized`](cobre_sddp::FutureCostFunction::from_deserialized)

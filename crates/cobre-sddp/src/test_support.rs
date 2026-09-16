@@ -10,6 +10,7 @@
 //! and by downstream integration tests via the `test-support` feature.
 
 use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
 
 use chrono::NaiveDate;
 use cobre_core::scenario::{InflowModel, LoadModel, SamplingScheme};
@@ -31,6 +32,10 @@ use cobre_io::config::{
     RawScenarioSourceConfig, RowSelectionConfig, SelectionMethod,
     SimulationConfig as IoSimulationConfig, SimulationSelection, StoppingMode, StoppingRuleConfig,
     TrainingConfig, TrainingSelection, TrainingSolverConfig, UpperBoundEvaluationConfig,
+};
+use cobre_io::{
+    EntitySlot, GraphManifest, ManifestEdge, ManifestNode, PolicyCutRecord, ProducerBlock,
+    StageCutsPayload, decode_slot_date, encode_slot_date, write_policy_checkpoint,
 };
 use cobre_stochastic::par::precompute::PrecomputedPar;
 use cobre_stochastic::{
@@ -725,39 +730,22 @@ pub fn trivial_full_fcf_proof(state_dimension: u32, num_stages: u32) -> PolicyLo
         .expect("trivial matching manifest cannot fail validate_policy_load")
 }
 
-/// [`checkpoint_metadata_with_seasons`] with the absent `season_manifest`
-/// default, for the fixtures that never exercise the season gate.
+/// Assemble the [`CheckpointManifest`] for a checkpoint fixture: the three
+/// invariant fields (`format_version` = [`FORMAT_VERSION`], `cobre_version`
+/// matching the production writer, a fixed `created_at` no consumer reads) are
+/// filled here — the sole owner of the manifest literal for `cobre-sddp`
+/// tests. `season_manifest` defaults absent; a caller exercising the
+/// boundary-load season/PAR-identity gate
+/// (`policy::policy_load::check_season_compatibility`) overrides it via
+/// struct-update syntax on the returned value.
+///
+/// [`CheckpointManifest`]: cobre_io::CheckpointManifest
+/// [`FORMAT_VERSION`]: cobre_io::FORMAT_VERSION
 #[must_use]
 pub fn checkpoint_metadata(
     num_stages: u32,
     graph_manifest: cobre_io::GraphManifest,
     producer: cobre_io::ProducerBlock,
-) -> cobre_io::CheckpointManifest {
-    checkpoint_metadata_with_seasons(
-        num_stages,
-        graph_manifest,
-        producer,
-        cobre_io::SeasonManifest::default(),
-    )
-}
-
-/// Assemble the [`CheckpointManifest`] for a checkpoint fixture: the three
-/// invariant fields (`format_version` = [`FORMAT_VERSION`], `cobre_version`
-/// matching the production writer, a fixed `created_at` no consumer reads) are
-/// filled here — the sole owner of the manifest literal for `cobre-sddp`
-/// tests; `num_stages`/`graph_manifest`/`producer`/`season_manifest` are
-/// forwarded verbatim. A present descriptor is what the boundary-load
-/// season/PAR-identity gate (`policy::policy_load::check_season_compatibility`)
-/// compares against.
-///
-/// [`CheckpointManifest`]: cobre_io::CheckpointManifest
-/// [`FORMAT_VERSION`]: cobre_io::FORMAT_VERSION
-#[must_use]
-pub fn checkpoint_metadata_with_seasons(
-    num_stages: u32,
-    graph_manifest: cobre_io::GraphManifest,
-    producer: cobre_io::ProducerBlock,
-    season_manifest: cobre_io::SeasonManifest,
 ) -> cobre_io::CheckpointManifest {
     cobre_io::CheckpointManifest {
         format_version: cobre_io::FORMAT_VERSION,
@@ -766,8 +754,230 @@ pub fn checkpoint_metadata_with_seasons(
         num_stages,
         graph_manifest,
         producer,
-        season_manifest,
+        season_manifest: cobre_io::SeasonManifest::default(),
     }
+}
+
+/// `YYYY-MM-DD` as a [`NaiveDate`], for a fixture's literal calendar date.
+///
+/// # Panics
+///
+/// Never in practice — see the rationale below.
+#[allow(clippy::expect_used)]
+// Rationale: every caller passes a literal, calendar-valid date;
+// `from_ymd_opt` only returns `None` for an out-of-range one.
+#[must_use]
+pub fn ymd(year: i32, month: u32, day: u32) -> NaiveDate {
+    NaiveDate::from_ymd_opt(year, month, day).expect("valid calendar date")
+}
+
+/// `base` plus `pool` months — a multi-pool checkpoint fixture's per-pool
+/// `priced_state_date`, distinct and ascending across pools. `base` is the
+/// caller's own epoch, never a shared constant: a boundary-date-selection
+/// fixture is sensitive to which pool's date is nearest the boundary, so
+/// unifying the epoch across fixtures would silently move which pool a
+/// date-driven selector resolves.
+///
+/// # Panics
+///
+/// Never in practice — see the rationale below.
+#[allow(clippy::expect_used)]
+// Rationale: every caller passes a small pool count; `checked_add_months`
+// only overflows past `NaiveDate`'s year range.
+#[must_use]
+pub fn fixture_priced_date(base: NaiveDate, pool: u32) -> NaiveDate {
+    base.checked_add_months(chrono::Months::new(pool))
+        .expect("in-range fixture date")
+}
+
+/// The following month's day-01 `YYYYMMDD` anchor of `month_anchor` (itself a
+/// day-01 anchor), routed through the production date codec
+/// ([`decode_slot_date`]/[`encode_slot_date`]) rather than hand-rolled
+/// packed-integer arithmetic.
+///
+/// # Panics
+///
+/// Never in practice — see the rationale below.
+#[allow(clippy::expect_used)]
+// Rationale: every caller passes a day-01 YYYYMMDD anchor in range; decoding
+// then re-encoding one only fails on a malformed or out-of-range stamp.
+#[must_use]
+pub fn next_month_anchor(month_anchor: i32) -> i32 {
+    encode_slot_date(
+        decode_slot_date(month_anchor)
+            .expect("day-01 YYYYMMDD anchor")
+            .checked_add_months(chrono::Months::new(1))
+            .expect("in-range anchor"),
+    )
+}
+
+/// A minimal, all-zeroed [`ProducerBlock`] for artifact-writing test fixtures.
+/// Callers override the fields their own fixture cares about via struct-update
+/// syntax.
+#[must_use]
+pub fn producer_block() -> ProducerBlock {
+    ProducerBlock {
+        completed_iterations: 0,
+        final_lower_bound: 0.0,
+        best_upper_bound: None,
+        max_iterations: 0,
+        forward_passes: 0,
+        warm_start_cuts: 0,
+        warm_start_counts: vec![],
+        rng_seed: 0,
+        total_visited_states: 0,
+        training_block_mode: "parallel".to_string(),
+        training_block_mode_per_stage: vec![],
+        cost_scale_factor: None,
+    }
+}
+
+/// A 1:1 chain [`GraphManifest`] over `n_stages` nodes (node id == stage id
+/// == pool id) — the shape a chain-degenerate study writes.
+///
+/// # Panics
+///
+/// Never in practice — see the rationale below.
+#[allow(clippy::expect_used)]
+// Rationale: every caller passes a small stage count; the `u32`→`i32` casts
+// only fail past `i32::MAX` stages.
+#[must_use]
+pub fn chain_graph_manifest(n_stages: u32) -> GraphManifest {
+    let nodes = (0..n_stages)
+        .map(|t| ManifestNode {
+            id: i32::try_from(t).expect("small stage count"),
+            stage_id: i32::try_from(t).expect("small stage count"),
+            pool_id: t,
+        })
+        .collect();
+    let edges = (0..n_stages.saturating_sub(1))
+        .map(|t| ManifestEdge {
+            source_id: i32::try_from(t).expect("small stage count"),
+            target_id: i32::try_from(t + 1).expect("small stage count"),
+            probability: 1.0,
+        })
+        .collect();
+    GraphManifest {
+        n_pools: n_stages,
+        nodes,
+        edges,
+    }
+}
+
+/// Write a synthetic single-cut boundary checkpoint carrying `intercept` and
+/// the explicit per-slot `coefficients`, priced at `priced_state_date`. No
+/// entity manifest (`&[]`): the loader's identity check short-circuits with a
+/// warning, so this controls only the state dimension, never entity-identity
+/// matching.
+///
+/// # Panics
+///
+/// Never in practice — see the rationale below.
+#[allow(clippy::expect_used)]
+// Rationale: `write_policy_checkpoint` only fails on a write-path IO error,
+// never on this fixture's own well-formed payload.
+pub fn write_synthetic_boundary(
+    dir: &Path,
+    state_dimension: u32,
+    intercept: f64,
+    coefficients: &[f64],
+    priced_state_date: NaiveDate,
+) {
+    let cuts = vec![PolicyCutRecord {
+        cut_id: 0,
+        slot_index: 0,
+        iteration: 0,
+        forward_pass_index: 0,
+        intercept,
+        coefficients,
+        is_active: true,
+    }];
+    let payload = StageCutsPayload {
+        stage_id: 0,
+        state_dimension,
+        capacity: 1,
+        warm_start_count: 0,
+        cuts: &cuts,
+        active_cut_indices: &[0],
+        populated_count: 1,
+        entity_manifest: &[],
+        cost_scale_factor: 1_000_000.0,
+        node_id: 100,
+        graph_stage_id: -1,
+        priced_state_date: encode_slot_date(priced_state_date),
+    };
+    let metadata = checkpoint_metadata(
+        1,
+        GraphManifest {
+            n_pools: 1,
+            nodes: vec![ManifestNode {
+                id: 100,
+                stage_id: 0,
+                pool_id: 0,
+            }],
+            edges: vec![],
+        },
+        ProducerBlock {
+            cost_scale_factor: Some(1.0),
+            ..producer_block()
+        },
+    );
+    write_policy_checkpoint(dir, &[payload], &[], &metadata, &[]).expect("write checkpoint");
+}
+
+/// A single active `HydroStorage` slot.
+#[must_use]
+pub fn storage_slot(id: i32) -> EntitySlot {
+    EntitySlot::storage(id, true)
+}
+
+/// A single active, sentinel-dated `HydroInflowLag` slot; `lag_depth` is
+/// 1-based.
+#[must_use]
+pub fn inflow_lag_slot(id: i32, lag_depth: u32) -> EntitySlot {
+    EntitySlot::inflow_lag(id, lag_depth, true)
+}
+
+/// Like [`inflow_lag_slot`] but carrying `reference_date` instead of the
+/// sentinel.
+#[must_use]
+pub fn inflow_lag_slot_at(id: i32, lag_depth: u32, reference_date: i32) -> EntitySlot {
+    EntitySlot::inflow_lag(id, lag_depth, true).with_reference_date(reference_date)
+}
+
+/// A single active, sentinel-dated `HydroTransitBucket` slot; `id` is the
+/// DOWNSTREAM hydro, `lag` the maturity subindex.
+#[must_use]
+pub fn transit_bucket_slot(id: i32, lag: u32) -> EntitySlot {
+    EntitySlot::transit_bucket(id, lag, true)
+}
+
+/// Like [`transit_bucket_slot`] but carrying a real `[start, end)` arrival
+/// interval instead of the sentinel.
+#[must_use]
+pub fn transit_bucket_slot_over(id: i32, lag: u32, start: i32, end: i32) -> EntitySlot {
+    transit_bucket_slot(id, lag).with_interval(start, end)
+}
+
+/// A single active, sentinel-dated `AnticipatedThermalState` slot.
+#[must_use]
+pub fn anticipated_slot(thermal_id: i32, ring_slot: u32) -> EntitySlot {
+    EntitySlot::anticipated(thermal_id, ring_slot, true)
+}
+
+/// Like [`anticipated_slot`] but carrying its own calendar-month
+/// `[month_anchor, next_month_anchor(month_anchor))` delivery interval.
+#[must_use]
+pub fn anticipated_slot_at(thermal_id: i32, ring_slot: u32, month_anchor: i32) -> EntitySlot {
+    EntitySlot::anticipated(thermal_id, ring_slot, true)
+        .with_interval(month_anchor, next_month_anchor(month_anchor))
+}
+
+/// Like [`anticipated_slot`] but carrying an explicit `[start, end)`
+/// interval instead of one derived from [`next_month_anchor`].
+#[must_use]
+pub fn anticipated_slot_over(thermal_id: i32, ring_slot: u32, start: i32, end: i32) -> EntitySlot {
+    EntitySlot::anticipated(thermal_id, ring_slot, true).with_interval(start, end)
 }
 
 /// Patch one stage-LP solve exactly as the production backward pass's

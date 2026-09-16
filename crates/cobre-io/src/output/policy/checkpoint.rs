@@ -187,8 +187,8 @@ fn check_transit_bucket_monotonicity(pool: &StageCutsReadResult) -> Result<(), O
     Ok(())
 }
 
-/// Validate that `checkpoint` is internally date-consistent, checking pools
-/// and slots in ascending order and returning the first violation found.
+/// Validate that `checkpoint` is internally date-consistent, returning the
+/// first violation found.
 ///
 /// # Errors
 ///

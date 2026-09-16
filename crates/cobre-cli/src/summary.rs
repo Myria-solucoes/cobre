@@ -354,10 +354,10 @@ pub fn format_provenance_summary_string(report: &ModelProvenanceReport) -> Strin
 /// The `Reconciliation:` row's value: the four-total tally with a compact
 /// trailing "N dropped" phrase, or the dimension-only notice on the skip path.
 ///
-/// Wording is independent of [`BoundaryReconciliationReport::tally_clause`],
-/// which keeps the legacy "N source slots dropped" wording `summary_line` must
-/// render byte-identically for `cobre validate`; the totals themselves come
-/// from the same [`BoundaryReconciliationReport::tally_totals`] both share.
+/// Wording is independent of [`BoundaryReconciliationReport::summary_line`],
+/// which keeps the legacy "N source slots dropped" wording byte-identical for
+/// `cobre validate`; the totals themselves come from the same
+/// [`BoundaryReconciliationReport::tally_totals`] both share.
 fn format_boundary_reconciliation_row(report: &BoundaryReconciliationReport) -> String {
     if !report.reconciled {
         return "dimension-only load (entity manifest absent)".to_string();

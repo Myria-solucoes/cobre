@@ -27,89 +27,31 @@
 
 use chrono::NaiveDate;
 use cobre_io::{
-    ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, GraphManifest, ManifestEdge, ManifestNode,
-    PolicyCutRecord, ProducerBlock, StageCutsPayload, encode_slot_date, write_policy_checkpoint,
+    EntitySlot, GraphManifest, PolicyCutRecord, ProducerBlock, StageCutsPayload, encode_slot_date,
+    write_policy_checkpoint,
+};
+use cobre_sddp::test_support::{
+    anticipated_slot, anticipated_slot_at, anticipated_slot_over, chain_graph_manifest,
+    inflow_lag_slot, inflow_lag_slot_at, storage_slot, transit_bucket_slot_over, ymd,
 };
 use cobre_sddp::{
     BoundaryInjection, BoundaryLoadRequest, FullFcf, PolicyStageManifest, load_boundary_cuts,
     validate_policy_load,
 };
 
-fn storage_slot(id: i32) -> EntitySlot {
-    EntitySlot::storage(id, true)
-}
-
-fn inflow_lag_slot_at(id: i32, lag_depth: u32, reference_date: i32) -> EntitySlot {
-    EntitySlot::inflow_lag(id, lag_depth, true).with_reference_date(reference_date)
-}
-
-fn inflow_lag_slot(id: i32, lag_depth: u32) -> EntitySlot {
+/// A single `HydroInflowLag` slot dated at the fixed `2031-01-01` reference —
+/// distinct from the sentinel-dated shared [`inflow_lag_slot`], for the
+/// tests in this suite that assert on the reference-date reconciliation gate.
+fn dated_inflow_lag_slot(id: i32, lag_depth: u32) -> EntitySlot {
     inflow_lag_slot_at(id, lag_depth, 20_310_101)
 }
 
-fn undated_inflow_lag_slot(id: i32, lag_depth: u32) -> EntitySlot {
-    inflow_lag_slot_at(id, lag_depth, ENTITY_SLOT_DELIVERY_DATE_SENTINEL)
-}
-
-fn transit_bucket_slot(downstream_hydro_id: i32, lag: u32) -> EntitySlot {
-    EntitySlot::transit_bucket(downstream_hydro_id, lag, true)
-}
-
-/// Like [`transit_bucket_slot`] but carrying a real `[start, end)` arrival
-/// interval instead of the sentinel.
-fn transit_bucket_slot_over(
-    downstream_hydro_id: i32,
-    lag: u32,
-    start: i32,
-    end: i32,
-) -> EntitySlot {
-    transit_bucket_slot(downstream_hydro_id, lag).with_interval(start, end)
-}
-
-fn sentinel_anticipated_slot(thermal_id: i32, ring_slot: u32) -> EntitySlot {
-    EntitySlot::anticipated(thermal_id, ring_slot, true)
-}
-
-fn dated_anticipated_slot(thermal_id: i32, ring_slot: u32, month_anchor: i32) -> EntitySlot {
-    EntitySlot::anticipated(thermal_id, ring_slot, true)
-        .with_interval(month_anchor, next_month_anchor(month_anchor))
-}
-
-/// A single `AnticipatedThermalState` slot dated at `start_anchor`, carrying
-/// its OWN `[start_anchor, end_anchor)` interval — a fan-out fixture whose
-/// target lane carries a sub-monthly span, unlike [`dated_anticipated_slot`]'s
-/// fixed one-month interval.
-fn anticipated_slot_over(
-    thermal_id: i32,
-    ring_slot: u32,
-    start_anchor: i32,
-    end_anchor: i32,
-) -> EntitySlot {
-    EntitySlot::anticipated(thermal_id, ring_slot, true).with_interval(start_anchor, end_anchor)
-}
-
-/// The following month's day-01 `YYYYMMDD` anchor of `month_anchor` (itself a
-/// day-01 anchor) — the exclusive end of the one-month interval every dated
-/// fixture in this suite prices (`π_M`, one calendar month).
-fn next_month_anchor(month_anchor: i32) -> i32 {
-    let year = month_anchor / 10_000;
-    let month = (month_anchor / 100) % 100;
-    if month == 12 {
-        (year + 1) * 10_000 + 101
-    } else {
-        year * 10_000 + (month + 1) * 100 + 1
-    }
-}
-
 /// Pool `pool`'s fixture `priced_state_date`: `2026-04-01` plus `pool`
-/// months — at or before the April 2026 span every `dated_anticipated_slot`
+/// months — at or before the April 2026 span every dated-anticipated
 /// fixture in this suite prices, so a later date-driven boundary selector
 /// never zeroes the coefficients those fixtures assert on.
 fn fixture_priced_date(pool: u32) -> NaiveDate {
-    NaiveDate::from_ymd_opt(2026, 4, 1)
-        .unwrap()
-        .checked_add_months(chrono::Months::new(pool))
-        .unwrap()
+    cobre_sddp::test_support::fixture_priced_date(ymd(2026, 4, 1), pool)
 }
 
 #[test]
@@ -117,37 +59,12 @@ fn fixture_priced_date_pool_zero_is_april_2026() {
     assert_eq!(fixture_priced_date(0), ymd(2026, 4, 1));
 }
 
-fn ymd(year: i32, month: u32, day: u32) -> NaiveDate {
-    NaiveDate::from_ymd_opt(year, month, day).expect("valid calendar date")
-}
-
 fn producer_block() -> ProducerBlock {
     ProducerBlock {
         completed_iterations: 10,
-        final_lower_bound: 0.0,
-        best_upper_bound: None,
         max_iterations: 50,
         forward_passes: 1,
-        warm_start_cuts: 0,
-        warm_start_counts: vec![],
-        rng_seed: 0,
-        total_visited_states: 0,
-        training_block_mode: "parallel".to_string(),
-        training_block_mode_per_stage: vec![],
-        cost_scale_factor: None,
-    }
-}
-
-/// A 1-stage chain graph manifest (node id == stage id == pool id).
-fn single_stage_manifest() -> GraphManifest {
-    GraphManifest {
-        n_pools: 1,
-        nodes: vec![ManifestNode {
-            id: 0,
-            stage_id: 0,
-            pool_id: 0,
-        }],
-        edges: Vec::<ManifestEdge>::new(),
+        ..cobre_sddp::test_support::producer_block()
     }
 }
 
@@ -180,7 +97,7 @@ fn write_checkpoint(dir: &std::path::Path, manifest: &[EntitySlot], coefficients
         priced_state_date: encode_slot_date(fixture_priced_date(0)),
     };
     let metadata =
-        cobre_sddp::test_support::checkpoint_metadata(1, single_stage_manifest(), producer_block());
+        cobre_sddp::test_support::checkpoint_metadata(1, chain_graph_manifest(1), producer_block());
     write_policy_checkpoint(dir, &[payload], &[], &metadata, &[]).expect("write checkpoint");
 }
 
@@ -191,10 +108,10 @@ fn write_checkpoint(dir: &std::path::Path, manifest: &[EntitySlot], coefficients
 #[test]
 fn boundary_injection_storage_lag_identity_match_succeeds() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let manifest = vec![storage_slot(1), inflow_lag_slot(1, 1)];
+    let manifest = vec![storage_slot(1), dated_inflow_lag_slot(1, 1)];
     write_checkpoint(tmp.path(), &manifest, &[10.0, 20.0]);
 
-    let current = vec![storage_slot(1), inflow_lag_slot(1, 1)];
+    let current = vec![storage_slot(1), dated_inflow_lag_slot(1, 1)];
     let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
         tmp.path(),
         fixture_priced_date(0),
@@ -272,9 +189,9 @@ fn boundary_injection_matching_lag_reference_date_tally_matches_sentinel() {
     assert_eq!(dated_cuts[0].coefficients, vec![10.0]);
 
     let tmp_sentinel = tempfile::tempdir().expect("tempdir");
-    let sentinel_manifest = vec![undated_inflow_lag_slot(1, 2)];
+    let sentinel_manifest = vec![inflow_lag_slot(1, 2)];
     write_checkpoint(tmp_sentinel.path(), &sentinel_manifest, &[10.0]);
-    let sentinel_current = vec![undated_inflow_lag_slot(1, 2)];
+    let sentinel_current = vec![inflow_lag_slot(1, 2)];
     let sentinel_cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
         tmp_sentinel.path(),
         fixture_priced_date(0),
@@ -301,7 +218,7 @@ fn boundary_injection_matching_lag_reference_date_tally_matches_sentinel() {
 #[test]
 fn boundary_injection_undated_source_lag_still_copies() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let manifest = vec![undated_inflow_lag_slot(1, 2)];
+    let manifest = vec![inflow_lag_slot(1, 2)];
     write_checkpoint(tmp.path(), &manifest, &[10.0]);
 
     let current = vec![inflow_lag_slot_at(1, 2, 20_300_301)];
@@ -319,7 +236,7 @@ fn boundary_injection_undated_source_lag_still_copies() {
     let tmp_symmetric = tempfile::tempdir().expect("tempdir");
     let symmetric_manifest = vec![inflow_lag_slot_at(1, 2, 20_300_301)];
     write_checkpoint(tmp_symmetric.path(), &symmetric_manifest, &[10.0]);
-    let symmetric_current = vec![undated_inflow_lag_slot(1, 2)];
+    let symmetric_current = vec![inflow_lag_slot(1, 2)];
     let symmetric_cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
         tmp_symmetric.path(),
         fixture_priced_date(0),
@@ -562,7 +479,7 @@ fn boundary_injection_sentinel_anticipated_defaults_to_zero() {
     let manifest = vec![storage_slot(1), storage_slot(2)];
     write_checkpoint(tmp.path(), &manifest, &[10.0, 20.0]);
 
-    let current = vec![storage_slot(1), sentinel_anticipated_slot(9, 0)];
+    let current = vec![storage_slot(1), anticipated_slot(9, 0)];
     let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
         tmp.path(),
         fixture_priced_date(0),
@@ -591,8 +508,8 @@ fn boundary_injection_target_shaped_source_reconciles_bit_identically() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let manifest = vec![
         storage_slot(1),
-        inflow_lag_slot(1, 1),
-        sentinel_anticipated_slot(9, 0),
+        dated_inflow_lag_slot(1, 1),
+        anticipated_slot(9, 0),
     ];
     let coefficients = vec![10.5, -3.25, 0.0];
     write_checkpoint(tmp.path(), &manifest, &coefficients);
@@ -749,10 +666,10 @@ fn boundary_injection_dated_anticipated_fan_out_matrix() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let source_manifest = vec![
         storage_slot(1),
-        dated_anticipated_slot(9, 0, 20_260_401),
-        sentinel_anticipated_slot(9, 1),
-        sentinel_anticipated_slot(9, 2),
-        sentinel_anticipated_slot(9, 3),
+        anticipated_slot_at(9, 0, 20_260_401),
+        anticipated_slot(9, 1),
+        anticipated_slot(9, 2),
+        anticipated_slot(9, 3),
     ];
     write_checkpoint(tmp.path(), &source_manifest, &[10.0, 300.0, 0.0, 0.0, 0.0]);
 
@@ -823,10 +740,10 @@ fn boundary_injection_dated_anticipated_fan_out_matrix() {
 fn boundary_injection_dated_anticipated_interior_weeks_conservation() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let source_manifest = vec![
-        dated_anticipated_slot(9, 0, 20_260_401),
-        sentinel_anticipated_slot(9, 1),
-        sentinel_anticipated_slot(9, 2),
-        sentinel_anticipated_slot(9, 3),
+        anticipated_slot_at(9, 0, 20_260_401),
+        anticipated_slot(9, 1),
+        anticipated_slot(9, 2),
+        anticipated_slot(9, 3),
     ];
     let source_coeff = 300.0;
     write_checkpoint(tmp.path(), &source_manifest, &[source_coeff, 0.0, 0.0, 0.0]);
@@ -886,10 +803,10 @@ fn boundary_injection_report_fan_out_matrix_coverage() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let source_manifest = vec![
         storage_slot(1),
-        dated_anticipated_slot(9, 0, 20_260_401),
-        sentinel_anticipated_slot(9, 1),
-        sentinel_anticipated_slot(9, 2),
-        sentinel_anticipated_slot(9, 3),
+        anticipated_slot_at(9, 0, 20_260_401),
+        anticipated_slot(9, 1),
+        anticipated_slot(9, 2),
+        anticipated_slot(9, 3),
     ];
     write_checkpoint(tmp.path(), &source_manifest, &[10.0, 300.0, 0.0, 0.0, 0.0]);
 
@@ -978,8 +895,8 @@ fn boundary_injection_report_target_shaped_superset_is_copy_only() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let manifest = vec![
         storage_slot(1),
-        inflow_lag_slot(1, 1),
-        sentinel_anticipated_slot(9, 0),
+        dated_inflow_lag_slot(1, 1),
+        anticipated_slot(9, 0),
     ];
     let coefficients = vec![10.5, -3.25, 0.0];
     write_checkpoint(tmp.path(), &manifest, &coefficients);
@@ -1031,7 +948,7 @@ fn boundary_injection_report_target_shaped_superset_is_copy_only() {
 #[test]
 fn boundary_injection_report_lists_every_dropped_slot_with_its_interval() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let source_manifest = vec![storage_slot(1), dated_anticipated_slot(33, 1, 20_320_101)];
+    let source_manifest = vec![storage_slot(1), anticipated_slot_at(33, 1, 20_320_101)];
     write_checkpoint(tmp.path(), &source_manifest, &[10.0, 300.0]);
 
     let current = vec![storage_slot(1)];
@@ -1102,8 +1019,8 @@ fn boundary_injection_ring_sourced_post_study_fan_out_matches_pre_switchover() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let source_manifest = vec![
         storage_slot(1),
-        dated_anticipated_slot(9, 0, 20_260_401),
-        sentinel_anticipated_slot(9, 1),
+        anticipated_slot_at(9, 0, 20_260_401),
+        anticipated_slot(9, 1),
     ];
     write_checkpoint(tmp.path(), &source_manifest, &[10.0, 300.0, 0.0]);
 
@@ -1163,7 +1080,7 @@ fn boundary_injection_ring_sourced_post_study_fan_out_matches_pre_switchover() {
 #[test]
 fn boundary_injection_dated_target_interval_ending_at_the_boundary_date_yields_zero() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let source_manifest = vec![storage_slot(1), dated_anticipated_slot(9, 0, 20_260_301)];
+    let source_manifest = vec![storage_slot(1), anticipated_slot_at(9, 0, 20_260_301)];
     write_checkpoint(tmp.path(), &source_manifest, &[10.0, 300.0]);
 
     let current = vec![
@@ -1206,12 +1123,12 @@ fn boundary_injection_dropped_source_inflow_lag_loads_silently_and_is_reported()
     let tmp = tempfile::tempdir().expect("tempdir");
     let manifest = vec![
         storage_slot(1),
-        inflow_lag_slot(1, 1),
-        inflow_lag_slot(1, 2),
+        dated_inflow_lag_slot(1, 1),
+        dated_inflow_lag_slot(1, 2),
     ];
     write_checkpoint(tmp.path(), &manifest, &[10.0, 20.0, 30.0]);
 
-    let current = vec![storage_slot(1), inflow_lag_slot(1, 1)];
+    let current = vec![storage_slot(1), dated_inflow_lag_slot(1, 1)];
     let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
         tmp.path(),
         fixture_priced_date(0),
@@ -1256,12 +1173,12 @@ fn boundary_injection_dropped_source_inflow_lag_rejects_under_strict() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let manifest = vec![
         storage_slot(1),
-        inflow_lag_slot(1, 1),
-        inflow_lag_slot(1, 2),
+        dated_inflow_lag_slot(1, 1),
+        dated_inflow_lag_slot(1, 2),
     ];
     write_checkpoint(tmp.path(), &manifest, &[10.0, 20.0, 30.0]);
 
-    let current = vec![storage_slot(1), inflow_lag_slot(1, 1)];
+    let current = vec![storage_slot(1), dated_inflow_lag_slot(1, 1)];
     let result = load_boundary_cuts(
         &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 2, &current, 1.0)
             .with_strict(true),
@@ -1297,7 +1214,7 @@ fn boundary_injection_dropped_source_inflow_lag_rejects_under_strict() {
 #[test]
 fn boundary_injection_dropped_source_anticipated_lane_loads_silently_and_is_reported() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let manifest = vec![storage_slot(1), dated_anticipated_slot(7, 0, 20_260_401)];
+    let manifest = vec![storage_slot(1), anticipated_slot_at(7, 0, 20_260_401)];
     write_checkpoint(tmp.path(), &manifest, &[10.0, 300.0]);
 
     let current = vec![storage_slot(1)];
@@ -1343,7 +1260,7 @@ fn boundary_injection_dropped_source_anticipated_lane_loads_silently_and_is_repo
 #[test]
 fn boundary_injection_dropped_source_anticipated_lane_rejects_under_strict() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let manifest = vec![storage_slot(1), dated_anticipated_slot(7, 0, 20_260_401)];
+    let manifest = vec![storage_slot(1), anticipated_slot_at(7, 0, 20_260_401)];
     write_checkpoint(tmp.path(), &manifest, &[10.0, 300.0]);
 
     let current = vec![storage_slot(1)];
@@ -1382,7 +1299,7 @@ fn boundary_injection_dropped_source_anticipated_lane_rejects_under_strict() {
 #[test]
 fn boundary_injection_sentinel_source_anticipated_pad_is_not_a_dropped_source() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let manifest = vec![storage_slot(1), sentinel_anticipated_slot(7, 0)];
+    let manifest = vec![storage_slot(1), anticipated_slot(7, 0)];
     write_checkpoint(tmp.path(), &manifest, &[10.0, 300.0]);
 
     let current = vec![storage_slot(1)];
@@ -1426,7 +1343,7 @@ fn boundary_injection_multi_family_superset_rejects_naming_families_in_order() {
     let manifest = vec![
         storage_slot(1),
         storage_slot(2),
-        dated_anticipated_slot(7, 0, 20_260_401),
+        anticipated_slot_at(7, 0, 20_260_401),
     ];
     write_checkpoint(tmp.path(), &manifest, &[10.0, 20.0, 300.0]);
 

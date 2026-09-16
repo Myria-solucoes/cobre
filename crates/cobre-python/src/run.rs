@@ -17,6 +17,12 @@
 //! This module uses [`cobre_comm::LocalBackend`] exclusively. MPI is never
 //! initialized here. For distributed runs, launch `mpiexec cobre` as a
 //! subprocess.
+//!
+//! ## Python-free helpers
+//!
+//! Several helpers below are marked **Python-free** — no `PyO3` type in the
+//! signature — so they can run inside `py.detach` and be exercised from a plain
+//! Rust `#[cfg(test)]` test without a GIL token.
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -476,6 +482,26 @@ fn drain_training_events(
     (collected, captured_pyerr)
 }
 
+/// [`DistributionInfo`] for a single-process (non-MPI) run, shared by the
+/// training and simulation `OutputContext` sites.
+fn single_process_distribution(n_threads: usize) -> DistributionInfo {
+    DistributionInfo {
+        backend: "local".to_string(),
+        world_size: 1,
+        ranks_participated: 1,
+        num_hosts: 1,
+        threads_per_rank: u32::try_from(n_threads).unwrap_or(u32::MAX),
+        mpi_library: None,
+        mpi_standard: None,
+        thread_level: None,
+        slurm_job_id: None,
+        hosts: vec![cobre_io::HostLayout {
+            hostname: cobre_io::get_hostname(),
+            ranks: vec![0],
+        }],
+    }
+}
+
 /// Write the training artifacts: policy checkpoint, training results, solver
 /// stats, and cut selection records.
 pub(crate) fn write_training_artifacts(
@@ -522,21 +548,7 @@ pub(crate) fn write_training_artifacts(
         solver_version: Some(active_solver_version()),
         started_at: training.started_at.clone(),
         completed_at: now_iso8601(),
-        distribution: DistributionInfo {
-            backend: "local".to_string(),
-            world_size: 1,
-            ranks_participated: 1,
-            num_hosts: 1,
-            threads_per_rank: u32::try_from(n_threads).unwrap_or(u32::MAX),
-            mpi_library: None,
-            mpi_standard: None,
-            thread_level: None,
-            slurm_job_id: None,
-            hosts: vec![cobre_io::HostLayout {
-                hostname: cobre_io::get_hostname(),
-                ranks: vec![0],
-            }],
-        },
+        distribution: single_process_distribution(n_threads),
         // Absent (CLI-only): the Python single-process path collects no
         // setup-phase timings. Matches the CLI shape via `skip_serializing_if`.
         setup: None,
@@ -812,21 +824,7 @@ pub(crate) fn run_simulation_phase_py(
         solver_version: Some(active_solver_version()),
         started_at: sim_started_at,
         completed_at: now_iso8601(),
-        distribution: DistributionInfo {
-            backend: "local".to_string(),
-            world_size: 1,
-            ranks_participated: 1,
-            num_hosts: 1,
-            threads_per_rank: u32::try_from(n_threads).unwrap_or(u32::MAX),
-            mpi_library: None,
-            mpi_standard: None,
-            thread_level: None,
-            slurm_job_id: None,
-            hosts: vec![cobre_io::HostLayout {
-                hostname: cobre_io::get_hostname(),
-                ranks: vec![0],
-            }],
-        },
+        distribution: single_process_distribution(n_threads),
         setup: None,
         // training-only.
         production_fit_deviation: None,
@@ -893,10 +891,9 @@ pub(crate) struct LoadedStudy {
 /// [`StudySetup`] and the provenance/summary carriers, and write the front-half
 /// sidecar artifacts.
 ///
-/// Python-free (no `PyO3` types in its signature) so its happy path can be
-/// exercised from a plain Rust `#[cfg(test)]` test without a GIL token. The ONLY
-/// place the front half runs: both [`run_via_study`] and the `Study` pyclass call
-/// it, so there is a single load path with no divergence.
+/// Python-free, and the ONLY place the front half runs: both [`run_via_study`]
+/// and the `Study` pyclass call it, so there is a single load path with no
+/// divergence.
 ///
 /// `overrides` is the already-converted dotted-key override map; `None` and an
 /// empty map both reproduce the no-override path.
@@ -1102,13 +1099,58 @@ fn validate_loaded_policy(
     Ok(proof)
 }
 
+/// Build a warm-started [`FutureCostFunction`] from a validated checkpoint proof.
+///
+/// `pool_state_dimensions`/`visit_bounds` come from the pre-replacement
+/// (cold-path) FCF's per-pool arrays (`new_per_pool`), reused verbatim by both
+/// the `WarmStart` and `Resume` modes rather than substituting a scalar.
+/// `max_iterations + 1` reserves one extra cut slot for the cut added in the
+/// final iteration.
+fn build_warm_start_fcf(
+    setup: &StudySetup,
+    proof: &PolicyLoadProof<FullFcf>,
+    checkpoint: &cobre_io::PolicyCheckpoint,
+    mode_label: &str,
+) -> Result<FutureCostFunction, String> {
+    let pool_state_dimensions: Vec<usize> =
+        setup.fcf.pools.iter().map(|p| p.state_dimension).collect();
+    let visit_bounds: Vec<u64> = setup
+        .fcf
+        .pools
+        .iter()
+        .map(|p| u64::from(p.visit_stride))
+        .collect();
+    FutureCostFunction::new_with_warm_start(
+        proof,
+        &checkpoint.stage_cuts,
+        &pool_state_dimensions,
+        &visit_bounds,
+        setup.loop_params.forward_passes,
+        setup.loop_params.max_iterations.saturating_add(1),
+    )
+    .map_err(|e| format!("{mode_label} FCF construction error: {e}"))
+}
+
+/// Seed `setup`'s warm-start basis cache from a loaded checkpoint's stage bases.
+/// Empty bases (a checkpoint written without `store_basis`) leave iteration 1 to
+/// cold-start.
+fn seed_warm_start_basis_cache(setup: &mut StudySetup, checkpoint: &cobre_io::PolicyCheckpoint) {
+    if !checkpoint.stage_bases.is_empty() {
+        let basis_cache = build_basis_cache_from_checkpoint(
+            &checkpoint.stage_bases,
+            &checkpoint.stage_cuts,
+            &setup.node_graph.node_ids,
+            &setup.node_graph.node_pool_ids(),
+        );
+        setup.set_warm_start_basis_cache(basis_cache);
+    }
+}
+
 /// Apply the configured policy mode (warm-start / resume / boundary cuts) to
 /// `setup` BEFORE training.
 ///
 /// Shared by the monolithic `run` path and `Study::train` (no divergence), and
-/// Python-free (no `PyO3` types in its signature) so it can run inside `py.detach`
-/// and be exercised from a plain Rust `#[cfg(test)]` test without a GIL token.
-/// The default mode with no boundary cuts is a no-op.
+/// Python-free. The default mode with no boundary cuts is a no-op.
 ///
 /// # Errors
 ///
@@ -1138,40 +1180,9 @@ pub(crate) fn apply_training_policy_mode(
             .map_err(|e| format!("failed to read policy checkpoint: {e}"))?;
         let proof = validate_loaded_policy(&mut checkpoint, system, setup)?;
 
-        // The pre-replacement (cold-path) FCF already carries the per-pool
-        // arrays `new_per_pool` derived for this study; the resume path
-        // reuses them verbatim rather than substituting a scalar.
-        let pool_state_dimensions: Vec<usize> =
-            setup.fcf.pools.iter().map(|p| p.state_dimension).collect();
-        let visit_bounds: Vec<u64> = setup
-            .fcf
-            .pools
-            .iter()
-            .map(|p| u64::from(p.visit_stride))
-            .collect();
-        // Reserve one extra slot for cuts added in the final iteration.
-        let warm_fcf = FutureCostFunction::new_with_warm_start(
-            &proof,
-            &checkpoint.stage_cuts,
-            &pool_state_dimensions,
-            &visit_bounds,
-            setup.loop_params.forward_passes,
-            setup.loop_params.max_iterations.saturating_add(1),
-        )
-        .map_err(|e| format!("warm-start FCF construction error: {e}"))?;
+        let warm_fcf = build_warm_start_fcf(setup, &proof, &checkpoint, "warm-start")?;
         setup.replace_fcf(warm_fcf);
-        // Seed the warm-start basis store so iteration 1's cut-loaded LPs
-        // warm-start. Empty bases (checkpoint written without `store_basis`) leave
-        // iteration 1 to cold-start.
-        if !checkpoint.stage_bases.is_empty() {
-            let basis_cache = build_basis_cache_from_checkpoint(
-                &checkpoint.stage_bases,
-                &checkpoint.stage_cuts,
-                &setup.node_graph.node_ids,
-                &setup.node_graph.node_pool_ids(),
-            );
-            setup.set_warm_start_basis_cache(basis_cache);
-        }
+        seed_warm_start_basis_cache(setup, &checkpoint);
     } else if config.policy.mode == Resume {
         let policy_dir = output_dir.join(&setup.policy_path);
         if !policy_dir.exists() {
@@ -1188,34 +1199,10 @@ pub(crate) fn apply_training_policy_mode(
 
         let completed = u64::from(checkpoint.metadata.producer.completed_iterations);
 
-        let pool_state_dimensions: Vec<usize> =
-            setup.fcf.pools.iter().map(|p| p.state_dimension).collect();
-        let visit_bounds: Vec<u64> = setup
-            .fcf
-            .pools
-            .iter()
-            .map(|p| u64::from(p.visit_stride))
-            .collect();
-        let warm_fcf = FutureCostFunction::new_with_warm_start(
-            &proof,
-            &checkpoint.stage_cuts,
-            &pool_state_dimensions,
-            &visit_bounds,
-            setup.loop_params.forward_passes,
-            setup.loop_params.max_iterations.saturating_add(1),
-        )
-        .map_err(|e| format!("resume FCF construction error: {e}"))?;
+        let warm_fcf = build_warm_start_fcf(setup, &proof, &checkpoint, "resume")?;
         setup.replace_fcf(warm_fcf);
         setup.set_start_iteration(completed);
-        if !checkpoint.stage_bases.is_empty() {
-            let basis_cache = build_basis_cache_from_checkpoint(
-                &checkpoint.stage_bases,
-                &checkpoint.stage_cuts,
-                &setup.node_graph.node_ids,
-                &setup.node_graph.node_pool_ids(),
-            );
-            setup.set_warm_start_basis_cache(basis_cache);
-        }
+        seed_warm_start_basis_cache(setup, &checkpoint);
     }
 
     // Boundary cuts run AFTER warm-start/resume so the two compose: warm-start
@@ -1270,10 +1257,8 @@ pub(crate) fn apply_training_policy_mode(
 /// the CLI's `load_policy_for_simulation` builds it (a synthetic
 /// [`TrainingResult::new`] with `frozen_templates = None`).
 ///
-/// The single on-disk reconstruction path shared by the simulation-only branch
-/// of [`run_via_study`] and `Study::load_policy`. Python-free (no `PyO3` types in
-/// its signature) so it can be exercised from a plain Rust `#[cfg(test)]` test
-/// without a GIL token.
+/// The single, Python-free on-disk reconstruction path, shared by the
+/// simulation-only branch of [`run_via_study`] and `Study::load_policy`.
 ///
 /// Deliberately does NOT call [`StudySetup::replace_fcf`]: the caller decides
 /// whether to mutate the study, so a trained `Policy` and a loaded one feed the

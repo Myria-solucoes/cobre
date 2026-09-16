@@ -216,7 +216,6 @@ pub fn estimate_from_history(
     }
 }
 
-/// Inner function that runs the full estimation pipeline once path conditions are met.
 fn run_estimation(
     system: System,
     case_dir: &Path,
@@ -368,7 +367,6 @@ fn run_partial_estimation(
     // stage_id rather than zeroing the lag. In-window wrap lags stay on the
     // Tier-2 → user-stat path. Empty for full-year.
     stats_rows.extend(prestudy_seasonal_rows(&fitting_stats, &prestudy));
-    // `extend` appends negative prestudy ids after the positive user ids above.
     stats_rows.sort_by_key(|r| (r.hydro_id.0, r.stage_id));
     let coeff_rows = ar_estimates_to_rows(&ar_estimates, stages);
     let annual_rows = ar_estimates_to_annual_rows(&ar_estimates, stages);
@@ -903,6 +901,17 @@ fn check_std_ratio_divergence(
     warnings
 }
 
+/// The first (lowest-`id`) non-negative study stage carrying a `season_id`,
+/// paired with that season — the anchor [`synthesize_prestudy_stages`] and
+/// [`resolve_model_stage_seasons`] both back-walk pre-study season ids from.
+fn first_study_stage_with_season(stages: &[Stage]) -> Option<(&Stage, usize)> {
+    stages
+        .iter()
+        .filter(|s| s.id >= 0 && s.season_id.is_some())
+        .min_by_key(|s| s.id)
+        .and_then(|s| s.season_id.map(|season| (s, season)))
+}
+
 /// Synthesize pre-study stages covering the PAR(p) lag window for a
 /// partial-year study (one whose horizon is narrower than the seasonal cycle).
 ///
@@ -912,21 +921,11 @@ fn check_std_ratio_divergence(
 /// those seasons, the season-aware estimators have no place to attach the
 /// out-of-window lag statistics, and the precompute silently zeroes them.
 ///
-/// This helper emits, for each lag `k = 1..=min(max_order, cycle_len-1)`, a
-/// pre-study [`Stage`](cobre_core::temporal::Stage) with:
-/// - `id = first_study_stage.id - k` (negative, descending),
-/// - `season_id` = the season `k` calendar positions before the first study
-///   stage's season (modular on `cycle_len`),
-/// - `start_date`/`end_date` = the calendar month `k` positions before the
-///   first study stage's `start_date`.
-///
-/// A pre-study stage is emitted **only** when its `season_id` is not already
-/// among the study stages' seasons. A full-year study therefore synthesizes
-/// nothing (every season already has a study stage), making this a no-op for
-/// the existing in-horizon cases.
-///
-/// Returns an empty `Vec` when `season_map` is `None`, `max_order == 0`, or
-/// the study has no stage with a `season_id`.
+/// This helper emits one pre-study [`Stage`](cobre_core::temporal::Stage) per
+/// lag `k = 1..=min(max_order, cycle_len-1)`, at the descending negative id
+/// `first_study_stage.id - k` and the season [`prestudy_season_for_lag`]
+/// resolves, but **only** when that season is not already among the study
+/// stages' seasons. A full-year study therefore synthesizes nothing.
 fn synthesize_prestudy_stages(
     stages: &[Stage],
     max_order: usize,
@@ -940,14 +939,7 @@ fn synthesize_prestudy_stages(
         return Vec::new();
     }
 
-    let Some(first) = stages
-        .iter()
-        .filter(|s| s.id >= 0 && s.season_id.is_some())
-        .min_by_key(|s| s.id)
-    else {
-        return Vec::new();
-    };
-    let Some(first_season) = first.season_id else {
+    let Some((first, first_season)) = first_study_stage_with_season(stages) else {
         return Vec::new();
     };
 
@@ -1018,14 +1010,10 @@ pub fn resolve_model_stage_seasons(
         return (stage_to_season, n_seasons);
     }
 
-    let Some((first_id, first_season)) = stages
-        .iter()
-        .filter(|s| s.id >= 0 && s.season_id.is_some())
-        .min_by_key(|s| s.id)
-        .and_then(|s| s.season_id.map(|season| (s.id, season)))
-    else {
+    let Some((first, first_season)) = first_study_stage_with_season(stages) else {
         return (stage_to_season, n_seasons);
     };
+    let first_id = first.id;
 
     let (dense_index, _) = season_dense_index(stages, Some(season_map));
 
