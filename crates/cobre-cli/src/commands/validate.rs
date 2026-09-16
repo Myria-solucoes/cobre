@@ -99,11 +99,9 @@ struct ValidateErrorOutput {
 
 impl ValidateBoundaryOutput {
     fn success(outcome: Option<BoundaryOutcome>) -> Self {
-        let configured = Some(outcome.is_some());
-        let boundary_date = outcome.as_ref().map(|o| o.boundary_date);
         Self {
-            configured,
-            boundary_date,
+            configured: Some(outcome.is_some()),
+            boundary_date: outcome.as_ref().map(|o| o.boundary_date),
             report: outcome.map(|o| o.report),
             error: None,
         }

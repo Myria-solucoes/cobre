@@ -7,6 +7,7 @@ use cobre_core::System;
 use cobre_io::Config;
 use cobre_io::EntitySlot;
 use cobre_io::OwnedPolicyCutRecord;
+use cobre_io::PolicyCheckpoint;
 use cobre_io::PolicyMode;
 use cobre_io::PolicyMode::Fresh;
 use cobre_io::PolicyMode::Resume;
@@ -56,7 +57,7 @@ fn load_and_validate_checkpoint(
     policy_dir: &Path,
     system: &System,
     setup: &StudySetup,
-) -> Result<(cobre_io::PolicyCheckpoint, PolicyLoadProof<FullFcf>), CliError> {
+) -> Result<(PolicyCheckpoint, PolicyLoadProof<FullFcf>), CliError> {
     let mut checkpoint = read_policy_checkpoint(policy_dir).map_err(|e| CliError::Internal {
         message: format!("failed to read policy checkpoint: {e}"),
     })?;
@@ -119,7 +120,7 @@ fn load_and_validate_checkpoint(
 /// Shared by the warm-start and resume paths. `proof` is the credential
 /// [`load_and_validate_checkpoint`] produced for this same `checkpoint`.
 fn load_checkpoint_into_setup(
-    checkpoint: &cobre_io::PolicyCheckpoint,
+    checkpoint: &PolicyCheckpoint,
     proof: &PolicyLoadProof<FullFcf>,
     setup: &mut StudySetup,
 ) -> Result<(), CliError> {

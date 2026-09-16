@@ -597,7 +597,7 @@ fn boundary_injection_target_shaped_source_reconciles_bit_identically() {
     let coefficients = vec![10.5, -3.25, 0.0];
     write_checkpoint(tmp.path(), &manifest, &coefficients);
 
-    let current = manifest.clone();
+    let current = manifest;
     let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
         tmp.path(),
         fixture_priced_date(0),
@@ -921,7 +921,7 @@ fn boundary_injection_report_target_shaped_superset_is_copy_only() {
     let coefficients = vec![10.5, -3.25, 0.0];
     write_checkpoint(tmp.path(), &manifest, &coefficients);
 
-    let current = manifest.clone();
+    let current = manifest;
     let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
         tmp.path(),
         fixture_priced_date(0),
