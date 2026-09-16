@@ -1603,7 +1603,6 @@ pub fn load_simulation_arrow(
 ///                     "entity_id": 0,
 ///                     "subindex": 0,
 ///                     "was_active": True,
-///                     "delivery_date": -1,
 ///                     "reference_date": -1,
 ///                     "interval_start": -1,
 ///                     "interval_end": -1,
@@ -1708,7 +1707,6 @@ pub fn load_policy(
             slot_dict.set_item("entity_id", into_py(py, slot.entity_id)?)?;
             slot_dict.set_item("subindex", into_py(py, slot.subindex)?)?;
             slot_dict.set_item("was_active", PyBool::new(py, slot.was_active).to_owned())?;
-            slot_dict.set_item("delivery_date", into_py(py, slot.delivery_date)?)?;
             slot_dict.set_item("reference_date", into_py(py, slot.reference_date)?)?;
             slot_dict.set_item("interval_start", into_py(py, slot.interval_start)?)?;
             slot_dict.set_item("interval_end", into_py(py, slot.interval_end)?)?;

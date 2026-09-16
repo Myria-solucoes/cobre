@@ -15,15 +15,21 @@
 use chrono::NaiveDate;
 use cobre_core::AnticipatedCommitmentHistory;
 use cobre_io::Config;
-use cobre_io::ENTITY_SLOT_DELIVERY_DATE_SENTINEL;
 use cobre_io::EntitySlot;
 use cobre_io::GraphManifest;
 use cobre_io::OwnedPolicyBasisRecord;
 use cobre_io::OwnedPolicyCutRecord;
 use cobre_io::PolicyCheckpoint;
-use cobre_io::STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL;
+use cobre_io::SEASON_CYCLE_CODE_ABSENT;
+use cobre_io::SEASON_CYCLE_CODE_CUSTOM;
+use cobre_io::SEASON_CYCLE_CODE_MONTHLY;
+use cobre_io::SEASON_CYCLE_CODE_WEEKLY;
 use cobre_io::STAGE_CUTS_NODE_ID_SENTINEL;
+use cobre_io::STAGE_CUTS_PRICED_STATE_DATE_SENTINEL;
+use cobre_io::SeasonManifest;
 use cobre_io::StageCutsReadResult;
+use cobre_io::decode_slot_date;
+use cobre_io::encode_slot_date;
 use cobre_io::read_policy_checkpoint;
 use cobre_solver::{Basis, BasisStatus};
 
@@ -31,13 +37,14 @@ use crate::SddpError;
 use crate::cut::pool::CutPool;
 use crate::policy::reconcile::{
     BoundaryReconciliationReport, RebindOp, build_boundary_fold, build_rebind,
-    build_reconciliation_report, decode_month_anchor, dropped_source_positions, overlap_hours,
-    rebind_cut,
+    build_reconciliation_report, build_source_interval_index, dropped_source_positions,
+    family_label, rebind_cut,
 };
 use crate::setup::{BoundaryStateRequirements, NodeId, NodePos, StudySetup, TypedVec};
 use crate::workspace::CapturedBasis;
 use cobre_io::StateFamily;
 
+use std::collections::HashSet;
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::path::Path;
@@ -630,32 +637,370 @@ fn boundary_predates_self_describing_cuts(boundary_path: &Path) -> SddpError {
     ))
 }
 
-/// Load boundary cuts from the `source_stage` of a source Cobre policy checkpoint.
+/// The parameter carrier for [`load_boundary_cuts`]. Fields are private, so
+/// the parameter set can grow or shrink without forcing every call site that
+/// does not supply the changed field to change — mirrors [`EntitySlot`]'s
+/// `storage(..).with_interval(..)` builder shape.
+#[derive(Debug, Clone, Copy)]
+pub struct BoundaryLoadRequest<'a> {
+    boundary_path: &'a Path,
+    boundary_date: NaiveDate,
+    current_state_dimension: u32,
+    current_manifest: &'a [EntitySlot],
+    loading_cost_scale_factor: f64,
+    fixed_windows: &'a [AnticipatedCommitmentHistory],
+    inflow_lag_depth: Option<u32>,
+    study_seasons: Option<&'a SeasonManifest>,
+}
+
+impl<'a> BoundaryLoadRequest<'a> {
+    /// Builds a request from the five values every [`load_boundary_cuts`]
+    /// caller must supply; `fixed_windows` defaults to an empty slice and
+    /// `inflow_lag_depth` to `None` until a `with_*` call overrides them.
+    #[must_use]
+    pub fn new(
+        boundary_path: &'a Path,
+        boundary_date: NaiveDate,
+        current_state_dimension: u32,
+        current_manifest: &'a [EntitySlot],
+        loading_cost_scale_factor: f64,
+    ) -> Self {
+        Self {
+            boundary_path,
+            boundary_date,
+            current_state_dimension,
+            current_manifest,
+            loading_cost_scale_factor,
+            fixed_windows: &[],
+            inflow_lag_depth: None,
+            study_seasons: None,
+        }
+    }
+
+    /// Returns `self` with `fixed_windows` replaced; every other field is
+    /// unchanged.
+    #[must_use]
+    pub fn with_fixed_windows(self, fixed_windows: &'a [AnticipatedCommitmentHistory]) -> Self {
+        Self {
+            fixed_windows,
+            ..self
+        }
+    }
+
+    /// Returns `self` with `inflow_lag_depth` replaced; every other field is
+    /// unchanged.
+    #[must_use]
+    pub fn with_inflow_lag_depth(self, inflow_lag_depth: Option<u32>) -> Self {
+        Self {
+            inflow_lag_depth,
+            ..self
+        }
+    }
+
+    /// Returns `self` with `study_seasons` set to `Some(study_seasons)`; every
+    /// other field is unchanged. Build `study_seasons` with
+    /// [`crate::policy::orchestration::build_season_manifest`] — the same
+    /// function the checkpoint writer calls — so the study and source sides
+    /// are never constructed by diverging code paths.
+    #[must_use]
+    pub fn with_study_seasons(self, study_seasons: &'a SeasonManifest) -> Self {
+        Self {
+            study_seasons: Some(study_seasons),
+            ..self
+        }
+    }
+}
+
+/// A checkpoint whose every pool carries
+/// [`STAGE_CUTS_PRICED_STATE_DATE_SENTINEL`] predates recorded priced dates:
+/// date selection has nothing to compare against, so the checkpoint must be
+/// re-exported.
+fn boundary_checkpoint_undated(boundary_path: &Path) -> SddpError {
+    SddpError::Validation(format!(
+        "boundary policy checkpoint at {} carries no priced_state_date on any pool (a pool \
+         written before priced dates were recorded); re-export it with a current Cobre",
+        boundary_path.display()
+    ))
+}
+
+/// Selects the unique pool in `checkpoint` whose own `priced_state_date`
+/// equals `boundary_date` — the index-based `source_stage -> pool` lookup
+/// this replaces could silently pick a different, wrong future-cost function
+/// whose reconciliation tally is identical, so only a calendar equality
+/// check catches the off-by-one. Encodes the study side ONCE via
+/// [`encode_slot_date`] and compares integers; never decodes a pool's stamp
+/// to compare `NaiveDate` values, so a malformed stamp can never compare
+/// equal to a real date. See [`load_boundary_cuts`]'s `# Errors` for the
+/// three rejects this enforces (the fourth, `cost_scale_factor`/`node_id`,
+/// runs after selection on the winning pool).
+fn select_boundary_pool<'a>(
+    checkpoint: &'a PolicyCheckpoint,
+    boundary_path: &Path,
+    boundary_date: NaiveDate,
+) -> Result<&'a StageCutsReadResult, SddpError> {
+    if checkpoint
+        .stage_cuts
+        .iter()
+        .all(|sr| sr.priced_state_date == STAGE_CUTS_PRICED_STATE_DATE_SENTINEL)
+    {
+        return Err(boundary_checkpoint_undated(boundary_path));
+    }
+
+    let target = encode_slot_date(boundary_date);
+    // Positional walk: `read_policy_checkpoint` sorts `stage_cuts` by pool id,
+    // which is what orders the tie and available-dates lists below.
+    let matched: Vec<&StageCutsReadResult> = checkpoint
+        .stage_cuts
+        .iter()
+        .filter(|sr| sr.priced_state_date == target)
+        .collect();
+
+    match matched.as_slice() {
+        [] => {
+            let available = checkpoint
+                .stage_cuts
+                .iter()
+                .map(|sr| match decode_slot_date(sr.priced_state_date) {
+                    Some(date) => format!("(pool {}, priced {date})", sr.stage_id),
+                    None => format!("(pool {}, priced {})", sr.stage_id, sr.priced_state_date),
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(SddpError::Validation(format!(
+                "boundary policy at {}: no pool is priced at the study's boundary date \
+                 {boundary_date} (available: {available})",
+                boundary_path.display()
+            )))
+        }
+        [single] => Ok(*single),
+        multiple => {
+            let pool_ids: Vec<u32> = multiple.iter().map(|sr| sr.stage_id).collect();
+            Err(SddpError::Validation(format!(
+                "boundary policy at {}: more than one pool is priced at the study's boundary \
+                 date {boundary_date} (pools {pool_ids:?}); boundary injection requires a \
+                 unique priced source",
+                boundary_path.display()
+            )))
+        }
+    }
+}
+
+/// Word label for a [`SeasonManifest::cycle_code`] discriminant, for
+/// [`check_season_compatibility`]'s reject messages.
+fn season_cycle_label(code: u8) -> &'static str {
+    match code {
+        SEASON_CYCLE_CODE_MONTHLY => "monthly",
+        SEASON_CYCLE_CODE_WEEKLY => "weekly",
+        SEASON_CYCLE_CODE_CUSTOM => "custom",
+        SEASON_CYCLE_CODE_ABSENT => "absent",
+        _ => "unknown",
+    }
+}
+
+/// Rejects a boundary load whose season cycle or per-hydro PAR order
+/// disagrees with `study`'s. `resolve_inflow_lag`'s join maps a lag depth to
+/// a season context, and the coefficient priced under it, so the two sides
+/// must share the same season definitions and PAR orders before any lag
+/// coefficient moves. Checked most-diagnostic-first: source absence, cycle,
+/// season count, then a per-hydro walk.
 ///
-/// Pool resolution and the source cost scale are read entirely from the
-/// resolved pool's own `cuts/<pool>.bin` — its `graph_stage_id` and
+/// Walks `study.hydro_orders` positionally — both sides are canonical
+/// ascending `hydro_id`
+/// ([`orchestration::build_season_manifest`](crate::policy::orchestration::build_season_manifest)) —
+/// and looks each hydro up in `source.hydro_orders` by binary search, never a
+/// `HashMap`. A hydro present only in `source` is a superset drop and is
+/// never examined here. Allocates nothing on the passing path; a message is
+/// built only once a reject is certain.
+fn check_season_compatibility(
+    boundary_path: &Path,
+    study: &SeasonManifest,
+    source: &SeasonManifest,
+) -> Result<(), SddpError> {
+    if source.cycle_code == SEASON_CYCLE_CODE_ABSENT {
+        return Err(SddpError::Validation(format!(
+            "boundary policy checkpoint at {} predates the season descriptor (its manifest \
+             carries no season cycle or PAR orders); re-export it with a current Cobre",
+            boundary_path.display()
+        )));
+    }
+
+    if study.cycle_code != source.cycle_code {
+        return Err(SddpError::Validation(format!(
+            "boundary policy at {}: season cycle mismatch (study is {}, source is {})",
+            boundary_path.display(),
+            season_cycle_label(study.cycle_code),
+            season_cycle_label(source.cycle_code)
+        )));
+    }
+
+    if study.n_seasons != source.n_seasons {
+        return Err(SddpError::Validation(format!(
+            "boundary policy at {}: season count mismatch (study has {} seasons, source has {})",
+            boundary_path.display(),
+            study.n_seasons,
+            source.n_seasons
+        )));
+    }
+
+    for study_hydro in &study.hydro_orders {
+        let Ok(source_idx) = source
+            .hydro_orders
+            .binary_search_by_key(&study_hydro.hydro_id, |h| h.hydro_id)
+        else {
+            return Err(SddpError::Validation(format!(
+                "boundary policy at {}: hydro {} has a modeled inflow season/PAR-order entry \
+                 in the current study but none in the boundary source (the boundary was fitted \
+                 on a different set of inflow processes)",
+                boundary_path.display(),
+                study_hydro.hydro_id
+            )));
+        };
+        let source_hydro = &source.hydro_orders[source_idx];
+        if study_hydro.orders.len() != source_hydro.orders.len() {
+            return Err(SddpError::Validation(format!(
+                "boundary policy at {}: hydro {} carries {} PAR orders in the current study \
+                 but {} in the boundary source",
+                boundary_path.display(),
+                study_hydro.hydro_id,
+                study_hydro.orders.len(),
+                source_hydro.orders.len()
+            )));
+        }
+
+        if let Some(season) = study_hydro
+            .orders
+            .iter()
+            .zip(&source_hydro.orders)
+            .position(|(s, o)| s != o)
+        {
+            return Err(SddpError::Validation(format!(
+                "boundary policy at {}: hydro {} PAR order mismatch at season {season} (study \
+                 has order {}, source has order {})",
+                boundary_path.display(),
+                study_hydro.hydro_id,
+                study_hydro.orders[season],
+                source_hydro.orders[season]
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+/// Rejects a boundary load whose current terminal manifest declares a
+/// `HydroStorage` or `HydroInflowLag` slot with no same-identity `source`
+/// counterpart — the state's must-correspond core (see `reconcile`'s module
+/// doc). Checked up front, over the whole `current` manifest at once, rather
+/// than the first miss [`build_rebind`] would otherwise report: every
+/// missing storage hydro is named in one message, then every missing
+/// inflow-lag `(hydro, depth)` pair in a second — storage first, since a
+/// missing reservoir is the louder "different deck" signal and a deck
+/// missing a plant is usually missing its lag block too. A `source` slot
+/// with no `current` counterpart is not examined here; that is a superset
+/// drop, reported separately by [`warn_dropped_source_couplings`].
+///
+/// `source`'s storage and inflow-lag slots are hashed once into a membership
+/// probe and never iterated; the missing lists come entirely from a
+/// positional walk of `current`, so their order matches `current`'s own
+/// declaration order.
+///
+/// # Errors
+///
+/// Returns [`SddpError::Validation`] naming every `current` storage slot
+/// (respectively every `current` inflow-lag slot) with no `source`
+/// counterpart, one message per family.
+fn check_topology_subset(source: &[EntitySlot], current: &[EntitySlot]) -> Result<(), SddpError> {
+    let source_keys: HashSet<(u8, i32, u32)> = source
+        .iter()
+        .filter(|slot| {
+            matches!(
+                slot.family(),
+                Some(StateFamily::HydroStorage | StateFamily::HydroInflowLag)
+            )
+        })
+        .map(slot_identity)
+        .collect();
+
+    let mut missing_storage: Vec<i32> = Vec::new();
+    let mut missing_inflow_lag: Vec<(i32, u32)> = Vec::new();
+    for slot in current {
+        match slot.family() {
+            Some(StateFamily::HydroStorage) => {
+                if !source_keys.contains(&slot_identity(slot)) {
+                    missing_storage.push(slot.entity_id);
+                }
+            }
+            Some(StateFamily::HydroInflowLag) => {
+                if !source_keys.contains(&slot_identity(slot)) {
+                    missing_inflow_lag.push((slot.entity_id, slot.subindex));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if !missing_storage.is_empty() {
+        let names = missing_storage
+            .iter()
+            .map(|id| format!("hydro {id}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(SddpError::Validation(format!(
+            "boundary policy does not price {names}; it was trained on a different set of plants"
+        )));
+    }
+
+    if !missing_inflow_lag.is_empty() {
+        let names = missing_inflow_lag
+            .iter()
+            .map(|(id, depth)| format!("hydro {id} at lag depth {depth}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(SddpError::Validation(format!(
+            "boundary policy has no inflow-lag coefficient for {names}: the boundary is \
+             lag-depth-incompatible with the current study"
+        )));
+    }
+
+    Ok(())
+}
+
+/// Load boundary cuts from the pool of a source Cobre policy checkpoint that
+/// prices the state at the study's boundary date.
+///
+/// Pool selection and the source cost scale are read entirely from the
+/// resolved pool's own `cuts/<pool>.bin` — its `priced_state_date` and
 /// `cost_scale_factor` self-describing facts — never from `metadata.json`'s
-/// `graph_manifest`/`producer.cost_scale_factor`. A resolved pool whose
-/// `cost_scale_factor` reads `None` predates those facts and REJECTS: there is
-/// no silent default and no `metadata.json` fallback (see the resolution
-/// section of `# Errors` below). A resolved pool shared by more than one
-/// node (`node_id == STAGE_CUTS_NODE_ID_SENTINEL`) REJECTS too — a boundary
-/// source must be a single-node terminal pool.
+/// `graph_manifest`/`producer.cost_scale_factor`. Cobre encodes
+/// [`BoundaryLoadRequest`]'s `boundary_date` once via
+/// [`cobre_io::encode_slot_date`] and selects the unique pool whose
+/// `priced_state_date` equals it, comparing the encoded integers — never by
+/// decoding a pool's own stamp, so a malformed stamp can never compare equal
+/// to a real date (see the four selection rejects in `# Errors` below). A
+/// resolved pool whose `cost_scale_factor` reads `None` predates those facts
+/// and REJECTS: there is no silent default and no `metadata.json` fallback. A
+/// resolved pool shared by more than one node (`node_id ==
+/// STAGE_CUTS_NODE_ID_SENTINEL`) REJECTS too — a boundary source must be a
+/// single-node terminal pool.
 ///
-/// Compares the source stage's manifest against the current TERMINAL-stage
+/// Compares the source pool's manifest against the current TERMINAL-stage
 /// manifest (`current_manifest`, built via
 /// [`StudySetup::build_terminal_entity_manifest`](crate::StudySetup::build_terminal_entity_manifest));
 /// `num_stages` may differ. `state_dimension`/`num_stages` compatibility
 /// routes through [`validate_policy_load`] typed to [`BoundaryInjection`];
 /// per-slot identity is then RECONCILED, never exact-matched, via
 /// [`crate::policy::reconcile::build_rebind`]/`rebind_cut` — storage and
-/// inflow-lag reject a target slot with no source counterpart, naming the
-/// offending hydro or lag depth (the entity is never relaxed); a live, dated
-/// anticipated target slot fans out against the source's own priced
-/// anticipated months by calendar overlap
-/// (`target_delivery_intervals`, aligned 1:1 with `current_manifest` — built
-/// via
-/// [`StudySetup::build_terminal_anticipated_delivery_intervals`](crate::StudySetup::build_terminal_anticipated_delivery_intervals)).
+/// inflow-lag first fail through `check_topology_subset` below, which reports
+/// every offending hydro or lag depth in one message per family before any
+/// coefficient moves; `build_rebind`'s own per-slot storage/inflow-lag
+/// rejects remain its postcondition for a direct in-crate caller, but are
+/// unreachable through this function once the gate has passed (the entity is
+/// never relaxed). A live target slot of EITHER forward-dated family
+/// (`AnticipatedThermalState` or `HydroTransitBucket`) whose OWN
+/// `interval_start`/`interval_end` (`current_manifest` — built via
+/// [`StudySetup::build_terminal_entity_manifest`](crate::StudySetup::build_terminal_entity_manifest))
+/// reaches past `boundary_date` fans out against the source's own priced
+/// intervals of the SAME family by calendar overlap.
 /// An empty manifest on either side skips reconciliation and warns, relying
 /// on `state_dimension` alone; a `was_active == false` boundary slot whose
 /// current counterpart is active warns and loads. Wraps the result in a
@@ -672,6 +1017,29 @@ fn boundary_predates_self_describing_cuts(boundary_path: &Path) -> SddpError {
 /// manifest checks so the lag-depth-specific message wins over the generic
 /// `state_dimension` reject.
 ///
+/// `study_seasons`, when present and not [`SEASON_CYCLE_CODE_ABSENT`], gates
+/// the load on season-cycle and per-hydro PAR-order identity against the
+/// checkpoint's own `metadata.season_manifest`
+/// ([`check_season_compatibility`]), run after the lag-depth guard and before
+/// [`validate_policy_load`] so this gate's specific message wins over the
+/// generic `state_dimension` reject. Build `study_seasons` with
+/// [`crate::policy::orchestration::build_season_manifest`], the same builder
+/// [`crate::policy::orchestration::write_checkpoint`] calls, so the two sides
+/// can never be constructed by diverging code. This is the one study-global
+/// fact this function reads from `metadata.json` rather than a resolved
+/// pool's own `cuts/<pool>.bin`: unlike `cost_scale_factor` and the graph, a
+/// season cycle is genuinely study-global (one per study, not one per pool),
+/// has no per-pool counterpart to go stale against, and duplicating it onto
+/// every pool would itself be the drift hazard.
+///
+/// `check_topology_subset` runs immediately after the (hoisted) manifest
+/// verifiability check that also gates the intercept fold and the rebind
+/// below, and before [`validate_policy_load`], so this gate's specific,
+/// every-missing-entity message wins over the generic `state_dimension`
+/// reject. It is skipped on the same unverifiable (empty-manifest) path
+/// those later steps skip, deferring entirely to the `state_dimension`
+/// fallback there.
+///
 /// `fixed_windows` are the current study's fixed post-horizon anticipated
 /// commitments (built via
 /// [`StudySetup::build_terminal_fixed_post_horizon_windows`](crate::StudySetup::build_terminal_fixed_post_horizon_windows)).
@@ -687,36 +1055,57 @@ fn boundary_predates_self_describing_cuts(boundary_path: &Path) -> SddpError {
 ///
 /// Returns [`SddpError::Validation`] if:
 /// - The checkpoint cannot be read
-/// - `source_stage` matches no pool's `graph_stage_id` (or, on a checkpoint
-///   where no pool carries a resolvable `graph_stage_id`, no pool's own id),
-///   or more than one pool's `graph_stage_id`
+/// - Every pool in the checkpoint carries
+///   [`STAGE_CUTS_PRICED_STATE_DATE_SENTINEL`] (a pre-dated checkpoint);
+///   re-export with a current Cobre
+/// - More than one pool is priced at the boundary date (a branching source's
+///   terminal date tie); names the boundary date and every matching pool id
+/// - No pool is priced at the boundary date; names the boundary date and
+///   every pool's own `(pool id, priced date)`
 /// - The resolved pool's `.bin` predates self-describing cuts
 ///   (`cost_scale_factor` reads `None`); re-export with a current Cobre
 /// - The resolved pool is shared by more than one node (`node_id` reads the
 ///   sentinel); a boundary source must be a single-node terminal pool
 /// - A cut references inflow-lag state deeper than `effective_inflow_lag_depth`
 ///   (a layout-sizing coupling regression)
-/// - The source stage's state dimension does not match `current_state_dimension`
-/// - A target storage or inflow-lag slot has no source counterpart under
-///   identity reconciliation
-/// - A live anticipated source slot's `delivery_date` fails to decode to a real
-///   calendar month (propagated from the intercept fold, before the rebind)
+/// - `study_seasons` is present and not absent, and the source's
+///   `metadata.season_manifest` is absent, disagrees on season cycle or
+///   season count, is missing a hydro the study models, or disagrees on a
+///   modeled hydro's per-season PAR order (see [`check_season_compatibility`])
+/// - A current-manifest storage or inflow-lag slot has no source counterpart
+///   under identity (when the manifest is verifiable); names every such
+///   storage hydro, or every such `(hydro, lag depth)` pair, in one message
+///   per family (`check_topology_subset`)
+/// - The source pool's state dimension does not match `current_state_dimension`
+///   (the unverifiable-manifest fallback, once the topology gate above is
+///   skipped)
+/// - A live anticipated source slot's `interval_start`/`interval_end` fails to
+///   decode, or decodes to a non-positive span; names the slot's identity and
+///   the raw values (propagated from `build_source_interval_index`, built
+///   separately for the intercept fold and for the rebind/report path)
+/// - A live forward-family target slot's `interval_start`/`interval_end` fails
+///   to decode; names the slot's identity and the undecodable raw value (see
+///   `reconcile::resolve_by_interval_overlap`)
 ///
-/// A dated anticipated target slot with no resolved `target_delivery_intervals`
-/// entry is NOT an error: it is an in-study ring slot (a within-horizon
-/// delivery) the boundary does not price, resolved to `Zero` (see
-/// `reconcile::resolve_anticipated`).
+/// A live forward-family target slot whose interval ends at or before
+/// `boundary_date` is NOT an error: it is an in-study delivery the boundary
+/// does not price, resolved to `Zero` (see
+/// `reconcile::resolve_by_interval_overlap`).
 pub fn load_boundary_cuts(
-    boundary_path: &Path,
-    source_stage: u32,
-    current_state_dimension: u32,
-    current_manifest: &[EntitySlot],
-    target_delivery_intervals: &[Option<(NaiveDate, NaiveDate)>],
-    fixed_windows: &[AnticipatedCommitmentHistory],
-    effective_inflow_lag_depth: Option<u32>,
-    loading_cost_scale_factor: f64,
+    request: &BoundaryLoadRequest<'_>,
     on_warning: &mut dyn FnMut(&str),
 ) -> Result<ValidatedBoundaryCuts, SddpError> {
+    let BoundaryLoadRequest {
+        boundary_path,
+        boundary_date,
+        current_state_dimension,
+        current_manifest,
+        loading_cost_scale_factor,
+        fixed_windows,
+        inflow_lag_depth: effective_inflow_lag_depth,
+        study_seasons,
+    } = *request;
+
     let checkpoint = read_policy_checkpoint(boundary_path).map_err(|e| {
         SddpError::Validation(format!(
             "failed to read boundary policy checkpoint at {}: {e}",
@@ -724,57 +1113,7 @@ pub fn load_boundary_cuts(
         ))
     })?;
 
-    // Resolve `source_stage` to its pool through each pool's own
-    // `graph_stage_id` (never `metadata.graph_manifest`), rejecting a
-    // multi-node stage: boundary injection requires a single-node source and
-    // the frozen `policy.boundary` config offers no node selector. A pool
-    // with no resolvable `graph_stage_id` at all is the .bin-level mirror of
-    // the old empty-graph-manifest fallback — but the fallback triggers only
-    // when EVERY pool in the checkpoint shares that property, so a
-    // genuinely branching checkpoint missing just one stage's pool never
-    // mis-resolves through an unrelated pool whose raw id happens to match
-    // `source_stage` numerically.
-    let source_stage_i32 = i32::try_from(source_stage).map_err(|_| {
-        SddpError::Validation(format!(
-            "boundary policy: source_stage {source_stage} overflows the stage id space"
-        ))
-    })?;
-    let graph_less = checkpoint
-        .stage_cuts
-        .iter()
-        .all(|sr| sr.graph_stage_id == STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL);
-
-    let stage_result = if graph_less {
-        checkpoint
-            .stage_cuts
-            .iter()
-            .find(|sr| sr.stage_id == source_stage)
-    } else {
-        let mut at_stage = checkpoint
-            .stage_cuts
-            .iter()
-            .filter(|sr| sr.graph_stage_id == source_stage_i32);
-        let first = at_stage.next();
-        if first.is_some() && at_stage.next().is_some() {
-            return Err(SddpError::Validation(format!(
-                "boundary policy: source_stage {source_stage} names a multi-node stage; boundary \
-                 injection requires a single-node source"
-            )));
-        }
-        first
-    }
-    .ok_or_else(|| {
-        SddpError::Validation(format!(
-            "boundary policy: source_stage {} not found in checkpoint \
-             (available pools: {:?})",
-            source_stage,
-            checkpoint
-                .stage_cuts
-                .iter()
-                .map(|sr| sr.stage_id)
-                .collect::<Vec<_>>()
-        ))
-    })?;
+    let stage_result = select_boundary_pool(&checkpoint, boundary_path, boundary_date)?;
 
     let Some(source_cost_scale_factor) = stage_result.cost_scale_factor else {
         return Err(boundary_predates_self_describing_cuts(boundary_path));
@@ -795,13 +1134,36 @@ pub fn load_boundary_cuts(
         let depth = boundary_cut_lag_depth(&stage_result.entity_manifest);
         if depth > reserved {
             return Err(SddpError::Validation(format!(
-                "internal: boundary policy stage {source_stage} references inflow-lag state to \
-                 depth {depth}, but the resolved state layout reserves only {reserved} inflow-lag \
-                 slots — resolve_boundary_state_requirements must infer the depth from the boundary \
-                 policy before the layout is built; reaching here means that coupling broke and cut \
-                 coefficients would truncate"
+                "internal: boundary policy pool {} references inflow-lag state to depth \
+                 {depth}, but the resolved state layout reserves only {reserved} inflow-lag \
+                 slots — resolve_boundary_state_requirements must infer the depth from the \
+                 boundary policy before the layout is built; reaching here means that coupling \
+                 broke and cut coefficients would truncate",
+                stage_result.stage_id
             )));
         }
+    }
+
+    // Skipped when the study side is absent: no declared season map means no
+    // PAR context to compare and, having no inflow models, no lag slots to
+    // protect.
+    if let Some(study_seasons) = study_seasons
+        && study_seasons.cycle_code != SEASON_CYCLE_CODE_ABSENT
+    {
+        check_season_compatibility(
+            boundary_path,
+            study_seasons,
+            &checkpoint.metadata.season_manifest,
+        )?;
+    }
+
+    // Hoisted above `validate_policy_load` so both the topology gate below and
+    // the later fold/rebind branches share this one emptiness check — a second
+    // call would double-fire the absent-manifest warning.
+    let verifiable =
+        manifest_identity_verifiable(&stage_result.entity_manifest, current_manifest, on_warning);
+    if verifiable {
+        check_topology_subset(&stage_result.entity_manifest, current_manifest)?;
     }
 
     // `BoundaryInjection` checks neither `num_stages`, `n_pools`, nor the
@@ -827,9 +1189,6 @@ pub fn load_boundary_cuts(
     }
 
     let mut records = stage_result.cuts.clone();
-
-    let verifiable =
-        manifest_identity_verifiable(&stage_result.entity_manifest, current_manifest, on_warning);
 
     // Guard only the unverifiable (empty-manifest) branch: a verifiable manifest
     // defers to per-slot reconciliation, which tolerates a differing source/current
@@ -872,10 +1231,14 @@ pub fn load_boundary_cuts(
     );
 
     let report = if verifiable {
+        // Built once and shared by both calls below, so a source slot's delivery span is
+        // never read two different ways.
+        let source_index = build_source_interval_index(&stage_result.entity_manifest)?;
         let rebind = build_rebind(
             &stage_result.entity_manifest,
             current_manifest,
-            target_delivery_intervals,
+            boundary_date,
+            &source_index,
         )?;
         for record in &mut records {
             record.coefficients = rebind_cut(record, &rebind);
@@ -884,26 +1247,15 @@ pub fn load_boundary_cuts(
         build_reconciliation_report(
             &stage_result.entity_manifest,
             current_manifest,
-            target_delivery_intervals,
+            boundary_date,
             &rebind,
+            &source_index,
         )
     } else {
         BoundaryReconciliationReport::default()
     };
 
     Ok(ValidatedBoundaryCuts { records, report })
-}
-
-/// Human-readable label for a source slot's state family, for the dropped-coupling
-/// warning below.
-fn family_label(family: Option<StateFamily>) -> &'static str {
-    match family {
-        Some(StateFamily::HydroStorage) => "hydro-storage",
-        Some(StateFamily::HydroInflowLag) => "inflow-lag",
-        Some(StateFamily::AnticipatedThermalState) => "anticipated-thermal",
-        Some(StateFamily::HydroTransitBucket) => "transit-bucket",
-        None => "other",
-    }
 }
 
 /// Warn — never reject — when a boundary SOURCE cut couples a state slot the current
@@ -943,151 +1295,6 @@ fn warn_dropped_source_couplings(
             examples.join(", ")
         ));
     }
-}
-
-/// Auto-resolve an absent `policy.boundary.source_stage`: decode each source
-/// pool's live anticipated `delivery_date` months
-/// ([`decode_month_anchor`]) and pick the pool whose months overlap
-/// `current_terminal_delivery_intervals` — the same `target_delivery_intervals`
-/// axis [`load_boundary_cuts`] fans coefficients onto (built by
-/// [`StudySetup::build_terminal_anticipated_delivery_intervals`](crate::StudySetup::build_terminal_anticipated_delivery_intervals)).
-/// The winning candidate is a POOL id (`checkpoint.stage_cuts`'s own
-/// `stage_id` field names a pool, not a graph stage — see
-/// [`cobre_io::StageCutsPayload`]'s doc); [`load_boundary_cuts`]'s
-/// `source_stage` parameter speaks graph-stage-id, so this resolver maps the
-/// winning pool back to a stage id via that SAME pool's own `graph_stage_id`
-/// self-describing fact — never `metadata.graph_manifest`. A winning pool
-/// whose `graph_stage_id` is the [`STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL`]
-/// (a pre-change checkpoint, or an internally unresolved stage key) REJECTS
-/// rather than falling back to the raw pool id: unlike `load_boundary_cuts`'s
-/// own graph-less fallback (licensed only when the checkpoint has no
-/// resolvable `graph_stage_id` anywhere), silently returning an unmapped pool
-/// id HERE is the reproduced defect this guards — threaded back into
-/// `load_boundary_cuts` as `source_stage` on a branching graph, it can match
-/// an unrelated pool whose OWN id happens to equal the winning pool's numeric
-/// value, silently resolving to a different pool.
-///
-/// This only PICKS a candidate; it is not a new trust boundary — a
-/// calendar-matched pool from an incompatible source still rejects once
-/// [`load_boundary_cuts`] reconciles it by storage/lag identity, and a
-/// calendar-matched pool shared by more than one node still rejects there too
-/// (a boundary source must be a single-node terminal pool).
-///
-/// # Errors
-///
-/// Returns [`SddpError::Validation`] if:
-/// - The checkpoint cannot be read.
-/// - More than one source pool's decoded months overlap the current terminal
-///   window (ambiguous; names the count and advises an explicit
-///   `source_stage`).
-/// - No source pool carries any decodable live anticipated `delivery_date`
-///   (a pre-dated-slot checkpoint, or a pure storage/lag boundary; advises
-///   re-exporting or an explicit `source_stage`).
-/// - Every source pool that does carry decodable months has none overlapping
-///   the current terminal window (advises an explicit `source_stage`).
-/// - A live anticipated source slot's `delivery_date` fails to decode to a
-///   real calendar month.
-/// - The winning pool's own `graph_stage_id` is the sentinel (advises an
-///   explicit `source_stage`), or the pool has no entry in
-///   `checkpoint.stage_cuts` at all (an internal inconsistency: the pool id
-///   was drawn from `checkpoint.stage_cuts` itself).
-pub fn resolve_boundary_source_stage(
-    boundary_path: &Path,
-    current_terminal_delivery_intervals: &[Option<(NaiveDate, NaiveDate)>],
-) -> Result<u32, SddpError> {
-    let checkpoint = read_policy_checkpoint(boundary_path).map_err(|e| {
-        SddpError::Validation(format!(
-            "failed to read boundary policy checkpoint at {}: {e}",
-            boundary_path.display()
-        ))
-    })?;
-
-    let target_intervals: Vec<(NaiveDate, NaiveDate)> = current_terminal_delivery_intervals
-        .iter()
-        .copied()
-        .flatten()
-        .collect();
-
-    let mut any_decodable = false;
-    let mut candidates: Vec<u32> = Vec::new();
-    for stage in &checkpoint.stage_cuts {
-        let months = decode_pool_anticipated_months(&stage.entity_manifest)?;
-        if months.is_empty() {
-            continue;
-        }
-        any_decodable = true;
-        let overlaps = months.iter().any(|&month| {
-            target_intervals
-                .iter()
-                .any(|&iv| overlap_hours(month, iv) > 0.0)
-        });
-        if overlaps {
-            candidates.push(stage.stage_id);
-        }
-    }
-
-    if candidates.len() > 1 {
-        return Err(SddpError::Validation(format!(
-            "ambiguous: {} source pools match the terminal date; set \
-             policy.boundary.source_stage explicitly",
-            candidates.len()
-        )));
-    }
-    if let Some(&pool) = candidates.first() {
-        let stage_result = checkpoint
-            .stage_cuts
-            .iter()
-            .find(|sr| sr.stage_id == pool)
-            .ok_or_else(|| {
-                SddpError::Validation(format!(
-                    "boundary policy: pool {pool} has no entry in checkpoint.stage_cuts \
-                     (internal inconsistency)"
-                ))
-            })?;
-        if stage_result.graph_stage_id == STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL {
-            return Err(SddpError::Validation(format!(
-                "boundary policy: pool {pool} carries no resolvable graph_stage_id (a \
-                 pre-change checkpoint, or an internally unresolved stage key); set \
-                 policy.boundary.source_stage explicitly"
-            )));
-        }
-        return u32::try_from(stage_result.graph_stage_id).map_err(|_| {
-            SddpError::Validation(format!(
-                "boundary policy: pool {pool}'s graph_stage_id {} is negative",
-                stage_result.graph_stage_id
-            ))
-        });
-    }
-    if any_decodable {
-        return Err(SddpError::Validation(
-            "no source pool's anticipated delivery calendar aligns with the current study's \
-             terminal delivery window; set policy.boundary.source_stage explicitly"
-                .to_string(),
-        ));
-    }
-    Err(SddpError::Validation(
-        "this boundary predates dated slots; re-export it, or set policy.boundary.source_stage \
-         explicitly"
-            .to_string(),
-    ))
-}
-
-/// Decode `manifest`'s live (non-sentinel) `AnticipatedThermalState` slots'
-/// `delivery_date` anchors into `[month_start, month_end)` spans, via
-/// [`decode_month_anchor`] — the per-pool candidate set
-/// [`resolve_boundary_source_stage`] matches against the current study's
-/// terminal delivery window.
-fn decode_pool_anticipated_months(
-    manifest: &[EntitySlot],
-) -> Result<Vec<(NaiveDate, NaiveDate)>, SddpError> {
-    manifest
-        .iter()
-        .filter(|slot| {
-            slot.entity_type == StateFamily::AnticipatedThermalState.code()
-                && slot.delivery_date != ENTITY_SLOT_DELIVERY_DATE_SENTINEL
-        })
-        .map(|slot| decode_month_anchor(slot.delivery_date).map(|(start, end, _)| (start, end)))
-        .collect()
 }
 
 /// Boundary cut records that passed [`validate_policy_load`]'s
@@ -1173,27 +1380,57 @@ mod tests {
     use chrono::NaiveDate;
     use cobre_core::{AnticipatedCommitmentHistory, EntityId};
     use cobre_io::{
-        EntitySlot, GraphManifest, ManifestEdge, ManifestNode, ProducerBlock,
-        STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, StageCutsPayload,
+        EntitySlot, GraphManifest, HydroSeasonOrders, ManifestEdge, ManifestNode, ProducerBlock,
+        SEASON_CYCLE_CODE_MONTHLY, SEASON_CYCLE_CODE_WEEKLY, STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
+        SeasonManifest, StageCutsPayload, decode_slot_date, encode_slot_date,
+        read_policy_checkpoint,
     };
 
     use super::{
-        BoundaryInjection, BoundaryReconciliationReport, BoundaryStateRequirements, CutPool,
-        FullFcf, NodeId, NodePos, PolicyStageManifest, TypedVec, ValidatedBoundaryCuts,
-        boundary_policy_required_lag_depth, compare_manifest_slot_identity, decode_month_anchor,
-        inject_boundary_cuts, load_boundary_cuts, overlap_hours, resolve_boundary_source_stage,
+        BoundaryInjection, BoundaryLoadRequest, BoundaryReconciliationReport,
+        BoundaryStateRequirements, CutPool, FullFcf, NodeId, NodePos, PolicyStageManifest,
+        TypedVec, ValidatedBoundaryCuts, boundary_policy_required_lag_depth,
+        compare_manifest_slot_identity, inject_boundary_cuts, load_boundary_cuts,
         validate_policy_load,
     };
     use crate::SddpError;
+    use crate::policy::reconcile::overlap_hours;
     use crate::test_support;
 
     // ── helpers ───────────────────────────────────────────────────────────────
 
-    /// All-`None` delivery intervals aligned to `len` — for
-    /// [`load_boundary_cuts`] tests whose manifests carry no live-dated
-    /// anticipated slot.
-    fn no_intervals(len: usize) -> Vec<Option<(NaiveDate, NaiveDate)>> {
-        vec![None; len]
+    /// Pool `pool`'s fixture `priced_state_date`: `2030-01-01` plus `pool`
+    /// months, so every pool in a multi-pool checkpoint written by this
+    /// module's fixtures carries a distinct, non-sentinel date.
+    fn fixture_priced_date(pool: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(2030, 1, 1)
+            .unwrap()
+            .checked_add_months(chrono::Months::new(pool))
+            .unwrap()
+    }
+
+    fn ymd(year: i32, month: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(year, month, day).expect("valid calendar date")
+    }
+
+    /// A single `AnticipatedThermalState` slot (`entity_type 2`), carrying its
+    /// own calendar-month `[delivery_date, next_month_anchor(delivery_date))`
+    /// delivery interval anchored at `delivery_date` (`YYYYMM01`).
+    fn anticipated_slot(thermal_id: i32, ring_slot: u32, delivery_date: i32) -> EntitySlot {
+        EntitySlot::anticipated(thermal_id, ring_slot, true)
+            .with_interval(delivery_date, next_month_anchor(delivery_date))
+    }
+
+    /// The following month's day-01 `YYYYMMDD` anchor of `month_anchor`
+    /// (itself a day-01 anchor) — mirrors the same-named helper in `tests/`.
+    fn next_month_anchor(month_anchor: i32) -> i32 {
+        let year = month_anchor / 10_000;
+        let month = (month_anchor / 100) % 100;
+        if month == 12 {
+            (year + 1) * 10_000 + 101
+        } else {
+            year * 10_000 + (month + 1) * 100 + 1
+        }
     }
 
     /// Discard warnings: a `&mut dyn FnMut(&str)` for tests asserting only the
@@ -1293,6 +1530,56 @@ mod tests {
         cut_intercepts: &[f64],
         manifest: &[EntitySlot],
     ) {
+        let metadata =
+            test_support::checkpoint_metadata(n_stages, chain_manifest(n_stages), producer_block());
+        write_checkpoint_with_manifest_metadata(
+            dir,
+            n_stages,
+            state_dimension,
+            cut_intercepts,
+            manifest,
+            &metadata,
+        );
+    }
+
+    /// Like [`write_checkpoint_with_manifest`] but stamps `season_manifest` on
+    /// the checkpoint metadata instead of the absent default — for the
+    /// boundary-load season/PAR-identity gate tests.
+    fn write_checkpoint_with_manifest_and_seasons(
+        dir: &std::path::Path,
+        n_stages: u32,
+        state_dimension: u32,
+        cut_intercepts: &[f64],
+        manifest: &[EntitySlot],
+        season_manifest: cobre_io::SeasonManifest,
+    ) {
+        let metadata = test_support::checkpoint_metadata_with_seasons(
+            n_stages,
+            chain_manifest(n_stages),
+            producer_block(),
+            season_manifest,
+        );
+        write_checkpoint_with_manifest_metadata(
+            dir,
+            n_stages,
+            state_dimension,
+            cut_intercepts,
+            manifest,
+            &metadata,
+        );
+    }
+
+    /// Shared body for [`write_checkpoint_with_manifest`] and
+    /// [`write_checkpoint_with_manifest_and_seasons`]: builds the payloads and
+    /// writes the checkpoint under the caller-supplied `metadata`.
+    fn write_checkpoint_with_manifest_metadata(
+        dir: &std::path::Path,
+        n_stages: u32,
+        state_dimension: u32,
+        cut_intercepts: &[f64],
+        manifest: &[EntitySlot],
+        metadata: &cobre_io::CheckpointManifest,
+    ) {
         let state_dim = state_dimension as usize;
         let coefficients = vec![1.0_f64; state_dim];
         let n_cuts = cut_intercepts.len();
@@ -1332,14 +1619,35 @@ mod tests {
                 cost_scale_factor: 1_000_000.0,
                 node_id: s as i32,
                 graph_stage_id: -1,
-                priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
+                priced_state_date: encode_slot_date(fixture_priced_date(s as u32)),
             })
             .collect();
 
-        let metadata =
-            test_support::checkpoint_metadata(n_stages, chain_manifest(n_stages), producer_block());
+        cobre_io::write_policy_checkpoint(dir, &payloads, &[], metadata, &[]).unwrap();
+    }
 
-        cobre_io::write_policy_checkpoint(dir, &payloads, &[], &metadata, &[]).unwrap();
+    /// Every pool [`write_checkpoint_with_manifest`] writes carries a
+    /// non-sentinel `priced_state_date`, and no two pools share one.
+    #[test]
+    fn write_checkpoint_with_manifest_pools_carry_distinct_priced_dates() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_checkpoint_with_manifest(tmp.path(), 5, 2, &[10.0, 20.0], &[]);
+
+        let checkpoint = read_policy_checkpoint(tmp.path()).unwrap();
+        let dates: Vec<i32> = checkpoint
+            .stage_cuts
+            .iter()
+            .map(|sr| sr.priced_state_date)
+            .collect();
+        assert!(
+            dates
+                .iter()
+                .all(|&d| d != STAGE_CUTS_PRICED_STATE_DATE_SENTINEL)
+        );
+        let mut sorted = dates.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), dates.len());
     }
 
     /// Write a single-stage checkpoint whose one cut has the given at-rest
@@ -1377,7 +1685,7 @@ mod tests {
             cost_scale_factor: 1_000_000.0,
             node_id: i32::try_from(stage_id).unwrap_or(-1),
             graph_stage_id: -1,
-            priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
+            priced_state_date: encode_slot_date(fixture_priced_date(stage_id)),
         };
         let metadata = test_support::checkpoint_metadata(
             stage_id + 1,
@@ -1402,14 +1710,13 @@ mod tests {
             write_checkpoint_with_scale(tmp.path(), 0, at_rest_intercept, &at_rest_coefficients);
 
             let cuts = load_boundary_cuts(
-                tmp.path(),
-                0,
-                2,
-                &[],
-                &[],
-                &[],
-                None,
-                loading_factor,
+                &BoundaryLoadRequest::new(
+                    tmp.path(),
+                    fixture_priced_date(0),
+                    2,
+                    &[],
+                    loading_factor,
+                ),
                 &mut ignore_warnings(),
             )
             .unwrap();
@@ -1658,14 +1965,13 @@ mod tests {
         write_minimal_checkpoint(tmp.path(), 12, 10, &intercepts);
 
         let cuts = load_boundary_cuts(
-            tmp.path(),
-            2,
-            10,
-            &[],
-            &[],
-            &[],
-            None,
-            NEUTRAL_LOADING_FACTOR,
+            &BoundaryLoadRequest::new(
+                tmp.path(),
+                fixture_priced_date(2),
+                10,
+                &[],
+                NEUTRAL_LOADING_FACTOR,
+            ),
             &mut ignore_warnings(),
         )
         .unwrap();
@@ -1685,35 +1991,32 @@ mod tests {
         }
     }
 
-    /// Given a checkpoint without stage 99, when `load_boundary_cuts` is called
-    /// for stage 99, then it returns `Err(SddpError::Validation)` with a message
-    /// containing `"source_stage"` and `"99"`.
+    /// Given a checkpoint whose pools are dated at `fixture_priced_date(0..5)`,
+    /// when `load_boundary_cuts` is called with a boundary date matching none
+    /// of them, then it returns `Err(SddpError::Validation)` naming that date.
     #[test]
-    fn load_boundary_cuts_missing_stage_returns_error() {
+    fn load_boundary_cuts_missing_date_returns_error() {
         let tmp = tempfile::tempdir().unwrap();
         write_minimal_checkpoint(tmp.path(), 5, 10, &[1.0]);
+        let unmatched_date = fixture_priced_date(99);
 
         let result = load_boundary_cuts(
-            tmp.path(),
-            99,
-            10,
-            &[],
-            &[],
-            &[],
-            None,
-            1_000_000.0,
+            &BoundaryLoadRequest::new(tmp.path(), unmatched_date, 10, &[], 1_000_000.0),
             &mut ignore_warnings(),
         );
 
-        assert!(result.is_err(), "should fail for missing stage");
+        assert!(
+            result.is_err(),
+            "should fail for an unmatched boundary date"
+        );
         let msg = result.unwrap_err().to_string();
         assert!(
-            msg.contains("source_stage"),
-            "error should mention 'source_stage': {msg}"
+            msg.contains(&unmatched_date.to_string()),
+            "error should name the unmatched boundary date: {msg}"
         );
         assert!(
-            msg.contains("99"),
-            "error should include the missing stage index: {msg}"
+            msg.contains("no pool is priced"),
+            "error should describe the selection failure: {msg}"
         );
     }
 
@@ -1726,14 +2029,7 @@ mod tests {
         write_minimal_checkpoint(tmp.path(), 5, 10, &[1.0]);
 
         let result = load_boundary_cuts(
-            tmp.path(),
-            0,
-            5,
-            &[],
-            &[],
-            &[],
-            None,
-            1_000_000.0,
+            &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 5, &[], 1_000_000.0),
             &mut ignore_warnings(),
         );
 
@@ -1750,14 +2046,13 @@ mod tests {
     #[test]
     fn load_boundary_cuts_nonexistent_path_returns_error() {
         let result = load_boundary_cuts(
-            std::path::Path::new("/nonexistent/path/to/policy"),
-            0,
-            10,
-            &[],
-            &[],
-            &[],
-            None,
-            1_000_000.0,
+            &BoundaryLoadRequest::new(
+                std::path::Path::new("/nonexistent/path/to/policy"),
+                fixture_priced_date(0),
+                10,
+                &[],
+                1_000_000.0,
+            ),
             &mut ignore_warnings(),
         );
 
@@ -1785,6 +2080,12 @@ mod tests {
         EntitySlot::transit_bucket(id, lag, true)
     }
 
+    /// Like [`transit_bucket_slot`] but carrying a real `[start, end)`
+    /// arrival interval instead of the sentinel.
+    fn transit_bucket_slot_over(id: i32, lag: u32, start: i32, end: i32) -> EntitySlot {
+        transit_bucket_slot(id, lag).with_interval(start, end)
+    }
+
     /// A single active `HydroInflowLag` slot (`entity_type 1`): `id` is the
     /// hydro, `lag_depth` the 1-based lag (as `build_stage_entity_manifest` emits).
     fn inflow_lag_slot(id: i32, lag_depth: u32) -> EntitySlot {
@@ -1805,14 +2106,8 @@ mod tests {
 
         let current = vec![storage_slot(1), inflow_lag_slot(1, 12)];
         let result = load_boundary_cuts(
-            tmp.path(),
-            0,
-            2,
-            &current,
-            &no_intervals(current.len()),
-            &[],
-            Some(6),
-            1_000_000.0,
+            &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 2, &current, 1_000_000.0)
+                .with_inflow_lag_depth(Some(6)),
             &mut ignore_warnings(),
         );
 
@@ -1846,14 +2141,8 @@ mod tests {
 
         let current = vec![storage_slot(1), inflow_lag_slot(1, 12)];
         let cuts = load_boundary_cuts(
-            tmp.path(),
-            0,
-            2,
-            &current,
-            &no_intervals(current.len()),
-            &[],
-            Some(12),
-            1_000_000.0,
+            &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 2, &current, 1_000_000.0)
+                .with_inflow_lag_depth(Some(12)),
             &mut ignore_warnings(),
         )
         .unwrap();
@@ -1863,6 +2152,271 @@ mod tests {
             2,
             "a boundary within the declared depth must load"
         );
+    }
+
+    /// A [`SeasonManifest`] literal for the season/PAR-identity gate tests.
+    fn seasons(
+        cycle_code: u8,
+        n_seasons: u32,
+        hydro_orders: Vec<HydroSeasonOrders>,
+    ) -> SeasonManifest {
+        SeasonManifest {
+            cycle_code,
+            n_seasons,
+            hydro_orders,
+        }
+    }
+
+    /// Given a study descriptor declaring `Monthly`/12 seasons and a source
+    /// checkpoint whose manifest declares `Weekly`/52, `load_boundary_cuts`
+    /// rejects naming both cycles by word — and the cycle check fires before
+    /// the season-count check, so the message never mentions "season count".
+    #[test]
+    fn boundary_load_rejects_differing_season_cycle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source_seasons = seasons(SEASON_CYCLE_CODE_WEEKLY, 52, vec![]);
+        write_checkpoint_with_manifest_and_seasons(tmp.path(), 1, 1, &[10.0], &[], source_seasons);
+
+        let study_seasons = seasons(SEASON_CYCLE_CODE_MONTHLY, 12, vec![]);
+        let result = load_boundary_cuts(
+            &BoundaryLoadRequest::new(
+                tmp.path(),
+                fixture_priced_date(0),
+                1,
+                &[],
+                NEUTRAL_LOADING_FACTOR,
+            )
+            .with_study_seasons(&study_seasons),
+            &mut ignore_warnings(),
+        );
+
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("monthly"), "must name the study cycle: {msg}");
+        assert!(msg.contains("weekly"), "must name the source cycle: {msg}");
+        assert!(
+            !msg.contains("season count"),
+            "the cycle check must fire before the season-count check: {msg}"
+        );
+    }
+
+    /// Given descriptors that agree on cycle but disagree on season count,
+    /// `load_boundary_cuts` rejects naming both counts.
+    #[test]
+    fn boundary_load_rejects_differing_season_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source_seasons = seasons(SEASON_CYCLE_CODE_MONTHLY, 4, vec![]);
+        write_checkpoint_with_manifest_and_seasons(tmp.path(), 1, 1, &[10.0], &[], source_seasons);
+
+        let study_seasons = seasons(SEASON_CYCLE_CODE_MONTHLY, 12, vec![]);
+        let result = load_boundary_cuts(
+            &BoundaryLoadRequest::new(
+                tmp.path(),
+                fixture_priced_date(0),
+                1,
+                &[],
+                NEUTRAL_LOADING_FACTOR,
+            )
+            .with_study_seasons(&study_seasons),
+            &mut ignore_warnings(),
+        );
+
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("study has 12 seasons"),
+            "must name the study count: {msg}"
+        );
+        assert!(
+            msg.contains("source has 4)"),
+            "must name the source count: {msg}"
+        );
+    }
+
+    /// Given a study descriptor modeling hydro 7 and a source whose
+    /// `hydro_orders` omits it entirely, `load_boundary_cuts` rejects naming
+    /// hydro 7.
+    #[test]
+    fn boundary_load_rejects_source_missing_a_modeled_hydro_par_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source_seasons = seasons(SEASON_CYCLE_CODE_MONTHLY, 3, vec![]);
+        write_checkpoint_with_manifest_and_seasons(tmp.path(), 1, 1, &[10.0], &[], source_seasons);
+
+        let study_seasons = seasons(
+            SEASON_CYCLE_CODE_MONTHLY,
+            3,
+            vec![HydroSeasonOrders {
+                hydro_id: 7,
+                orders: vec![1, 2, 3],
+            }],
+        );
+        let result = load_boundary_cuts(
+            &BoundaryLoadRequest::new(
+                tmp.path(),
+                fixture_priced_date(0),
+                1,
+                &[],
+                NEUTRAL_LOADING_FACTOR,
+            )
+            .with_study_seasons(&study_seasons),
+            &mut ignore_warnings(),
+        );
+
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("hydro 7"),
+            "must name the missing hydro: {msg}"
+        );
+    }
+
+    /// Given hydro 7 declaring `orders` `[2, 2, 3]` on the study side and
+    /// A source whose per-hydro `orders` vector is shorter than the study's
+    /// rejects on the length, so a truncated descriptor can never pass the
+    /// positional comparison by silently comparing fewer seasons.
+    #[test]
+    fn boundary_load_rejects_truncated_source_par_orders_for_a_hydro() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source_seasons = seasons(
+            SEASON_CYCLE_CODE_MONTHLY,
+            3,
+            vec![HydroSeasonOrders {
+                hydro_id: 7,
+                orders: vec![2, 2],
+            }],
+        );
+        write_checkpoint_with_manifest_and_seasons(tmp.path(), 1, 1, &[10.0], &[], source_seasons);
+
+        let study_seasons = seasons(
+            SEASON_CYCLE_CODE_MONTHLY,
+            3,
+            vec![HydroSeasonOrders {
+                hydro_id: 7,
+                orders: vec![2, 2, 3],
+            }],
+        );
+        let result = load_boundary_cuts(
+            &BoundaryLoadRequest::new(
+                tmp.path(),
+                fixture_priced_date(0),
+                1,
+                &[],
+                NEUTRAL_LOADING_FACTOR,
+            )
+            .with_study_seasons(&study_seasons),
+            &mut ignore_warnings(),
+        );
+
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("hydro 7"), "must name the hydro: {msg}");
+        assert!(
+            msg.contains("3 PAR orders") && msg.contains("but 2"),
+            "must name both order counts: {msg}"
+        );
+    }
+
+    /// `[2, 4, 3]` on the source side, `load_boundary_cuts` rejects naming
+    /// hydro 7, the first differing season ordinal, and both orders there.
+    #[test]
+    fn boundary_load_rejects_differing_par_order_naming_hydro_and_season() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source_seasons = seasons(
+            SEASON_CYCLE_CODE_MONTHLY,
+            3,
+            vec![HydroSeasonOrders {
+                hydro_id: 7,
+                orders: vec![2, 4, 3],
+            }],
+        );
+        write_checkpoint_with_manifest_and_seasons(tmp.path(), 1, 1, &[10.0], &[], source_seasons);
+
+        let study_seasons = seasons(
+            SEASON_CYCLE_CODE_MONTHLY,
+            3,
+            vec![HydroSeasonOrders {
+                hydro_id: 7,
+                orders: vec![2, 2, 3],
+            }],
+        );
+        let result = load_boundary_cuts(
+            &BoundaryLoadRequest::new(
+                tmp.path(),
+                fixture_priced_date(0),
+                1,
+                &[],
+                NEUTRAL_LOADING_FACTOR,
+            )
+            .with_study_seasons(&study_seasons),
+            &mut ignore_warnings(),
+        );
+
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("hydro 7"), "must name the hydro: {msg}");
+        assert!(
+            msg.contains("season 1"),
+            "must name the first differing season ordinal: {msg}"
+        );
+        assert!(
+            msg.contains("order 2"),
+            "must name the study's order at that season: {msg}"
+        );
+        assert!(
+            msg.contains("order 4"),
+            "must name the source's order at that season: {msg}"
+        );
+    }
+
+    /// Given a source whose `season_manifest` is `SeasonManifest::default()`
+    /// (a pre-`id:19` checkpoint) and a present study descriptor,
+    /// `load_boundary_cuts` rejects advising re-export.
+    #[test]
+    fn boundary_load_rejects_absent_source_season_descriptor_with_reexport_hint() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_checkpoint_with_manifest(tmp.path(), 1, 1, &[10.0], &[]);
+
+        let study_seasons = seasons(SEASON_CYCLE_CODE_MONTHLY, 12, vec![]);
+        let result = load_boundary_cuts(
+            &BoundaryLoadRequest::new(
+                tmp.path(),
+                fixture_priced_date(0),
+                1,
+                &[],
+                NEUTRAL_LOADING_FACTOR,
+            )
+            .with_study_seasons(&study_seasons),
+            &mut ignore_warnings(),
+        );
+
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("re-export"), "must advise re-export: {msg}");
+    }
+
+    /// Given a study whose descriptor is absent (no `with_study_seasons`
+    /// call), `load_boundary_cuts` proceeds even against a source descriptor
+    /// that would reject a present study — the gate never runs.
+    #[test]
+    fn boundary_load_without_a_study_season_descriptor_skips_the_gate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source_seasons = seasons(
+            SEASON_CYCLE_CODE_WEEKLY,
+            52,
+            vec![HydroSeasonOrders {
+                hydro_id: 7,
+                orders: vec![9; 52],
+            }],
+        );
+        write_checkpoint_with_manifest_and_seasons(tmp.path(), 1, 1, &[10.0], &[], source_seasons);
+
+        let cuts = load_boundary_cuts(
+            &BoundaryLoadRequest::new(
+                tmp.path(),
+                fixture_priced_date(0),
+                1,
+                &[],
+                NEUTRAL_LOADING_FACTOR,
+            ),
+            &mut ignore_warnings(),
+        )
+        .unwrap();
+
+        assert_eq!(cuts.len(), 1, "the load proceeds without the season gate");
     }
 
     /// `boundary_policy_required_lag_depth` reads the deepest `HydroInflowLag`
@@ -1923,14 +2477,7 @@ mod tests {
         let current = storage_manifest(1, 2);
         let mut warnings: Vec<String> = Vec::new();
         let cuts = load_boundary_cuts(
-            tmp.path(),
-            0,
-            2,
-            &current,
-            &no_intervals(current.len()),
-            &[],
-            None,
-            1_000_000.0,
+            &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 2, &current, 1_000_000.0),
             &mut |m| {
                 warnings.push(m.to_string());
             },
@@ -1956,14 +2503,7 @@ mod tests {
 
         let current = storage_manifest(9, 2);
         let result = load_boundary_cuts(
-            tmp.path(),
-            0,
-            2,
-            &current,
-            &no_intervals(current.len()),
-            &[],
-            None,
-            1_000_000.0,
+            &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 2, &current, 1_000_000.0),
             &mut ignore_warnings(),
         );
 
@@ -1991,14 +2531,7 @@ mod tests {
 
         let current = storage_manifest(1, 2);
         let result = load_boundary_cuts(
-            tmp.path(),
-            0,
-            2,
-            &current,
-            &no_intervals(current.len()),
-            &[],
-            None,
-            1_000_000.0,
+            &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 2, &current, 1_000_000.0),
             &mut ignore_warnings(),
         );
 
@@ -2013,6 +2546,90 @@ mod tests {
         );
     }
 
+    /// Given a current terminal manifest with storage slots for hydros 0, 3
+    /// and 7, and a source manifest that prices hydro 3 only, when
+    /// `load_boundary_cuts` runs, then it rejects with a single message
+    /// naming both unpriced hydros and not the one the source does price.
+    #[test]
+    fn boundary_load_rejects_every_unpriced_hydro_in_one_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        let boundary = vec![storage_slot(3)];
+        write_checkpoint_with_manifest(tmp.path(), 1, 1, &[10.0], &boundary);
+
+        let current = vec![storage_slot(0), storage_slot(3), storage_slot(7)];
+        let result = load_boundary_cuts(
+            &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 3, &current, 1_000_000.0),
+            &mut ignore_warnings(),
+        );
+
+        assert!(result.is_err(), "two unpriced hydros must reject");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("hydro 0"), "must name hydro 0: {msg}");
+        assert!(msg.contains("hydro 7"), "must name hydro 7: {msg}");
+        assert!(
+            msg.contains("different set of plants"),
+            "must use the storage-family wording: {msg}"
+        );
+        assert!(
+            !msg.contains("hydro 3"),
+            "must not name hydro 3, which the source does price: {msg}"
+        );
+    }
+
+    /// Given a current manifest whose hydro 2 needs inflow-lag depths 1 and
+    /// 2, with storage matching on both sides, and a source carrying only
+    /// depth 1, when `load_boundary_cuts` runs, then it rejects naming
+    /// hydro 2 and lag depth 2.
+    #[test]
+    fn boundary_load_rejects_missing_inflow_lag_depth_naming_hydro_and_depth() {
+        let tmp = tempfile::tempdir().unwrap();
+        let boundary = vec![storage_slot(2), inflow_lag_slot(2, 1)];
+        write_checkpoint_with_manifest(tmp.path(), 1, 2, &[10.0], &boundary);
+
+        let current = vec![
+            storage_slot(2),
+            inflow_lag_slot(2, 1),
+            inflow_lag_slot(2, 2),
+        ];
+        let result = load_boundary_cuts(
+            &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 3, &current, 1_000_000.0),
+            &mut ignore_warnings(),
+        );
+
+        assert!(result.is_err(), "a missing lag depth must reject");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("hydro 2"), "must name hydro 2: {msg}");
+        assert!(msg.contains("lag depth 2"), "must name lag depth 2: {msg}");
+    }
+
+    /// Given a source manifest that is a strict superset of the current
+    /// manifest (an extra hydro the source prices but the study does not
+    /// model), when `load_boundary_cuts` runs, then the load succeeds and
+    /// the extra source slot is reported as a dropped coupling.
+    #[test]
+    fn boundary_load_superset_source_passes_the_topology_gate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let boundary = vec![storage_slot(1), storage_slot(2)];
+        write_checkpoint_with_manifest(tmp.path(), 1, 2, &[10.0], &boundary);
+
+        let current = vec![storage_slot(1)];
+        let cuts = load_boundary_cuts(
+            &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 1, &current, 1_000_000.0),
+            &mut ignore_warnings(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            cuts.len(),
+            1,
+            "a superset source must still load the current cuts"
+        );
+        assert!(
+            cuts.report().tally_totals().3 > 0,
+            "the extra source hydro must be reported as a dropped coupling"
+        );
+    }
+
     /// Given a boundary checkpoint with an empty manifest and a matching
     /// `current_state_dimension`, `load_boundary_cuts` returns `Ok` (no hard fail on
     /// absence) and surfaces an "identity could not be verified" warning.
@@ -2024,14 +2641,7 @@ mod tests {
         let current = storage_manifest(1, 2);
         let mut warnings: Vec<String> = Vec::new();
         let cuts = load_boundary_cuts(
-            tmp.path(),
-            0,
-            2,
-            &current,
-            &no_intervals(current.len()),
-            &[],
-            None,
-            1_000_000.0,
+            &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 2, &current, 1_000_000.0),
             &mut |m| {
                 warnings.push(m.to_string());
             },
@@ -2044,6 +2654,37 @@ mod tests {
             warnings[0].contains("manifest absent"),
             "warning must flag the absent manifest: {}",
             warnings[0]
+        );
+    }
+
+    /// Given a boundary checkpoint with an empty entity manifest and a
+    /// current manifest whose storage slots the (absent) source manifest can
+    /// neither confirm nor deny, when `load_boundary_cuts` runs with a
+    /// matching `state_dimension`, then the topology gate is skipped — no
+    /// per-hydro reject — the absent-manifest warning fires exactly once,
+    /// and the `state_dimension` fallback lets the load proceed.
+    #[test]
+    fn boundary_load_absent_manifest_skips_the_topology_gate() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_checkpoint_with_manifest(tmp.path(), 1, 2, &[10.0, 20.0], &[]);
+
+        let current = vec![storage_slot(1), storage_slot(2)];
+        let mut warnings: Vec<String> = Vec::new();
+        let cuts = load_boundary_cuts(
+            &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 2, &current, 1_000_000.0),
+            &mut |m| warnings.push(m.to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            cuts.len(),
+            2,
+            "an unverifiable manifest must fall back to state_dimension, not reject"
+        );
+        assert_eq!(
+            warnings.len(),
+            1,
+            "the absent-manifest warning must fire exactly once: {warnings:?}"
         );
     }
 
@@ -2062,14 +2703,7 @@ mod tests {
         let current = storage_manifest(1, 2);
         let mut warnings: Vec<String> = Vec::new();
         let cuts = load_boundary_cuts(
-            tmp.path(),
-            0,
-            2,
-            &current,
-            &no_intervals(current.len()),
-            &[],
-            None,
-            1_000_000.0,
+            &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 2, &current, 1_000_000.0),
             &mut |m| {
                 warnings.push(m.to_string());
             },
@@ -2084,45 +2718,53 @@ mod tests {
     }
 
     /// A manifest carrying a `HydroTransitBucket` slot (`entity_type 3`, the
-    /// downstream hydro id, the maturity lag as `subindex`) round-trips: written to a
-    /// checkpoint and reloaded against a slot-for-slot matching current manifest,
-    /// `load_boundary_cuts` returns `Ok` with no warning — the bucket slot passes
-    /// `slot_identity`.
+    /// downstream hydro id, the maturity lag as `subindex`) whose SOURCE and
+    /// CURRENT arrival intervals are IDENTICAL round-trips: written to a
+    /// checkpoint and reloaded against a slot-for-slot matching current
+    /// manifest, `load_boundary_cuts` returns `Ok` with no warning and the
+    /// bucket's coefficient blends at unit weight, bit-identical to the
+    /// source — the exact-match case of the arrival-interval join.
     #[test]
-    fn load_boundary_cuts_matching_transit_bucket_manifest_round_trips() {
+    fn load_boundary_cuts_matching_transit_bucket_arrival_interval_round_trips() {
         let tmp = tempfile::tempdir().unwrap();
-        let manifest = vec![storage_slot(1), transit_bucket_slot(2, 1)];
+        let start = encode_slot_date(fixture_priced_date(0));
+        let end = encode_slot_date(fixture_priced_date(1));
+        let manifest = vec![storage_slot(1), transit_bucket_slot_over(2, 1, start, end)];
         write_checkpoint_with_manifest(tmp.path(), 5, 2, &[10.0, 20.0], &manifest);
 
-        let current = vec![storage_slot(1), transit_bucket_slot(2, 1)];
+        let current = vec![storage_slot(1), transit_bucket_slot_over(2, 1, start, end)];
         let mut warnings: Vec<String> = Vec::new();
         let cuts = load_boundary_cuts(
-            tmp.path(),
-            0,
-            2,
-            &current,
-            &no_intervals(current.len()),
-            &[],
-            None,
-            1_000_000.0,
+            &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 2, &current, 1.0),
             &mut |m| {
                 warnings.push(m.to_string());
             },
         )
         .unwrap();
 
-        assert_eq!(cuts.len(), 2, "matching bucket manifest must load all cuts");
+        assert_eq!(
+            cuts.len(),
+            2,
+            "matching bucket arrival interval must load all cuts"
+        );
         assert!(
             warnings.is_empty(),
-            "a slot-for-slot bucket match must emit no warning: {warnings:?}"
+            "an identical-interval bucket match must emit no warning: {warnings:?}"
         );
+        for cut in cuts.iter() {
+            assert_eq!(
+                cut.coefficients[1].to_bits(),
+                1.0_f64.to_bits(),
+                "an identical arrival interval blends at unit weight, bit-identical to source"
+            );
+        }
     }
 
     /// A policy exported WITHOUT travel-time buckets loaded by bucket-aware
     /// code whose terminal manifest has a `HydroTransitBucket` (type 3) slot
     /// at the same `state_dimension` succeeds: a target transit bucket with no
     /// source match defaults to `0.0` (distinct from storage/lag's
-    /// reject-on-miss; a matching source transit slot is instead copied). The
+    /// reject-on-miss; a matching source transit slot is instead blended). The
     /// storage slot still loads its identity-matched coefficient.
     #[test]
     fn load_boundary_cuts_missing_transit_bucket_slot_identity_defaults_to_zero() {
@@ -2132,14 +2774,13 @@ mod tests {
 
         let current = vec![storage_slot(1), transit_bucket_slot(2, 1)];
         let cuts = load_boundary_cuts(
-            tmp.path(),
-            0,
-            2,
-            &current,
-            &no_intervals(current.len()),
-            &[],
-            None,
-            NEUTRAL_LOADING_FACTOR,
+            &BoundaryLoadRequest::new(
+                tmp.path(),
+                fixture_priced_date(0),
+                2,
+                &current,
+                NEUTRAL_LOADING_FACTOR,
+            ),
             &mut ignore_warnings(),
         )
         .expect(
@@ -2169,14 +2810,13 @@ mod tests {
 
         let current = vec![storage_slot(1), storage_slot(2), transit_bucket_slot(2, 1)];
         let cuts = load_boundary_cuts(
-            tmp.path(),
-            0,
-            3,
-            &current,
-            &no_intervals(current.len()),
-            &[],
-            None,
-            NEUTRAL_LOADING_FACTOR,
+            &BoundaryLoadRequest::new(
+                tmp.path(),
+                fixture_priced_date(0),
+                3,
+                &current,
+                NEUTRAL_LOADING_FACTOR,
+            ),
             &mut ignore_warnings(),
         )
         .expect("a differing-dimension load with a reconcilable manifest must load, not reject");
@@ -2192,15 +2832,16 @@ mod tests {
         }
     }
 
-    // ── load_boundary_cuts graph_stage_id resolution (pool id != stage id) ────
+    // ── load_boundary_cuts date selection ─────────────────────────────────────
 
-    /// Write a checkpoint with one pool per `(pool_id, graph_stage_id,
-    /// intercepts)` entry, each pool's own `graph_stage_id` self-describing
-    /// fact set directly (never through `metadata.graph_manifest`) — so
-    /// `load_boundary_cuts` must resolve `source_stage` to a pool through that
-    /// fact alone, not by a stage == pool coincidence.
-    fn write_pools_with_graph_stage_ids(dir: &std::path::Path, pools: &[(u32, i32, &[f64])]) {
-        let coefficients = [1.0_f64, 1.0];
+    /// Write a checkpoint with one pool per `(pool_id, priced_state_date,
+    /// intercepts)` entry, each pool's own `priced_state_date` self-describing
+    /// fact set directly to the given RAW encoded value (never through
+    /// `fixture_priced_date`'s per-pool default) — for the date-tie and
+    /// undated-checkpoint selection tests, which need two pools sharing one
+    /// priced date or every pool sharing the sentinel.
+    fn write_pools_with_priced_state_dates(dir: &std::path::Path, pools: &[(u32, i32, &[f64])]) {
+        let coefficients = [1.0_f64];
         let cuts_per_pool: Vec<Vec<cobre_io::PolicyCutRecord<'_>>> = pools
             .iter()
             .map(|(_, _, intercepts)| {
@@ -2228,9 +2869,9 @@ mod tests {
             .zip(&cuts_per_pool)
             .zip(&active_per_pool)
             .map(
-                |(((pool_id, graph_stage_id, intercepts), cuts), active)| StageCutsPayload {
+                |(((pool_id, priced_state_date, intercepts), cuts), active)| StageCutsPayload {
                     stage_id: *pool_id,
-                    state_dimension: 2,
+                    state_dimension: 1,
                     capacity: intercepts.len() as u32,
                     warm_start_count: 0,
                     cuts,
@@ -2239,399 +2880,144 @@ mod tests {
                     entity_manifest: &[],
                     cost_scale_factor: 1_000_000.0,
                     node_id: i32::try_from(*pool_id).unwrap_or(-1),
-                    graph_stage_id: *graph_stage_id,
-                    priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
+                    graph_stage_id: -1,
+                    priced_state_date: *priced_state_date,
                 },
             )
             .collect();
-        let metadata =
-            test_support::checkpoint_metadata(6, GraphManifest::default(), producer_block());
+        let metadata = test_support::checkpoint_metadata(
+            pools.len() as u32,
+            GraphManifest::default(),
+            producer_block(),
+        );
         cobre_io::write_policy_checkpoint(dir, &payloads, &[], &metadata, &[]).unwrap();
     }
 
-    /// A `source_stage` matching more than one pool's own `graph_stage_id` is
-    /// rejected: the frozen `policy.boundary` config offers no pool selector,
-    /// so an ambiguous source is a named `SddpError::Validation` (no remedy
-    /// field).
+    /// Given a two-pool checkpoint whose pools are stamped `fixture_priced_date(0)`
+    /// (`2030-01-01`) and `fixture_priced_date(1)` (`2030-02-01`), when
+    /// `load_boundary_cuts` runs with a boundary date equal to pool 1's stamp,
+    /// then it loads pool 1's cuts.
     #[test]
-    fn load_boundary_cuts_multi_pool_source_stage_rejects() {
+    fn load_boundary_cuts_selects_the_pool_priced_at_the_boundary_date() {
         let tmp = tempfile::tempdir().unwrap();
-        // Two distinct pools (2 and 5) both self-describe graph_stage_id 3.
-        write_pools_with_graph_stage_ids(tmp.path(), &[(2, 3, &[10.0, 20.0]), (5, 3, &[99.0])]);
-
-        let result = load_boundary_cuts(
-            tmp.path(),
-            3,
-            2,
-            &[],
-            &[],
-            &[],
-            None,
-            1_000_000.0,
-            &mut ignore_warnings(),
-        );
-
-        assert!(result.is_err(), "a multi-pool source_stage must reject");
-        let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("multi-node"),
-            "rejection must name the stage as multi-node: {msg}"
-        );
-        assert!(
-            msg.contains("source_stage 3"),
-            "rejection must name the stage: {msg}"
-        );
-    }
-
-    /// A `source_stage` resolves through a pool's own `graph_stage_id`, even
-    /// when the pool id differs from the stage id (pool 2 self-describes
-    /// stage 5): the cuts loaded are pool 2's.
-    #[test]
-    fn load_boundary_cuts_single_pool_resolves_through_graph_stage_id() {
-        let tmp = tempfile::tempdir().unwrap();
-        // Pool 2 self-describes graph_stage_id 5 (pool id != stage id).
-        write_pools_with_graph_stage_ids(tmp.path(), &[(2, 5, &[10.0, 20.0, 30.0])]);
+        let intercepts = vec![10.0, 20.0];
+        write_minimal_checkpoint(tmp.path(), 2, 2, &intercepts);
 
         let cuts = load_boundary_cuts(
-            tmp.path(),
-            5,
-            2,
-            &[],
-            &[],
-            &[],
-            None,
-            NEUTRAL_LOADING_FACTOR,
+            &BoundaryLoadRequest::new(
+                tmp.path(),
+                fixture_priced_date(1),
+                2,
+                &[],
+                NEUTRAL_LOADING_FACTOR,
+            ),
             &mut ignore_warnings(),
         )
-        .expect("a source_stage must resolve through the pool's own graph_stage_id");
+        .unwrap();
 
-        assert_eq!(
-            cuts.len(),
-            3,
-            "must load all of pool 2's cuts, resolved from stage 5 via graph_stage_id"
-        );
-        let intercepts: Vec<f64> = cuts.iter().map(|c| c.intercept).collect();
-        assert_eq!(intercepts, vec![10.0, 20.0, 30.0]);
+        assert_eq!(cuts.len(), 2, "must load pool 1's two cuts");
+        let loaded_intercepts: Vec<f64> = cuts.iter().map(|c| c.intercept).collect();
+        assert_eq!(loaded_intercepts, intercepts);
     }
 
-    // ── resolve_boundary_source_stage tests ───────────────────────────────────
-
-    fn ymd(year: i32, month: u32, day: u32) -> NaiveDate {
-        NaiveDate::from_ymd_opt(year, month, day).expect("valid calendar date")
-    }
-
-    /// A single `AnticipatedThermalState` slot (`entity_type 2`), dated at
-    /// `delivery_date` (`YYYYMM01`).
-    fn anticipated_slot(thermal_id: i32, ring_slot: u32, delivery_date: i32) -> EntitySlot {
-        EntitySlot::anticipated(thermal_id, ring_slot, true).with_delivery_date(delivery_date)
-    }
-
-    /// Write a checkpoint with one pool per `manifests` entry (pool id ==
-    /// index == `graph_stage_id`, a chain-degenerate graph), each pool holding
-    /// one cut sized to its own manifest — for [`resolve_boundary_source_stage`]
-    /// tests exercising distinct per-pool anticipated calendars.
-    fn write_checkpoint_with_pool_manifests(dir: &std::path::Path, manifests: &[Vec<EntitySlot>]) {
-        let n_pools = manifests.len() as u32;
-        let coefficients_per_pool: Vec<Vec<f64>> =
-            manifests.iter().map(|m| vec![1.0_f64; m.len()]).collect();
-        let cuts_per_pool: Vec<Vec<cobre_io::PolicyCutRecord<'_>>> = coefficients_per_pool
-            .iter()
-            .map(|coeffs| {
-                vec![cobre_io::PolicyCutRecord {
-                    cut_id: 0,
-                    slot_index: 0,
-                    iteration: 0,
-                    forward_pass_index: 0,
-                    intercept: 0.0,
-                    coefficients: coeffs,
-                    is_active: true,
-                }]
-            })
-            .collect();
-        let active_indices = [0_u32];
-        let payloads: Vec<StageCutsPayload<'_>> = manifests
-            .iter()
-            .enumerate()
-            .map(|(pool, manifest)| StageCutsPayload {
-                stage_id: pool as u32,
-                state_dimension: manifest.len() as u32,
-                capacity: 1,
-                warm_start_count: 0,
-                cuts: &cuts_per_pool[pool],
-                active_cut_indices: &active_indices,
-                populated_count: 1,
-                entity_manifest: manifest,
-                cost_scale_factor: 1_000_000.0,
-                node_id: pool as i32,
-                graph_stage_id: pool as i32,
-                priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
-            })
-            .collect();
-        let metadata =
-            test_support::checkpoint_metadata(n_pools, chain_manifest(n_pools), producer_block());
-        cobre_io::write_policy_checkpoint(dir, &payloads, &[], &metadata, &[]).unwrap();
-    }
-
-    /// A checkpoint whose pool 1 alone carries an anticipated slot dated
-    /// inside the current terminal window resolves to pool 1.
+    /// Given the same two-pool checkpoint, when `load_boundary_cuts` runs with
+    /// a boundary date matching neither pool, then it returns
+    /// `Err(SddpError::Validation)` naming the boundary date and every pool's
+    /// own priced date.
     #[test]
-    fn resolve_boundary_source_stage_unique_match_returns_pool_index() {
+    fn load_boundary_cuts_unmatched_boundary_date_rejects_naming_available_dates() {
         let tmp = tempfile::tempdir().unwrap();
-        let manifests = vec![
-            vec![storage_slot(1)],
-            vec![anticipated_slot(9, 0, 20_260_301)],
-        ];
-        write_checkpoint_with_pool_manifests(tmp.path(), &manifests);
+        write_minimal_checkpoint(tmp.path(), 2, 2, &[10.0, 20.0]);
+        let unmatched = fixture_priced_date(2);
 
-        let target = vec![None, Some((ymd(2026, 3, 1), ymd(2026, 4, 1)))];
-        let resolved = resolve_boundary_source_stage(tmp.path(), &target)
-            .expect("a unique calendar match must resolve");
-
-        assert_eq!(resolved, 1, "pool 1 carries the matching anticipated month");
-    }
-
-    /// Two pools both carrying an anticipated slot dated inside the current
-    /// terminal window are ambiguous: rejects naming the candidate count and
-    /// advising an explicit `source_stage`.
-    #[test]
-    fn resolve_boundary_source_stage_ambiguous_multiple_pools_rejects() {
-        let tmp = tempfile::tempdir().unwrap();
-        let manifests = vec![
-            vec![anticipated_slot(9, 0, 20_260_301)],
-            vec![anticipated_slot(9, 0, 20_260_301)],
-        ];
-        write_checkpoint_with_pool_manifests(tmp.path(), &manifests);
-
-        let target = vec![Some((ymd(2026, 3, 1), ymd(2026, 4, 1)))];
-        let err = resolve_boundary_source_stage(tmp.path(), &target).unwrap_err();
-
-        let msg = err.to_string();
-        assert!(msg.contains("ambiguous"), "must name the ambiguity: {msg}");
-        assert!(msg.contains('2'), "must name the candidate count 2: {msg}");
-        assert!(
-            msg.contains("policy.boundary.source_stage"),
-            "must advise the explicit override: {msg}"
-        );
-    }
-
-    /// A source with no anticipated slot at all, on any pool, has no
-    /// decodable delivery date to match against: rejects with the
-    /// re-export hint.
-    #[test]
-    fn resolve_boundary_source_stage_fully_sentinel_dated_source_rejects_with_reexport_hint() {
-        let tmp = tempfile::tempdir().unwrap();
-        let manifests = vec![vec![storage_slot(1)], vec![storage_slot(1)]];
-        write_checkpoint_with_pool_manifests(tmp.path(), &manifests);
-
-        let target = vec![Some((ymd(2026, 3, 1), ymd(2026, 4, 1)))];
-        let err = resolve_boundary_source_stage(tmp.path(), &target).unwrap_err();
-
-        let msg = err.to_string();
-        assert!(
-            msg.contains("re-export"),
-            "must advise re-exporting the boundary: {msg}"
-        );
-        assert!(
-            msg.contains("policy.boundary.source_stage"),
-            "must advise the explicit override: {msg}"
-        );
-    }
-
-    /// A source pool DOES carry a decodable anticipated month, but it falls
-    /// outside the current terminal window: rejects advising an explicit
-    /// `source_stage`, distinct from both the ambiguous and the
-    /// sentinel-dated fallback.
-    #[test]
-    fn resolve_boundary_source_stage_no_overlap_among_decodable_pools_rejects() {
-        let tmp = tempfile::tempdir().unwrap();
-        let manifests = vec![vec![anticipated_slot(9, 0, 20_260_301)]];
-        write_checkpoint_with_pool_manifests(tmp.path(), &manifests);
-
-        let target = vec![Some((ymd(2026, 6, 1), ymd(2026, 7, 1)))];
-        let err = resolve_boundary_source_stage(tmp.path(), &target).unwrap_err();
-
-        let msg = err.to_string();
-        assert!(
-            msg.contains("policy.boundary.source_stage"),
-            "must advise the explicit override: {msg}"
-        );
-        assert!(
-            !msg.contains("ambiguous") && !msg.contains("re-export"),
-            "a decodable-but-non-overlapping source is neither ambiguous nor sentinel-dated: {msg}"
-        );
-    }
-
-    /// A non-existent boundary path surfaces the same IO-failure message
-    /// [`load_boundary_cuts`] reports.
-    #[test]
-    fn resolve_boundary_source_stage_nonexistent_path_returns_error() {
-        let err =
-            resolve_boundary_source_stage(std::path::Path::new("/nonexistent/path/to/policy"), &[])
-                .unwrap_err();
-
-        let msg = err.to_string();
-        assert!(
-            msg.contains("failed to read boundary policy checkpoint"),
-            "error should describe the IO failure: {msg}"
-        );
-    }
-
-    /// The resolver only PICKS a candidate by calendar: a pool that matches
-    /// the terminal date but belongs to a storage-identity-incompatible
-    /// source still rejects once `load_boundary_cuts` reconciles it — the
-    /// resolver is not a new trust boundary.
-    #[test]
-    fn resolve_boundary_source_stage_wrong_system_still_rejected_by_load_boundary_cuts_identity() {
-        let tmp = tempfile::tempdir().unwrap();
-        let manifests = vec![vec![storage_slot(7), anticipated_slot(9, 0, 20_260_301)]];
-        write_checkpoint_with_pool_manifests(tmp.path(), &manifests);
-
-        let target_intervals = vec![None, Some((ymd(2026, 3, 1), ymd(2026, 4, 1)))];
-        let resolved = resolve_boundary_source_stage(tmp.path(), &target_intervals)
-            .expect("a unique calendar match must resolve, even from an incompatible system");
-        assert_eq!(resolved, 0);
-
-        let current = vec![storage_slot(42), anticipated_slot(9, 100, 20_260_301)];
         let result = load_boundary_cuts(
+            &BoundaryLoadRequest::new(tmp.path(), unmatched, 2, &[], NEUTRAL_LOADING_FACTOR),
+            &mut ignore_warnings(),
+        );
+
+        assert!(result.is_err(), "an unmatched boundary date must reject");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains(&unmatched.to_string()),
+            "must name the boundary date: {msg}"
+        );
+        assert!(
+            msg.contains(&fixture_priced_date(0).to_string()),
+            "must name pool 0's priced date: {msg}"
+        );
+        assert!(
+            msg.contains(&fixture_priced_date(1).to_string()),
+            "must name pool 1's priced date: {msg}"
+        );
+    }
+
+    /// Given a checkpoint whose two pools (2 and 5) are both stamped the same
+    /// date — a branching source's terminal date tie — when
+    /// `load_boundary_cuts` runs at that date, then it rejects naming both
+    /// pool ids in ascending order.
+    #[test]
+    fn load_boundary_cuts_multi_pool_date_tie_rejects_naming_both_pools() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tie_date = encode_slot_date(fixture_priced_date(0));
+        write_pools_with_priced_state_dates(
             tmp.path(),
-            resolved,
-            current.len() as u32,
-            &current,
-            &target_intervals,
-            &[],
-            None,
-            1_000_000.0,
+            &[(2, tie_date, &[10.0]), (5, tie_date, &[20.0])],
+        );
+
+        let result = load_boundary_cuts(
+            &BoundaryLoadRequest::new(
+                tmp.path(),
+                fixture_priced_date(0),
+                1,
+                &[],
+                NEUTRAL_LOADING_FACTOR,
+            ),
+            &mut ignore_warnings(),
+        );
+
+        assert!(result.is_err(), "a date tie between two pools must reject");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("[2, 5]"),
+            "must name both tied pool ids in ascending order: {msg}"
+        );
+    }
+
+    /// Given a checkpoint whose every pool carries
+    /// [`STAGE_CUTS_PRICED_STATE_DATE_SENTINEL`] — a pre-dated checkpoint —
+    /// when `load_boundary_cuts` runs, then it rejects with a message
+    /// containing "re-export" and the checkpoint path.
+    #[test]
+    fn load_boundary_cuts_undated_pools_reject_with_reexport_hint() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_pools_with_priced_state_dates(
+            tmp.path(),
+            &[
+                (0, STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, &[10.0]),
+                (1, STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, &[20.0]),
+            ],
+        );
+
+        let result = load_boundary_cuts(
+            &BoundaryLoadRequest::new(
+                tmp.path(),
+                fixture_priced_date(0),
+                1,
+                &[],
+                NEUTRAL_LOADING_FACTOR,
+            ),
             &mut ignore_warnings(),
         );
 
         assert!(
             result.is_err(),
-            "a calendar-matched but identity-incompatible source must still reject"
+            "an every-pool-undated checkpoint must reject"
         );
         let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("re-export"), "must advise re-export: {msg}");
         assert!(
-            msg.contains("42"),
-            "the storage/lag identity reject must name the unpriced hydro 42: {msg}"
-        );
-    }
-
-    /// Write a checkpoint from explicit `(pool_id, graph_stage_id,
-    /// entity_manifest, intercept)` pools — each pool's own `graph_stage_id`
-    /// self-describing fact set directly, for tests where a pool id must
-    /// diverge from its own `graph_stage_id`.
-    fn write_checkpoint_with_explicit_graph_stage_ids(
-        dir: &std::path::Path,
-        pools: &[(u32, i32, Vec<EntitySlot>, f64)],
-    ) {
-        let coefficients_per_pool: Vec<Vec<f64>> = pools
-            .iter()
-            .map(|(_, _, manifest, _)| vec![1.0_f64; manifest.len()])
-            .collect();
-        let cuts_per_pool: Vec<Vec<cobre_io::PolicyCutRecord<'_>>> = pools
-            .iter()
-            .zip(&coefficients_per_pool)
-            .map(|((_, _, _, intercept), coeffs)| {
-                vec![cobre_io::PolicyCutRecord {
-                    cut_id: 0,
-                    slot_index: 0,
-                    iteration: 0,
-                    forward_pass_index: 0,
-                    intercept: *intercept,
-                    coefficients: coeffs,
-                    is_active: true,
-                }]
-            })
-            .collect();
-        let active_indices = [0_u32];
-        let payloads: Vec<StageCutsPayload<'_>> = pools
-            .iter()
-            .zip(&cuts_per_pool)
-            .map(
-                |((pool_id, graph_stage_id, manifest, _), cuts)| StageCutsPayload {
-                    stage_id: *pool_id,
-                    state_dimension: manifest.len() as u32,
-                    capacity: 1,
-                    warm_start_count: 0,
-                    cuts,
-                    active_cut_indices: &active_indices,
-                    populated_count: 1,
-                    entity_manifest: manifest,
-                    cost_scale_factor: 1_000_000.0,
-                    node_id: i32::try_from(*pool_id).unwrap_or(-1),
-                    graph_stage_id: *graph_stage_id,
-                    priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
-                },
-            )
-            .collect();
-        let metadata =
-            test_support::checkpoint_metadata(8, GraphManifest::default(), producer_block());
-        cobre_io::write_policy_checkpoint(dir, &payloads, &[], &metadata, &[]).unwrap();
-    }
-
-    /// The reproduced defect: the resolver's winning POOL id (2) numerically
-    /// coincides with an unrelated DECOY pool's own raw id (7), and the decoy
-    /// pool's `graph_stage_id` (99) carries different cuts. Returning the raw
-    /// pool id (the pre-fix behavior) would make `load_boundary_cuts` resolve
-    /// `source_stage` through the decoy pool's numeric id instead, silently
-    /// loading the decoy's cuts (999.0) rather than the calendar-winning
-    /// pool's (777.0). The fix maps the winning pool to its OWN
-    /// `graph_stage_id` (7 — distinct from every pool id and from the decoy's
-    /// `graph_stage_id`), so `load_boundary_cuts` follows the correct pool.
-    #[test]
-    fn resolve_boundary_source_stage_maps_winning_pool_to_its_owning_node_stage_id() {
-        let tmp = tempfile::tempdir().unwrap();
-        let winning_pool: u32 = 2;
-        let winning_graph_stage_id: i32 = 7;
-        let decoy_pool: u32 = 7; // numerically equals winning_graph_stage_id
-        let decoy_graph_stage_id: i32 = 99;
-
-        let winning_manifest = vec![anticipated_slot(9, 0, 20_260_301)];
-        let decoy_manifest = vec![storage_slot(1)];
-
-        write_checkpoint_with_explicit_graph_stage_ids(
-            tmp.path(),
-            &[
-                (
-                    winning_pool,
-                    winning_graph_stage_id,
-                    winning_manifest,
-                    777.0,
-                ),
-                (decoy_pool, decoy_graph_stage_id, decoy_manifest, 999.0),
-            ],
-        );
-
-        let target = vec![Some((ymd(2026, 3, 1), ymd(2026, 4, 1)))];
-        let resolved = resolve_boundary_source_stage(tmp.path(), &target)
-            .expect("a unique calendar match must resolve");
-
-        assert_eq!(
-            resolved,
-            u32::try_from(winning_graph_stage_id).unwrap(),
-            "must return the winning pool's own graph_stage_id (7), not the raw pool id (2)"
-        );
-
-        let cuts = load_boundary_cuts(
-            tmp.path(),
-            resolved,
-            1,
-            &[],
-            &no_intervals(1),
-            &[],
-            None,
-            NEUTRAL_LOADING_FACTOR,
-            &mut ignore_warnings(),
-        )
-        .expect("the resolved stage id must thread correctly through load_boundary_cuts");
-
-        assert_eq!(
-            cuts.len(),
-            1,
-            "must load the winning pool's one cut, not the decoy's"
-        );
-        assert_eq!(
-            cuts[0].intercept, 777.0,
-            "must load the CORRECT pool's cut (777.0), never the decoy's (999.0)"
+            msg.contains(&tmp.path().display().to_string()),
+            "must name the checkpoint path: {msg}"
         );
     }
 
@@ -2920,20 +3306,22 @@ mod tests {
     /// `state_dimension` gate — the intended clean break. The SAME slot layout
     /// boundary-injected at equal width but with its slots repositioned (a
     /// positional match would fail: the storage and ring slots no longer line
-    /// up) reconciles by identity (storage) and by date (the anticipated slots
-    /// fan onto the current ring by calendar overlap) and loads, so boundary
-    /// injection across the version boundary is unaffected.
+    /// up) reconciles by identity (storage) and by date (each ring slot fans
+    /// onto the current ring by calendar overlap of its own carried interval,
+    /// which reaches past the boundary date) and loads, so boundary injection
+    /// across the version boundary is unaffected.
     #[test]
     fn lane_era_wider_checkpoint_rejects_full_fcf_but_boundary_injection_reconciles() {
-        let march = 20_260_301;
-        let april = 20_260_401;
+        let first_month = encode_slot_date(fixture_priced_date(0));
+        let second_month = encode_slot_date(fixture_priced_date(1));
+        let third_month = encode_slot_date(fixture_priced_date(2));
         let lane_era = vec![
             storage_slot(1),
-            anticipated_slot(9, 0, march),
-            anticipated_slot(9, 1, april),
+            anticipated_slot(9, 0, first_month),
+            anticipated_slot(9, 1, second_month),
         ];
 
-        let current_narrow = vec![storage_slot(1), anticipated_slot(9, 0, march)];
+        let current_narrow = vec![storage_slot(1), anticipated_slot(9, 0, first_month)];
         let full_fcf = validate_policy_load::<FullFcf>(
             &psm(lane_era.len() as u32, 12, &lane_era),
             &psm(current_narrow.len() as u32, 12, &current_narrow),
@@ -2958,25 +3346,19 @@ mod tests {
         );
 
         let current_reordered = vec![
-            anticipated_slot(9, 0, april),
+            anticipated_slot(9, 0, second_month).with_interval(second_month, third_month),
             storage_slot(1),
-            anticipated_slot(9, 1, march),
-        ];
-        let target_intervals = vec![
-            Some((ymd(2026, 4, 1), ymd(2026, 5, 1))),
-            None,
-            Some((ymd(2026, 3, 1), ymd(2026, 4, 1))),
+            anticipated_slot(9, 1, first_month).with_interval(first_month, second_month),
         ];
 
         let cuts = load_boundary_cuts(
-            tmp.path(),
-            0,
-            current_reordered.len() as u32,
-            &current_reordered,
-            &target_intervals,
-            &[],
-            None,
-            1_000_000.0,
+            &BoundaryLoadRequest::new(
+                tmp.path(),
+                fixture_priced_date(0),
+                current_reordered.len() as u32,
+                &current_reordered,
+                1_000_000.0,
+            ),
             &mut ignore_warnings(),
         )
         .expect("the same lane-era source must load under BoundaryInjection by identity + date");
@@ -2991,6 +3373,16 @@ mod tests {
                 cut.coefficients.len(),
                 current_reordered.len(),
                 "each reconciled cut spans the current state vector"
+            );
+            let storage = cut.coefficients[1];
+            assert!(storage != 0.0, "the storage lane copies by identity");
+            assert_eq!(
+                cut.coefficients[0], storage,
+                "a ring slot fully covered by one source month blends at unit weight"
+            );
+            assert_eq!(
+                cut.coefficients[2], storage,
+                "a ring slot fully covered by one source month blends at unit weight"
             );
         }
     }
@@ -3024,14 +3416,7 @@ mod tests {
         write_checkpoint_with_manifest(tmp.path(), 1, 2, &[10.0, 20.0], &[]);
 
         let result = load_boundary_cuts(
-            tmp.path(),
-            0,
-            3,
-            &[],
-            &[],
-            &[],
-            None,
-            1_000_000.0,
+            &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 3, &[], 1_000_000.0),
             &mut ignore_warnings(),
         );
 
@@ -3486,7 +3871,7 @@ mod tests {
             cost_scale_factor: 1_000_000.0,
             node_id: 0,
             graph_stage_id: -1,
-            priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
+            priced_state_date: encode_slot_date(fixture_priced_date(0)),
         };
         let metadata = test_support::checkpoint_metadata(
             1,
@@ -3528,14 +3913,8 @@ mod tests {
         let windows = vec![fixed_window(9, ymd(2026, 3, 1), ymd(2026, 4, 1), value_mw)];
 
         let cuts = load_boundary_cuts(
-            tmp.path(),
-            0,
-            2,
-            &current,
-            &no_intervals(current.len()),
-            &windows,
-            None,
-            s,
+            &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 2, &current, s)
+                .with_fixed_windows(&windows),
             &mut ignore_warnings(),
         )
         .unwrap();
@@ -3568,14 +3947,7 @@ mod tests {
 
         let current = vec![storage_slot(1), anticipated_slot(9, 0, 20_260_301)];
         let cuts = load_boundary_cuts(
-            tmp.path(),
-            0,
-            2,
-            &current,
-            &no_intervals(current.len()),
-            &[],
-            None,
-            s,
+            &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 2, &current, s),
             &mut ignore_warnings(),
         )
         .unwrap();
@@ -3604,14 +3976,14 @@ mod tests {
         let loading_cost_scale_factor = 1_000_000.0;
         let mut warnings: Vec<String> = Vec::new();
         let cuts = load_boundary_cuts(
-            tmp.path(),
-            0,
-            2,
-            &current,
-            &no_intervals(current.len()),
-            &windows,
-            None,
-            loading_cost_scale_factor,
+            &BoundaryLoadRequest::new(
+                tmp.path(),
+                fixture_priced_date(0),
+                2,
+                &current,
+                loading_cost_scale_factor,
+            )
+            .with_fixed_windows(&windows),
             &mut |m| warnings.push(m.to_string()),
         )
         .unwrap();
@@ -3631,12 +4003,14 @@ mod tests {
 
     // ── intercept-fold analytics (hand-computed deltas, both frames) ──────────
 
-    /// The `overlap(window, M) / H_M` weight a window contributes at a source
-    /// month anchor, via the SAME accessors `build_boundary_fold` uses — never a
-    /// decimal literal, so a weight that drifted together with production would
-    /// not be masked.
+    /// The `overlap(window, m) / H_m` weight a window contributes at a source
+    /// month anchor — decoded independently via `decode_slot_date`, never a
+    /// decimal literal, so a weight that drifted together with production
+    /// would not be masked.
     fn fold_weight(window: (NaiveDate, NaiveDate), source_anchor: i32) -> f64 {
-        let (month_start, month_end, h_m) = decode_month_anchor(source_anchor).unwrap();
+        let month_start = decode_slot_date(source_anchor).unwrap();
+        let month_end = decode_slot_date(next_month_anchor(source_anchor)).unwrap();
+        let h_m = f64::from(u32::try_from((month_end - month_start).num_days()).unwrap()) * 24.0;
         overlap_hours(window, (month_start, month_end)) / h_m
     }
 
@@ -3658,14 +4032,8 @@ mod tests {
         let v = 50.0;
         let current = manifest.clone();
         let cuts = load_boundary_cuts(
-            tmp.path(),
-            0,
-            2,
-            &current,
-            &no_intervals(current.len()),
-            &[fixed_window(9, ws, we, v)],
-            None,
-            s,
+            &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 2, &current, s)
+                .with_fixed_windows(&[fixed_window(9, ws, we, v)]),
             &mut ignore_warnings(),
         )
         .unwrap();
@@ -3694,14 +4062,8 @@ mod tests {
         let current = manifest.clone();
         let load = |windows: &[AnticipatedCommitmentHistory]| {
             load_boundary_cuts(
-                tmp.path(),
-                0,
-                2,
-                &current,
-                &no_intervals(current.len()),
-                windows,
-                None,
-                s,
+                &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 2, &current, s)
+                    .with_fixed_windows(windows),
                 &mut ignore_warnings(),
             )
             .unwrap()
@@ -3734,14 +4096,8 @@ mod tests {
         let current = manifest.clone();
         let load = |windows: &[AnticipatedCommitmentHistory]| {
             load_boundary_cuts(
-                tmp.path(),
-                0,
-                2,
-                &current,
-                &no_intervals(current.len()),
-                windows,
-                None,
-                s,
+                &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 2, &current, s)
+                    .with_fixed_windows(windows),
                 &mut ignore_warnings(),
             )
             .unwrap()
@@ -3796,14 +4152,8 @@ mod tests {
         let v = 50.0;
         let current = manifest.clone();
         let cuts = load_boundary_cuts(
-            tmp.path(),
-            0,
-            3,
-            &current,
-            &no_intervals(current.len()),
-            &[fixed_window(9, ws, we, v)],
-            None,
-            s,
+            &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 3, &current, s)
+                .with_fixed_windows(&[fixed_window(9, ws, we, v)]),
             &mut ignore_warnings(),
         )
         .unwrap();

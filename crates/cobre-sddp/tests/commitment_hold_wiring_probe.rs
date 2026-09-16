@@ -212,7 +212,7 @@ fn manifest_slot_identity_binds_on_subindex_with_no_schema_change() {
     let real_slot = manifest[0].clone();
 
     let window_indexed_slot = EntitySlot::anticipated(real_slot.entity_id, 7, real_slot.was_active)
-        .with_delivery_date(real_slot.delivery_date);
+        .with_interval(real_slot.interval_start, real_slot.interval_end);
     let source = vec![window_indexed_slot.clone()];
     let matching_current = vec![window_indexed_slot.clone()];
     compare_manifest_slot_identity(&source, &matching_current, &mut |_| {})

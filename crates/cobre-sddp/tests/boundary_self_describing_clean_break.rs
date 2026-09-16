@@ -3,8 +3,7 @@
 //! `cuts/<pool>.bin`'s own self-describing facts (`cost_scale_factor`,
 //! `graph_stage_id`), never `metadata.producer`/`metadata.graph_manifest`; a
 //! pre-change `.bin` (missing those facts) rejects instead of silently
-//! defaulting, and the auto-resolver rejects a winning pool it cannot map
-//! back to a `source_stage` safely.
+//! defaulting.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -13,14 +12,22 @@ use std::process::Command;
 
 use chrono::NaiveDate;
 use cobre_io::{
-    ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, GraphManifest, PolicyCutRecord, ProducerBlock,
-    STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, StageCutsPayload, write_policy_checkpoint,
+    ENTITY_SLOT_DELIVERY_DATE_SENTINEL, GraphManifest, PolicyCutRecord, ProducerBlock,
+    StageCutsPayload, encode_slot_date, write_policy_checkpoint,
 };
-use cobre_sddp::{SddpError, load_boundary_cuts, resolve_boundary_source_stage};
+use cobre_sddp::{BoundaryLoadRequest, SddpError, load_boundary_cuts};
 use serde_json::json;
 
 fn ymd(year: i32, month: u32, day: u32) -> NaiveDate {
     NaiveDate::from_ymd_opt(year, month, day).expect("valid calendar date")
+}
+
+/// Pool `pool`'s fixture `priced_state_date`: `2030-01-01` plus `pool`
+/// months.
+fn fixture_priced_date(pool: u32) -> NaiveDate {
+    ymd(2030, 1, 1)
+        .checked_add_months(chrono::Months::new(pool))
+        .unwrap()
 }
 
 /// Discard warnings: a `&mut dyn FnMut(&str)` for tests asserting only the `Result`.
@@ -47,12 +54,6 @@ fn producer_block() -> ProducerBlock {
         training_block_mode_per_stage: vec![],
         cost_scale_factor: None,
     }
-}
-
-/// A single dated `AnticipatedThermalState` slot (`entity_type 2`), delivery
-/// anchored at `delivery_date` (`YYYYMM01`).
-fn dated_anticipated_slot(thermal_id: i32, ring_slot: u32, delivery_date: i32) -> EntitySlot {
-    EntitySlot::anticipated(thermal_id, ring_slot, true).with_delivery_date(delivery_date)
 }
 
 /// The boundary load reads its source cost scale from the resolved pool's own
@@ -90,7 +91,7 @@ fn boundary_load_reads_cost_scale_from_bin() {
         cost_scale_factor: 500_000.0,
         node_id: 0,
         graph_stage_id: 0,
-        priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
+        priced_state_date: encode_slot_date(fixture_priced_date(0)),
     };
     let metadata = cobre_sddp::test_support::checkpoint_metadata(
         1,
@@ -101,14 +102,7 @@ fn boundary_load_reads_cost_scale_from_bin() {
 
     let loading_factor = 2_500_000.0;
     let cuts = load_boundary_cuts(
-        tmp.path(),
-        0,
-        2,
-        &[],
-        &[],
-        &[],
-        None,
-        loading_factor,
+        &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 2, &[], loading_factor),
         &mut ignore_warnings(),
     )
     .expect(
@@ -290,7 +284,7 @@ fn boundary_load_rejects_pre_self_describing_checkpoint() {
         cost_scale_factor: 1_000_000.0,
         node_id: 0,
         graph_stage_id: 0,
-        priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
+        priced_state_date: encode_slot_date(fixture_priced_date(0)),
     };
     let metadata = cobre_sddp::test_support::checkpoint_metadata(
         1,
@@ -303,14 +297,7 @@ fn boundary_load_rejects_pre_self_describing_checkpoint() {
     std::fs::write(tmp.path().join("cuts/000.bin"), &pre_change_buf).unwrap();
 
     let result = load_boundary_cuts(
-        tmp.path(),
-        0,
-        1,
-        &[],
-        &[],
-        &[],
-        None,
-        1_000_000.0,
+        &BoundaryLoadRequest::new(tmp.path(), fixture_priced_date(0), 1, &[], 1_000_000.0),
         &mut ignore_warnings(),
     );
 
@@ -327,65 +314,5 @@ fn boundary_load_rejects_pre_self_describing_checkpoint() {
     assert!(
         msg.contains(&tmp.path().display().to_string()),
         "message must name the checkpoint path: {msg}"
-    );
-}
-
-/// The auto-resolver rejects a winning pool whose own `graph_stage_id` is the
-/// `-1` sentinel (unresolved at export time — a pre-change or otherwise
-/// unresolved stage key): it cannot map the pool back to a
-/// `load_boundary_cuts` `source_stage` safely, so it advises an explicit
-/// `policy.boundary.source_stage` rather than guessing (and never falls back
-/// to the raw pool id, which could numerically coincide with an unrelated
-/// pool's own id on a branching graph).
-#[test]
-fn auto_resolver_rejects_sentinel_graph_stage_id() {
-    let tmp = tempfile::tempdir().unwrap();
-    let manifest = vec![dated_anticipated_slot(9, 0, 20_260_401)];
-    let coefficients = [1.0_f64];
-    let cut = PolicyCutRecord {
-        cut_id: 0,
-        slot_index: 0,
-        iteration: 0,
-        forward_pass_index: 0,
-        intercept: 1.0,
-        coefficients: &coefficients,
-        is_active: true,
-    };
-    let payload = StageCutsPayload {
-        stage_id: 0,
-        state_dimension: 1,
-        capacity: 1,
-        warm_start_count: 0,
-        cuts: &[cut],
-        active_cut_indices: &[0],
-        populated_count: 1,
-        entity_manifest: &manifest,
-        cost_scale_factor: 1_000_000.0,
-        node_id: -1,
-        graph_stage_id: -1,
-        priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
-    };
-    let metadata = cobre_sddp::test_support::checkpoint_metadata(
-        1,
-        GraphManifest::default(),
-        producer_block(),
-    );
-    write_policy_checkpoint(tmp.path(), &[payload], &[], &metadata, &[]).unwrap();
-
-    let current_intervals = vec![Some((ymd(2026, 4, 1), ymd(2026, 4, 8)))];
-    let result = resolve_boundary_source_stage(tmp.path(), &current_intervals);
-
-    let err = result.expect_err(
-        "a winning pool with a sentinel graph_stage_id must reject, never silently pick a \
-         numerically-coincidental stage id",
-    );
-    assert!(
-        matches!(err, SddpError::Validation(_)),
-        "must reject as SddpError::Validation: {err:?}"
-    );
-    let msg = err.to_string();
-    assert!(
-        msg.contains("policy.boundary.source_stage"),
-        "message must advise an explicit source_stage: {msg}"
     );
 }

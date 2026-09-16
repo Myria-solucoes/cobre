@@ -19,13 +19,25 @@
 
 use std::path::Path;
 
+use chrono::NaiveDate;
 use cobre_io::{
-    GraphManifest, PolicyCutRecord, ProducerBlock, STAGE_CUTS_NODE_ID_SENTINEL,
-    STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, StageCutsPayload, write_policy_checkpoint,
+    GraphManifest, PolicyCutRecord, ProducerBlock, STAGE_CUTS_NODE_ID_SENTINEL, StageCutsPayload,
+    encode_slot_date, write_policy_checkpoint,
 };
 use cobre_sddp::setup::{NodeGraph, NodePos};
 use cobre_sddp::test_support::k_fan_setup;
-use cobre_sddp::{LEGACY_COST_SCALE_FACTOR, inject_boundary_cuts, load_boundary_cuts};
+use cobre_sddp::{
+    BoundaryLoadRequest, LEGACY_COST_SCALE_FACTOR, inject_boundary_cuts, load_boundary_cuts,
+};
+
+/// Pool `pool`'s fixture `priced_state_date`: `2030-01-01` plus `pool`
+/// months.
+fn fixture_priced_date(pool: u32) -> NaiveDate {
+    NaiveDate::from_ymd_opt(2030, 1, 1)
+        .unwrap()
+        .checked_add_months(chrono::Months::new(pool))
+        .unwrap()
+}
 
 /// Write a synthetic single-pool policy checkpoint whose pool's own
 /// `graph_stage_id`/`node_id` self-describing facts are derived from
@@ -91,7 +103,7 @@ fn write_synthetic_checkpoint(
         cost_scale_factor: 1_000_000.0,
         node_id,
         graph_stage_id,
-        priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
+        priced_state_date: encode_slot_date(fixture_priced_date(pool_id)),
     };
     let metadata = cobre_sddp::test_support::checkpoint_metadata(
         1,
@@ -167,15 +179,14 @@ fn single_node_source_injects_into_the_one_pool_every_terminal_fan_leaf_shares()
 
     let mut warnings: Vec<String> = Vec::new();
     let boundary_cuts = load_boundary_cuts(
-        &source_dir,
-        0,
-        state_dimension,
-        &[],
-        &[],
-        &[],
-        None,
-        LEGACY_COST_SCALE_FACTOR,
-        &mut |msg| warnings.push(msg.to_string()),
+        &BoundaryLoadRequest::new(
+            &source_dir,
+            fixture_priced_date(0),
+            state_dimension,
+            &[],
+            LEGACY_COST_SCALE_FACTOR,
+        ),
+        &mut |msg: &str| warnings.push(msg.to_string()),
     )
     .expect(
         "a single-node source boundary must load into a fanned terminal target, not reject on \
@@ -223,14 +234,13 @@ fn multi_node_source_stage_is_rejected() {
     write_synthetic_checkpoint(&source_dir, &[(200, 5, 0), (201, 5, 0)], 0, &[7.0, 11.0], 2);
 
     let result = load_boundary_cuts(
-        &source_dir,
-        5,
-        2,
-        &[],
-        &[],
-        &[],
-        None,
-        LEGACY_COST_SCALE_FACTOR,
+        &BoundaryLoadRequest::new(
+            &source_dir,
+            fixture_priced_date(0),
+            2,
+            &[],
+            LEGACY_COST_SCALE_FACTOR,
+        ),
         &mut |_| {},
     );
 

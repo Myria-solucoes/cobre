@@ -30,8 +30,6 @@ pub(crate) struct PyEntitySlot {
     subindex: u32,
     was_active: bool,
     #[pyo3(default = ENTITY_SLOT_DELIVERY_DATE_SENTINEL)]
-    delivery_date: i32,
-    #[pyo3(default = ENTITY_SLOT_DELIVERY_DATE_SENTINEL)]
     reference_date: i32,
     #[pyo3(default = ENTITY_SLOT_DELIVERY_DATE_SENTINEL)]
     interval_start: i32,
@@ -57,14 +55,12 @@ impl From<&PyEntitySlot> for EntitySlot {
                 entity_id: slot.entity_id,
                 subindex: slot.subindex,
                 was_active: slot.was_active,
-                delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
                 reference_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
                 interval_start: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
                 interval_end: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
             },
         };
         converted
-            .with_delivery_date(slot.delivery_date)
             .with_reference_date(slot.reference_date)
             .with_interval(slot.interval_start, slot.interval_end)
     }
@@ -507,7 +503,6 @@ mod tests {
             entity_id: 7,
             subindex: 3,
             was_active: true,
-            delivery_date: 20_260_101,
             reference_date: 20_260_102,
             interval_start: 20_260_103,
             interval_end: 20_260_104,
@@ -519,7 +514,6 @@ mod tests {
         assert_eq!(converted.entity_id, 7);
         assert_eq!(converted.subindex, 3);
         assert!(converted.was_active);
-        assert_eq!(converted.delivery_date, 20_260_101);
         assert_eq!(converted.reference_date, 20_260_102);
         assert_eq!(converted.interval_start, 20_260_103);
         assert_eq!(converted.interval_end, 20_260_104);

@@ -7005,6 +7005,373 @@ mod season_descriptor_checkpoint_round_trip {
     }
 }
 
+/// A study with a monthly `SeasonMap` and inflow-lag state, checkpointed
+/// through the real producer path (`orchestration::write_checkpoint`) and
+/// read back through the real consumer path (`load_boundary_cuts` with
+/// `with_study_seasons`): the producer's own descriptor and the consumer's
+/// own gate must agree end to end, never merely on an in-memory
+/// `SeasonManifest` the test builds itself.
+mod boundary_season_gate_round_trip {
+    use cobre_core::scenario::{InflowModel, LoadModel};
+    use cobre_core::temporal::{
+        Block, BlockMode, NoiseMethod, ScenarioSourceConfig, SeasonCycleType, SeasonDefinition,
+        SeasonMap, Stage, StageRiskConfig, StageStateConfig,
+    };
+    use cobre_core::{
+        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, DeficitSegment,
+        EntityId, HorizonGraph, HydroBlockBounds, HydroGenerationModel, HydroPenalties,
+        HydroStageBounds, HydroStorage, InitialConditions, LineBlockBounds, LineStagePenalties,
+        NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds,
+        ResolvedBounds, ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
+    };
+    use cobre_io::config::{
+        Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
+        InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
+        RowSelectionConfig, SimulationConfig as IoSimulationConfig, StoppingRuleConfig,
+        TrainingConfig, TrainingSelection, TrainingSolverConfig, UpperBoundEvaluationConfig,
+    };
+    use cobre_solver::ActiveSolver;
+
+    use cobre_sddp::orchestration::{CheckpointParams, build_season_manifest, write_checkpoint};
+    use cobre_sddp::{BoundaryLoadRequest, load_boundary_cuts, study_horizon_end};
+    use tempfile::TempDir;
+
+    use super::common::builders::{
+        BusSpec, HydroSpec, StageSpec, make_bus, make_hydro, make_stage,
+    };
+    use super::common::{StubComm, build_setup_in_code};
+
+    const N_STAGES: usize = 3;
+    const N_ITERATIONS: u32 = 2;
+    const N_SEASONS: usize = 12;
+    const BUS_ID: i32 = 1;
+    const HYDRO_ID: i32 = 1;
+
+    // Dense season ordinals the three stages carry; the terminal stage (index
+    // 2) lands on season 11 and carries a fitted 2-lag AR model, so the
+    // terminal manifest's inflow-lag family is non-empty.
+    const STAGE_SEASON_IDS: [usize; N_STAGES] = [0, 5, 11];
+
+    fn hydro_penalties() -> HydroPenalties {
+        HydroPenalties {
+            spillage_cost: 0.01,
+            diversion_cost: 0.0,
+            turbined_cost: 0.0,
+            storage_violation_below_cost: 500.0,
+            filling_target_violation_cost: 0.0,
+            turbined_violation_below_cost: 0.0,
+            outflow_violation_below_cost: 0.0,
+            outflow_violation_above_cost: 0.0,
+            generation_violation_below_cost: 0.0,
+            evaporation_violation_cost: 0.0,
+            water_withdrawal_violation_cost: 0.0,
+            water_withdrawal_violation_pos_cost: 0.0,
+            water_withdrawal_violation_neg_cost: 0.0,
+            evaporation_violation_pos_cost: 0.0,
+            evaporation_violation_neg_cost: 0.0,
+            inflow_nonnegativity_cost: 1000.0,
+        }
+    }
+
+    fn monthly_season_map() -> SeasonMap {
+        let seasons = (0..N_SEASONS)
+            .map(|id| SeasonDefinition {
+                id,
+                label: format!("Month{}", id + 1),
+                month_start: u32::try_from(id + 1).expect("month fits u32"),
+                day_start: None,
+                month_end: None,
+                day_end: None,
+            })
+            .collect();
+        SeasonMap {
+            cycle_type: SeasonCycleType::Monthly,
+            seasons,
+        }
+    }
+
+    /// The fitted AR-coefficient vector at each stage: order 1 at the first
+    /// two stages, order 2 at the terminal stage (index 2, season 11).
+    fn ar_coefficients(stage: usize) -> Vec<f64> {
+        match stage {
+            0 => vec![0.3],
+            1 => vec![0.25],
+            2 => vec![0.2, 0.1],
+            _ => unreachable!("only three stages are fitted"),
+        }
+    }
+
+    fn build_system() -> cobre_core::System {
+        use chrono::NaiveDate;
+
+        let bus = make_bus(
+            EntityId(BUS_ID),
+            BusSpec {
+                name: "B1".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                deficit_segments: vec![DeficitSegment {
+                    depth_mw: None,
+                    cost_per_mwh: 500.0,
+                }],
+                excess_cost: 0.0,
+            },
+        );
+
+        let hydro = make_hydro(
+            EntityId(HYDRO_ID),
+            HydroSpec {
+                name: "H1".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                bus_id: EntityId(BUS_ID),
+                min_storage_hm3: 0.0,
+                max_storage_hm3: 300.0,
+                max_turbined_m3s: 100.0,
+                generation_model: HydroGenerationModel::ConstantProductivity,
+                specific_productivity_mw_per_m3s_per_m: Some(0.5),
+                max_generation_mw: 250.0,
+                penalties: hydro_penalties(),
+                ..Default::default()
+            },
+        );
+
+        let stages: Vec<Stage> = (0..N_STAGES)
+            .map(|i| {
+                make_stage(
+                    i,
+                    StageSpec {
+                        start_date: NaiveDate::from_ymd_opt(2024, (i % 12 + 1) as u32, 1).unwrap(),
+                        end_date: NaiveDate::from_ymd_opt(2024, ((i % 12 + 1) % 12 + 1) as u32, 1)
+                            .unwrap(),
+                        season_id: Some(STAGE_SEASON_IDS[i]),
+                        blocks: vec![Block {
+                            index: 0,
+                            name: "S".to_string(),
+                            duration_hours: 744.0,
+                        }],
+                        block_mode: BlockMode::Parallel,
+                        state_config: StageStateConfig {
+                            storage: true,
+                            inflow_lags: true,
+                        },
+                        risk_config: StageRiskConfig::Expectation,
+                        scenario_config: ScenarioSourceConfig {
+                            branching_factor: 1,
+                            noise_method: NoiseMethod::Saa,
+                        },
+                    },
+                )
+            })
+            .collect();
+
+        let inflow_models: Vec<InflowModel> = (0..N_STAGES)
+            .map(|i| InflowModel {
+                hydro_id: EntityId(HYDRO_ID),
+                stage_id: i32::try_from(i).expect("stage index fits i32"),
+                mean_m3s: 80.0,
+                std_m3s: 20.0,
+                ar_coefficients: ar_coefficients(i),
+                residual_std_ratio: 0.8,
+                annual: None,
+            })
+            .collect();
+
+        let load_models: Vec<LoadModel> = (0..N_STAGES)
+            .map(|i| LoadModel {
+                bus_id: EntityId(BUS_ID),
+                stage_id: i32::try_from(i).expect("stage index fits i32"),
+                mean_mw: 50.0,
+                std_mw: 0.0,
+            })
+            .collect();
+
+        let default_hydro_bounds = || HydroStageBounds {
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 300.0,
+            filling_min_rate_m3s: 0.0,
+            water_withdrawal_m3s: 0.0,
+        };
+        let default_hydro_bounds_block = || HydroBlockBounds {
+            max_turbined_m3s: 100.0,
+            max_generation_mw: 250.0,
+            ..Default::default()
+        };
+
+        let bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 1,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: N_STAGES,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: default_hydro_bounds(),
+                hydro_block: default_hydro_bounds_block(),
+                thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+                thermal_block: ThermalBlockBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                },
+                line_block: LineBlockBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping_block: PumpingBlockBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract_block: ContractBlockBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 1,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages: N_STAGES,
+            },
+            &PenaltiesDefaults {
+                hydro: hydro_penalties(),
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        let initial_conditions = InitialConditions {
+            storage: vec![HydroStorage {
+                hydro_id: EntityId(HYDRO_ID),
+                value_hm3: 100.0,
+            }],
+            filling_storage: vec![],
+            past_anticipated_commitments: vec![],
+            recent_observations: vec![],
+            past_defluences: vec![],
+        };
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .hydros(vec![hydro])
+            .stages(stages)
+            .inflow_models(inflow_models)
+            .load_models(load_models)
+            .bounds(bounds)
+            .penalties(penalties)
+            .initial_conditions(initial_conditions)
+            .policy_graph(HorizonGraph {
+                season_map: Some(monthly_season_map()),
+                ..HorizonGraph::default()
+            })
+            .build()
+            .expect("build_system: valid one-hydro season-fitted study")
+    }
+
+    fn build_config() -> Config {
+        Config {
+            schema: None,
+            modeling: ModelingConfig {
+                inflow_non_negativity: InflowNonNegativityConfig {
+                    method: CfgInflowMethod::None,
+                },
+                cost_scale_factor: None,
+            },
+            training: TrainingConfig {
+                enabled: true,
+                tree_seed: Some(42),
+                stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
+                    limit: N_ITERATIONS,
+                }]),
+                stopping_mode: cobre_io::config::StoppingMode::Any,
+                cut_selection: RowSelectionConfig::default(),
+                solver: TrainingSolverConfig::default(),
+                parallelism: cobre_io::config::ParallelismConfig::default(),
+                scenario_source: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
+            },
+            upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
+            policy: PolicyConfig::default(),
+            simulation: IoSimulationConfig::default(),
+            exports: ExportsConfig::default(),
+            estimation: EstimationConfig::default(),
+        }
+    }
+
+    /// Trains one study, writes its checkpoint through the real producer
+    /// (`orchestration::write_checkpoint`), then loads it back through the
+    /// real consumer (`load_boundary_cuts`) gated on
+    /// `with_study_seasons(&build_season_manifest(&system))`: the load
+    /// succeeds and the report's `inflow_lag.copy` tally is non-zero — the
+    /// producer's own descriptor and the consumer's own gate agree.
+    #[test]
+    fn boundary_load_accepts_the_studys_own_checkpoint_under_its_own_season_gate() {
+        let config = build_config();
+        let mut setup = build_setup_in_code(build_system(), &config);
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
+        let outcome = setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("train must not return Err");
+        assert!(
+            outcome.error.is_none(),
+            "training error: {:?}",
+            outcome.error
+        );
+        let result = outcome.result;
+
+        // System is not `Clone`; rebuild the identical study for the checkpoint
+        // writer and the boundary-load accessors below (`build_system` is
+        // deterministic).
+        let system = build_system();
+        let policy_dir = TempDir::new().expect("TempDir::new");
+        let params = CheckpointParams {
+            max_iterations: setup.loop_params.max_iterations,
+            forward_passes: setup.loop_params.forward_passes,
+            seed: setup.loop_params.seed,
+            export_states: config.exports.states,
+        };
+        write_checkpoint(policy_dir.path(), &setup, &system, &result, &params)
+            .expect("write_checkpoint must succeed");
+
+        let state_dim = setup.fcf.state_dimension as u32;
+        let current_manifest = setup.build_terminal_entity_manifest(&system);
+        let boundary_date =
+            study_horizon_end(&system).expect("a non-negative stage exists in this study");
+        let study_seasons = build_season_manifest(&system);
+
+        let validated = load_boundary_cuts(
+            &BoundaryLoadRequest::new(
+                policy_dir.path(),
+                boundary_date,
+                state_dim,
+                &current_manifest,
+                setup.stage_data.stage_templates.cost_scale_factor,
+            )
+            .with_study_seasons(&study_seasons),
+            &mut |_| {},
+        )
+        .expect(
+            "the study's own checkpoint must reconcile against its own season descriptor and \
+             terminal manifest",
+        );
+
+        assert!(
+            validated.report().inflow_lag.copy > 0,
+            "the terminal inflow-lag slot must reconcile by identity Copy: {:?}",
+            validated.report()
+        );
+    }
+}
+
 /// A cascade whose upstream hydro declares a travel-time arc into its
 /// downstream hydro, checkpointed through the real producer path
 /// ([`orchestration::write_checkpoint`], never `write_policy_checkpoint`
@@ -10306,18 +10673,20 @@ mod enumerated_checkpoint {
 mod water_terminal_fcf_valuation {
     use std::path::Path;
 
+    use chrono::NaiveDate;
     use cobre_core::EntityId;
     use cobre_core::temporal::StageStateConfig;
     use cobre_io::{
         BoundaryPolicy, GraphManifest, ManifestNode, PolicyCutRecord, ProducerBlock,
-        STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, StageCutsPayload, write_policy_checkpoint,
+        StageCutsPayload, encode_slot_date, write_policy_checkpoint,
     };
     use cobre_sddp::indexer::CutStateProjection;
     use cobre_sddp::setup::{NodeId, StageIdx};
     use cobre_sddp::test_support::{patch_backward_opening_for_probe, solve_stage_for_probe};
     use cobre_sddp::workspace::SolverWorkspace;
     use cobre_sddp::{
-        CutPool, StudySetup, build_cut_row_batch_into, inject_boundary_cuts, load_boundary_cuts,
+        BoundaryLoadRequest, CutPool, StudySetup, build_cut_row_batch_into, inject_boundary_cuts,
+        load_boundary_cuts,
     };
     use cobre_solver::{
         ActiveSolver, FreezeScratch, RowBatch, SolverInterface, StageTemplate,
@@ -10399,6 +10768,15 @@ mod water_terminal_fcf_valuation {
         &template.row_indices[start..end]
     }
 
+    /// Pool `pool`'s fixture `priced_state_date`: `2030-01-01` plus `pool`
+    /// months.
+    fn fixture_priced_date(pool: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(2030, 1, 1)
+            .unwrap()
+            .checked_add_months(chrono::Months::new(pool))
+            .unwrap()
+    }
+
     /// Write a synthetic single-cut boundary checkpoint carrying `intercept`
     /// and the explicit per-slot `coefficients`, unscaled (`cost_scale_factor:
     /// Some(1.0)`). No entity manifest: the loader's identity check
@@ -10430,7 +10808,7 @@ mod water_terminal_fcf_valuation {
             cost_scale_factor: 1_000_000.0,
             node_id: 100,
             graph_stage_id: -1,
-            priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
+            priced_state_date: encode_slot_date(fixture_priced_date(0)),
         };
         let metadata = cobre_sddp::test_support::checkpoint_metadata(
             1,
@@ -10470,14 +10848,7 @@ mod water_terminal_fcf_valuation {
         write_synthetic_boundary(dir, state_dimension, ALPHA, &coefficients);
 
         let boundary_cuts = load_boundary_cuts(
-            dir,
-            0,
-            state_dimension,
-            &[],
-            &[],
-            &[],
-            None,
-            1.0,
+            &BoundaryLoadRequest::new(dir, fixture_priced_date(0), state_dimension, &[], 1.0),
             &mut |_msg| {},
         )
         .expect("boundary cut must load");

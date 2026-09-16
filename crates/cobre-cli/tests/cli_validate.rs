@@ -545,7 +545,7 @@ fn append_boundary_policy(dir: &Path, boundary_policy_dir: &Path) {
             }},
             "simulation": {{ "enabled": false }},
             "modeling": {{ "inflow_non_negativity": {{ "method": "none" }} }},
-            "policy": {{ "boundary": {{ "path": "{boundary_path}", "source_stage": 1 }} }}
+            "policy": {{ "boundary": {{ "path": "{boundary_path}" }} }}
         }}"#
     );
     write_file(dir, "config.json", &config);

@@ -85,7 +85,7 @@ mod deck_smoke {
 
     use std::path::PathBuf;
 
-    use cobre_io::StateFamily;
+    use cobre_io::{StateFamily, encode_slot_date};
     use cobre_sddp::indexer::StateDim;
     use cobre_sddp::policy_export::{
         build_active_indices, build_stage_cut_records, build_stage_cuts_payloads,
@@ -117,8 +117,6 @@ mod deck_smoke {
     /// relies on — never a hand-rolled `commit_out`-relative offset.
     #[test]
     fn real_deck_terminal_manifest_lists_live_dated_post_horizon_lane() {
-        use chrono::Datelike;
-
         let deck = deck_dir();
         if !deck.exists() {
             eprintln!("skipping deck smoke: {deck:?} absent");
@@ -161,9 +159,7 @@ mod deck_smoke {
         let last_end_date = *study_stage_end_dates
             .last()
             .expect("a converted deck has at least one study stage");
-        let expected_priced_state_date = last_end_date.year() * 10_000
-            + i32::try_from(last_end_date.month()).unwrap_or(1) * 100
-            + i32::try_from(last_end_date.day()).unwrap_or(1);
+        let expected_priced_state_date = encode_slot_date(last_end_date);
         assert_eq!(
             stage_cuts
                 .last()
@@ -176,7 +172,7 @@ mod deck_smoke {
         let ring_slot = manifest.iter().enumerate().find(|(_, slot)| {
             slot.entity_type == StateFamily::AnticipatedThermalState.code()
                 && slot.entity_id == DECK_THERMAL_ID
-                && slot.delivery_date >= 20_260_501
+                && slot.interval_start >= 20_260_501
         });
 
         let Some((state_dim, _slot)) = ring_slot else {
@@ -221,16 +217,26 @@ mod anticipated_fanout_readback {
 
     use chrono::NaiveDate;
     use cobre_io::{
-        EntitySlot, GraphManifest, ManifestEdge, ManifestNode, PolicyCutRecord, ProducerBlock,
-        STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, StageCutsPayload, StateFamily,
-        write_policy_checkpoint,
+        ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, GraphManifest, ManifestEdge, ManifestNode,
+        PolicyCutRecord, ProducerBlock, StageCutsPayload, StateFamily, decode_slot_date,
+        encode_slot_date, write_policy_checkpoint,
     };
-    use cobre_sddp::load_boundary_cuts;
+    use cobre_sddp::{BoundaryLoadRequest, load_boundary_cuts};
 
     use crate::common::fresh_setup_with;
 
     /// SANTA CRUZ's cobre thermal id in the converted deck.
     const DECK_THERMAL_ID: i32 = 86;
+
+    /// This test's own derived calendar-month key (day-01 truncated), for
+    /// grouping several weekly `interval_start` slots that fall in the same
+    /// month — not a wire field. Preserves the sentinel.
+    fn month_anchor_of(date: i32) -> i32 {
+        if date == ENTITY_SLOT_DELIVERY_DATE_SENTINEL {
+            return date;
+        }
+        (date / 100) * 100 + 1
+    }
 
     fn deck_dir() -> PathBuf {
         let home = std::env::var("HOME").expect("HOME must be set to resolve the converted deck");
@@ -270,7 +276,6 @@ mod anticipated_fanout_readback {
 
     fn anticipated_source_slot(thermal_id: i32, ring_slot: u32, delivery_date: i32) -> EntitySlot {
         EntitySlot::anticipated(thermal_id, ring_slot, true)
-            .with_delivery_date(delivery_date)
             .with_interval(delivery_date, next_month_anchor(delivery_date))
     }
 
@@ -287,10 +292,27 @@ mod anticipated_fanout_readback {
         }
     }
 
+    /// Pool `pool`'s fixture `priced_state_date`: the deck-derived
+    /// `base_anchor` (the nearer of the two post-horizon month anchors this
+    /// mod's source manifest prices — never later than either, so a
+    /// date-driven boundary selector never zeroes the coefficients this
+    /// mod's fan-out assertions read) plus `pool` months.
+    fn fixture_priced_date(base_anchor: i32, pool: u32) -> NaiveDate {
+        decode_slot_date(base_anchor)
+            .expect("base_anchor is a valid YYYYMMDD anchor")
+            .checked_add_months(chrono::Months::new(pool))
+            .unwrap()
+    }
+
     /// Mirrors `boundary_reconcile_defaults.rs`'s same-named helper: a single-stage,
     /// single-cut checkpoint whose one cut carries `coefficients`, one per `manifest`
     /// slot in the same order.
-    fn write_checkpoint(dir: &Path, manifest: &[EntitySlot], coefficients: &[f64]) {
+    fn write_checkpoint(
+        dir: &Path,
+        manifest: &[EntitySlot],
+        coefficients: &[f64],
+        priced_date: NaiveDate,
+    ) {
         let state_dimension = u32::try_from(coefficients.len()).expect("small coefficient count");
         let cut = PolicyCutRecord {
             cut_id: 0,
@@ -314,7 +336,7 @@ mod anticipated_fanout_readback {
             cost_scale_factor: 1_000_000.0,
             node_id: 0,
             graph_stage_id: -1,
-            priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
+            priced_state_date: encode_slot_date(priced_date),
         };
         let metadata = cobre_sddp::test_support::checkpoint_metadata(
             1,
@@ -349,14 +371,19 @@ mod anticipated_fanout_readback {
             cobre_io::load_case(&deck).expect("load_case must succeed on the converted deck");
 
         let manifest = setup.build_terminal_entity_manifest(&system);
-        let intervals = setup.build_terminal_anticipated_delivery_intervals(&system);
 
-        // Every ring slot is dated (the day-01 anchor of its modular delivery
-        // target's stage) regardless of whether that target lands in-study or
-        // post-study; a slot carries the thermal's POST-HORIZON commitment
-        // only when its anchor matches a declared post-study stage — the
-        // subindex >= k_max lane convention this test used to key on no
-        // longer exists (every commitment-hold slot is now a ring slot).
+        // Every ring slot's `interval_start` is the real day-accurate start of
+        // its modular delivery target's stage, regardless of whether that
+        // target lands in-study or post-study; a slot carries the thermal's
+        // POST-HORIZON commitment only when its interval's calendar month
+        // matches a declared post-study stage — the subindex >= k_max lane
+        // convention this test used to key on no longer exists (every
+        // commitment-hold slot is now a ring slot). Grouping by calendar
+        // month (day-01 truncated via `month_anchor_of`) is this test's own
+        // derived key, not a wire field: a weekly delivery stage's own
+        // `interval_start` is day-accurate, not day-01, so several weekly
+        // slots within one month must be re-grouped here to compare against
+        // the post-study calendar's own month-granular stages.
         let post_study_anchors: std::collections::HashSet<i32> = system
             .post_study_stages()
             .map(|post_study| {
@@ -379,7 +406,7 @@ mod anticipated_fanout_readback {
             .filter(|(_, slot)| {
                 slot.entity_type == StateFamily::AnticipatedThermalState.code()
                     && slot.entity_id == DECK_THERMAL_ID
-                    && post_study_anchors.contains(&slot.delivery_date)
+                    && post_study_anchors.contains(&month_anchor_of(slot.interval_start))
             })
             .map(|(i, _)| i)
             .collect();
@@ -396,7 +423,7 @@ mod anticipated_fanout_readback {
         let mut by_month: BTreeMap<i32, Vec<usize>> = BTreeMap::new();
         for &pos in &dated_positions {
             by_month
-                .entry(manifest[pos].delivery_date)
+                .entry(month_anchor_of(manifest[pos].interval_start))
                 .or_default()
                 .push(pos);
         }
@@ -450,8 +477,6 @@ mod anticipated_fanout_readback {
             .iter()
             .map(|&pos| manifest[pos].clone())
             .collect();
-        let id86_intervals: Vec<Option<(NaiveDate, NaiveDate)>> =
-            dated_positions.iter().map(|&pos| intervals[pos]).collect();
 
         let near_coefficient = 100.0_f64;
         let far_coefficient = 42.5_f64;
@@ -462,19 +487,23 @@ mod anticipated_fanout_readback {
         let source_coefficients = vec![near_coefficient, far_coefficient];
 
         let tmp = tempfile::tempdir().expect("tempdir");
-        write_checkpoint(tmp.path(), &source_manifest, &source_coefficients);
+        write_checkpoint(
+            tmp.path(),
+            &source_manifest,
+            &source_coefficients,
+            fixture_priced_date(near_anchor, 0),
+        );
 
         let source_state_dimension =
             u32::try_from(source_coefficients.len()).expect("small coefficient count");
         let cuts = load_boundary_cuts(
-            tmp.path(),
-            0,
-            source_state_dimension,
-            &id86_manifest,
-            &id86_intervals,
-            &[],
-            None,
-            1_000_000.0,
+            &BoundaryLoadRequest::new(
+                tmp.path(),
+                fixture_priced_date(near_anchor, 0),
+                source_state_dimension,
+                &id86_manifest,
+                1_000_000.0,
+            ),
             &mut |_| {},
         )
         .expect("the synthetic 2-month source must reconcile against the read-back id-86 lane");
@@ -487,8 +516,8 @@ mod anticipated_fanout_readback {
                 fanned[j], 0.0,
                 "a live dated lane slot covered by the synthetic source must fan out to a \
                  nonzero coefficient (Blend/Renormalize), never default to Zero: slot {j} \
-                 (delivery_date={})",
-                manifest[pos].delivery_date
+                 (interval_start={})",
+                manifest[pos].interval_start
             );
         }
 

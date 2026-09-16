@@ -32,11 +32,13 @@ const POLICY_FILE_IDENTIFIER: &str = "CBVF";
 
 // ── FlatBuffers vtable slot offsets ──────────────────────────────────────────
 //
-// slot = (id + 2) * 2. Two slots are permanently burned and never read or
-// written here — reusing either would diverge the hand-written layout from the
+// slot = (id + 2) * 2. Three slots are permanently burned and never read or
+// written here — reusing any would diverge the hand-written layout from the
 // schema's `deprecated` placeholder: `AffinePiece` id 7 (slot 18), the former
-// `state_at_generation`; and `EntitySlot` id 4 (slot 12), the former
-// month-integer `delivery_anchor` replaced by `delivery_date` at id 5 (slot 14).
+// `state_at_generation`; `EntitySlot` id 4 (slot 12), the former month-integer
+// `delivery_anchor`; and `EntitySlot` id 5 (slot 14), the former single-field
+// `delivery_date` anchor replaced by `reference_date`/`interval_start`/
+// `interval_end` at ids 6/7/8.
 
 const CUT_FIELD_CUT_ID: u16 = 4;
 const CUT_FIELD_SLOT_INDEX: u16 = 6;
@@ -50,7 +52,6 @@ const ENTITY_SLOT_FIELD_ENTITY_TYPE: u16 = 4;
 const ENTITY_SLOT_FIELD_ENTITY_ID: u16 = 6;
 const ENTITY_SLOT_FIELD_SUBINDEX: u16 = 8;
 const ENTITY_SLOT_FIELD_WAS_ACTIVE: u16 = 10;
-const ENTITY_SLOT_FIELD_DELIVERY_DATE: u16 = 14;
 const ENTITY_SLOT_FIELD_REFERENCE_DATE: u16 = 16;
 const ENTITY_SLOT_FIELD_INTERVAL_START: u16 = 18;
 const ENTITY_SLOT_FIELD_INTERVAL_END: u16 = 20;
@@ -155,7 +156,6 @@ fn build_entity_slot_table(
     builder.push_slot_always::<i32>(ENTITY_SLOT_FIELD_ENTITY_ID, slot.entity_id);
     builder.push_slot_always::<u32>(ENTITY_SLOT_FIELD_SUBINDEX, slot.subindex);
     builder.push_slot_always::<bool>(ENTITY_SLOT_FIELD_WAS_ACTIVE, slot.was_active);
-    builder.push_slot_always::<i32>(ENTITY_SLOT_FIELD_DELIVERY_DATE, slot.delivery_date);
     builder.push_slot_always::<i32>(ENTITY_SLOT_FIELD_REFERENCE_DATE, slot.reference_date);
     builder.push_slot_always::<i32>(ENTITY_SLOT_FIELD_INTERVAL_START, slot.interval_start);
     builder.push_slot_always::<i32>(ENTITY_SLOT_FIELD_INTERVAL_END, slot.interval_end);
@@ -758,15 +758,6 @@ fn deserialize_entity_slot_table(buf: &[u8], slot_table_pos: usize) -> Option<En
     // Absent in a buffer written before these ids existed (FlatBuffers graceful
     // absence): default each to the sentinel, not zero — zero is a valid
     // calendar value.
-    let delivery_date = field_pos(
-        buf,
-        slot_table_pos,
-        vtable_pos,
-        ENTITY_SLOT_FIELD_DELIVERY_DATE,
-    )
-    .and_then(|p| read_i32_le(buf, p))
-    .unwrap_or(ENTITY_SLOT_DELIVERY_DATE_SENTINEL);
-
     let reference_date = field_pos(
         buf,
         slot_table_pos,
@@ -799,7 +790,6 @@ fn deserialize_entity_slot_table(buf: &[u8], slot_table_pos: usize) -> Option<En
         entity_id,
         subindex,
         was_active,
-        delivery_date,
         reference_date,
         interval_start,
         interval_end,
@@ -1646,7 +1636,7 @@ mod tests {
 
     /// `EntitySlot`'s `reference_date`/`interval_start`/`interval_end` (ids
     /// 6/7/8) round-trip through the writer/reader pair, each independently of
-    /// the others and of `delivery_date`.
+    /// the others.
     #[test]
     fn entity_slot_new_date_fields_round_trip() {
         let coeffs = [1.0_f64, 2.0];

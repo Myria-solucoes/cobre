@@ -12,6 +12,7 @@ use cobre_io::PolicyMode::Fresh;
 use cobre_io::PolicyMode::Resume;
 use cobre_io::PolicyMode::WarmStart;
 use cobre_io::output::policy::read_policy_checkpoint;
+use cobre_sddp::BoundaryLoadRequest;
 use cobre_sddp::FullFcf;
 use cobre_sddp::FutureCostFunction;
 use cobre_sddp::PolicyLoadProof;
@@ -23,8 +24,9 @@ use cobre_sddp::build_basis_cache_from_checkpoint;
 use cobre_sddp::checkpoint_terminal_cost_scale_factor;
 use cobre_sddp::inject_boundary_cuts;
 use cobre_sddp::load_boundary_cuts;
+use cobre_sddp::orchestration::build_season_manifest;
 use cobre_sddp::rescale_checkpoint_cuts_for_load;
-use cobre_sddp::resolve_boundary_source_stage;
+use cobre_sddp::study_horizon_end;
 use cobre_sddp::validate_policy_load;
 
 use crate::commands::broadcast::broadcast_value;
@@ -260,22 +262,16 @@ pub(super) fn apply_training_policy(
             #[allow(clippy::cast_possible_truncation)]
             let state_dim = setup.fcf.state_dimension as u32;
             let current_manifest = setup.build_terminal_entity_manifest(system);
-            let target_delivery_intervals =
-                setup.build_terminal_anticipated_delivery_intervals(system);
             let fixed_windows = setup.build_terminal_fixed_post_horizon_windows(system);
-            let source_stage = if let Some(idx) = bp.source_stage {
-                idx
-            } else {
-                let resolved =
-                    resolve_boundary_source_stage(&boundary_path, &target_delivery_intervals)
-                        .map_err(CliError::from)?;
-                if !ctx.quiet {
-                    let _ = ctx.stderr.write_line(&format!(
-                        "Boundary source_stage resolved to {resolved} (no explicit \
-                         policy.boundary.source_stage configured)."
-                    ));
-                }
-                resolved
+            let Some(boundary_date) = study_horizon_end(system) else {
+                return Err(CliError::Validation {
+                    report: format!(
+                        "case {}: the study declares no non-negative stage, so it has no \
+                         boundary date to load a boundary policy against",
+                        ctx.case_dir.display()
+                    ),
+                    already_rendered: false,
+                });
             };
             let stderr = &ctx.stderr;
             let quiet = ctx.quiet;
@@ -288,15 +284,18 @@ pub(super) fn apply_training_policy(
             // setup, not re-inferred from the checkpoint), so the load-time depth
             // guard is a defensive check, never a user error.
             let effective_inflow_lag_depth = setup.boundary_requirements().inflow_lag_depth();
+            let study_seasons = build_season_manifest(system);
             let validated = load_boundary_cuts(
-                &boundary_path,
-                source_stage,
-                state_dim,
-                &current_manifest,
-                &target_delivery_intervals,
-                &fixed_windows,
-                effective_inflow_lag_depth,
-                setup.stage_data.stage_templates.cost_scale_factor,
+                &BoundaryLoadRequest::new(
+                    &boundary_path,
+                    boundary_date,
+                    state_dim,
+                    &current_manifest,
+                    setup.stage_data.stage_templates.cost_scale_factor,
+                )
+                .with_fixed_windows(&fixed_windows)
+                .with_inflow_lag_depth(effective_inflow_lag_depth)
+                .with_study_seasons(&study_seasons),
                 &mut on_warning,
             )
             .map_err(CliError::from)?;
@@ -304,7 +303,7 @@ pub(super) fn apply_training_policy(
                 print_boundary_summary(
                     &ctx.stderr,
                     validated.len(),
-                    source_stage,
+                    boundary_date,
                     &boundary_path,
                     validated.report(),
                 );

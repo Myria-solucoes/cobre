@@ -730,7 +730,9 @@ pub fn trivial_full_fcf_proof(state_dimension: u32, num_stages: u32) -> PolicyLo
 /// `cobre_version` matching the production writer, a fixed `created_at` no
 /// consumer reads) are filled here — the sole owner of the manifest literal for
 /// `cobre-sddp` tests — `num_stages`/`graph_manifest`/`producer` are
-/// forwarded verbatim, and `season_manifest` stays the absent default.
+/// forwarded verbatim, and `season_manifest` stays the absent default. Delegates
+/// to [`checkpoint_metadata_with_seasons`] for a caller that needs a present
+/// descriptor.
 ///
 /// [`CheckpointManifest`]: cobre_io::CheckpointManifest
 /// [`FORMAT_VERSION`]: cobre_io::FORMAT_VERSION
@@ -740,6 +742,27 @@ pub fn checkpoint_metadata(
     graph_manifest: cobre_io::GraphManifest,
     producer: cobre_io::ProducerBlock,
 ) -> cobre_io::CheckpointManifest {
+    checkpoint_metadata_with_seasons(
+        num_stages,
+        graph_manifest,
+        producer,
+        cobre_io::SeasonManifest::default(),
+    )
+}
+
+/// [`checkpoint_metadata`] with an explicit `season_manifest`, for a fixture
+/// that must exercise the boundary-load season/PAR-identity gate
+/// (`policy::policy_load::check_season_compatibility`).
+///
+/// [`CheckpointManifest`]: cobre_io::CheckpointManifest
+/// [`FORMAT_VERSION`]: cobre_io::FORMAT_VERSION
+#[must_use]
+pub fn checkpoint_metadata_with_seasons(
+    num_stages: u32,
+    graph_manifest: cobre_io::GraphManifest,
+    producer: cobre_io::ProducerBlock,
+    season_manifest: cobre_io::SeasonManifest,
+) -> cobre_io::CheckpointManifest {
     cobre_io::CheckpointManifest {
         format_version: cobre_io::FORMAT_VERSION,
         cobre_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -747,7 +770,7 @@ pub fn checkpoint_metadata(
         num_stages,
         graph_manifest,
         producer,
-        season_manifest: cobre_io::SeasonManifest::default(),
+        season_manifest,
     }
 }
 

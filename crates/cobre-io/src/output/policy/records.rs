@@ -7,6 +7,8 @@
 //! algorithm-specific types is the calling crate's responsibility. Field names
 //! correspond to the tables in `schemas/policy.fbs`.
 
+use chrono::{Datelike, NaiveDate};
+
 /// Current on-disk value-function artifact format version.
 ///
 /// [`CheckpointManifest::format_version`] must equal this;
@@ -16,12 +18,12 @@
 /// dated, self-describing format.
 pub const FORMAT_VERSION: u32 = 2;
 
-/// Sentinel [`EntitySlot`] date-field value — [`EntitySlot::delivery_date`],
-/// [`EntitySlot::reference_date`], [`EntitySlot::interval_start`], and
-/// [`EntitySlot::interval_end`] all default to it — for a slot whose family
-/// does not populate that field; also the value a reader yields when a field
-/// is absent from a buffer older than that field's own id (see
-/// `schemas/policy.fbs` for each field's introducing id).
+/// Sentinel [`EntitySlot`] date-field value — [`EntitySlot::reference_date`],
+/// [`EntitySlot::interval_start`], and [`EntitySlot::interval_end`] all
+/// default to it — for a slot whose family does not populate that field; also
+/// the value a reader yields when a field is absent from a buffer older than
+/// that field's own id (see `schemas/policy.fbs` for each field's introducing
+/// id).
 pub const ENTITY_SLOT_DELIVERY_DATE_SENTINEL: i32 = i32::MIN;
 
 /// One per-slot entity-identity record for a state-vector dimension.
@@ -39,19 +41,13 @@ pub struct EntitySlot {
     pub subindex: u32,
     /// Whether the owning entity was operationally active at this slot's stage.
     pub was_active: bool,
-    /// Canonical absolute delivery/arrival calendar date for this slot, encoded
-    /// `YYYYMMDD` (`year * 10000 + month * 100 + day`);
-    /// [`ENTITY_SLOT_DELIVERY_DATE_SENTINEL`] when the slot has no delivery
-    /// semantics. Which calendar date maps to a slot is the calling crate's
-    /// responsibility, as with `subindex`.
-    pub delivery_date: i32,
     /// `HydroInflowLag`'s reference past stage's `start_date`, `YYYYMMDD`
-    /// encoded as [`delivery_date`](Self::delivery_date);
+    /// encoded (`year * 10000 + month * 100 + day`);
     /// [`ENTITY_SLOT_DELIVERY_DATE_SENTINEL`] for every other family.
     pub reference_date: i32,
     /// Half-open delivery/arrival interval's inclusive start, `YYYYMMDD`
-    /// encoded as [`delivery_date`](Self::delivery_date): `HydroTransitBucket`'s
-    /// `arrival_start` or `AnticipatedThermalState`'s `delivery_start`;
+    /// encoded: `HydroTransitBucket`'s `arrival_start` or
+    /// `AnticipatedThermalState`'s `delivery_start`;
     /// [`ENTITY_SLOT_DELIVERY_DATE_SENTINEL`] for storage and inflow-lag.
     pub interval_start: i32,
     /// Half-open delivery/arrival interval's exclusive end, paired with
@@ -75,7 +71,6 @@ impl EntitySlot {
             entity_id,
             subindex,
             was_active,
-            delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
             reference_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
             interval_start: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
             interval_end: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
@@ -122,16 +117,6 @@ impl EntitySlot {
             ring_slot,
             was_active,
         )
-    }
-
-    /// Returns `self` with `delivery_date` replaced; every other field is
-    /// unchanged.
-    #[must_use]
-    pub fn with_delivery_date(self, delivery_date: i32) -> Self {
-        Self {
-            delivery_date,
-            ..self
-        }
     }
 
     /// Returns `self` with `reference_date` replaced; every other field is
@@ -264,6 +249,33 @@ pub const STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL: i32 = -1;
 /// (forward-compatible default). `i32::MIN` rather than `-1`, which is a
 /// decodable value in the `YYYYMMDD` space this field encodes.
 pub const STAGE_CUTS_PRICED_STATE_DATE_SENTINEL: i32 = i32::MIN;
+
+/// Encodes `date` as `YYYYMMDD` (`year * 10000 + month * 100 + day`) — the wire
+/// encoding [`EntitySlot`]'s and [`StageCutsPayload`]'s date fields document.
+/// Total; [`decode_slot_date`] is its exact inverse.
+#[must_use]
+pub fn encode_slot_date(date: NaiveDate) -> i32 {
+    date.year() * 10_000
+        + i32::try_from(date.month()).unwrap_or(1) * 100
+        + i32::try_from(date.day()).unwrap_or(1)
+}
+
+/// Decodes `value` from the `YYYYMMDD` encoding [`encode_slot_date`] produces —
+/// its exact inverse. `None` for [`ENTITY_SLOT_DELIVERY_DATE_SENTINEL`]/
+/// [`STAGE_CUTS_PRICED_STATE_DATE_SENTINEL`] (`i32::MIN`) and for any other
+/// value that is not a real calendar date; `-1` is deliberately rejected here
+/// too, since it is a distinct non-date sentinel elsewhere in this module
+/// (e.g. [`STAGE_CUTS_NODE_ID_SENTINEL`]) that must never be mistaken for one.
+#[must_use]
+pub fn decode_slot_date(value: i32) -> Option<NaiveDate> {
+    let year = value / 10_000;
+    let month = (value / 100) % 100;
+    let day = value % 100;
+    let (Ok(month), Ok(day)) = (u32::try_from(month), u32::try_from(day)) else {
+        return None;
+    };
+    NaiveDate::from_ymd_opt(year, month, day)
+}
 
 /// Payload for writing per-stage visited states to a value-function artifact.
 ///
@@ -613,8 +625,14 @@ pub struct PolicyCheckpoint {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
-    use super::{ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, StateFamily};
+    use chrono::NaiveDate;
+
+    use super::{
+        ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, StateFamily, decode_slot_date,
+        encode_slot_date,
+    };
 
     #[test]
     fn state_family_codes_match_policy_fbs_entity_type() {
@@ -651,14 +669,12 @@ mod tests {
         assert_eq!(storage.entity_id, 7);
         assert_eq!(storage.subindex, 0);
         assert!(storage.was_active);
-        assert_eq!(storage.delivery_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL);
 
         let inflow_lag = EntitySlot::inflow_lag(2, 3, false);
         assert_eq!(inflow_lag.entity_type, StateFamily::HydroInflowLag.code());
         assert_eq!(inflow_lag.entity_id, 2);
         assert_eq!(inflow_lag.subindex, 3);
         assert!(!inflow_lag.was_active);
-        assert_eq!(inflow_lag.delivery_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL);
 
         let transit_bucket = EntitySlot::transit_bucket(4, 5, true);
         assert_eq!(
@@ -668,10 +684,6 @@ mod tests {
         assert_eq!(transit_bucket.entity_id, 4);
         assert_eq!(transit_bucket.subindex, 5);
         assert!(transit_bucket.was_active);
-        assert_eq!(
-            transit_bucket.delivery_date,
-            ENTITY_SLOT_DELIVERY_DATE_SENTINEL
-        );
 
         let anticipated = EntitySlot::anticipated(6, 1, false);
         assert_eq!(
@@ -681,23 +693,6 @@ mod tests {
         assert_eq!(anticipated.entity_id, 6);
         assert_eq!(anticipated.subindex, 1);
         assert!(!anticipated.was_active);
-        assert_eq!(
-            anticipated.delivery_date,
-            ENTITY_SLOT_DELIVERY_DATE_SENTINEL
-        );
-    }
-
-    #[test]
-    fn entity_slot_with_delivery_date_overrides_only_the_date() {
-        let dated = EntitySlot::anticipated(33, 1, true).with_delivery_date(20_320_101);
-        assert_eq!(
-            dated.entity_type,
-            StateFamily::AnticipatedThermalState.code()
-        );
-        assert_eq!(dated.entity_id, 33);
-        assert_eq!(dated.subindex, 1);
-        assert!(dated.was_active);
-        assert_eq!(dated.delivery_date, 20_320_101);
     }
 
     #[test]
@@ -720,6 +715,16 @@ mod tests {
         assert_eq!(dated.interval_start, 20_311_201);
         assert_eq!(dated.interval_end, 20_320_101);
         assert_eq!(dated.reference_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL);
-        assert_eq!(dated.delivery_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL);
+    }
+
+    #[test]
+    fn slot_date_codec_round_trips_and_rejects_non_dates() {
+        for (year, month, day) in [(2031, 11, 10), (2024, 2, 29), (2030, 1, 1)] {
+            let date = NaiveDate::from_ymd_opt(year, month, day).unwrap();
+            assert_eq!(decode_slot_date(encode_slot_date(date)), Some(date));
+        }
+        for value in [i32::MIN, -1, 0, 20_240_230] {
+            assert_eq!(decode_slot_date(value), None);
+        }
     }
 }

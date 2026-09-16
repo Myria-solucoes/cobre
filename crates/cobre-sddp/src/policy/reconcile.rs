@@ -7,39 +7,44 @@
 //! coefficients. Storage and inflow-lag are the state's must-correspond core:
 //! a target slot of either family with no source counterpart is
 //! [`RebindOp::Reject`] — the entity (`entity_type`/`entity_id`) is never
-//! relaxed, only matched exactly. Transit buckets resolve by the same
-//! identity match; a miss defaults to [`RebindOp::Zero`] instead of
-//! rejecting — a NEWAVE-shaped source carries no transit slots at all, so a
-//! miss is the expected case, not a boundary the current study is
-//! incompatible with. Anticipated slots dispatch on `delivery_date` and the
-//! caller-supplied `target_delivery_intervals`: `SENTINEL` (pre-fan-out
-//! padding) always defaults to `Zero`; a live, dated post-study-targeted ring
-//! slot (dated WITH a resolved interval) fans out against the source's own anticipated
-//! months by calendar overlap — full coverage by priced source months yields
-//! [`RebindOp::Blend`] (the `÷H_M` distribute), a boundary-edge slot straddling
-//! into unpriced time yields [`RebindOp::Renormalize`] (anti-deflation over the
-//! covered span), no covered month yields `Zero`; a live, dated slot with NO
-//! resolved interval is an in-study ring slot (a within-horizon delivery the
-//! terminal boundary does not price) and also yields `Zero`. Every remaining
-//! family falls back to the identity-reject default, pending its own arm. When every
-//! storage/lag/transit/unclassified target slot has a same-identity source
-//! counterpart and every anticipated slot is still sentinel-dated — the shape
-//! an already target-aligned, pre-fan-out boundary policy has — the rebind
-//! reproduces the source cut's own coefficients bit-for-bit: `Copy` at the
-//! matching position for every identity-resolved family, and `Zero` for the
-//! sentinel-anticipated slot, whose source coefficient there is itself always
-//! `0.0` (a masked state dimension never holds a value). This is the
-//! strict-superset guarantee.
+//! relaxed, only matched exactly. Inflow-lag additionally validates a
+//! matched slot's `reference_date` ([`resolve_inflow_lag`]), so identity
+//! alone does not guarantee a `Copy`. The two forward-dated families —
+//! `AnticipatedThermalState` and `HydroTransitBucket` — both dispatch to
+//! [`resolve_by_interval_overlap`] on the target slot's OWN
+//! `interval_start`/`interval_end` against the caller-supplied
+//! `boundary_date`, never on `subindex` identity: `interval_start ==
+//! SENTINEL` (pre-fan-out padding) always defaults to `Zero`; a live
+//! interval ending at or before `boundary_date` is an in-study delivery the
+//! terminal boundary does not price and also yields `Zero`; a live interval
+//! reaching past `boundary_date` fans out against `source_index`'s own
+//! decoded intervals of the SAME family by calendar overlap — full coverage
+//! yields [`RebindOp::Blend`] (the `÷H_M` distribute), a boundary-edge slot
+//! straddling into unpriced time yields [`RebindOp::Renormalize`]
+//! (anti-deflation over the covered span), and no covered interval yields
+//! `Zero` — the expected outcome for a `HydroTransitBucket` target when the
+//! source is NEWAVE-shaped and carries no transit arcs at all, exactly as an
+//! `AnticipatedThermalState` target's `Zero` there instead usually means an
+//! in-study delivery already discharged. Every remaining family falls back
+//! to the identity-reject default, pending its own arm. When every
+//! storage/lag/unclassified target slot has a same-identity source
+//! counterpart and every forward-family slot is still sentinel-dated — the
+//! shape an already target-aligned, pre-fan-out boundary policy has — the
+//! rebind reproduces the source cut's own coefficients bit-for-bit: `Copy`
+//! at the matching position for every identity-resolved family, and `Zero`
+//! for each sentinel forward-family slot, whose source coefficient there is
+//! itself always `0.0` (a masked state dimension never holds a value). This
+//! is the strict-superset guarantee.
 
 use std::collections::HashMap;
 
-use chrono::Months;
 use chrono::NaiveDate;
 use cobre_core::AnticipatedCommitmentHistory;
 use cobre_io::ENTITY_SLOT_DELIVERY_DATE_SENTINEL;
 use cobre_io::EntitySlot;
 use cobre_io::OwnedPolicyCutRecord;
 use cobre_io::StateFamily;
+use cobre_io::decode_slot_date;
 use serde::Serialize;
 
 use crate::SddpError;
@@ -66,17 +71,17 @@ pub(crate) enum RebindOp {
     /// `Σ cut.coefficients[p] · w` over the `(source_position, weight)`
     /// terms. [`build_rebind`] constructs this for a live, dated
     /// `AnticipatedThermalState` target slot fully covered by priced source
-    /// months, `weight = overlap(w, M) / H_M` per covered month `M` — the
-    /// `÷H_M` distribute. A monthly target fully inside one source month
-    /// yields a single `1.0` term (copy-equivalent).
+    /// intervals, `weight = overlap(w, m) / H_m` per covered source interval
+    /// `m` — the `÷H_m` distribute. A target fully inside one source
+    /// interval yields a single `1.0` term (copy-equivalent).
     Blend(Vec<(usize, f64)>),
     /// A [`Self::Blend`] re-normalized over its covered overlap span:
     /// [`rebind_cut`] applies the identical weighted sum, but each term's
-    /// weight is additionally scaled by `H_w / Σ_covered overlap(w, M)` so
-    /// the covered months' density replicates across the target slot's
+    /// weight is additionally scaled by `H_w / Σ_covered overlap(w, m)` so
+    /// the covered intervals' density replicates across the target slot's
     /// uncovered span instead of deflating it with an implicit `0.0` term.
     /// [`build_rebind`] constructs this for a target slot whose interval
-    /// straddles a priced month and an unpriced one.
+    /// straddles a priced source interval and an unpriced span.
     Renormalize(Vec<(usize, f64)>),
     /// The target slot cannot be resolved from `source`: either no
     /// same-identity counterpart exists under a family that requires one
@@ -100,22 +105,24 @@ fn slot_key(slot: &EntitySlot) -> SlotKey {
     (slot.entity_type, slot.entity_id, slot.subindex)
 }
 
-/// One anticipated source slot's decoded calendar month: `source_pos` is its
-/// position in `source`; `[month_start, month_end)` and `h_m` come from
-/// [`decode_month_anchor`].
-struct MonthSource {
+/// One forward-family source slot's decoded delivery/arrival interval:
+/// `source_pos` is its position in `source`; `[start, end)` and `hours` come
+/// from decoding the slot's own `interval_start`/`interval_end`
+/// ([`build_source_interval_index`]).
+#[derive(Debug)]
+pub(crate) struct SourceInterval {
     source_pos: usize,
-    month_start: NaiveDate,
-    month_end: NaiveDate,
-    h_m: f64,
+    start: NaiveDate,
+    end: NaiveDate,
+    hours: f64,
 }
 
-/// `(entity_type, entity_id)` — the anticipated fan-out join key. A source
-/// anticipated slot's `entity_type` is always
-/// [`StateFamily::AnticipatedThermalState`], so the first component never varies;
-/// kept for symmetry with [`SlotKey`],
-/// the identity families' join key.
-type MonthKey = (u8, i32);
+/// `(entity_type, entity_id)` — the forward-family fan-out join key, shared
+/// by `AnticipatedThermalState` and `HydroTransitBucket`. The family byte
+/// keeps the two families' entries disjoint in
+/// [`build_source_interval_index`]'s map, so one index serves both without a
+/// discriminator parameter.
+pub(crate) type SourceKey = (u8, i32);
 
 /// Positive `[start, end)` span in hours; `0.0` for a degenerate or
 /// backwards interval (`end <= start`), never a negative value.
@@ -133,100 +140,93 @@ pub(crate) fn overlap_hours(a: (NaiveDate, NaiveDate), b: (NaiveDate, NaiveDate)
     positive_hours(a.0.max(b.0), a.1.min(b.1))
 }
 
-/// Decode a day-01 `YYYYMM01` anchor into `[month_start, month_end)` and
-/// `H_M = days_in_month · 24` hours — the exact inverse of
-/// `year_month_day_anchor` (`setup/mod.rs`). Shared with
-/// [`crate::policy::policy_load::resolve_boundary_source_stage`], which
-/// decodes the same per-pool anticipated anchors to auto-resolve
-/// `policy.boundary.source_stage`.
+/// Index every LIVE (non-sentinel) source slot of EITHER forward-dated
+/// family — `AnticipatedThermalState` or `HydroTransitBucket` — selected by
+/// `interval_start != ENTITY_SLOT_DELIVERY_DATE_SENTINEL` — by its owning
+/// [`SourceKey`], decoding its own `interval_start`/`interval_end` into the
+/// `[start, end)` span [`resolve_by_interval_overlap`] and
+/// [`build_boundary_fold`] compute `overlap(w, m)` against. The two
+/// families' entries stay disjoint because `SourceKey`'s first component is
+/// the family byte.
 ///
 /// # Errors
 ///
-/// Returns [`SddpError::Validation`] if `delivery_date` does not decode to a
-/// real calendar month.
-pub(crate) fn decode_month_anchor(
-    delivery_date: i32,
-) -> Result<(NaiveDate, NaiveDate, f64), SddpError> {
-    let year = delivery_date / 10_000;
-    let month = u32::try_from(delivery_date / 100 % 100).map_err(|_| {
-        SddpError::Validation(format!(
-            "boundary policy source anticipated slot has a malformed delivery_date anchor \
-             {delivery_date}"
-        ))
-    })?;
-    let month_start = NaiveDate::from_ymd_opt(year, month, 1).ok_or_else(|| {
-        SddpError::Validation(format!(
-            "boundary policy source anticipated slot has an invalid delivery_date anchor \
-             {delivery_date}"
-        ))
-    })?;
-    let month_end = month_start
-        .checked_add_months(Months::new(1))
-        .ok_or_else(|| {
-            SddpError::Validation(format!(
-                "boundary policy source anticipated slot's delivery_date anchor {delivery_date} \
-             overflows the calendar"
-            ))
-        })?;
-    let h_m = positive_hours(month_start, month_end);
-    Ok((month_start, month_end, h_m))
-}
-
-/// Index every LIVE (non-sentinel) anticipated source slot by its owning
-/// [`MonthKey`], decoding each slot's day-01 `delivery_date` anchor into the
-/// calendar month [`resolve_anticipated`] computes `overlap(w, M)` against.
-///
-/// # Errors
-///
-/// Returns [`SddpError::Validation`] if a live anticipated source slot's
-/// `delivery_date` fails to decode ([`decode_month_anchor`]).
-fn build_by_month_index(
+/// Returns [`SddpError::Validation`], naming the slot's identity and the raw
+/// values, if a live forward-family source slot's
+/// `interval_start`/`interval_end` fails to decode, or decodes to a
+/// non-positive span.
+pub(crate) fn build_source_interval_index(
     source: &[EntitySlot],
-) -> Result<HashMap<MonthKey, Vec<MonthSource>>, SddpError> {
-    let mut by_month: HashMap<MonthKey, Vec<MonthSource>> = HashMap::new();
+) -> Result<HashMap<SourceKey, Vec<SourceInterval>>, SddpError> {
+    let mut index: HashMap<SourceKey, Vec<SourceInterval>> = HashMap::new();
     for (pos, slot) in source.iter().enumerate() {
-        if slot.entity_type != StateFamily::AnticipatedThermalState.code()
-            || slot.delivery_date == ENTITY_SLOT_DELIVERY_DATE_SENTINEL
-        {
+        let is_forward_family = slot.entity_type == StateFamily::AnticipatedThermalState.code()
+            || slot.entity_type == StateFamily::HydroTransitBucket.code();
+        if !is_forward_family || slot.interval_start == ENTITY_SLOT_DELIVERY_DATE_SENTINEL {
             continue;
         }
-        let (month_start, month_end, h_m) = decode_month_anchor(slot.delivery_date)?;
-        by_month
+        let Some(start) = decode_slot_date(slot.interval_start) else {
+            return Err(SddpError::Validation(format!(
+                "boundary policy source forward-family slot (entity_id={}, subindex={}) has an \
+                 undecodable interval_start {}",
+                slot.entity_id, slot.subindex, slot.interval_start
+            )));
+        };
+        let Some(end) = decode_slot_date(slot.interval_end) else {
+            return Err(SddpError::Validation(format!(
+                "boundary policy source forward-family slot (entity_id={}, subindex={}) has an \
+                 undecodable interval_end {}",
+                slot.entity_id, slot.subindex, slot.interval_end
+            )));
+        };
+        let hours = positive_hours(start, end);
+        if hours <= 0.0 {
+            return Err(SddpError::Validation(format!(
+                "boundary policy source forward-family slot (entity_id={}, subindex={}) has a \
+                 non-positive delivery interval: interval_start={}, interval_end={}",
+                slot.entity_id, slot.subindex, slot.interval_start, slot.interval_end
+            )));
+        }
+        index
             .entry((slot.entity_type, slot.entity_id))
             .or_default()
-            .push(MonthSource {
+            .push(SourceInterval {
                 source_pos: pos,
-                month_start,
-                month_end,
-                h_m,
+                start,
+                end,
+                hours,
             });
     }
-    Ok(by_month)
+    Ok(index)
 }
 
 /// The boundary intercept-fold vector `(source_pos, factor)` pricing a study's
-/// fixed post-horizon commitments, reusing [`resolve_anticipated`]'s per-month
-/// `÷H_M` distribute (`overlap_hours(w, M) / H_M`) applied to each fixed
-/// window's declared MW instead of a state dimension. A window overlapping no
-/// source month contributes nothing (mirrors [`RebindOp::Zero`], never an
-/// error), a `value_mw == 0.0` window is skipped, and only non-zero factors are
-/// emitted — an empty vector is the byte-neutral no-contribution case the
-/// intercept fold relies on, so zero-factor entries must never be emitted.
+/// fixed post-horizon commitments, reusing [`resolve_by_interval_overlap`]'s
+/// per-source-interval `÷H_m` distribute (`overlap_hours(w, m) / H_m`) applied to each
+/// fixed window's declared MW instead of a state dimension. A window
+/// overlapping no source interval contributes nothing (mirrors
+/// [`RebindOp::Zero`], never an error), a `value_mw == 0.0` window is skipped,
+/// and only non-zero factors are emitted — an empty vector is the byte-neutral
+/// no-contribution case the intercept fold relies on, so zero-factor entries
+/// must never be emitted.
 ///
 /// Determinism (D5): accumulates into a `source_pos`-indexed `Vec`, iterating
-/// `fixed_windows` and each plant's [`build_by_month_index`] records in given
-/// order; the sole map use is the `by_month` lookup, never a `HashMap`
-/// iteration.
+/// `fixed_windows` and each plant's [`build_source_interval_index`] records in
+/// given order; the sole map use is the index lookup, never a `HashMap`
+/// iteration. The lookup key's family byte is load-bearing: it is the only
+/// thing that keeps a transit slot sharing an `entity_id` with an anticipated
+/// slot out of the fold, so the key must never collapse to the bare
+/// `entity_id` (`boundary_fold_ignores_transit_slots_sharing_an_entity_id`).
 ///
 /// # Errors
 ///
-/// Propagates [`SddpError::Validation`] from [`build_by_month_index`] when a
-/// live anticipated `source` slot's `delivery_date` fails to decode.
+/// Propagates [`SddpError::Validation`] from [`build_source_interval_index`]
+/// when a live anticipated `source` slot's interval fails to decode.
 pub(crate) fn build_boundary_fold(
     source: &[EntitySlot],
     fixed_windows: &[AnticipatedCommitmentHistory],
 ) -> Result<Vec<(usize, f64)>, SddpError> {
-    let by_month = build_by_month_index(source)?;
+    let source_index = build_source_interval_index(source)?;
     let mut factor = vec![0.0_f64; source.len()];
     for window in fixed_windows {
         if window.value_mw == 0.0 {
@@ -236,16 +236,16 @@ pub(crate) fn build_boundary_fold(
             StateFamily::AnticipatedThermalState.code(),
             window.thermal_id.0,
         );
-        let Some(months) = by_month.get(&key) else {
+        let Some(intervals) = source_index.get(&key) else {
             continue;
         };
-        for m in months {
+        for interval in intervals {
             let overlap = overlap_hours(
                 (window.start_date, window.end_date),
-                (m.month_start, m.month_end),
+                (interval.start, interval.end),
             );
             if overlap > 0.0 {
-                factor[m.source_pos] += (overlap / m.h_m) * window.value_mw;
+                factor[interval.source_pos] += (overlap / interval.hours) * window.value_mw;
             }
         }
     }
@@ -258,52 +258,47 @@ pub(crate) fn build_boundary_fold(
 
 /// Build one [`RebindOp`] per `target` slot, dispatched per target slot's
 /// `entity_type` to [`resolve_storage`], [`resolve_inflow_lag`],
-/// [`resolve_transit_bucket`], [`resolve_anticipated`], or the identity
-/// fallback [`resolve_by_identity`]. `target_delivery_intervals` is aligned
-/// 1:1 with `target` (`Some((start, end))` for a live, dated
-/// `AnticipatedThermalState` target slot, `None` elsewhere) — the calendar
-/// span [`resolve_anticipated`] resolves `overlap(w, M)` against `source`'s
-/// own anticipated months, reconstructed from their `delivery_date` day-01
-/// anchors ([`build_by_month_index`]; no new source input).
+/// [`resolve_by_interval_overlap`] (both forward-dated families), or the
+/// identity fallback [`resolve_by_identity`]. `boundary_date` is the study's
+/// boundary date, read by [`resolve_by_interval_overlap`] against each
+/// forward-family target slot's OWN `interval_start`/`interval_end` fields —
+/// the calendar span it resolves `overlap(w, m)` against `source_index`'s
+/// own decoded intervals of the SAME family. `source_index` is
+/// [`build_source_interval_index`]'s output, built once by the caller and
+/// shared with [`build_reconciliation_report`] so a source slot's span is
+/// never read two different ways.
 ///
-/// For a `target` whose every storage/lag/transit/unclassified slot has a
-/// same-identity `source` counterpart, and whose every anticipated slot is
-/// still sentinel-dated (pre-fan-out) — the shape a still target-aligned
+/// For a `target` whose every storage/lag/unclassified slot has a
+/// same-identity `source` counterpart, and whose every forward-family slot
+/// is still sentinel-dated (pre-fan-out) — the shape a still target-aligned
 /// boundary policy has — the rebind reproduces the `source` cut's own
 /// coefficients bit-for-bit: `Copy` at the matching position for every
-/// identity-resolved family, and `Zero` for the sentinel-anticipated slot
-/// (see the module doc for why that still matches `source`).
+/// identity-resolved family, and `Zero` for each sentinel forward-family
+/// slot (see the module doc for why that still matches `source`).
 ///
 /// # Errors
 ///
 /// Returns [`SddpError::Validation`] if a storage, inflow-lag, or
 /// unclassified `target` slot has no `source` counterpart under identity
-/// resolution, or a live anticipated `source` slot's `delivery_date` fails to
-/// decode to a real calendar month. A dated `AnticipatedThermalState` `target`
-/// slot with no resolved `target_delivery_intervals` entry is an in-study ring
-/// slot, resolved to [`RebindOp::Zero`] rather than rejected (see
-/// [`resolve_anticipated`]).
+/// resolution, or a live forward-family `target` slot's
+/// `interval_start`/`interval_end` fails to decode. A live forward-family
+/// `target` slot whose interval ends at or before `boundary_date` is an
+/// in-study delivery, resolved to [`RebindOp::Zero`] rather than rejected
+/// (see [`resolve_by_interval_overlap`]).
 pub(crate) fn build_rebind(
     source: &[EntitySlot],
     target: &[EntitySlot],
-    target_delivery_intervals: &[Option<(NaiveDate, NaiveDate)>],
+    boundary_date: NaiveDate,
+    source_index: &HashMap<SourceKey, Vec<SourceInterval>>,
 ) -> Result<Vec<RebindOp>, SddpError> {
-    debug_assert_eq!(
-        target_delivery_intervals.len(),
-        target.len(),
-        "target_delivery_intervals must be aligned 1:1 with target"
-    );
-
     let mut by_identity: HashMap<SlotKey, usize> = HashMap::with_capacity(source.len());
     for (pos, slot) in source.iter().enumerate() {
         by_identity.insert(slot_key(slot), pos);
     }
-    let by_month = build_by_month_index(source)?;
 
     let mut ops = Vec::with_capacity(target.len());
     for (i, slot) in target.iter().enumerate() {
-        let interval = target_delivery_intervals.get(i).copied().flatten();
-        match resolve_target_slot(i, slot, &by_identity, &by_month, interval) {
+        match resolve_target_slot(i, slot, source, &by_identity, source_index, boundary_date) {
             RebindOp::Reject { reason } => return Err(SddpError::Validation(reason)),
             op => ops.push(op),
         }
@@ -312,25 +307,28 @@ pub(crate) fn build_rebind(
 }
 
 /// Dispatch one target slot to its family's resolution rule, by
-/// `entity_type`. Storage, inflow-lag, and transit-bucket are each indexed by
-/// their own identity shape (storage ignores `subindex`, always `0`; lag and
-/// transit-bucket include it); all three share the one `by_identity` map,
-/// since it already keys on the full `(entity_type, entity_id, subindex)`
-/// triple. Anticipated slots never consult `by_identity` — dispatch is on
-/// `delivery_date` and `target_interval`, joined against `by_month`.
+/// `entity_type`. Storage and inflow-lag are each indexed by their own
+/// identity shape (storage ignores `subindex`, always `0`; lag includes it);
+/// both share the one `by_identity` map, since it already keys on the full
+/// `(entity_type, entity_id, subindex)` triple. The two forward-dated
+/// families — anticipated and transit-bucket — never consult `by_identity`;
+/// dispatch is on the slot's own `interval_start`/`interval_end` against
+/// `boundary_date`, joined against `source_index`. `source` is threaded
+/// through for [`resolve_inflow_lag`]'s own `reference_date` validation; no
+/// other arm reads it.
 fn resolve_target_slot(
     i: usize,
     slot: &EntitySlot,
+    source: &[EntitySlot],
     by_identity: &HashMap<SlotKey, usize>,
-    by_month: &HashMap<MonthKey, Vec<MonthSource>>,
-    target_interval: Option<(NaiveDate, NaiveDate)>,
+    source_index: &HashMap<SourceKey, Vec<SourceInterval>>,
+    boundary_date: NaiveDate,
 ) -> RebindOp {
     match slot.family() {
         Some(StateFamily::HydroStorage) => resolve_storage(slot, by_identity),
-        Some(StateFamily::HydroInflowLag) => resolve_inflow_lag(slot, by_identity),
-        Some(StateFamily::HydroTransitBucket) => resolve_transit_bucket(slot, by_identity),
-        Some(StateFamily::AnticipatedThermalState) => {
-            resolve_anticipated(slot, target_interval, by_month)
+        Some(StateFamily::HydroInflowLag) => resolve_inflow_lag(slot, source, by_identity),
+        Some(StateFamily::HydroTransitBucket | StateFamily::AnticipatedThermalState) => {
+            resolve_by_interval_overlap(slot, boundary_date, source_index)
         }
         None => resolve_by_identity(i, slot, by_identity),
     }
@@ -338,6 +336,11 @@ fn resolve_target_slot(
 
 /// `HydroStorage` resolution: matched by `(entity_type, entity_id)` identity;
 /// unmatched rejects naming the hydro the boundary policy does not price.
+/// Through [`load_boundary_cuts`](crate::policy::policy_load::load_boundary_cuts),
+/// the `check_topology_subset` gate normally reports this condition first,
+/// over every missing hydro at once; this arm remains the enforcement of
+/// [`build_rebind`]'s own postcondition for a caller that invokes it
+/// directly.
 fn resolve_storage(slot: &EntitySlot, by_identity: &HashMap<SlotKey, usize>) -> RebindOp {
     match by_identity.get(&slot_key(slot)) {
         Some(&pos) => RebindOp::Copy(pos),
@@ -353,90 +356,185 @@ fn resolve_storage(slot: &EntitySlot, by_identity: &HashMap<SlotKey, usize>) -> 
 
 /// `HydroInflowLag` resolution: matched by `(entity_type, entity_id,
 /// subindex)` identity; unmatched rejects as a lag-depth incompatibility,
-/// naming the offending hydro and lag depth.
-fn resolve_inflow_lag(slot: &EntitySlot, by_identity: &HashMap<SlotKey, usize>) -> RebindOp {
-    match by_identity.get(&slot_key(slot)) {
-        Some(&pos) => RebindOp::Copy(pos),
-        None => RebindOp::Reject {
+/// naming the offending hydro and lag depth. Through
+/// [`load_boundary_cuts`](crate::policy::policy_load::load_boundary_cuts),
+/// the `check_topology_subset` gate normally reports this condition first,
+/// over every missing `(hydro, lag depth)` pair at once; this arm remains
+/// the enforcement of [`build_rebind`]'s own postcondition for a caller that
+/// invokes it directly.
+///
+/// An identity hit is then validated on `reference_date` (the two raw `i32`
+/// stamps, never decoded `NaiveDate`s — an unparseable stamp must degrade to
+/// its raw form in the message, not fold two undecodable stamps into a
+/// spurious equality): both sides dated and equal copies, unchanged; both
+/// dated and DIFFERENT rejects, naming the hydro, the lag depth, and both
+/// dates — a "different past" diagnosis, worded distinctly from the
+/// identity-miss reject above so the two failures, which have different
+/// remedies, are never conflated. Either side at
+/// `ENTITY_SLOT_DELIVERY_DATE_SENTINEL` copies by identity regardless: the
+/// [`reserve_boundary_inflow_lag_slots`](crate::policy_export::reserve_boundary_inflow_lag_slots)
+/// bridge carve-out — that DECOMP-bootstrap path builds slots from a
+/// manifest and coefficients, never a calendar, so it can only ever emit the
+/// sentinel, and rejecting on it would break the boundary bridge with no
+/// replacement path.
+///
+/// Two wrong-but-compiling alternatives: rejecting whenever either side is
+/// undated buys date evidence
+/// [`reserve_boundary_inflow_lag_slots`](crate::policy_export::reserve_boundary_inflow_lag_slots)
+/// cannot supply, at the cost of the only supported external-authoring path;
+/// keying the join on `(hydro, reference_date)` instead of `(hydro,
+/// lag-index)` would make every undated slot unjoinable — breaking the same
+/// carve-out — to guard against a lag-index convention difference that
+/// [`build_stage_entity_manifest`](crate::policy_export::build_stage_entity_manifest)
+/// never lets occur, since it is the sole owner of the 1-based `subindex`
+/// convention on both sides.
+fn resolve_inflow_lag(
+    slot: &EntitySlot,
+    source: &[EntitySlot],
+    by_identity: &HashMap<SlotKey, usize>,
+) -> RebindOp {
+    let Some(&pos) = by_identity.get(&slot_key(slot)) else {
+        return RebindOp::Reject {
             reason: format!(
                 "boundary policy has no inflow-lag coefficient for hydro {} at lag depth {}: the \
                  boundary is lag-depth-incompatible with the current study",
                 slot.entity_id, slot.subindex
             ),
-        },
-    }
-}
-
-/// `HydroTransitBucket` resolution: matched by `(entity_type, entity_id,
-/// subindex)` identity, mirroring inflow-lag's shape; unmatched defaults to
-/// `Zero` rather than rejecting — a NEWAVE-shaped source carries no transit
-/// slots at all, so a miss is the expected case, not a boundary the current
-/// study is incompatible with (unlike storage/lag's must-correspond core). A
-/// Cobre-to-Cobre boundary with a matching transit arc hits instead and
-/// copies the source's own coefficient.
-fn resolve_transit_bucket(slot: &EntitySlot, by_identity: &HashMap<SlotKey, usize>) -> RebindOp {
-    match by_identity.get(&slot_key(slot)) {
-        Some(&pos) => RebindOp::Copy(pos),
-        None => RebindOp::Zero,
-    }
-}
-
-/// `AnticipatedThermalState` resolution. `slot.delivery_date == SENTINEL`
-/// (pre-fan-out padding) always resolves to `Zero`, regardless of
-/// `target_interval`. A live, dated slot with no resolved `target_interval`
-/// is an IN-STUDY ring slot — a commitment delivered WITHIN the current
-/// horizon (e.g. a matured commitment fished at the terminal stage, or a
-/// `K = 0` sub-stage-lead delivery self-delivered there) — and resolves to
-/// `Zero`: the terminal boundary FCF prices only post-study obligations, so
-/// a within-horizon delivery, already discharged inside the study, contributes
-/// nothing. A post-study-targeted ring slot derives its `delivery_date` and its
-/// `target_interval` from the SAME modular delivery stage
-/// ([`build_stage_entity_delivery_intervals`] mirrors
-/// [`build_stage_entity_manifest`], each dating the slot at its modular delivery
-/// stage), so a post-study-targeted ring slot is always
-/// `dated ⟺ Some(interval)`; a `None` interval on a dated slot therefore marks
-/// the in-study ring uniquely, never a failed post-study resolution. Two
-/// wrong-but-compiling alternatives: [`RebindOp::Reject`] here aborts a
-/// legitimate boundary load the moment any anticipated thermal delivers
-/// in-horizon (a sub-stage lead at the terminal stage — the K=0 case); fanning
-/// an in-study slot out (resolving it an in-horizon interval) would wrongly
-/// [`RebindOp::Blend`] a within-horizon delivery against the source's months.
-/// A live, dated slot WITH a resolved interval fans out against `by_month`'s
-/// calendar-overlap-weighted source months: no covered month yields `Zero`;
-/// full coverage yields [`RebindOp::Blend`] (`weight = overlap(w, M) / H_M`,
-/// the `÷H_M` distribute); partial coverage (a boundary-edge slot straddling
-/// into unpriced time) yields [`RebindOp::Renormalize`], scaling the covered
-/// months' density up to the full slot instead of an implicit `0.0`
-/// deflation term.
-///
-/// [`build_stage_entity_delivery_intervals`]: crate::policy_export::build_stage_entity_delivery_intervals
-/// [`build_stage_entity_manifest`]: crate::policy_export::build_stage_entity_manifest
-fn resolve_anticipated(
-    slot: &EntitySlot,
-    target_interval: Option<(NaiveDate, NaiveDate)>,
-    by_month: &HashMap<MonthKey, Vec<MonthSource>>,
-) -> RebindOp {
-    if slot.delivery_date == ENTITY_SLOT_DELIVERY_DATE_SENTINEL {
-        return RebindOp::Zero;
-    }
-    let Some((start_w, end_w)) = target_interval else {
-        return RebindOp::Zero;
+        };
     };
+
+    let target_date = slot.reference_date;
+    let source_date = source[pos].reference_date;
+    let target_live = target_date != ENTITY_SLOT_DELIVERY_DATE_SENTINEL;
+    let source_live = source_date != ENTITY_SLOT_DELIVERY_DATE_SENTINEL;
+
+    match (target_live, source_live) {
+        (true, true) if target_date == source_date => RebindOp::Copy(pos),
+        (true, true) => RebindOp::Reject {
+            reason: format!(
+                "boundary policy's inflow-lag coefficient for hydro {} at lag depth {} \
+                 references a different past than the current study: boundary {}, current {}",
+                slot.entity_id,
+                slot.subindex,
+                render_reference_date(source_date),
+                render_reference_date(target_date),
+            ),
+        },
+        (false, _) | (_, false) => RebindOp::Copy(pos),
+    }
+}
+
+/// Renders an [`EntitySlot::reference_date`] stamp for a reject message,
+/// never for the equality comparison itself (that stays on the raw `i32` in
+/// [`resolve_inflow_lag`]).
+fn render_reference_date(raw: i32) -> String {
+    decode_slot_date(raw).map_or_else(|| raw.to_string(), |d| d.to_string())
+}
+
+/// Forward-dated resolution shared by `AnticipatedThermalState` and
+/// `HydroTransitBucket` target slots — the two families whose delivery/
+/// arrival intervals, not `subindex` identity, determine which source
+/// position(s) a target coefficient draws from. Decodes `slot.interval_start`/
+/// `interval_end` ONCE, at the top: `interval_start == SENTINEL` (pre-fan-out
+/// padding) always resolves to `Zero`. A live interval that fails to decode
+/// (never expected past `read_policy_checkpoint`'s date validation, but not
+/// ruled out by the type system) is [`RebindOp::Reject`], naming the slot's
+/// identity and the undecodable raw value — loud rather than silently `Zero`.
+/// A live, decoded interval whose `interval_end` is at or before
+/// `boundary_date` is an IN-STUDY slot — an anticipated commitment delivered
+/// WITHIN the current horizon (e.g. a matured commitment fished at the
+/// terminal stage, or a `K = 0` sub-stage-lead delivery self-delivered
+/// there), or a transit bucket whose maturity lands before the terminal
+/// boundary — and resolves to `Zero`: the terminal boundary FCF prices only
+/// post-study obligations, so a within-horizon delivery, already discharged
+/// inside the study, contributes nothing.
+///
+/// Under a shared stage calendar, a live interval reaching past
+/// `boundary_date` always STARTS at or after it too: a slot's delivery stage
+/// is either a study stage (ending at or before `boundary_date`, which IS
+/// the study's last stage's `end_date`) or a post-study stage (the
+/// post-study calendar begins at the horizon end), so no live interval
+/// straddles `boundary_date`. That is asserted by a `debug_assert!` on this
+/// branch rather than enforced by clipping — a case the calendar forbids
+/// needs no machinery, and clipping would mask a producer bug the assertion
+/// surfaces.
+///
+/// A live interval reaching past `boundary_date` fans out against
+/// `source_index`'s calendar-overlap-weighted intervals of the SAME family
+/// (the family byte in [`SourceKey`] keeps the two families' entries
+/// disjoint, so no `subindex` or other discriminator is needed to tell them
+/// apart): no covered interval yields `Zero` — the expected outcome for a
+/// `HydroTransitBucket` target when the source is NEWAVE-shaped and carries
+/// no transit arcs at all, exactly as an `AnticipatedThermalState` target's
+/// `Zero` there instead usually expresses an in-study delivery already
+/// discharged; full coverage yields [`RebindOp::Blend`] (`weight =
+/// overlap(w, m) / H_m`, the `÷H_m` distribute); partial coverage (a
+/// boundary-edge slot straddling into unpriced time) yields
+/// [`RebindOp::Renormalize`], scaling the covered intervals' density up to
+/// the full slot instead of an implicit `0.0` deflation term. Neither `Zero`
+/// case is a reject: a NEWAVE-shaped source missing every transit arc, or a
+/// within-horizon delivery, is an expected boundary shape, not one the
+/// current study is incompatible with. `subindex` plays no part in this join
+/// for either family — two transit buckets of one downstream plant at
+/// different maturity lags, or two anticipated ring slots of one thermal,
+/// are told apart entirely by their disjoint arrival intervals.
+///
+/// Two wrong-but-compiling alternatives: [`RebindOp::Reject`] on an in-study
+/// delivery aborts a legitimate boundary load the moment any anticipated
+/// thermal delivers in-horizon (a sub-stage lead at the terminal stage — the
+/// `K = 0` case); clipping a live interval to `[max(start, boundary_date),
+/// end)` instead of asserting adds machinery for a case the calendar
+/// forbids.
+fn resolve_by_interval_overlap(
+    slot: &EntitySlot,
+    boundary_date: NaiveDate,
+    source_index: &HashMap<SourceKey, Vec<SourceInterval>>,
+) -> RebindOp {
+    if slot.interval_start == ENTITY_SLOT_DELIVERY_DATE_SENTINEL {
+        return RebindOp::Zero;
+    }
+    let Some(start_w) = decode_slot_date(slot.interval_start) else {
+        return RebindOp::Reject {
+            reason: format!(
+                "boundary policy target forward-family slot (entity_id={}, subindex={}) has an \
+                 undecodable interval_start {}",
+                slot.entity_id, slot.subindex, slot.interval_start
+            ),
+        };
+    };
+    let Some(end_w) = decode_slot_date(slot.interval_end) else {
+        return RebindOp::Reject {
+            reason: format!(
+                "boundary policy target forward-family slot (entity_id={}, subindex={}) has an \
+                 undecodable interval_end {}",
+                slot.entity_id, slot.subindex, slot.interval_end
+            ),
+        };
+    };
+
+    if end_w <= boundary_date {
+        return RebindOp::Zero;
+    }
+    debug_assert!(
+        start_w >= boundary_date,
+        "a live target forward-family interval reaching past the boundary date must start at or \
+         after it under a shared stage calendar: [{start_w}, {end_w}) vs boundary {boundary_date}"
+    );
 
     let h_w = positive_hours(start_w, end_w);
     if h_w <= 0.0 {
         return RebindOp::Zero;
     }
-    let Some(months) = by_month.get(&(slot.entity_type, slot.entity_id)) else {
+    let Some(intervals) = source_index.get(&(slot.entity_type, slot.entity_id)) else {
         return RebindOp::Zero;
     };
 
     let mut terms = Vec::new();
     let mut covered = 0.0;
-    for m in months {
-        let overlap = overlap_hours((start_w, end_w), (m.month_start, m.month_end));
+    for interval in intervals {
+        let overlap = overlap_hours((start_w, end_w), (interval.start, interval.end));
         if overlap > 0.0 {
-            terms.push((m.source_pos, overlap, m.h_m));
+            terms.push((interval.source_pos, overlap, interval.hours));
             covered += overlap;
         }
     }
@@ -448,7 +546,7 @@ fn resolve_anticipated(
         RebindOp::Blend(
             terms
                 .into_iter()
-                .map(|(pos, overlap, h_m)| (pos, overlap / h_m))
+                .map(|(pos, overlap, hours)| (pos, overlap / hours))
                 .collect(),
         )
     } else {
@@ -456,7 +554,7 @@ fn resolve_anticipated(
         RebindOp::Renormalize(
             terms
                 .into_iter()
-                .map(|(pos, overlap, h_m)| (pos, (overlap / h_m) * scale))
+                .map(|(pos, overlap, hours)| (pos, (overlap / hours) * scale))
                 .collect(),
         )
     }
@@ -539,6 +637,20 @@ pub(crate) fn dropped_source_positions(source_len: usize, rebind: &[RebindOp]) -
         .collect()
 }
 
+/// Human-readable name for a slot's state family — the single owner of every
+/// family's rendered name, shared by [`BoundaryReconciliationReport::families`]
+/// (and therefore [`BoundaryReconciliationReport::detail_lines`] and
+/// [`slot_detail`]) and `policy_load`'s dropped-coupling warning.
+pub(crate) fn family_label(family: Option<StateFamily>) -> &'static str {
+    match family {
+        Some(StateFamily::HydroStorage) => "storage",
+        Some(StateFamily::HydroInflowLag) => "inflow-lag",
+        Some(StateFamily::HydroTransitBucket) => "transit-bucket",
+        Some(StateFamily::AnticipatedThermalState) => "anticipated",
+        None => "other-identity",
+    }
+}
+
 /// Per-family tally of one [`BoundaryReconciliationReport`]'s per-operation
 /// classification: `copy` ([`RebindOp::Copy`]), `fan_out`
 /// (`Blend` + `Renormalize` target slots), `straddling` (the `Renormalize`
@@ -560,19 +672,66 @@ pub struct FamilyTally {
 }
 
 /// Anticipated-family fan-out coverage: the source's own priced
-/// delivery-month span and the target's live delivery-interval span.
+/// delivery-interval span and the target's live delivery-interval span.
 /// Paired with the sibling [`BoundaryReconciliationReport::anticipated`]
 /// tally's `fan_out`/`straddling`/`default_zero`, this is everything
 /// [`BoundaryReconciliationReport::detail_lines`] needs to render the
 /// coverage line.
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct AnticipatedCoverage {
-    /// Live, dated anticipated source slots contributing a decoded calendar month.
-    pub source_month_count: usize,
-    /// `[earliest month_start, latest month_end)` across those source months.
+    /// Live, dated anticipated source slots contributing a decoded delivery interval.
+    pub source_interval_count: usize,
+    /// `[earliest start, latest end)` across those source intervals.
     pub source_span: Option<(NaiveDate, NaiveDate)>,
     /// `[earliest start, latest end)` across live, dated anticipated target intervals.
     pub target_span: Option<(NaiveDate, NaiveDate)>,
+}
+
+/// One [`EntitySlot`]'s identity and dating, as rendered into
+/// [`BoundaryReconciliationReport::dropped_source_slots`] and
+/// [`BoundaryReconciliationReport::straddling_slots`]. `interval` is
+/// populated for `HydroTransitBucket`/`AnticipatedThermalState`,
+/// `reference_date` for `HydroInflowLag`; both are `None` for `HydroStorage`
+/// and for an unrecognized family — see [`slot_detail`].
+#[derive(Debug, Clone, Serialize)]
+pub struct SlotDetail {
+    /// This slot's state family, via [`family_label`].
+    pub family: &'static str,
+    /// The owning entity's id.
+    pub entity_id: i32,
+    /// The slot's secondary index (per-family meaning is the caller's).
+    pub subindex: u32,
+    /// The slot's own `[start, end)` delivery/arrival span, decoded, for the
+    /// two forward-dated families; `None` otherwise, including an
+    /// undecodable stamp.
+    pub interval: Option<(NaiveDate, NaiveDate)>,
+    /// The slot's own reference date, decoded, for `HydroInflowLag`; `None`
+    /// otherwise, including an undecodable stamp.
+    pub reference_date: Option<NaiveDate>,
+}
+
+/// Builds `slot`'s [`SlotDetail`], decoding only the date field(s) `slot`'s
+/// own family populates ([`EntitySlot`]'s field docs). A stamp that fails to
+/// decode yields `None`, never an error — the report is a diagnostic and
+/// must never fail a load that otherwise succeeded.
+fn slot_detail(slot: &EntitySlot) -> SlotDetail {
+    let family = slot.family();
+    let interval = matches!(
+        family,
+        Some(StateFamily::AnticipatedThermalState | StateFamily::HydroTransitBucket)
+    )
+    .then(|| decode_slot_date(slot.interval_start).zip(decode_slot_date(slot.interval_end)))
+    .flatten();
+    let reference_date = matches!(family, Some(StateFamily::HydroInflowLag))
+        .then(|| decode_slot_date(slot.reference_date))
+        .flatten();
+    SlotDetail {
+        family: family_label(family),
+        entity_id: slot.entity_id,
+        subindex: slot.subindex,
+        interval,
+        reference_date,
+    }
 }
 
 /// The "which boundary policy we have + what got reconciled" diagnostic:
@@ -596,6 +755,14 @@ pub struct BoundaryReconciliationReport {
     pub anticipated_coverage: AnticipatedCoverage,
     /// Every family without its own reconcile arm (the identity-reject default).
     pub other_identity: FamilyTally,
+    /// Every dropped source slot's own identity and dating, in ascending
+    /// source position — [`dropped_source_positions`] made readable.
+    /// Uncapped; [`Self::detail_lines`] caps its own rendering of it.
+    pub dropped_source_slots: Vec<SlotDetail>,
+    /// Every straddling ([`RebindOp::Renormalize`]) target slot's own
+    /// identity and dating, in ascending target position. Uncapped;
+    /// [`Self::detail_lines`] caps its own rendering of it.
+    pub straddling_slots: Vec<SlotDetail>,
 }
 
 impl BoundaryReconciliationReport {
@@ -611,11 +778,20 @@ impl BoundaryReconciliationReport {
 
     fn families(&self) -> [(&'static str, FamilyTally); 5] {
         [
-            ("storage", self.storage),
-            ("inflow-lag", self.inflow_lag),
-            ("transit-bucket", self.transit_bucket),
-            ("anticipated", self.anticipated),
-            ("other-identity", self.other_identity),
+            (family_label(Some(StateFamily::HydroStorage)), self.storage),
+            (
+                family_label(Some(StateFamily::HydroInflowLag)),
+                self.inflow_lag,
+            ),
+            (
+                family_label(Some(StateFamily::HydroTransitBucket)),
+                self.transit_bucket,
+            ),
+            (
+                family_label(Some(StateFamily::AnticipatedThermalState)),
+                self.anticipated,
+            ),
+            (family_label(None), self.other_identity),
         ]
     }
 
@@ -658,15 +834,20 @@ impl BoundaryReconciliationReport {
     }
 
     /// Per-family reconciliation breakdown (one COPY / FAN-OUT / DEFAULT-0.0 /
-    /// DROP line per family, then the anticipated coverage line) — the verbose
-    /// detail behind [`Self::summary_line`]. Empty on the dimension-only skip path.
+    /// DROP line per family, then the anticipated coverage line), followed by
+    /// up to [`DETAIL_LINES_SLOT_CAP`] `dropped:` lines and up to
+    /// [`DETAIL_LINES_SLOT_CAP`] `straddling:` lines (each with its own
+    /// `"... and N more"` remainder line past the cap) — the verbose detail
+    /// behind [`Self::summary_line`]. The cap is a rendering concern only:
+    /// [`Self::dropped_source_slots`] and [`Self::straddling_slots`]
+    /// themselves stay uncapped. Empty on the dimension-only skip path.
     #[must_use]
     pub fn detail_lines(&self) -> Vec<String> {
         if !self.reconciled {
             return Vec::new();
         }
         let families = self.families();
-        let mut lines = Vec::with_capacity(families.len() + 1);
+        let mut lines = Vec::with_capacity(families.len() + 1 + 2 * (DETAIL_LINES_SLOT_CAP + 1));
         for (name, tally) in families {
             lines.push(format!(
                 "{name}: COPY={}, FAN-OUT=({}, rule = distribute), DEFAULT-0.0={}, DROP={}",
@@ -674,20 +855,51 @@ impl BoundaryReconciliationReport {
             ));
         }
         lines.push(format!(
-            "anticipated: {} source months fanned to {} target slots ({} straddling, \
-             overlap-blended), {} months defaulted",
-            self.anticipated_coverage.source_month_count,
+            "anticipated: {} source delivery intervals fanned to {} target slots ({} \
+             straddling, overlap-blended), {} months defaulted",
+            self.anticipated_coverage.source_interval_count,
             self.anticipated.fan_out,
             self.anticipated.straddling,
             self.anticipated.default_zero
         ));
+        push_capped_slot_lines(&mut lines, "dropped", &self.dropped_source_slots);
+        push_capped_slot_lines(&mut lines, "straddling", &self.straddling_slots);
         lines
+    }
+}
+
+/// [`BoundaryReconciliationReport::detail_lines`]'s per-list rendering cap for
+/// `dropped_source_slots`/`straddling_slots` — a terminal-rendering concern
+/// only; the report's own vectors stay uncapped.
+const DETAIL_LINES_SLOT_CAP: usize = 5;
+
+/// Renders `details`' first [`DETAIL_LINES_SLOT_CAP`] entries as
+/// `"{prefix}: {family} {entity_id}/{subindex} @ [{start}, {end})"` (or `@
+/// {reference_date}`, or no date clause for storage), appending a `"... and N
+/// more"` line when `details` is longer than the cap.
+fn push_capped_slot_lines(lines: &mut Vec<String>, prefix: &str, details: &[SlotDetail]) {
+    for detail in details.iter().take(DETAIL_LINES_SLOT_CAP) {
+        let date_clause = match (detail.interval, detail.reference_date) {
+            (Some((start, end)), _) => format!(" @ [{start}, {end})"),
+            (None, Some(reference_date)) => format!(" @ {reference_date}"),
+            (None, None) => String::new(),
+        };
+        lines.push(format!(
+            "{prefix}: {} {}/{}{date_clause}",
+            detail.family, detail.entity_id, detail.subindex
+        ));
+    }
+    if details.len() > DETAIL_LINES_SLOT_CAP {
+        lines.push(format!(
+            "... and {} more",
+            details.len() - DETAIL_LINES_SLOT_CAP
+        ));
     }
 }
 
 /// Classify one target slot's `(family, op)` into `tally`: `Copy` → COPY;
 /// `Blend`/`Renormalize` → FAN-OUT (`Renormalize` also STRADDLING); `Zero` on
-/// a sentinel-anticipated slot is a structural pad, excluded from every
+/// a sentinel forward-family slot is a structural pad, excluded from every
 /// tally; every other `Zero` → DEFAULT-0.0.
 fn classify_op(
     op: &RebindOp,
@@ -703,9 +915,13 @@ fn classify_op(
             tally.straddling += 1;
         }
         RebindOp::Zero => {
-            let sentinel_anticipated_pad = family == Some(StateFamily::AnticipatedThermalState)
-                && slot.delivery_date == ENTITY_SLOT_DELIVERY_DATE_SENTINEL;
-            if !sentinel_anticipated_pad {
+            let is_forward_family = matches!(
+                family,
+                Some(StateFamily::AnticipatedThermalState | StateFamily::HydroTransitBucket)
+            );
+            let sentinel_forward_pad =
+                is_forward_family && slot.interval_start == ENTITY_SLOT_DELIVERY_DATE_SENTINEL;
+            if !sentinel_forward_pad {
                 tally.default_zero += 1;
             }
         }
@@ -730,9 +946,20 @@ fn fold_span(span: &mut Option<(NaiveDate, NaiveDate)>, interval: Option<(NaiveD
 
 /// Build a [`BoundaryReconciliationReport`] over one `load_boundary_cuts`
 /// reconciliation: a pure pass over the aligned `target`/`rebind` vectors,
-/// `source` (for [`dropped_source_positions`] and the source month span), and
-/// `target_delivery_intervals` (for the target interval span). No I/O, no
-/// mutation, not on any hot path.
+/// `source` (for [`dropped_source_positions`]), and `source_index` (for the
+/// source interval span) — the same [`build_source_interval_index`] output
+/// [`build_rebind`] resolved against, so a source slot's span is read exactly
+/// once, never re-decoded here. [`AnticipatedCoverage`] is anticipated-only,
+/// so the source-span pass filters `source_index` to the
+/// `AnticipatedThermalState` family byte even though the shared index also
+/// carries `HydroTransitBucket` entries. The target span folds each live
+/// anticipated `target` slot's OWN `interval_start`/`interval_end` — the same
+/// set [`build_rebind`] fanned out against — reaching past `boundary_date`.
+/// [`BoundaryReconciliationReport::dropped_source_slots`] is built in the
+/// same dropped-positions loop, in ascending source position;
+/// [`BoundaryReconciliationReport::straddling_slots`] in the same target
+/// pass, in ascending target position — both positional orders, never
+/// sorted. No I/O, no mutation, not on any hot path.
 ///
 /// # Panics
 ///
@@ -741,8 +968,9 @@ fn fold_span(span: &mut Option<(NaiveDate, NaiveDate)>, interval: Option<(NaiveD
 pub(crate) fn build_reconciliation_report(
     source: &[EntitySlot],
     target: &[EntitySlot],
-    target_delivery_intervals: &[Option<(NaiveDate, NaiveDate)>],
+    boundary_date: NaiveDate,
     rebind: &[RebindOp],
+    source_index: &HashMap<SourceKey, Vec<SourceInterval>>,
 ) -> BoundaryReconciliationReport {
     let mut report = BoundaryReconciliationReport {
         reconciled: true,
@@ -750,10 +978,19 @@ pub(crate) fn build_reconciliation_report(
     };
 
     let mut target_span = None;
-    for (i, (slot, op)) in target.iter().zip(rebind).enumerate() {
+    for (slot, op) in target.iter().zip(rebind) {
         let family = slot.family();
-        let interval = target_delivery_intervals.get(i).copied().flatten();
-        fold_span(&mut target_span, interval);
+        if family == Some(StateFamily::AnticipatedThermalState)
+            && slot.interval_start != ENTITY_SLOT_DELIVERY_DATE_SENTINEL
+            && let Some(start) = decode_slot_date(slot.interval_start)
+            && let Some(end) = decode_slot_date(slot.interval_end)
+            && end > boundary_date
+        {
+            fold_span(&mut target_span, Some((start, end)));
+        }
+        if matches!(op, RebindOp::Renormalize(_)) {
+            report.straddling_slots.push(slot_detail(slot));
+        }
         classify_op(op, family, slot, report.tally_mut(family));
     }
     report.anticipated_coverage.target_span = target_span;
@@ -761,24 +998,26 @@ pub(crate) fn build_reconciliation_report(
     for pos in dropped_source_positions(source.len(), rebind) {
         if let Some(slot) = source.get(pos) {
             report.tally_mut(slot.family()).dropped_source += 1;
+            report.dropped_source_slots.push(slot_detail(slot));
         }
     }
 
     let mut source_span = None;
-    let mut source_month_count = 0;
-    for slot in source {
-        if slot.entity_type != StateFamily::AnticipatedThermalState.code()
-            || slot.delivery_date == ENTITY_SLOT_DELIVERY_DATE_SENTINEL
-        {
+    let mut source_interval_count = 0;
+    // Anticipated-only: the family byte in the key filters out the shared
+    // index's HydroTransitBucket entries, which AnticipatedCoverage excludes.
+    // Map-order iteration is safe here only because a count and a min/max span
+    // are exactly commutative; never accumulate a float sum this way.
+    for (&(family_byte, _), intervals) in source_index {
+        if family_byte != StateFamily::AnticipatedThermalState.code() {
             continue;
         }
-        let Ok((start, end, _)) = decode_month_anchor(slot.delivery_date) else {
-            continue;
-        };
-        source_month_count += 1;
-        fold_span(&mut source_span, Some((start, end)));
+        for interval in intervals {
+            source_interval_count += 1;
+            fold_span(&mut source_span, Some((interval.start, interval.end)));
+        }
     }
-    report.anticipated_coverage.source_month_count = source_month_count;
+    report.anticipated_coverage.source_interval_count = source_interval_count;
     report.anticipated_coverage.source_span = source_span;
 
     report
@@ -789,12 +1028,13 @@ mod tests {
     use chrono::NaiveDate;
 
     use super::{
-        BoundaryReconciliationReport, FamilyTally, RebindOp, build_boundary_fold, build_rebind,
-        build_reconciliation_report, decode_month_anchor, dropped_source_positions, rebind_cut,
+        BoundaryReconciliationReport, FamilyTally, RebindOp, SlotDetail, build_boundary_fold,
+        build_rebind, build_reconciliation_report, build_source_interval_index,
+        dropped_source_positions, rebind_cut, slot_detail,
     };
     use crate::SddpError;
     use cobre_core::{AnticipatedCommitmentHistory, EntityId};
-    use cobre_io::{EntitySlot, OwnedPolicyCutRecord};
+    use cobre_io::{EntitySlot, OwnedPolicyCutRecord, encode_slot_date};
 
     fn storage_slot(id: i32) -> EntitySlot {
         EntitySlot::storage(id, true)
@@ -808,12 +1048,61 @@ mod tests {
         EntitySlot::transit_bucket(downstream_hydro_id, lag, true)
     }
 
+    /// Like [`transit_bucket_slot`] but carrying a real `[start, end)`
+    /// arrival interval instead of the sentinel.
+    fn transit_bucket_slot_over(
+        downstream_hydro_id: i32,
+        lag: u32,
+        start: i32,
+        end: i32,
+    ) -> EntitySlot {
+        transit_bucket_slot(downstream_hydro_id, lag).with_interval(start, end)
+    }
+
     fn anticipated_sentinel_slot(thermal_id: i32, ring_slot: u32) -> EntitySlot {
         EntitySlot::anticipated(thermal_id, ring_slot, true)
     }
 
     fn anticipated_dated_slot(thermal_id: i32, ring_slot: u32, delivery_date: i32) -> EntitySlot {
-        EntitySlot::anticipated(thermal_id, ring_slot, true).with_delivery_date(delivery_date)
+        EntitySlot::anticipated(thermal_id, ring_slot, true)
+            .with_interval(delivery_date, next_month_anchor(delivery_date))
+    }
+
+    /// The following month's day-01 `YYYYMMDD` anchor of `month_anchor`
+    /// (itself a day-01 anchor) — mirrors the same-named helper in `tests/`.
+    fn next_month_anchor(month_anchor: i32) -> i32 {
+        let year = month_anchor / 10_000;
+        let month = (month_anchor / 100) % 100;
+        if month == 12 {
+            (year + 1) * 10_000 + 101
+        } else {
+            year * 10_000 + (month + 1) * 100 + 1
+        }
+    }
+
+    /// Builds `source`'s interval index and resolves [`build_rebind`] against
+    /// it — the two-step call `load_boundary_cuts` performs, collapsed for
+    /// tests that only assert on the resulting ops.
+    fn rebind_via_index(
+        source: &[EntitySlot],
+        target: &[EntitySlot],
+        boundary_date: NaiveDate,
+    ) -> Result<Vec<RebindOp>, SddpError> {
+        let source_index = build_source_interval_index(source)?;
+        build_rebind(source, target, boundary_date, &source_index)
+    }
+
+    /// Builds `source`'s interval index and resolves
+    /// [`build_reconciliation_report`] against it, mirroring
+    /// [`rebind_via_index`].
+    fn report_via_index(
+        source: &[EntitySlot],
+        target: &[EntitySlot],
+        boundary_date: NaiveDate,
+        rebind: &[RebindOp],
+    ) -> BoundaryReconciliationReport {
+        let source_index = build_source_interval_index(source).unwrap();
+        build_reconciliation_report(source, target, boundary_date, rebind, &source_index)
     }
 
     fn owned_cut(coefficients: Vec<f64>) -> OwnedPolicyCutRecord {
@@ -828,11 +1117,11 @@ mod tests {
         }
     }
 
-    /// All-`None` intervals aligned to `target.len()` — for tests exercising
-    /// only the identity families, which never consult
-    /// `target_delivery_intervals`.
-    fn no_intervals(target: &[EntitySlot]) -> Vec<Option<(NaiveDate, NaiveDate)>> {
-        vec![None; target.len()]
+    /// An arbitrary boundary date for tests exercising only the identity
+    /// families or a sentinel-padded anticipated slot, neither of which reads
+    /// `boundary_date`.
+    fn arbitrary_boundary_date() -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, 1, 1).expect("valid calendar date")
     }
 
     fn ymd(year: i32, month: u32, day: u32) -> NaiveDate {
@@ -861,7 +1150,7 @@ mod tests {
         let source = vec![storage_slot(1), storage_slot(2), storage_slot(3)];
         let target = source.clone();
 
-        let rebind = build_rebind(&source, &target, &no_intervals(&target)).unwrap();
+        let rebind = rebind_via_index(&source, &target, arbitrary_boundary_date()).unwrap();
 
         assert_eq!(
             rebind,
@@ -883,7 +1172,7 @@ mod tests {
         ];
         let target = vec![storage_slot(2), inflow_lag_slot(1, 1)];
 
-        let rebind = build_rebind(&source, &target, &no_intervals(&target)).unwrap();
+        let rebind = rebind_via_index(&source, &target, arbitrary_boundary_date()).unwrap();
 
         assert_eq!(rebind, vec![RebindOp::Copy(2), RebindOp::Copy(1)]);
     }
@@ -895,7 +1184,7 @@ mod tests {
         let source = vec![storage_slot(1)];
         let target = vec![storage_slot(1), storage_slot(42)];
 
-        let err = build_rebind(&source, &target, &no_intervals(&target)).unwrap_err();
+        let err = rebind_via_index(&source, &target, arbitrary_boundary_date()).unwrap_err();
 
         let msg = err.to_string();
         assert!(msg.contains("42"), "must name the unpriced hydro: {msg}");
@@ -909,11 +1198,81 @@ mod tests {
         let source = vec![storage_slot(1), inflow_lag_slot(1, 1)];
         let target = vec![storage_slot(1), inflow_lag_slot(1, 2)];
 
-        let err = build_rebind(&source, &target, &no_intervals(&target)).unwrap_err();
+        let err = rebind_via_index(&source, &target, arbitrary_boundary_date()).unwrap_err();
 
         let msg = err.to_string();
         assert!(msg.contains('1'), "must name hydro 1: {msg}");
         assert!(msg.contains('2'), "must name lag depth 2: {msg}");
+    }
+
+    /// Given a source and a target inflow-lag slot for the same hydro and lag
+    /// depth, but with DIFFERENT non-sentinel `reference_date`s, when
+    /// `build_rebind` runs, then it rejects naming the hydro, the lag depth,
+    /// and both dates — never the identity-miss lag-depth-incompatibility
+    /// wording.
+    #[test]
+    fn inflow_lag_differing_reference_dates_reject_naming_both_dates() {
+        let source = vec![inflow_lag_slot(1, 2).with_reference_date(20_300_301)];
+        let target = vec![inflow_lag_slot(1, 2).with_reference_date(20_300_401)];
+
+        let err = rebind_via_index(&source, &target, arbitrary_boundary_date()).unwrap_err();
+
+        let msg = err.to_string();
+        assert!(msg.contains("hydro 1"), "must name hydro 1: {msg}");
+        assert!(msg.contains("lag depth 2"), "must name lag depth 2: {msg}");
+        assert!(
+            msg.contains("2030-03-01"),
+            "must name the source date: {msg}"
+        );
+        assert!(
+            msg.contains("2030-04-01"),
+            "must name the target date: {msg}"
+        );
+        assert!(
+            !msg.contains("lag-depth-incompatible"),
+            "a date mismatch is not a depth incompatibility: {msg}"
+        );
+    }
+
+    /// Given a source and a target inflow-lag slot agreeing on a non-sentinel
+    /// `reference_date`, when `build_rebind` runs, then the coefficient still
+    /// copies by identity — matching dates is not a new requirement, only a
+    /// mismatch is newly rejected.
+    #[test]
+    fn inflow_lag_matching_reference_dates_copy() {
+        let source = vec![inflow_lag_slot(1, 2).with_reference_date(20_300_301)];
+        let target = vec![inflow_lag_slot(1, 2).with_reference_date(20_300_301)];
+
+        let rebind = rebind_via_index(&source, &target, arbitrary_boundary_date()).unwrap();
+
+        assert_eq!(rebind, vec![RebindOp::Copy(0)]);
+    }
+
+    /// Given an inflow-lag slot pair where exactly one side carries a real
+    /// `reference_date` and the other the sentinel — both directions — when
+    /// `build_rebind` runs, then it still copies by identity: the
+    /// `reserve_boundary_inflow_lag_slots` bridge carve-out.
+    #[test]
+    fn inflow_lag_sentinel_on_either_side_copies_by_identity() {
+        let dated_source = vec![inflow_lag_slot(1, 2).with_reference_date(20_300_301)];
+        let sentinel_target = vec![inflow_lag_slot(1, 2)];
+        let rebind =
+            rebind_via_index(&dated_source, &sentinel_target, arbitrary_boundary_date()).unwrap();
+        assert_eq!(
+            rebind,
+            vec![RebindOp::Copy(0)],
+            "dated source, sentinel target"
+        );
+
+        let sentinel_source = vec![inflow_lag_slot(1, 2)];
+        let dated_target = vec![inflow_lag_slot(1, 2).with_reference_date(20_300_301)];
+        let rebind =
+            rebind_via_index(&sentinel_source, &dated_target, arbitrary_boundary_date()).unwrap();
+        assert_eq!(
+            rebind,
+            vec![RebindOp::Copy(0)],
+            "sentinel source, dated target"
+        );
     }
 
     /// A target storage slot never matches a source slot sharing its
@@ -925,7 +1284,7 @@ mod tests {
         let source = vec![inflow_lag_slot(5, 1)];
         let target = vec![storage_slot(5)];
 
-        let err = build_rebind(&source, &target, &no_intervals(&target)).unwrap_err();
+        let err = rebind_via_index(&source, &target, arbitrary_boundary_date()).unwrap_err();
 
         assert!(matches!(err, SddpError::Validation(_)));
     }
@@ -937,7 +1296,7 @@ mod tests {
     fn rebind_cut_all_copy_matches_source_coefficients_verbatim() {
         let source = vec![storage_slot(1), storage_slot(2)];
         let target = source.clone();
-        let rebind = build_rebind(&source, &target, &no_intervals(&target)).unwrap();
+        let rebind = rebind_via_index(&source, &target, arbitrary_boundary_date()).unwrap();
         let cut = owned_cut(vec![10.0, -5.0]);
 
         let coefficients = rebind_cut(&cut, &rebind);
@@ -988,7 +1347,7 @@ mod tests {
         let source = vec![storage_slot(1)];
         let target = vec![storage_slot(1), storage_slot(2)];
 
-        let err = build_rebind(&source, &target, &no_intervals(&target)).unwrap_err();
+        let err = rebind_via_index(&source, &target, arbitrary_boundary_date()).unwrap_err();
 
         assert!(matches!(err, SddpError::Validation(_)));
     }
@@ -1002,55 +1361,214 @@ mod tests {
         assert_eq!(dropped, vec![0, 2]);
     }
 
-    /// Given a target transit-bucket slot, when `build_rebind` runs, then it
-    /// resolves to `Copy` at the source's identity-matched position when the
-    /// source carries the same `(entity_id, subindex)` transit slot, and to
-    /// `Zero` when it does not (the NEWAVE-shaped-source default) — transit
-    /// resolves by identity like storage/lag, never unconditionally.
+    /// Given a target transit-bucket slot at the sentinel `interval_start`,
+    /// when `build_rebind` runs, then it resolves to `Zero` even when the
+    /// source carries the same `(entity_id, subindex)` transit slot at the
+    /// same sentinel — transit no longer resolves by identity, so a
+    /// same-identity match with no arrival interval never copies.
     #[test]
-    fn build_rebind_transit_bucket_copies_on_identity_match_else_zero() {
+    fn build_rebind_sentinel_transit_bucket_target_is_always_zero() {
         let source = vec![storage_slot(1), transit_bucket_slot(2, 1)];
         let matching_target = vec![storage_slot(1), transit_bucket_slot(2, 1)];
 
         let rebind =
-            build_rebind(&source, &matching_target, &no_intervals(&matching_target)).unwrap();
-
-        assert_eq!(rebind, vec![RebindOp::Copy(0), RebindOp::Copy(1)]);
-        let cut = owned_cut(vec![10.0, 99.0]);
-        assert_eq!(rebind_cut(&cut, &rebind), vec![10.0, 99.0]);
-
-        let missing_target = vec![storage_slot(1), transit_bucket_slot(3, 1)];
-
-        let rebind =
-            build_rebind(&source, &missing_target, &no_intervals(&missing_target)).unwrap();
+            rebind_via_index(&source, &matching_target, arbitrary_boundary_date()).unwrap();
 
         assert_eq!(rebind, vec![RebindOp::Copy(0), RebindOp::Zero]);
-        assert_eq!(rebind_cut(&cut, &rebind), vec![10.0, 0.0]);
     }
 
-    /// Given a target anticipated slot with `delivery_date == SENTINEL`, when
-    /// `build_rebind` runs, then it resolves to `Zero` — even when the source
-    /// carries an identical sentinel-dated slot at the same identity, proving
-    /// the sentinel case is dispatched purely on `delivery_date`.
+    /// Given a source and a target transit-bucket slot sharing the SAME
+    /// arrival interval, when `build_rebind` runs, then it resolves to
+    /// `Blend` with a single unit-weight term — the exact-match acceptance
+    /// case, whose coefficient is bit-identical to the source's own — and
+    /// the reconciliation report tallies it as `fan_out`, never `copy`: the
+    /// join mechanism changed even though the coefficient did not.
+    #[test]
+    fn transit_bucket_identical_arrival_interval_blends_at_unit_weight() {
+        let start = encode_slot_date(ymd(2026, 4, 1));
+        let end = encode_slot_date(ymd(2026, 5, 1));
+        let source = vec![transit_bucket_slot_over(2, 1, start, end)];
+        let target = vec![transit_bucket_slot_over(2, 1, start, end)];
+        let boundary_date = ymd(2026, 4, 1);
+
+        let rebind = rebind_via_index(&source, &target, boundary_date).unwrap();
+
+        assert_eq!(rebind, vec![RebindOp::Blend(vec![(0, 1.0)])]);
+
+        let cut = owned_cut(vec![77.0]);
+        let coefficients = rebind_cut(&cut, &rebind);
+        assert_eq!(
+            coefficients[0].to_bits(),
+            cut.coefficients[0].to_bits(),
+            "an identical-interval unit-weight Blend term must reproduce the source \
+             coefficient bit-for-bit"
+        );
+
+        let report = report_via_index(&source, &target, boundary_date, &rebind);
+        assert_eq!(
+            report.transit_bucket.fan_out, 1,
+            "an interval-join match tallies as fan_out, not copy"
+        );
+        assert_eq!(report.transit_bucket.copy, 0);
+    }
+
+    /// Given a target transit-bucket slot whose arrival interval is fully
+    /// inside the ONE wider source interval covering it, when `build_rebind`
+    /// runs, then it resolves to `Blend` (full coverage, never
+    /// `Renormalize`) with the `÷H_m`-conserving weight — a target narrower
+    /// than its covering source interval draws a fractional share, not the
+    /// source's own coefficient verbatim, exactly as
+    /// `build_rebind_anticipated_partial_month_yields_blend_fractional_weight`
+    /// establishes for the anticipated family this resolver is shared with.
+    #[test]
+    fn transit_bucket_target_inside_one_source_interval_blends_at_fractional_source_hours() {
+        let source = vec![transit_bucket_slot_over(
+            2,
+            1,
+            encode_slot_date(ymd(2026, 4, 1)),
+            encode_slot_date(ymd(2026, 5, 1)),
+        )];
+        let boundary_date = ymd(2026, 4, 1);
+        let target = vec![transit_bucket_slot_over(
+            2,
+            100,
+            encode_slot_date(ymd(2026, 4, 1)),
+            encode_slot_date(ymd(2026, 4, 8)),
+        )];
+
+        let rebind = rebind_via_index(&source, &target, boundary_date).unwrap();
+
+        match &rebind[0] {
+            RebindOp::Blend(terms) => {
+                assert_eq!(terms.len(), 1);
+                assert_eq!(terms[0].0, 0);
+                let expected_weight = (7.0 * 24.0) / (30.0 * 24.0);
+                assert!(
+                    (terms[0].1 - expected_weight).abs() < expected_weight * 1e-9,
+                    "weight {} != expected {expected_weight}",
+                    terms[0].1
+                );
+            }
+            other => panic!("expected Blend, got {other:?}"),
+        }
+    }
+
+    /// Given a target transit-bucket slot whose arrival interval does not
+    /// overlap the source's, when `build_rebind` runs, then it resolves to
+    /// `Zero` — no covered interval, nothing to reconcile to.
+    #[test]
+    fn transit_bucket_non_overlapping_arrival_interval_zeroes() {
+        let source = vec![transit_bucket_slot_over(
+            2,
+            1,
+            encode_slot_date(ymd(2026, 4, 1)),
+            encode_slot_date(ymd(2026, 5, 1)),
+        )];
+        let boundary_date = ymd(2026, 4, 1);
+        let target = vec![transit_bucket_slot_over(
+            2,
+            100,
+            encode_slot_date(ymd(2026, 5, 1)),
+            encode_slot_date(ymd(2026, 6, 1)),
+        )];
+
+        let rebind = rebind_via_index(&source, &target, boundary_date).unwrap();
+
+        assert_eq!(rebind, vec![RebindOp::Zero]);
+    }
+
+    /// Given a target manifest with two transit buckets for one downstream
+    /// hydro at lags 1 and 2 whose arrival intervals are disjoint, and a
+    /// source carrying only the lag-2 interval AT A DIFFERENT subindex, when
+    /// `build_rebind` runs, then the lag-2 target draws the source
+    /// coefficient and the lag-1 target resolves to `Zero` — the join
+    /// discriminates by interval alone, with `subindex` playing no part.
+    #[test]
+    fn transit_bucket_join_ignores_subindex() {
+        let lag1 = (ymd(2026, 4, 1), ymd(2026, 4, 8));
+        let lag2 = (ymd(2026, 4, 8), ymd(2026, 4, 15));
+        let source = vec![transit_bucket_slot_over(
+            2,
+            7,
+            encode_slot_date(lag2.0),
+            encode_slot_date(lag2.1),
+        )];
+        let target = vec![
+            transit_bucket_slot_over(2, 1, encode_slot_date(lag1.0), encode_slot_date(lag1.1)),
+            transit_bucket_slot_over(2, 2, encode_slot_date(lag2.0), encode_slot_date(lag2.1)),
+        ];
+
+        let rebind = rebind_via_index(&source, &target, lag1.0).unwrap();
+
+        assert_eq!(
+            rebind,
+            vec![RebindOp::Zero, RebindOp::Blend(vec![(0, 1.0)])],
+            "the lag-1 target has no overlapping source interval and zeroes; the lag-2 target \
+             draws the source's coefficient by interval overlap alone, its differing subindex \
+             (7 on the source, 2 on the target) irrelevant"
+        );
+    }
+
+    /// Given a target transit-bucket slot at the sentinel `interval_start`
+    /// (pre-fan-out padding), when `build_rebind` runs, then it resolves to
+    /// `Zero` regardless of `boundary_date`, and the reconciliation report
+    /// excludes it from every tally — the structural-pad exclusion, mirroring
+    /// `anticipated_sentinel_interval_is_a_structural_pad`.
+    #[test]
+    fn transit_bucket_sentinel_interval_is_a_structural_pad() {
+        let source = vec![transit_bucket_slot_over(
+            2,
+            1,
+            encode_slot_date(ymd(2026, 4, 1)),
+            encode_slot_date(ymd(2026, 5, 1)),
+        )];
+        let target = vec![transit_bucket_slot(2, 1)];
+        let boundary_date = arbitrary_boundary_date();
+
+        let rebind = rebind_via_index(&source, &target, boundary_date).unwrap();
+        assert_eq!(rebind, vec![RebindOp::Zero]);
+
+        let report = report_via_index(&source, &target, boundary_date, &rebind);
+        assert_eq!(
+            report.transit_bucket.default_zero, 0,
+            "a sentinel-interval Zero must be excluded from the default_zero tally"
+        );
+        assert_eq!(report.transit_bucket.copy, 0);
+        assert_eq!(report.transit_bucket.fan_out, 0);
+    }
+
+    /// Given a target slot whose `entity_type` is a byte no `StateFamily`
+    /// variant defines, when `build_rebind` runs, then it still rejects by identity
+    /// via `resolve_by_identity`, naming the target's own position and
+    /// identity — unaffected by the forward-family dispatch this module adds.
+    #[test]
+    fn unrecognized_entity_type_still_rejects_by_identity() {
+        let mut unrecognized = storage_slot(42);
+        unrecognized.entity_type = 99;
+        let source: Vec<EntitySlot> = vec![];
+        let target = vec![unrecognized];
+
+        let err = rebind_via_index(&source, &target, arbitrary_boundary_date()).unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("entity_type=99"),
+            "must name the unrecognized entity_type: {msg}"
+        );
+    }
+
+    /// Given a target anticipated slot with `interval_start == SENTINEL`,
+    /// when `build_rebind` runs, then it resolves to `Zero` — even when the
+    /// source carries an identical sentinel-dated slot at the same identity,
+    /// proving the sentinel case is dispatched purely on the interval.
     #[test]
     fn build_rebind_sentinel_anticipated_target_is_always_zero() {
         let source = vec![storage_slot(1), anticipated_sentinel_slot(9, 0)];
         let target = vec![storage_slot(1), anticipated_sentinel_slot(9, 0)];
 
-        let rebind = build_rebind(&source, &target, &no_intervals(&target)).unwrap();
+        let rebind = rebind_via_index(&source, &target, arbitrary_boundary_date()).unwrap();
 
         assert_eq!(rebind, vec![RebindOp::Copy(0), RebindOp::Zero]);
-    }
-
-    /// A `YYYYMM01` source anchor decodes to the correct `[month_start,
-    /// month_end)` interval and `H_M = days_in_month · 24` hours.
-    #[test]
-    fn decode_month_anchor_yields_correct_interval_and_hours() {
-        let (start, end, h_m) = decode_month_anchor(20_260_301).unwrap();
-
-        assert_eq!(start, ymd(2026, 3, 1));
-        assert_eq!(end, ymd(2026, 4, 1));
-        assert_eq!(h_m, 31.0 * 24.0, "March 2026 has 31 days");
     }
 
     /// Given a source manifest with one monthly anticipated slot and a
@@ -1060,11 +1578,13 @@ mod tests {
     #[test]
     fn build_rebind_dated_anticipated_target_fully_covered_yields_blend() {
         let source = vec![anticipated_dated_slot(9, 0, 20_260_301)];
-        let target = vec![anticipated_dated_slot(9, 100, 20_260_301)];
-        let target_interval = (ymd(2026, 3, 1), ymd(2026, 4, 1));
-        let intervals = vec![Some(target_interval)];
+        let boundary_date = ymd(2026, 3, 1);
+        let target = vec![anticipated_dated_slot(9, 100, 20_260_301).with_interval(
+            encode_slot_date(boundary_date),
+            encode_slot_date(ymd(2026, 4, 1)),
+        )];
 
-        let rebind = build_rebind(&source, &target, &intervals).unwrap();
+        let rebind = rebind_via_index(&source, &target, boundary_date).unwrap();
 
         assert_eq!(
             rebind,
@@ -1088,11 +1608,15 @@ mod tests {
     #[test]
     fn build_rebind_anticipated_partial_month_yields_blend_fractional_weight() {
         let source = vec![storage_slot(1), anticipated_dated_slot(9, 0, 20_260_401)];
-        let target = vec![storage_slot(1), anticipated_dated_slot(9, 100, 20_260_401)];
-        let target_interval = (ymd(2026, 4, 8), ymd(2026, 4, 15));
-        let intervals = vec![None, Some(target_interval)];
+        let start_w = ymd(2026, 4, 8);
+        let end_w = ymd(2026, 4, 15);
+        let target = vec![
+            storage_slot(1),
+            anticipated_dated_slot(9, 100, 20_260_401)
+                .with_interval(encode_slot_date(start_w), encode_slot_date(end_w)),
+        ];
 
-        let rebind = build_rebind(&source, &target, &intervals).unwrap();
+        let rebind = rebind_via_index(&source, &target, start_w).unwrap();
 
         match &rebind[1] {
             RebindOp::Blend(terms) => {
@@ -1109,6 +1633,56 @@ mod tests {
         }
     }
 
+    /// Given a source anticipated slot whose OWN delivery interval is a
+    /// 7-day stage (not a calendar month) and a target slot covering that
+    /// same span, when `build_rebind` runs, then the fanned coefficient
+    /// equals the source's own value (weight `1.0`) — under the retired
+    /// month-reconstruction the same fixture would have produced `7/30` of
+    /// it.
+    #[test]
+    fn anticipated_source_interval_shorter_than_a_month_weights_by_its_own_hours() {
+        let source_coeff = 42.0;
+        let start = ymd(2026, 4, 1);
+        let end = ymd(2026, 4, 8);
+        let source = vec![
+            anticipated_dated_slot(9, 0, 20_260_401)
+                .with_interval(encode_slot_date(start), encode_slot_date(end)),
+        ];
+        let target = vec![
+            anticipated_dated_slot(9, 100, 20_260_401)
+                .with_interval(encode_slot_date(start), encode_slot_date(end)),
+        ];
+
+        let rebind = rebind_via_index(&source, &target, start).unwrap();
+
+        assert_eq!(
+            rebind,
+            vec![RebindOp::Blend(vec![(0, 1.0)])],
+            "a target fully covering a 7-day source stage weights 1.0, not 7/30"
+        );
+
+        let cut = owned_cut(vec![source_coeff]);
+        assert_eq!(rebind_cut(&cut, &rebind), vec![source_coeff]);
+    }
+
+    /// Given a source anticipated slot whose `interval_start` is a raw,
+    /// undecodable value, when `build_source_interval_index` runs, then it
+    /// rejects, naming the slot's identity and the undecodable raw value.
+    #[test]
+    fn source_interval_index_rejects_an_undecodable_live_interval() {
+        let source =
+            vec![anticipated_dated_slot(9, 0, 20_260_301).with_interval(20_261_301, 20_260_401)];
+
+        let err = build_source_interval_index(&source).unwrap_err();
+
+        let msg = err.to_string();
+        assert!(msg.contains("entity_id=9"), "must name the entity: {msg}");
+        assert!(
+            msg.contains("20261301"),
+            "must name the undecodable raw value: {msg}"
+        );
+    }
+
     /// Given a target ring slot whose interval straddles a priced month and
     /// an unpriced one, when `build_rebind` runs, then it resolves to
     /// `Renormalize` with a single covered term scaled to the full slot —
@@ -1117,12 +1691,14 @@ mod tests {
     fn build_rebind_anticipated_straddle_into_unpriced_yields_renormalize_no_zero_term() {
         let source_coeff = 300.0;
         let source = vec![anticipated_dated_slot(9, 0, 20_260_301)];
-        let target = vec![anticipated_dated_slot(9, 100, 20_260_301)];
         let start_w = ymd(2026, 2, 26);
         let end_w = ymd(2026, 3, 5);
-        let intervals = vec![Some((start_w, end_w))];
+        let target = vec![
+            anticipated_dated_slot(9, 100, 20_260_301)
+                .with_interval(encode_slot_date(start_w), encode_slot_date(end_w)),
+        ];
 
-        let rebind = build_rebind(&source, &target, &intervals).unwrap();
+        let rebind = rebind_via_index(&source, &target, start_w).unwrap();
 
         let h_w = f64::from(u32::try_from((end_w - start_w).num_days()).unwrap()) * 24.0;
         let h_m = 31.0 * 24.0;
@@ -1160,34 +1736,142 @@ mod tests {
     #[test]
     fn build_rebind_anticipated_no_covered_month_yields_zero() {
         let source = vec![anticipated_dated_slot(9, 0, 20_260_301)];
-        let target = vec![anticipated_dated_slot(9, 100, 20_260_301)];
-        let intervals = vec![Some((ymd(2026, 5, 1), ymd(2026, 5, 8)))];
+        let start_w = ymd(2026, 5, 1);
+        let end_w = ymd(2026, 5, 8);
+        let target = vec![
+            anticipated_dated_slot(9, 100, 20_260_301)
+                .with_interval(encode_slot_date(start_w), encode_slot_date(end_w)),
+        ];
 
-        let rebind = build_rebind(&source, &target, &intervals).unwrap();
+        let rebind = rebind_via_index(&source, &target, start_w).unwrap();
 
         assert_eq!(rebind, vec![RebindOp::Zero]);
     }
 
-    /// Given a live, dated anticipated target slot whose
-    /// `target_delivery_intervals` entry is `None` — the shape of an IN-STUDY
-    /// ring slot (a within-horizon delivery, e.g. a `K = 0` sub-stage-lead
-    /// thermal maturing at the terminal stage), never a post-study-targeted ring
-    /// slot (those are always dated ⟺ interval) — when `build_rebind` runs, then it
-    /// resolves to `Zero`: the terminal boundary prices no within-horizon
-    /// delivery. It must never reject (which would abort a legitimate load) and
-    /// never fan out against the source months (which would wrongly `Blend`).
+    /// Given a target anticipated slot whose fan-out weights come purely from
+    /// its OWN `interval_start`/`interval_end` fields, when `build_rebind`
+    /// runs, then it fans out exactly as the (retired) parallel interval
+    /// vector would have.
     #[test]
-    fn build_rebind_dated_in_study_ring_slot_with_no_interval_yields_zero() {
-        // A source month for thermal 9 that WOULD overlap the in-study slot's
-        // April date if it were (wrongly) fanned out — proving the `Zero` is
-        // the in-study classification, not an accidental no-covered-month miss.
-        let source = vec![storage_slot(1), anticipated_dated_slot(9, 0, 20_260_401)];
-        let target = vec![storage_slot(1), anticipated_dated_slot(9, 0, 20_260_401)];
-        let intervals = vec![None, None];
+    fn anticipated_target_reads_its_own_manifest_interval() {
+        let source = vec![anticipated_dated_slot(9, 0, 20_260_301)];
+        let boundary_date = ymd(2026, 3, 1);
+        let target = vec![anticipated_dated_slot(9, 100, 20_260_301).with_interval(
+            encode_slot_date(ymd(2026, 3, 1)),
+            encode_slot_date(ymd(2026, 3, 15)),
+        )];
 
-        let rebind = build_rebind(&source, &target, &intervals).unwrap();
+        let rebind = rebind_via_index(&source, &target, boundary_date).unwrap();
+
+        let h_w = 14.0 * 24.0;
+        let h_m = 31.0 * 24.0;
+        match &rebind[0] {
+            RebindOp::Blend(terms) => {
+                assert_eq!(terms.len(), 1);
+                assert_eq!(terms[0].0, 0);
+                let expected_weight = h_w / h_m;
+                assert!(
+                    (terms[0].1 - expected_weight).abs() < expected_weight * 1e-9,
+                    "weight {} != expected {expected_weight}",
+                    terms[0].1
+                );
+            }
+            other => panic!("expected Blend, got {other:?}"),
+        }
+    }
+
+    /// Given a live anticipated target slot whose interval ENDS at the
+    /// boundary date — an in-study delivery, discharged inside the current
+    /// horizon (e.g. a `K = 0` sub-stage-lead thermal maturing at the
+    /// terminal stage) — when `build_rebind` runs, then it resolves to
+    /// `Zero`: the terminal boundary prices no within-horizon delivery. It
+    /// must never reject (which would abort a legitimate load) and never fan
+    /// out against the source months (which would wrongly `Blend`), even
+    /// though the source carries a month whose date would overlap it if it
+    /// were wrongly fanned out.
+    #[test]
+    fn anticipated_target_ending_at_the_boundary_date_zeroes() {
+        let source = vec![storage_slot(1), anticipated_dated_slot(9, 0, 20_260_301)];
+        let boundary_date = ymd(2026, 4, 1);
+        let target = vec![
+            storage_slot(1),
+            anticipated_dated_slot(9, 0, 20_260_301).with_interval(
+                encode_slot_date(ymd(2026, 3, 1)),
+                encode_slot_date(boundary_date),
+            ),
+        ];
+
+        let rebind = rebind_via_index(&source, &target, boundary_date).unwrap();
 
         assert_eq!(rebind, vec![RebindOp::Copy(0), RebindOp::Zero]);
+    }
+
+    /// The predicate's other side: a live anticipated target slot whose
+    /// interval reaches PAST the boundary date fans out against the
+    /// overlapping source month, never zeroes.
+    #[test]
+    fn anticipated_target_reaching_past_the_boundary_date_fans_out() {
+        let source = vec![anticipated_dated_slot(9, 0, 20_260_301)];
+        let boundary_date = ymd(2026, 2, 1);
+        let target = vec![anticipated_dated_slot(9, 100, 20_260_301).with_interval(
+            encode_slot_date(ymd(2026, 3, 1)),
+            encode_slot_date(ymd(2026, 4, 1)),
+        )];
+
+        let rebind = rebind_via_index(&source, &target, boundary_date).unwrap();
+
+        assert!(
+            matches!(rebind[0], RebindOp::Blend(_)),
+            "an interval reaching past the boundary date must fan out, not zero: {:?}",
+            rebind[0]
+        );
+    }
+
+    /// Given a target anticipated slot at the sentinel `interval_start`
+    /// (pre-fan-out padding), when `build_rebind` runs, then it resolves to
+    /// `Zero` regardless of `boundary_date`, and the reconciliation report
+    /// excludes it from every tally — the structural-pad exclusion.
+    #[test]
+    fn anticipated_sentinel_interval_is_a_structural_pad() {
+        let source = vec![anticipated_dated_slot(9, 0, 20_260_301)];
+        let target = vec![anticipated_sentinel_slot(9, 100)];
+        let boundary_date = arbitrary_boundary_date();
+
+        let rebind = rebind_via_index(&source, &target, boundary_date).unwrap();
+        assert_eq!(rebind, vec![RebindOp::Zero]);
+
+        let report = report_via_index(&source, &target, boundary_date, &rebind);
+        assert_eq!(
+            report.anticipated.default_zero, 0,
+            "a sentinel-interval Zero must be excluded from the default_zero tally"
+        );
+        assert_eq!(report.anticipated.copy, 0);
+        assert_eq!(report.anticipated.fan_out, 0);
+    }
+
+    /// Given a target anticipated slot whose `interval_start` is a raw,
+    /// undecodable value (never expected past `read_policy_checkpoint`'s own
+    /// date validation, but not ruled out by the type system), when
+    /// `build_rebind` runs, then it rejects, naming the slot's identity and
+    /// the undecodable raw value.
+    #[test]
+    fn anticipated_undecodable_interval_rejects_naming_the_slot() {
+        let source = vec![anticipated_dated_slot(9, 0, 20_260_301)];
+        let target =
+            vec![anticipated_dated_slot(9, 100, 20_260_301).with_interval(20_261_301, 20_260_401)];
+
+        let err = rebind_via_index(&source, &target, ymd(2026, 3, 1)).unwrap_err();
+
+        let msg = err.to_string();
+        assert!(msg.contains("entity_id=9"), "must name the entity: {msg}");
+        assert!(
+            msg.contains("subindex=100"),
+            "must name the subindex: {msg}"
+        );
+        assert!(
+            msg.contains("20261301"),
+            "must name the undecodable raw value: {msg}"
+        );
     }
 
     /// Given a source already shaped identically to the target (storage, lag,
@@ -1206,7 +1890,7 @@ mod tests {
             anticipated_sentinel_slot(9, 0),
         ];
         let target = source.clone();
-        let rebind = build_rebind(&source, &target, &no_intervals(&target)).unwrap();
+        let rebind = rebind_via_index(&source, &target, arbitrary_boundary_date()).unwrap();
         let cut = owned_cut(vec![10.5, -3.25, 0.0]);
 
         let coefficients = rebind_cut(&cut, &rebind);
@@ -1234,7 +1918,7 @@ mod tests {
             anticipated_sentinel_slot(9, 0),
         ];
         let target = vec![storage_slot(1)];
-        let rebind = build_rebind(&source, &target, &no_intervals(&target)).unwrap();
+        let rebind = rebind_via_index(&source, &target, arbitrary_boundary_date()).unwrap();
 
         let dropped = dropped_source_positions(source.len(), &rebind);
 
@@ -1270,17 +1954,20 @@ mod tests {
     #[test]
     fn build_reconciliation_report_full_coverage_fan_out_matches_target_slot_count() {
         let source = vec![anticipated_dated_slot(9, 0, 20_260_401)];
+        let boundary_date = ymd(2026, 4, 1);
         let target = vec![
-            anticipated_dated_slot(9, 100, 20_260_401),
-            anticipated_dated_slot(9, 101, 20_260_401),
+            anticipated_dated_slot(9, 100, 20_260_401).with_interval(
+                encode_slot_date(ymd(2026, 4, 1)),
+                encode_slot_date(ymd(2026, 4, 16)),
+            ),
+            anticipated_dated_slot(9, 101, 20_260_401).with_interval(
+                encode_slot_date(ymd(2026, 4, 16)),
+                encode_slot_date(ymd(2026, 5, 1)),
+            ),
         ];
-        let intervals = vec![
-            Some((ymd(2026, 4, 1), ymd(2026, 4, 16))),
-            Some((ymd(2026, 4, 16), ymd(2026, 5, 1))),
-        ];
-        let rebind = build_rebind(&source, &target, &intervals).unwrap();
+        let rebind = rebind_via_index(&source, &target, boundary_date).unwrap();
 
-        let report = build_reconciliation_report(&source, &target, &intervals, &rebind);
+        let report = report_via_index(&source, &target, boundary_date, &rebind);
 
         assert_eq!(
             report.anticipated.fan_out, 2,
@@ -1292,15 +1979,15 @@ mod tests {
         );
         assert_eq!(report.anticipated.default_zero, 0);
         assert_eq!(
-            report.anticipated_coverage.source_month_count, 1,
-            "one source month (K = 1)"
+            report.anticipated_coverage.source_interval_count, 1,
+            "one source delivery interval (K = 1)"
         );
 
         let lines = report.detail_lines();
         assert!(
             lines.iter().any(|l| l
-                == "anticipated: 1 source months fanned to 2 target slots (0 straddling, \
-                    overlap-blended), 0 months defaulted"),
+                == "anticipated: 1 source delivery intervals fanned to 2 target slots (0 \
+                    straddling, overlap-blended), 0 months defaulted"),
             "coverage line must match the expected shape: {lines:?}"
         );
     }
@@ -1312,15 +1999,18 @@ mod tests {
     #[test]
     fn build_reconciliation_report_renormalize_counts_in_fan_out_and_straddling() {
         let source = vec![anticipated_dated_slot(9, 0, 20_260_301)];
-        let target = vec![anticipated_dated_slot(9, 100, 20_260_301)];
-        let intervals = vec![Some((ymd(2026, 2, 26), ymd(2026, 3, 5)))];
-        let rebind = build_rebind(&source, &target, &intervals).unwrap();
+        let boundary_date = ymd(2026, 2, 26);
+        let target = vec![anticipated_dated_slot(9, 100, 20_260_301).with_interval(
+            encode_slot_date(ymd(2026, 2, 26)),
+            encode_slot_date(ymd(2026, 3, 5)),
+        )];
+        let rebind = rebind_via_index(&source, &target, boundary_date).unwrap();
         assert!(
             matches!(rebind[0], RebindOp::Renormalize(_)),
             "fixture must straddle into unpriced time"
         );
 
-        let report = build_reconciliation_report(&source, &target, &intervals, &rebind);
+        let report = report_via_index(&source, &target, boundary_date, &rebind);
 
         assert_eq!(
             report.anticipated.fan_out, 1,
@@ -1336,15 +2026,18 @@ mod tests {
     #[test]
     fn build_reconciliation_report_dated_zero_defaults_sentinel_zero_excluded() {
         let source = vec![anticipated_dated_slot(9, 0, 20_260_301)];
+        let boundary_date = ymd(2026, 5, 1);
         let target = vec![
-            anticipated_dated_slot(9, 100, 20_260_301),
+            anticipated_dated_slot(9, 100, 20_260_301).with_interval(
+                encode_slot_date(ymd(2026, 5, 1)),
+                encode_slot_date(ymd(2026, 5, 8)),
+            ),
             anticipated_sentinel_slot(9, 101),
         ];
-        let intervals = vec![Some((ymd(2026, 5, 1), ymd(2026, 5, 8))), None];
-        let rebind = build_rebind(&source, &target, &intervals).unwrap();
+        let rebind = rebind_via_index(&source, &target, boundary_date).unwrap();
         assert_eq!(rebind, vec![RebindOp::Zero, RebindOp::Zero]);
 
-        let report = build_reconciliation_report(&source, &target, &intervals, &rebind);
+        let report = report_via_index(&source, &target, boundary_date, &rebind);
 
         assert_eq!(
             report.anticipated.default_zero, 1,
@@ -1367,10 +2060,10 @@ mod tests {
             anticipated_sentinel_slot(9, 0),
         ];
         let target = source.clone();
-        let intervals = no_intervals(&target);
-        let rebind = build_rebind(&source, &target, &intervals).unwrap();
+        let boundary_date = arbitrary_boundary_date();
+        let rebind = rebind_via_index(&source, &target, boundary_date).unwrap();
 
-        let report = build_reconciliation_report(&source, &target, &intervals, &rebind);
+        let report = report_via_index(&source, &target, boundary_date, &rebind);
 
         assert_eq!(report.storage.copy, 1);
         assert_eq!(report.inflow_lag.copy, 1);
@@ -1385,6 +2078,187 @@ mod tests {
         assert_eq!(report.anticipated.fan_out, 0);
         assert_eq!(report.transit_bucket.fan_out, 0);
         assert_eq!(report.other_identity.fan_out, 0);
+    }
+
+    /// Given a dated anticipated slot, when `slot_detail` reads it, then the
+    /// `SlotDetail` carries the family, identity, and decoded `[start, end)`
+    /// interval.
+    #[test]
+    fn dropped_slot_detail_carries_the_anticipated_interval() {
+        let slot = anticipated_dated_slot(33, 1, 20_320_101);
+
+        let detail = slot_detail(&slot);
+
+        assert_eq!(detail.family, "anticipated");
+        assert_eq!(detail.entity_id, 33);
+        assert_eq!(detail.subindex, 1);
+        assert_eq!(detail.interval, Some((ymd(2032, 1, 1), ymd(2032, 2, 1))));
+        assert_eq!(detail.reference_date, None);
+    }
+
+    /// Given an inflow-lag slot carrying a `reference_date`, when
+    /// `slot_detail` reads it, then the `SlotDetail` carries the decoded
+    /// `reference_date` and no interval.
+    #[test]
+    fn dropped_slot_detail_carries_the_inflow_lag_reference_date() {
+        let slot = inflow_lag_slot(4, 2).with_reference_date(20_300_301);
+
+        let detail = slot_detail(&slot);
+
+        assert_eq!(detail.family, "inflow-lag");
+        assert_eq!(detail.entity_id, 4);
+        assert_eq!(detail.subindex, 2);
+        assert_eq!(detail.reference_date, Some(ymd(2030, 3, 1)));
+        assert_eq!(detail.interval, None);
+    }
+
+    /// Given a storage slot, when `slot_detail` reads it, then the
+    /// `SlotDetail` carries neither an interval nor a reference date —
+    /// storage populates no date field.
+    #[test]
+    fn dropped_slot_detail_for_storage_carries_no_date() {
+        let slot = storage_slot(7);
+
+        let detail = slot_detail(&slot);
+
+        assert_eq!(detail.family, "storage");
+        assert_eq!(detail.entity_id, 7);
+        assert_eq!(detail.subindex, 0);
+        assert_eq!(detail.interval, None);
+        assert_eq!(detail.reference_date, None);
+    }
+
+    /// Given a target ring slot straddling a priced month and an unpriced one
+    /// (the same `Renormalize` fixture as
+    /// `build_reconciliation_report_renormalize_counts_in_fan_out_and_straddling`),
+    /// when `build_reconciliation_report` runs, then `straddling_slots`
+    /// carries that TARGET slot's own `[start, end)` span, never the source
+    /// month it straddles into.
+    #[test]
+    fn straddling_slot_detail_carries_the_target_span() {
+        let source = vec![anticipated_dated_slot(9, 0, 20_260_301)];
+        let boundary_date = ymd(2026, 2, 26);
+        let target = vec![anticipated_dated_slot(9, 100, 20_260_301).with_interval(
+            encode_slot_date(ymd(2026, 2, 26)),
+            encode_slot_date(ymd(2026, 3, 5)),
+        )];
+        let rebind = rebind_via_index(&source, &target, boundary_date).unwrap();
+        assert!(
+            matches!(rebind[0], RebindOp::Renormalize(_)),
+            "fixture must straddle into unpriced time"
+        );
+
+        let report = report_via_index(&source, &target, boundary_date, &rebind);
+
+        assert_eq!(report.anticipated.straddling, 1);
+        assert_eq!(report.straddling_slots.len(), 1);
+        let detail = &report.straddling_slots[0];
+        assert_eq!(detail.family, "anticipated");
+        assert_eq!(detail.entity_id, 9);
+        assert_eq!(detail.subindex, 100);
+        assert_eq!(
+            detail.interval,
+            Some((ymd(2026, 2, 26), ymd(2026, 3, 5))),
+            "the target slot's OWN span, not the source month it straddles into"
+        );
+    }
+
+    /// A source manifest's two dropped slots (a transit bucket and an
+    /// anticipated slot the target models neither of) are declared in one
+    /// order; a second manifest declares the SAME two slots at swapped
+    /// positions. `dropped_source_slots` must reflect each manifest's own
+    /// ascending source position — checked with TWO simultaneous differences
+    /// so a content-derived order (e.g. sorted by entity id, which would
+    /// coincidentally match both manifests here) cannot pass unnoticed — and
+    /// the two reports' entry sets must be equal regardless of declaration
+    /// order.
+    #[test]
+    fn dropped_slot_details_are_declaration_order_invariant() {
+        let transit = transit_bucket_slot_over(
+            2,
+            1,
+            encode_slot_date(ymd(2026, 4, 1)),
+            encode_slot_date(ymd(2026, 5, 1)),
+        );
+        let anticipated = anticipated_dated_slot(9, 0, 20_320_101);
+        let target = vec![storage_slot(1)];
+        let boundary_date = arbitrary_boundary_date();
+
+        let source_a = vec![storage_slot(1), transit.clone(), anticipated.clone()];
+        let rebind_a = rebind_via_index(&source_a, &target, boundary_date).unwrap();
+        let report_a = report_via_index(&source_a, &target, boundary_date, &rebind_a);
+
+        let source_b = vec![storage_slot(1), anticipated.clone(), transit.clone()];
+        let rebind_b = rebind_via_index(&source_b, &target, boundary_date).unwrap();
+        let report_b = report_via_index(&source_b, &target, boundary_date, &rebind_b);
+
+        assert_eq!(report_a.dropped_source_slots.len(), 2);
+        assert_eq!(report_b.dropped_source_slots.len(), 2);
+
+        assert_eq!(
+            report_a.dropped_source_slots[0].family, "transit-bucket",
+            "manifest A declares transit (source position 1) before anticipated (position 2)"
+        );
+        assert_eq!(report_a.dropped_source_slots[1].family, "anticipated");
+
+        assert_eq!(
+            report_b.dropped_source_slots[0].family, "anticipated",
+            "manifest B declares anticipated (position 1) before transit (position 2) — swapped \
+             from A"
+        );
+        assert_eq!(report_b.dropped_source_slots[1].family, "transit-bucket");
+
+        let entry_set = |report: &BoundaryReconciliationReport| {
+            let mut entries: Vec<(&'static str, i32, u32)> = report
+                .dropped_source_slots
+                .iter()
+                .map(|d| (d.family, d.entity_id, d.subindex))
+                .collect();
+            entries.sort_unstable();
+            entries
+        };
+        assert_eq!(
+            entry_set(&report_a),
+            entry_set(&report_b),
+            "the two reports must carry the same dropped entries regardless of declaration order"
+        );
+    }
+
+    /// Given a report with seven dropped slots, when `detail_lines` renders,
+    /// then it emits five `dropped:` lines and one `... and 2 more` line —
+    /// the rendering cap.
+    #[test]
+    fn detail_lines_caps_dropped_entries_at_five_with_a_remainder_line() {
+        let dropped_source_slots: Vec<SlotDetail> = (0..7)
+            .map(|i| SlotDetail {
+                family: "anticipated",
+                entity_id: i,
+                subindex: 0,
+                interval: None,
+                reference_date: None,
+            })
+            .collect();
+        let report = BoundaryReconciliationReport {
+            reconciled: true,
+            dropped_source_slots,
+            ..BoundaryReconciliationReport::default()
+        };
+
+        let lines = report.detail_lines();
+
+        let dropped_lines: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.starts_with("dropped: "))
+            .collect();
+        assert_eq!(
+            dropped_lines.len(),
+            5,
+            "cap at five dropped lines: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l == "... and 2 more"),
+            "must state the remainder count: {lines:?}"
+        );
     }
 
     /// The default report (the shape `load_boundary_cuts` stores on its
@@ -1468,6 +2342,30 @@ mod tests {
             (fold[0].1 - expected).abs() < expected * 1e-9,
             "factor {} != expected {expected}",
             fold[0].1
+        );
+    }
+
+    /// A transit-bucket slot sharing the SAME `entity_id` and delivery span
+    /// as an anticipated slot must never be folded in: the index's lookup
+    /// key carries the family byte, so a transit slot (a different family,
+    /// same id) is invisible to the anticipated fold — the guarantee that
+    /// keeps a future transit-widened index from double-counting.
+    #[test]
+    fn boundary_fold_ignores_transit_slots_sharing_an_entity_id() {
+        let source = vec![anticipated_dated_slot(9, 0, 20_260_401)];
+        let windows = vec![fixed_window(9, ymd(2026, 4, 8), ymd(2026, 4, 15), 50.0)];
+        let baseline = build_boundary_fold(&source, &windows).unwrap();
+
+        let mut with_transit = source.clone();
+        with_transit.push(transit_bucket_slot(9, 1).with_interval(
+            encode_slot_date(ymd(2026, 4, 1)),
+            encode_slot_date(ymd(2026, 5, 1)),
+        ));
+        let with_transit_fold = build_boundary_fold(&with_transit, &windows).unwrap();
+
+        assert_eq!(
+            baseline, with_transit_fold,
+            "a transit slot sharing entity_id must never be folded into the anticipated intercept"
         );
     }
 

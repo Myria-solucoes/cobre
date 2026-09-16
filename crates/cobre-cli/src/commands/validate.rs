@@ -33,9 +33,9 @@ use cobre_io::{BoundaryPolicy, Config, LoadError, validate_case_with_artifacts};
 use cobre_sddp::hydro_models::prepare_hydro_models_from_artifacts;
 use cobre_sddp::validate_phases::{PrepPhase, prep_phase_metadata};
 use cobre_sddp::{
-    BoundaryReconciliationReport, PrepareHydroModelsResult, SddpError, StudyParams, StudySetup,
-    load_boundary_cuts, prepare_stochastic, resolve_boundary_source_stage,
-    resolve_boundary_state_requirements,
+    BoundaryLoadRequest, BoundaryReconciliationReport, PrepareHydroModelsResult, SddpError,
+    StudyParams, StudySetup, load_boundary_cuts, orchestration, prepare_stochastic,
+    resolve_boundary_state_requirements, study_horizon_end,
 };
 use cobre_stochastic::StochasticContext;
 use console::{Term, style};
@@ -213,20 +213,14 @@ fn reconcile_boundary(
     #[allow(clippy::cast_possible_truncation)]
     let state_dim = setup.fcf.state_dimension as u32;
     let current_manifest = setup.build_terminal_entity_manifest(system);
-    let target_delivery_intervals = setup.build_terminal_anticipated_delivery_intervals(system);
     let fixed_windows = setup.build_terminal_fixed_post_horizon_windows(system);
 
-    let source_stage = if let Some(idx) = bp.source_stage {
-        idx
-    } else {
-        let resolved = resolve_boundary_source_stage(&boundary_path, &target_delivery_intervals)?;
-        if let Some(term) = stdout {
-            let _ = term.write_line(&format!(
-                "Boundary source_stage resolved to {resolved} (no explicit \
-                 policy.boundary.source_stage configured)."
-            ));
-        }
-        resolved
+    let Some(boundary_date) = study_horizon_end(system) else {
+        return Err(SddpError::Validation(format!(
+            "case {}: the study declares no non-negative stage, so it has no boundary date to \
+             load a boundary policy against",
+            case_dir.display()
+        )));
     };
 
     let mut on_warning = |msg: &str| {
@@ -234,15 +228,18 @@ fn reconcile_boundary(
             let _ = term.write_line(&format!("{} {msg}", style("warning:").yellow().bold()));
         }
     };
+    let study_seasons = orchestration::build_season_manifest(system);
     let boundary_cuts = load_boundary_cuts(
-        &boundary_path,
-        source_stage,
-        state_dim,
-        &current_manifest,
-        &target_delivery_intervals,
-        &fixed_windows,
-        setup.boundary_requirements().inflow_lag_depth(),
-        setup.stage_data.stage_templates.cost_scale_factor,
+        &BoundaryLoadRequest::new(
+            &boundary_path,
+            boundary_date,
+            state_dim,
+            &current_manifest,
+            setup.stage_data.stage_templates.cost_scale_factor,
+        )
+        .with_fixed_windows(&fixed_windows)
+        .with_inflow_lag_depth(setup.boundary_requirements().inflow_lag_depth())
+        .with_study_seasons(&study_seasons),
         &mut on_warning,
     )?;
 

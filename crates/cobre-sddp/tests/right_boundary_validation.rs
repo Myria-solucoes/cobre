@@ -44,15 +44,16 @@ use cobre_core::{
     SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
 };
 use cobre_io::{
-    GraphManifest, ManifestNode, PolicyCutRecord, ProducerBlock,
-    STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, StageCutsPayload, write_policy_checkpoint,
+    GraphManifest, ManifestNode, PolicyCutRecord, ProducerBlock, StageCutsPayload,
+    encode_slot_date, write_policy_checkpoint,
 };
 use cobre_sddp::indexer::CutStateProjection;
 use cobre_sddp::setup::{NodeId, StageIdx};
 use cobre_sddp::test_support::{patch_backward_opening_for_probe, solve_stage_for_probe};
 use cobre_sddp::workspace::SolverWorkspace;
 use cobre_sddp::{
-    CutPool, StudySetup, build_cut_row_batch_into, inject_boundary_cuts, load_boundary_cuts,
+    BoundaryLoadRequest, CutPool, StudySetup, build_cut_row_batch_into, inject_boundary_cuts,
+    load_boundary_cuts,
 };
 use cobre_solver::{
     ActiveSolver, FreezeScratch, RowBatch, SolverInterface, StageTemplate,
@@ -359,6 +360,15 @@ fn post_study_ring_slot(setup: &StudySetup) -> usize {
     state.commit_out.start + (m % state.k_max) * state.n_anticipated
 }
 
+/// Pool `pool`'s fixture `priced_state_date`: `2030-01-01` plus `pool`
+/// months.
+fn fixture_priced_date(pool: u32) -> NaiveDate {
+    NaiveDate::from_ymd_opt(2030, 1, 1)
+        .unwrap()
+        .checked_add_months(chrono::Months::new(pool))
+        .unwrap()
+}
+
 /// Write a synthetic single-cut boundary checkpoint carrying `intercept` and
 /// the explicit per-slot `coefficients`. No entity manifest (`&[]`): the
 /// loader's identity check short-circuits with a warning, so this test
@@ -390,7 +400,7 @@ fn write_synthetic_boundary(
         cost_scale_factor: 1_000_000.0,
         node_id: 100,
         graph_stage_id: -1,
-        priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
+        priced_state_date: encode_slot_date(fixture_priced_date(0)),
     };
     let metadata = cobre_sddp::test_support::checkpoint_metadata(
         1,
@@ -432,14 +442,7 @@ fn inject_ring_boundary(setup: &mut StudySetup, dir: &Path, beta: f64) {
     write_synthetic_boundary(dir, state_dimension, ALPHA, &coefficients);
 
     let boundary_cuts = load_boundary_cuts(
-        dir,
-        0,
-        state_dimension,
-        &[],
-        &[],
-        &[],
-        None,
-        1.0,
+        &BoundaryLoadRequest::new(dir, fixture_priced_date(0), state_dimension, &[], 1.0),
         &mut |_msg| {},
     )
     .expect("boundary cut must load");

@@ -215,11 +215,6 @@ fn assert_manifest_json_matches(manifest_json: &Value, expected: &[EntitySlot]) 
             "slot {i} was_active"
         );
         assert_eq!(
-            i64_or(obj, "delivery_date", 0),
-            i64::from(slot.delivery_date),
-            "slot {i} delivery_date"
-        );
-        assert_eq!(
             i64_or(obj, "reference_date", 0),
             i64::from(slot.reference_date),
             "slot {i} reference_date"
@@ -241,9 +236,9 @@ fn assert_manifest_json_matches(manifest_json: &Value, expected: &[EntitySlot]) 
 /// writer→flatc and flatc→reader paths cover every field including a signed id.
 fn conformance_manifest() -> Vec<EntitySlot> {
     vec![
-        EntitySlot::anticipated(7, 1, true).with_delivery_date(20240501),
+        EntitySlot::anticipated(7, 1, true).with_interval(20_240_501, 20_240_601),
         EntitySlot::inflow_lag(-1, 3, false),
-        EntitySlot::transit_bucket(42, 2, true).with_delivery_date(20200101),
+        EntitySlot::transit_bucket(42, 2, true).with_interval(20_200_101, 20_200_201),
     ]
 }
 
@@ -784,7 +779,7 @@ fn stage_states_reader_consumes_flatc_buffer() {
 /// Forward-compat: a buffer written against a pre-`id:5` `StageStates` schema
 /// (no `node_id` field) must deserialize with `node_id` at
 /// [`STAGE_STATES_NODE_ID_SENTINEL`], never a bare `0` (a valid node id).
-/// Mirrors `pre_delivery_date_entity_slot_reads_as_sentinel`'s rewritten-schema
+/// Mirrors `pre_interval_entity_slot_reads_as_sentinel`'s rewritten-schema
 /// approach: flatc cannot emit a field the schema lacks, so the buffer is built
 /// from a schema that stops at `entity_manifest (id: 4)`.
 #[test]
@@ -1243,10 +1238,9 @@ fn schema_carries_no_algorithm_vocabulary() {
     );
 }
 
-/// `EntitySlot`: id 4 is a burned `deprecated` placeholder, the
-/// `YYYYMMDD` `delivery_date` sits at id 5, and the artifact declares the
-/// `CBVF` `file_identifier` plus a `file_extension`. A text inspection of
-/// `schemas/policy.fbs`.
+/// `EntitySlot`: id 4 and id 5 are burned `deprecated` placeholders, and the
+/// artifact declares the `CBVF` `file_identifier` plus a `file_extension`. A
+/// text inspection of `schemas/policy.fbs`.
 #[test]
 fn schema_burns_delivery_anchor_and_declares_file_identifier() {
     let schema = std::fs::read_to_string(schema_path()).expect("read policy.fbs");
@@ -1255,8 +1249,8 @@ fn schema_burns_delivery_anchor_and_declares_file_identifier() {
         "EntitySlot id 4 must be the burned, deprecated delivery_anchor placeholder"
     );
     assert!(
-        schema.contains("delivery_date:int32 (id: 5);"),
-        "the YYYYMMDD delivery_date must sit at id 5"
+        schema.contains("delivery_date:int32 (id: 5, deprecated);"),
+        "EntitySlot id 5 must be the burned, deprecated delivery_date placeholder"
     );
     assert!(
         schema.contains("file_identifier \"CBVF\";"),
@@ -1266,158 +1260,6 @@ fn schema_burns_delivery_anchor_and_declares_file_identifier() {
         schema.contains("file_extension"),
         "the schema must declare a file_extension"
     );
-}
-
-// ─── EntitySlot delivery_date (id: 5) round-trip + forward-compat ─────────────
-
-/// Round-trip: an `EntitySlot` carrying a non-sentinel `delivery_date`
-/// survives the hand-rolled writer → hand-rolled reader path, and the same
-/// buffer decodes through `flatc` with the date at slot id 5.
-#[test]
-fn entity_slot_delivery_date_round_trips() {
-    let coeffs = [1.0, 2.0];
-    let cuts = [PolicyCutRecord {
-        cut_id: 1,
-        slot_index: 0,
-        iteration: 1,
-        forward_pass_index: 0,
-        intercept: 3.0,
-        coefficients: &coeffs,
-        is_active: true,
-    }];
-    let manifest = vec![
-        EntitySlot::anticipated(7, 1, true).with_delivery_date(20240501),
-        EntitySlot::storage(1, true),
-    ];
-    let buf = ser_cuts(3, 2, 8, 0, &cuts, &[0], 1, &manifest);
-
-    let result: StageCutsReadResult =
-        deserialize_stage_cuts(&buf).expect("hand-rolled reader must consume its own buffer");
-    assert_eq!(result.entity_manifest.len(), 2);
-    assert_eq!(result.entity_manifest[0].delivery_date, 20240501);
-    assert_eq!(
-        result.entity_manifest[1].delivery_date,
-        ENTITY_SLOT_DELIVERY_DATE_SENTINEL
-    );
-
-    let json = flatc_decode(&buf, "StageCuts");
-    let arr = get(&json, "entity_manifest")
-        .as_array()
-        .expect("entity_manifest is an array")
-        .clone();
-    assert_eq!(i64_or(&arr[0], "delivery_date", 0), i64::from(20240501));
-    assert_eq!(
-        i64_or(&arr[1], "delivery_date", 0),
-        i64::from(ENTITY_SLOT_DELIVERY_DATE_SENTINEL)
-    );
-}
-
-/// Forward-compat (the schema-evolution half of the reject-role for the
-/// `FlatBuffers` `policy/codec.rs` row; the identifier rejection is the codec
-/// unit test): a buffer written against a pre-`id:5` `EntitySlot` schema (no
-/// `delivery_date` field) must deserialize with every slot's date at the
-/// sentinel and no error. flatc cannot emit a field the schema lacks, so the
-/// buffer is built from a rewritten schema that stops at `was_active (id: 3)`;
-/// that schema still declares the `CBVF` `file_identifier`, so the buffer clears
-/// the read-path identifier gate that a genuine pre-0.14 buffer would fail.
-#[test]
-fn pre_delivery_date_entity_slot_reads_as_sentinel() {
-    let schema_pre_delivery_date = "
-namespace Cobre.IO.Policy;
-
-file_identifier \"CBVF\";
-
-enum EntityType : byte {
-  HydroStorage = 0,
-  HydroInflowLag = 1,
-  AnticipatedThermalState = 2,
-  HydroTransitBucket = 3,
-}
-
-table EntitySlot {
-  entity_type:EntityType (id: 0);
-  entity_id:int32 (id: 1);
-  subindex:uint32 (id: 2);
-  was_active:bool (id: 3);
-}
-
-table AffinePiece {
-  piece_id:uint64 (id: 0);
-  slot_index:uint32 (id: 1);
-  iteration:uint32 (id: 2);
-  forward_pass_index:uint32 (id: 3);
-  intercept:float64 (id: 4);
-  coefficients:[float64] (id: 5);
-  is_active:bool (id: 6);
-  reserved_7:[float64] (id: 7, deprecated);
-}
-
-table StageCuts {
-  stage_id:uint32 (id: 0);
-  state_dimension:uint32 (id: 1);
-  capacity:uint32 (id: 2);
-  warm_start_count:uint32 (id: 3);
-  cuts:[AffinePiece] (id: 4);
-  active_cut_indices:[uint32] (id: 5);
-  populated_count:uint32 (id: 6);
-  entity_manifest:[EntitySlot] (id: 7);
-}
-";
-    let dir = TempDir::new().unwrap();
-    let pre_delivery_date_schema = dir.path().join("pre_delivery_date.fbs");
-    std::fs::write(&pre_delivery_date_schema, schema_pre_delivery_date).unwrap();
-
-    let document = json!({
-        "stage_id": 1,
-        "state_dimension": 2,
-        "capacity": 4,
-        "warm_start_count": 0,
-        "populated_count": 1,
-        "active_cut_indices": [0],
-        "cuts": [
-            {
-                "piece_id": 1,
-                "slot_index": 0,
-                "iteration": 1,
-                "forward_pass_index": 0,
-                "intercept": 1.0,
-                "coefficients": [1.0, 2.0],
-                "is_active": true
-            }
-        ],
-        "entity_manifest": [
-            {"entity_type": "HydroStorage", "entity_id": 1, "subindex": 0, "was_active": true},
-            {"entity_type": "AnticipatedThermalState", "entity_id": 7, "subindex": 1, "was_active": true}
-        ]
-    });
-    let json_path = dir.path().join("doc.json");
-    std::fs::write(&json_path, serde_json::to_vec(&document).unwrap()).unwrap();
-
-    let status = flatc_command()
-        .arg("-b")
-        .arg("--root-type")
-        .arg(qualified("StageCuts"))
-        .arg("-o")
-        .arg(dir.path())
-        .arg(&pre_delivery_date_schema)
-        .arg(&json_path)
-        .status()
-        .expect("run flatc -b on pre-delivery_date schema");
-    assert!(
-        status.success(),
-        "flatc -b on pre-delivery_date schema failed"
-    );
-    let buf = std::fs::read(dir.path().join("doc.bin")).unwrap();
-
-    let result = deserialize_stage_cuts(&buf)
-        .expect("hand-rolled reader must accept pre-delivery_date buffer");
-    assert_eq!(result.entity_manifest.len(), 2);
-    for (i, slot) in result.entity_manifest.iter().enumerate() {
-        assert_eq!(
-            slot.delivery_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-            "pre-delivery_date slot {i} must read back as the sentinel"
-        );
-    }
 }
 
 // ─── EntitySlot per-family dating (ids: 6/7/8) round-trip + forward-compat ────
@@ -1474,10 +1316,12 @@ fn entity_slot_per_family_dates_round_trip() {
 }
 
 /// Forward-compat: a buffer written against a pre-`id:6` `EntitySlot` schema
-/// (fields through `delivery_date` at id 5 only) must deserialize with every
-/// slot's `reference_date`, `interval_start` and `interval_end` at the
-/// sentinel and no error. Mirrors `pre_delivery_date_entity_slot_reads_as_sentinel`'s
-/// rewritten-schema technique.
+/// (fields through the now-retired `delivery_date` at id 5 only) must
+/// deserialize with every slot's `reference_date`, `interval_start` and
+/// `interval_end` at the sentinel and no error. The rewritten-schema
+/// technique this test uses (flatc cannot emit a field the schema lacks, so
+/// the buffer is built from a schema stopping short of the field under test)
+/// is mirrored by `pre_node_id_stage_states_reads_as_sentinel`.
 #[test]
 fn pre_interval_entity_slot_reads_as_sentinel() {
     let schema_pre_interval = "

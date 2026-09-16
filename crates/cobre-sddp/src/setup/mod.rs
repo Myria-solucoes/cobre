@@ -1158,14 +1158,10 @@ pub(crate) fn resolve_state_layout(
 /// Canonical absolute delivery/arrival calendar date of a stage `start_date`,
 /// encoded `year * 10000 + month * 100 + day` (`YYYYMMDD`). The day is pinned to
 /// `01` so the anchor stays month-granular — the same calendar month maps to the
-/// same date whether resolved from a weekly or a monthly stage.
-///
-/// This pin is load-bearing for the boundary reconciliation date join: the join
-/// compares anchors by **equality**, so passing the raw stage-start day instead
-/// of normalizing to `01` would force interval-containment logic in its place.
+/// same date whether resolved from a weekly or a monthly stage. This is the
+/// `anticipated_lanes` output column's month key, not a reconciliation input.
 /// Pinned by `year_month_day_anchor_same_month_dates_are_equal` and
-/// `year_month_day_anchor_always_normalizes_to_day_01`, and mirrored by the
-/// `delivery_date` field's day-01 promise in `policy.fbs`.
+/// `year_month_day_anchor_always_normalizes_to_day_01`.
 pub(crate) fn year_month_day_anchor(date: NaiveDate) -> i32 {
     use chrono::Datelike;
     // `month()` is 1..=12, so the conversion never fails.
@@ -1175,16 +1171,30 @@ pub(crate) fn year_month_day_anchor(date: NaiveDate) -> i32 {
 /// The study's post-study delivery calendar ([`post_study_calendar_stages`]),
 /// empty when none is declared. Appended after the study stages to extend the
 /// ring's dating calendar so a slot maturing past the horizon dates onto its
-/// real post-study stage. Shared by [`build_extended_delivery_anchors`] and the
-/// policy manifest builders (`build_stage_entity_manifest`,
-/// `build_stage_entity_delivery_intervals`), so every delivery-dating site
-/// derives one calendar. The synthetic `Stage::id` restarts at `0` and collides
-/// with study ids — only `start_date`/`end_date` are ever read.
+/// real post-study stage. Shared by [`build_extended_delivery_anchors`] and
+/// the policy manifest builder `build_stage_entity_manifest`, so every
+/// delivery-dating site derives one calendar. The synthetic `Stage::id`
+/// restarts at `0` and collides with study ids — only
+/// `start_date`/`end_date` are ever read.
 pub(crate) fn post_study_delivery_calendar(system: &System) -> Vec<Stage> {
     system
         .post_study_stages()
         .map(|post_study| post_study_calendar_stages(&post_study.stages))
         .unwrap_or_default()
+}
+
+/// The study's boundary date: the last study stage's (`id >= 0`, highest
+/// `id`) exclusive `end_date` — the instant a terminal boundary policy must
+/// price. The sole owner of the last-non-negative-stage lookup; every site
+/// deriving this date calls it rather than repeating the walk. `None` only
+/// when the system declares no study stages.
+#[must_use]
+pub fn study_horizon_end(system: &System) -> Option<NaiveDate> {
+    system
+        .stages()
+        .iter()
+        .rfind(|s| s.id >= 0)
+        .map(|s| s.end_date)
 }
 
 /// The extended dating calendar: the `study_stages` view chained with the
@@ -1658,11 +1668,7 @@ fn warn_on_boundary_absent_post_study_delivery(
     }
     let n_stages = bucket_topology::study_stage_durations(system).len();
     let thermals = system.thermals();
-    let horizon_end = system
-        .stages()
-        .iter()
-        .rfind(|s| s.id >= 0)
-        .map(|s| s.end_date);
+    let horizon_end = study_horizon_end(system);
     let past = &system.initial_conditions().past_anticipated_commitments;
     let has_nonzero_fixed = |thermal_id: i32| -> bool {
         horizon_end.is_some_and(|end| {

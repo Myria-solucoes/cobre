@@ -27,6 +27,7 @@ pub use records::{
     SEASON_CYCLE_CODE_WEEKLY, STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL, STAGE_CUTS_NODE_ID_SENTINEL,
     STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, STAGE_STATES_NODE_ID_SENTINEL, SeasonManifest,
     StageCutsPayload, StageCutsReadResult, StageStatesPayload, StageStatesReadResult, StateFamily,
+    decode_slot_date, encode_slot_date,
 };
 
 #[cfg(test)]
@@ -789,7 +790,7 @@ mod tests {
         vec![
             EntitySlot::storage(12, true),
             EntitySlot::inflow_lag(-1, 3, false),
-            EntitySlot::anticipated(7, 1, true).with_delivery_date(20240501),
+            EntitySlot::anticipated(7, 1, true).with_interval(20_240_501, 20_240_601),
         ]
     }
 
@@ -800,7 +801,10 @@ mod tests {
             assert_eq!(a.entity_id, e.entity_id, "slot {i} entity_id");
             assert_eq!(a.subindex, e.subindex, "slot {i} subindex");
             assert_eq!(a.was_active, e.was_active, "slot {i} was_active");
-            assert_eq!(a.delivery_date, e.delivery_date, "slot {i} delivery_date");
+            assert_eq!(
+                a.interval_start, e.interval_start,
+                "slot {i} interval_start"
+            );
         }
     }
 

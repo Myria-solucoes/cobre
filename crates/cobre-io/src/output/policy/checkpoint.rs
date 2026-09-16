@@ -8,8 +8,6 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use chrono::NaiveDate;
-
 use super::super::atomic::write_bytes_atomic;
 use super::super::error::OutputError;
 use super::codec::{
@@ -20,22 +18,13 @@ use super::codec::{
 use super::records::{
     CheckpointManifest, ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, OwnedPolicyBasisRecord,
     PolicyBasisRecord, PolicyCheckpoint, StageCutsPayload, StageCutsReadResult, StageStatesPayload,
-    StageStatesReadResult, StateFamily,
+    StageStatesReadResult, StateFamily, decode_slot_date,
 };
 
 /// Whether a slot date field is [`ENTITY_SLOT_DELIVERY_DATE_SENTINEL`] or
 /// decodes as a valid `YYYYMMDD` date.
-fn is_well_formed_slot_date(delivery_date: i32) -> bool {
-    if delivery_date == ENTITY_SLOT_DELIVERY_DATE_SENTINEL {
-        return true;
-    }
-    let year = delivery_date / 10_000;
-    let month = (delivery_date / 100) % 100;
-    let day = delivery_date % 100;
-    let (Ok(month), Ok(day)) = (u32::try_from(month), u32::try_from(day)) else {
-        return false;
-    };
-    NaiveDate::from_ymd_opt(year, month, day).is_some()
+fn is_well_formed_slot_date(value: i32) -> bool {
+    value == ENTITY_SLOT_DELIVERY_DATE_SENTINEL || decode_slot_date(value).is_some()
 }
 
 /// Formats a date-consistency error naming `pool_id`, `slot`'s identity and `detail`.
@@ -51,7 +40,6 @@ fn slot_date_error(pool_id: u32, slot: &EntitySlot, detail: &str) -> OutputError
 
 fn check_well_formed_slot_dates(pool_id: u32, slot: &EntitySlot) -> Result<(), OutputError> {
     for (field_name, value) in [
-        ("delivery_date", slot.delivery_date),
         ("reference_date", slot.reference_date),
         ("interval_start", slot.interval_start),
         ("interval_end", slot.interval_end),
@@ -158,7 +146,7 @@ fn check_family_applicability(pool_id: u32, slot: &EntitySlot) -> Result<(), Out
 }
 
 /// Verify one pool's [`StateFamily::HydroTransitBucket`] slots (grouped by
-/// `entity_id`) carry non-sentinel `delivery_date`s that are monotone
+/// `entity_id`) carry non-sentinel `interval_start`s that are monotone
 /// non-decreasing in `subindex` (the maturity-lag depth).
 ///
 /// Only this family is checked: its `subindex` is a genuine delivery-ordered
@@ -169,31 +157,31 @@ fn check_family_applicability(pool_id: u32, slot: &EntitySlot) -> Result<(), Out
 /// # Errors
 ///
 /// Returns [`OutputError::SerializationError`] naming the pool, the offending
-/// subindex, and its `delivery_date`.
+/// subindex, and its `interval_start`.
 fn check_transit_bucket_monotonicity(pool: &StageCutsReadResult) -> Result<(), OutputError> {
     let mut by_entity: BTreeMap<i32, Vec<(u32, i32)>> = BTreeMap::new();
     for slot in &pool.entity_manifest {
         if slot.family() == Some(StateFamily::HydroTransitBucket)
-            && slot.delivery_date != ENTITY_SLOT_DELIVERY_DATE_SENTINEL
+            && slot.interval_start != ENTITY_SLOT_DELIVERY_DATE_SENTINEL
         {
             by_entity
                 .entry(slot.entity_id)
                 .or_default()
-                .push((slot.subindex, slot.delivery_date));
+                .push((slot.subindex, slot.interval_start));
         }
     }
-    for dates in by_entity.values_mut() {
-        dates.sort_by_key(|&(subindex, _)| subindex);
-        for pair in dates.windows(2) {
-            let (prev_subindex, prev_date) = pair[0];
-            let (subindex, date) = pair[1];
-            if date < prev_date {
+    for starts in by_entity.values_mut() {
+        starts.sort_by_key(|&(subindex, _)| subindex);
+        for pair in starts.windows(2) {
+            let (prev_subindex, prev_start) = pair[0];
+            let (subindex, start) = pair[1];
+            if start < prev_start {
                 let pool_id = pool.stage_id;
                 return Err(OutputError::serialization(
                     "policy_checkpoint_dates",
                     format!(
-                        "pool {pool_id} subindex {subindex} carries delivery_date {date}, \
-                         earlier than subindex {prev_subindex}'s {prev_date}"
+                        "pool {pool_id} subindex {subindex} carries interval_start {start}, \
+                         earlier than subindex {prev_subindex}'s {prev_start}"
                     ),
                 ));
             }

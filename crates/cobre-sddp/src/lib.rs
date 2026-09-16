@@ -139,17 +139,19 @@ pub use lp::builder::build_stage_templates_resolving_layout;
 pub use lp::builder::{StageTemplates, build_stage_templates};
 // ── policy_load ───────────────────────────────────────────────────────────────
 pub use policy::policy_load::{
-    BoundaryInjection, FullFcf, LEGACY_COST_SCALE_FACTOR, PolicyLoadKind, PolicyLoadProof,
-    PolicyStageManifest, ValidatedBoundaryCuts, boundary_policy_required_lag_depth,
-    build_basis_cache_from_checkpoint, checkpoint_terminal_cost_scale_factor,
-    compare_manifest_slot_identity, inject_boundary_cuts, load_boundary_cuts,
-    rescale_checkpoint_cuts_for_load, resolve_boundary_source_stage,
-    resolve_boundary_state_requirements, validate_policy_load,
+    BoundaryInjection, BoundaryLoadRequest, FullFcf, LEGACY_COST_SCALE_FACTOR, PolicyLoadKind,
+    PolicyLoadProof, PolicyStageManifest, ValidatedBoundaryCuts,
+    boundary_policy_required_lag_depth, build_basis_cache_from_checkpoint,
+    checkpoint_terminal_cost_scale_factor, compare_manifest_slot_identity, inject_boundary_cuts,
+    load_boundary_cuts, rescale_checkpoint_cuts_for_load, resolve_boundary_state_requirements,
+    validate_policy_load,
 };
 // ── policy_export (checkpoint authoring) ─────────────────────────────────────
 pub use policy::policy_export::{ReservedInflowLagLayout, reserve_boundary_inflow_lag_slots};
 // ── policy_load::reconcile (report) ──────────────────────────────────────────
-pub use policy::reconcile::{AnticipatedCoverage, BoundaryReconciliationReport, FamilyTally};
+pub use policy::reconcile::{
+    AnticipatedCoverage, BoundaryReconciliationReport, FamilyTally, SlotDetail,
+};
 // ── provenance ────────────────────────────────────────────────────────────────
 pub use policy::provenance::{
     HydroProductionProvenance, InflowProvenance, ModelProvenanceReport, ProvenanceSource,
@@ -163,7 +165,7 @@ pub use convergence::risk_measure::{BackwardOutcome, RiskMeasure};
 pub use setup::{
     BoundaryStateRequirements, DEFAULT_COST_SCALE_FACTOR, DEFAULT_MAX_ITERATIONS, DEFAULT_SEED,
     PrepareStochasticResult, StudyParams, StudySetup, build_stochastic_context_for_study,
-    prepare_stochastic,
+    prepare_stochastic, study_horizon_end,
 };
 // ── simulation ────────────────────────────────────────────────────────────────
 pub use simulation::{

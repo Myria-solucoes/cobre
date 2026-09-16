@@ -40,6 +40,17 @@ mod simulation_only {
 
     use super::common::StubComm;
 
+    /// Ascending, distinct `end_date` per pool (`2030-01-01` plus the pool
+    /// index in months) — the study-stage calendar fed to
+    /// `build_stage_cuts_payloads` to self-describe each pool's
+    /// `priced_state_date`.
+    fn ascending_stage_end_dates(n_pools: usize) -> Vec<chrono::NaiveDate> {
+        let base = chrono::NaiveDate::from_ymd_opt(2030, 1, 1).unwrap();
+        (0..n_pools as u32)
+            .map(|i| base.checked_add_months(chrono::Months::new(i)).unwrap())
+            .collect()
+    }
+
     #[test]
     fn simulation_only_fcf_round_trip() {
         let case_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -100,8 +111,7 @@ mod simulation_only {
         let stage_active_indices = build_active_indices(&stage_records);
         let stage_manifests: Vec<Vec<cobre_io::EntitySlot>> = vec![Vec::new(); fcf.pools.len()];
         let study_stage_ids: Vec<i32> = (0..fcf.pools.len() as i32).collect();
-        let study_stage_end_dates =
-            vec![chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(); fcf.pools.len()];
+        let study_stage_end_dates = ascending_stage_end_dates(fcf.pools.len());
         let stage_cuts = build_stage_cuts_payloads(
             fcf,
             &setup.node_graph,
@@ -964,6 +974,17 @@ mod decomp_integration {
             .join("examples/deterministic/d28-decomp-weekly-monthly")
     }
 
+    /// Ascending, distinct `end_date` per pool (`2030-01-01` plus the pool
+    /// index in months) — the study-stage calendar fed to
+    /// `build_stage_cuts_payloads` to self-describe each pool's
+    /// `priced_state_date`.
+    fn ascending_stage_end_dates(n_pools: usize) -> Vec<chrono::NaiveDate> {
+        let base = chrono::NaiveDate::from_ymd_opt(2030, 1, 1).unwrap();
+        (0..n_pools as u32)
+            .map(|i| base.checked_add_months(chrono::Months::new(i)).unwrap())
+            .collect()
+    }
+
     /// Write a policy checkpoint to `policy_dir` from the given setup and training result.
     fn write_test_checkpoint(
         policy_dir: &Path,
@@ -994,8 +1015,7 @@ mod decomp_integration {
         let stage_records = build_stage_cut_records(fcf);
         let stage_active_indices = build_active_indices(&stage_records);
         let study_stage_ids: Vec<i32> = (0..fcf.pools.len() as i32).collect();
-        let study_stage_end_dates =
-            vec![chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(); fcf.pools.len()];
+        let study_stage_end_dates = ascending_stage_end_dates(fcf.pools.len());
         let stage_cuts = build_stage_cuts_payloads(
             fcf,
             &setup.node_graph,
@@ -1207,7 +1227,8 @@ mod decomp_integration {
         write_test_checkpoint(&source_policy_dir, &setup_a, &outcome_a.result, 42);
 
         let num_stages = setup_a.fcf.pools.len();
-        let source_stage = (num_stages - 2) as u32; // second-to-last stage has backward-pass cuts
+        // second-to-last stage has backward-pass cuts
+        let boundary_date = ascending_stage_end_dates(num_stages)[num_stages - 2];
 
         let (mut setup_b, _system_b) = build_setup(&case_dir, &config);
         let mut solver_b = ActiveSolver::new().expect("solver B");
@@ -1225,15 +1246,14 @@ mod decomp_integration {
         let current_manifest = setup_c.build_terminal_entity_manifest(&system_c);
         let mut warnings: Vec<String> = Vec::new();
         let boundary_records = cobre_sddp::load_boundary_cuts(
-            &source_policy_dir,
-            source_stage,
-            state_dim,
-            &current_manifest,
-            &vec![None; current_manifest.len()],
-            &[],
-            None,
-            1_000_000.0,
-            &mut |msg| warnings.push(msg.to_string()),
+            &cobre_sddp::BoundaryLoadRequest::new(
+                &source_policy_dir,
+                boundary_date,
+                state_dim,
+                &current_manifest,
+                1_000_000.0,
+            ),
+            &mut |msg: &str| warnings.push(msg.to_string()),
         )
         .expect("load_boundary_cuts");
         assert!(
@@ -1315,17 +1335,16 @@ mod decomp_integration {
             &stage_manifests,
         );
 
-        let source_stage = (n_pools - 2) as u32;
+        let boundary_date = ascending_stage_end_dates(n_pools)[n_pools - 2];
         let state_dim = setup_a.fcf.state_dimension as u32;
         let result = cobre_sddp::load_boundary_cuts(
-            &source_policy_dir,
-            source_stage,
-            state_dim,
-            &current_manifest,
-            &vec![None; current_manifest.len()],
-            &[],
-            None,
-            1_000_000.0,
+            &cobre_sddp::BoundaryLoadRequest::new(
+                &source_policy_dir,
+                boundary_date,
+                state_dim,
+                &current_manifest,
+                1_000_000.0,
+            ),
             &mut |_| {},
         );
 
@@ -2786,14 +2805,16 @@ mod water_arc_and_post_study_anticipated_coexist_on_extended_layout {
         TrainingSelection, TrainingSolverConfig, UpperBoundEvaluationConfig,
     };
     use cobre_io::{
-        GraphManifest, ManifestNode, PolicyCutRecord, ProducerBlock,
-        STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, StageCutsPayload, write_policy_checkpoint,
+        GraphManifest, ManifestNode, PolicyCutRecord, ProducerBlock, StageCutsPayload,
+        encode_slot_date, write_policy_checkpoint,
     };
     use cobre_sddp::indexer::{CutStateProjection, StateDim};
     use cobre_sddp::setup::{NodeId, StageIdx};
     use cobre_sddp::test_support::{patch_backward_opening_for_probe, solve_stage_for_probe};
     use cobre_sddp::workspace::SolverWorkspace;
-    use cobre_sddp::{SolverStatsDelta, inject_boundary_cuts, load_boundary_cuts};
+    use cobre_sddp::{
+        BoundaryLoadRequest, SolverStatsDelta, inject_boundary_cuts, load_boundary_cuts,
+    };
     use cobre_solver::{
         ActiveSolver, FreezeScratch, RowBatch, SolverInterface, StageTemplate,
         freeze_rows_into_template,
@@ -3179,6 +3200,15 @@ mod water_arc_and_post_study_anticipated_coexist_on_extended_layout {
         pin
     }
 
+    /// Pool `pool`'s fixture `priced_state_date`: `2030-01-01` plus `pool`
+    /// months.
+    fn fixture_priced_date(pool: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(2030, 1, 1)
+            .unwrap()
+            .checked_add_months(chrono::Months::new(pool))
+            .unwrap()
+    }
+
     /// Write a synthetic single-cut boundary checkpoint carrying `intercept`
     /// and the explicit per-slot `coefficients`. No entity manifest (`&[]`):
     /// the loader's identity check short-circuits with a warning (mirrors
@@ -3211,7 +3241,7 @@ mod water_arc_and_post_study_anticipated_coexist_on_extended_layout {
             cost_scale_factor: 1_000_000.0,
             node_id: 100,
             graph_stage_id: -1,
-            priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
+            priced_state_date: encode_slot_date(fixture_priced_date(0)),
         };
         let metadata = cobre_sddp::test_support::checkpoint_metadata(
             1,
@@ -3258,14 +3288,7 @@ mod water_arc_and_post_study_anticipated_coexist_on_extended_layout {
         write_synthetic_boundary(dir, state_dimension, ALPHA, &coefficients);
 
         let boundary_cuts = load_boundary_cuts(
-            dir,
-            0,
-            state_dimension,
-            &[],
-            &[],
-            &[],
-            None,
-            1.0,
+            &BoundaryLoadRequest::new(dir, fixture_priced_date(0), state_dimension, &[], 1.0),
             &mut |_msg| {},
         )
         .expect("boundary cut must load");

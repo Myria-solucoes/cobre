@@ -3055,7 +3055,7 @@ mod faithful_resolution {
     //! only, read off the built setup through the two public terminal
     //! accessors with no training and no solve.
 
-    use chrono::{Datelike, NaiveDate};
+    use chrono::NaiveDate;
     use cobre_core::entities::bus::DeficitSegment;
     use cobre_core::entities::thermal::AnticipatedConfig;
     use cobre_core::temporal::{
@@ -3077,6 +3077,8 @@ mod faithful_resolution {
         StoppingRuleConfig, TrainingConfig, TrainingSelection, TrainingSolverConfig,
         UpperBoundEvaluationConfig,
     };
+    use cobre_io::{ENTITY_SLOT_DELIVERY_DATE_SENTINEL, StateFamily, decode_slot_date};
+    use cobre_sddp::study_horizon_end;
 
     use super::common::build_setup_in_code;
     use super::common::builders::{
@@ -3405,35 +3407,35 @@ mod faithful_resolution {
         ]
     }
 
-    /// `YYYYMM01`, the same day-01 anchor `year_month_day_anchor` computes —
-    /// `EntitySlot::delivery_date` is month-granular by construction, never
-    /// the exact-day date.
-    fn month_anchor(d: NaiveDate) -> i32 {
-        d.year() * 10_000 + i32::try_from(d.month()).unwrap_or(1) * 100 + 1
-    }
-
     #[test]
     fn study_stage_deliveries_resolve_to_their_real_post_study_calendar_window() {
         let config = build_config();
         let setup = build_setup_in_code(build_system(), &config);
         let system = build_system();
 
-        let intervals = setup.build_terminal_anticipated_delivery_intervals(&system);
         let manifest = setup.build_terminal_entity_manifest(&system);
-        assert_eq!(
-            intervals.len(),
-            manifest.len(),
-            "the interval and manifest accessors must walk the same terminal projection"
-        );
+        let boundary_date =
+            study_horizon_end(&system).expect("a non-negative stage exists in this study");
 
         // A `LeadStages` plant's ring `k_max` is clamped up to its own declared
         // lead rather than the resolver's true occupancy, so the ring's own
         // slot order does not match ascending delivery-target order — compare
         // the carried set by value (sorted by start), never by vector position.
-        let mut carried: Vec<(usize, (NaiveDate, NaiveDate))> = intervals
+        let mut carried: Vec<(usize, (NaiveDate, NaiveDate))> = manifest
             .iter()
             .enumerate()
-            .filter_map(|(j, interval)| interval.map(|window| (j, window)))
+            .filter_map(|(j, slot)| {
+                if slot.entity_type != StateFamily::AnticipatedThermalState.code()
+                    || slot.interval_start == ENTITY_SLOT_DELIVERY_DATE_SENTINEL
+                {
+                    return None;
+                }
+                let start = decode_slot_date(slot.interval_start)
+                    .expect("a live interval_start must decode");
+                let end =
+                    decode_slot_date(slot.interval_end).expect("a live interval_end must decode");
+                (end > boundary_date).then_some((j, (start, end)))
+            })
             .collect();
         carried.sort_by_key(|&(_, (start, _))| start);
 
@@ -3450,15 +3452,7 @@ mod faithful_resolution {
             assert_eq!(
                 window, *expected_window,
                 "a carried delivery interval must equal the literal reference window \
-                 {expected_window:?}, got {window:?}",
-            );
-
-            let expected_date = month_anchor(expected_window.0);
-            assert_eq!(
-                manifest[slot].delivery_date, expected_date,
-                "the manifest's delivery_date at slot {slot} must equal the month anchor \
-                 {expected_date} of the literal reference window's start, got {}",
-                manifest[slot].delivery_date,
+                 {expected_window:?}, got {window:?} (slot {slot})",
             );
         }
     }
@@ -3469,8 +3463,25 @@ mod faithful_resolution {
         let setup = build_setup_in_code(build_system(), &config);
         let system = build_system();
 
-        let intervals = setup.build_terminal_anticipated_delivery_intervals(&system);
-        let mut carried: Vec<(NaiveDate, NaiveDate)> = intervals.into_iter().flatten().collect();
+        let manifest = setup.build_terminal_entity_manifest(&system);
+        let boundary_date =
+            study_horizon_end(&system).expect("a non-negative stage exists in this study");
+
+        let mut carried: Vec<(NaiveDate, NaiveDate)> = manifest
+            .iter()
+            .filter_map(|slot| {
+                if slot.entity_type != StateFamily::AnticipatedThermalState.code()
+                    || slot.interval_start == ENTITY_SLOT_DELIVERY_DATE_SENTINEL
+                {
+                    return None;
+                }
+                let start = decode_slot_date(slot.interval_start)
+                    .expect("a live interval_start must decode");
+                let end =
+                    decode_slot_date(slot.interval_end).expect("a live interval_end must decode");
+                (end > boundary_date).then_some((start, end))
+            })
+            .collect();
         carried.sort_by_key(|&(start, _)| start);
 
         let expected_days = [7_i64, 7, 7, 24];

@@ -59,9 +59,9 @@ fn write_fixture(dir: &std::path::Path, pool_id: u32, manifest: &[EntitySlot]) {
 }
 
 #[test]
-fn malformed_month_delivery_date_rejected_naming_slot() {
+fn malformed_month_reference_date_rejected_naming_slot() {
     let dir = tempfile::tempdir().unwrap();
-    let manifest = [EntitySlot::anticipated(7, 0, true).with_delivery_date(20_261_305)];
+    let manifest = [EntitySlot::inflow_lag(7, 0, true).with_reference_date(20_261_305)];
     write_fixture(dir.path(), 0, &manifest);
 
     let err = read_policy_checkpoint(dir.path()).expect_err("month-13 date must be rejected");
@@ -78,8 +78,8 @@ fn malformed_month_delivery_date_rejected_naming_slot() {
 fn hydro_transit_bucket_decreasing_dates_rejected_naming_pool_and_subindex() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = [
-        EntitySlot::transit_bucket(42, 0, true).with_delivery_date(20_260_601),
-        EntitySlot::transit_bucket(42, 1, true).with_delivery_date(20_260_501),
+        EntitySlot::transit_bucket(42, 0, true).with_interval(20_260_601, 20_260_701),
+        EntitySlot::transit_bucket(42, 1, true).with_interval(20_260_501, 20_260_601),
     ];
     write_fixture(dir.path(), 3, &manifest);
 
@@ -91,6 +91,10 @@ fn hydro_transit_bucket_decreasing_dates_rejected_naming_pool_and_subindex() {
         msg.contains("subindex 1"),
         "must name the offending subindex: {msg}"
     );
+    assert!(
+        msg.contains("interval_start"),
+        "must name interval_start: {msg}"
+    );
 }
 
 #[test]
@@ -98,8 +102,8 @@ fn well_formed_monotone_checkpoint_accepted_manifest_unchanged() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = [
         EntitySlot::storage(1, true),
-        EntitySlot::transit_bucket(42, 0, true).with_delivery_date(20_260_501),
-        EntitySlot::transit_bucket(42, 1, true).with_delivery_date(20_260_601),
+        EntitySlot::transit_bucket(42, 0, true).with_interval(20_260_501, 20_260_601),
+        EntitySlot::transit_bucket(42, 1, true).with_interval(20_260_601, 20_260_701),
     ];
     write_fixture(dir.path(), 1, &manifest);
 
@@ -111,7 +115,8 @@ fn well_formed_monotone_checkpoint_accepted_manifest_unchanged() {
         assert_eq!(got.entity_type, want.entity_type);
         assert_eq!(got.entity_id, want.entity_id);
         assert_eq!(got.subindex, want.subindex);
-        assert_eq!(got.delivery_date, want.delivery_date);
+        assert_eq!(got.interval_start, want.interval_start);
+        assert_eq!(got.interval_end, want.interval_end);
     }
 }
 
@@ -138,8 +143,8 @@ fn anticipated_thermal_state_non_monotone_dates_accepted() {
     // Rejecting this would be a false positive on real data — see
     // `StateFamily::HydroTransitBucket`'s doc in `checkpoint.rs`.
     let manifest = [
-        EntitySlot::anticipated(1, 0, true).with_delivery_date(20_260_601),
-        EntitySlot::anticipated(1, 1, true).with_delivery_date(20_260_501),
+        EntitySlot::anticipated(1, 0, true).with_interval(20_260_601, 20_260_701),
+        EntitySlot::anticipated(1, 1, true).with_interval(20_260_501, 20_260_601),
     ];
     write_fixture(dir.path(), 1, &manifest);
 
@@ -263,7 +268,7 @@ fn fully_sentinel_dated_checkpoint_still_accepted() {
     let manifest = [
         EntitySlot::storage(1, true),
         EntitySlot::inflow_lag(1, 1, true),
-        EntitySlot::transit_bucket(42, 0, true).with_delivery_date(20_260_501),
+        EntitySlot::transit_bucket(42, 0, true),
         EntitySlot::anticipated(7, 0, true),
     ];
     write_fixture(dir.path(), 0, &manifest);

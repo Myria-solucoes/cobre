@@ -64,8 +64,14 @@ fn training_block_provenance(modes: &[BlockMode]) -> (String, Vec<String>) {
     }
 }
 
-/// Builds the study's season-cycle and per-hydro PAR-order descriptor for
-/// [`CheckpointManifest::season_manifest`].
+/// Builds the study's season-cycle and per-hydro PAR-order descriptor.
+///
+/// This is the single owner both the checkpoint writer
+/// ([`write_checkpoint`], via [`CheckpointManifest::season_manifest`]) and the
+/// boundary-load season/PAR-identity gate
+/// ([`crate::policy::policy_load::BoundaryLoadRequest::with_study_seasons`])
+/// build their descriptor from, so the two sides can never construct
+/// incomparable descriptors.
 ///
 /// Sources `n_seasons` from [`resolve_model_stage_seasons`]'s dense ordinals,
 /// not raw `season_id`s — a sparse cycle (e.g. `Weekly` ids 21/26) would index
@@ -73,8 +79,9 @@ fn training_block_provenance(modes: &[BlockMode]) -> (String, Vec<String>) {
 /// stage ids (not just `system.stages()`) keeps fitted models at synthesized
 /// pre-study stage ids — partial-year studies whose AR lags reach past the
 /// horizon — from silently dropping out of the descriptor.
+#[must_use]
 #[allow(clippy::cast_possible_truncation)] // season/AR-order counts are small
-fn season_manifest(system: &System) -> SeasonManifest {
+pub fn build_season_manifest(system: &System) -> SeasonManifest {
     let Some(season_map) = system.policy_graph().season_map.as_ref() else {
         return SeasonManifest::default();
     };
@@ -262,7 +269,7 @@ pub fn write_checkpoint(
             training_block_mode_per_stage,
             cost_scale_factor: Some(setup.stage_data.stage_templates.cost_scale_factor),
         },
-        season_manifest: season_manifest(system),
+        season_manifest: build_season_manifest(system),
     };
 
     let stage_states = if params.export_states {
@@ -391,7 +398,7 @@ mod tests {
 
     use super::{
         BlockMode, InflowModel, SEASON_CYCLE_CODE_WEEKLY, SeasonCycleType, System,
-        hydro_season_orders, season_manifest, training_block_provenance,
+        build_season_manifest, hydro_season_orders, training_block_provenance,
     };
 
     #[test]
@@ -531,7 +538,7 @@ mod tests {
             ],
         );
 
-        let manifest = season_manifest(&system);
+        let manifest = build_season_manifest(&system);
 
         assert_eq!(manifest.cycle_code, SEASON_CYCLE_CODE_WEEKLY);
         assert_eq!(manifest.n_seasons, 2);
@@ -546,7 +553,7 @@ mod tests {
             .build()
             .expect("empty system must be valid");
 
-        let manifest = season_manifest(&system);
+        let manifest = build_season_manifest(&system);
 
         assert_eq!(manifest.cycle_code, SEASON_CYCLE_CODE_ABSENT);
         assert_eq!(manifest.n_seasons, 0);
@@ -567,7 +574,7 @@ mod tests {
             vec![inflow_model(1, 0, vec![0.3])],
         );
 
-        let manifest = season_manifest(&system);
+        let manifest = build_season_manifest(&system);
 
         assert_eq!(manifest.n_seasons, 4);
         assert_eq!(manifest.hydro_orders.len(), 1);
@@ -632,7 +639,7 @@ mod tests {
             ],
         );
 
-        let manifest = season_manifest(&system);
+        let manifest = build_season_manifest(&system);
 
         assert_eq!(manifest.n_seasons, 3);
         assert_eq!(manifest.hydro_orders.len(), 1);
@@ -640,7 +647,7 @@ mod tests {
         assert_eq!(manifest.hydro_orders[0].orders, vec![1, 0, 2]);
     }
 
-    /// Regression for a reviewer-flagged bug: `season_manifest` used to
+    /// Regression for a reviewer-flagged bug: `build_season_manifest` used to
     /// resolve every `InflowModel.stage_id` through `system.stages()` alone,
     /// so a fitted model at a synthesized pre-study stage id (never merged
     /// into `system.stages()`) silently dropped out of `hydro_season_orders`
@@ -668,7 +675,7 @@ mod tests {
             ],
         );
 
-        let manifest = season_manifest(&system);
+        let manifest = build_season_manifest(&system);
 
         assert_eq!(manifest.n_seasons, 12);
         assert_eq!(manifest.hydro_orders.len(), 1);
