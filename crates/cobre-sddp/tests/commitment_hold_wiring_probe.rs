@@ -29,7 +29,9 @@ use cobre_io::config::{
     StoppingMode, StoppingRuleConfig, TrainingConfig, TrainingSelection, TrainingSolverConfig,
     UpperBoundEvaluationConfig,
 };
-use cobre_io::{EntitySlot, OwnedPolicyCutRecord, StageCutsReadResult};
+use cobre_io::{
+    EntitySlot, OwnedPolicyCutRecord, STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, StageCutsReadResult,
+};
 use cobre_sddp::{
     LEGACY_COST_SCALE_FACTOR, SddpError, compare_manifest_slot_identity,
     rescale_checkpoint_cuts_for_load,
@@ -209,10 +211,8 @@ fn manifest_slot_identity_binds_on_subindex_with_no_schema_change() {
     // there is no storage/lag/bucket slot competing for the entity-type byte.
     let real_slot = manifest[0].clone();
 
-    let window_indexed_slot = EntitySlot {
-        subindex: 7,
-        ..real_slot.clone()
-    };
+    let window_indexed_slot = EntitySlot::anticipated(real_slot.entity_id, 7, real_slot.was_active)
+        .with_interval(real_slot.interval_start, real_slot.interval_end);
     let source = vec![window_indexed_slot.clone()];
     let matching_current = vec![window_indexed_slot.clone()];
     compare_manifest_slot_identity(&source, &matching_current, &mut |_| {})
@@ -302,6 +302,7 @@ fn sample_stage_cuts() -> Vec<StageCutsReadResult> {
         cost_scale_factor: None,
         node_id: -1,
         graph_stage_id: -1,
+        priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
     }]
 }
 

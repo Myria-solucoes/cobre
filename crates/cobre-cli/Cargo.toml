@@ -24,6 +24,7 @@ cobre-sddp = { version = "0.15.0", path = "../cobre-sddp", default-features = fa
 cobre-solver = { version = "0.15.0", path = "../cobre-solver", default-features = false }
 cobre-comm = { version = "0.15.0", path = "../cobre-comm" }
 cobre-stochastic = { version = "0.15.0", path = "../cobre-stochastic" }
+chrono = { version = "0.4", default-features = false, features = ["std", "serde"] }
 clap = { version = "4", features = ["derive"] }
 postcard = { version = "1", features = ["alloc"] }
 console = "0.16"
@@ -58,7 +59,6 @@ slow-tests = []
 [dev-dependencies]
 arrow = { version = "59", default-features = false }
 assert_cmd = "2"
-chrono = { version = "0.4", default-features = false, features = ["std"] }
 cobre-core = { version = "0.15.0", path = "../cobre-core", features = ["test-support"] }
 cobre-io = { version = "0.15.0", path = "../cobre-io" }
 cobre-solver = { version = "0.15.0", path = "../cobre-solver", default-features = false }

@@ -427,12 +427,11 @@ mod self_reproducibility_regression {
 
         let params = StudyParams::from_config(&config_with_sim)
             .expect("StudyParams::from_config must succeed");
-        let construction = params;
 
         let mut setup = StudySetup::from_broadcast_params(
             &system,
             stochastic,
-            construction,
+            params,
             hydro_models,
             &training_source,
             &simulation_source,
@@ -1985,27 +1984,6 @@ mod water_travel_time_no_arc_byte_identity {
         }
     }
 
-    fn zero_hydro_stage_penalties() -> HydroPenalties {
-        HydroPenalties {
-            spillage_cost: 0.0,
-            diversion_cost: 0.0,
-            turbined_cost: 0.0,
-            storage_violation_below_cost: 0.0,
-            filling_target_violation_cost: 0.0,
-            turbined_violation_below_cost: 0.0,
-            outflow_violation_below_cost: 0.0,
-            outflow_violation_above_cost: 0.0,
-            generation_violation_below_cost: 0.0,
-            evaporation_violation_cost: 0.0,
-            water_withdrawal_violation_cost: 0.0,
-            water_withdrawal_violation_pos_cost: 0.0,
-            water_withdrawal_violation_neg_cost: 0.0,
-            evaporation_violation_pos_cost: 0.0,
-            evaporation_violation_neg_cost: 0.0,
-            inflow_nonnegativity_cost: 0.0,
-        }
-    }
-
     /// One bus, one standalone hydro (no `downstream_id`/`travel_time_hours` —
     /// no arc declared) with a backup thermal, `N_STAGES` stages each carrying a
     /// single default-length block (`StageSpec::default()`'s block: the `K = 1`
@@ -2137,7 +2115,7 @@ mod water_travel_time_no_arc_byte_identity {
                 n_stages: N_STAGES,
             },
             &PenaltiesDefaults {
-                hydro: zero_hydro_stage_penalties(),
+                hydro: zero_hydro_penalties(),
                 bus: BusStagePenalties { excess_cost: 0.0 },
                 line: LineStagePenalties { exchange_cost: 0.0 },
                 ncs: NcsStagePenalties {
@@ -2398,12 +2376,11 @@ mod water_travel_time_no_arc_byte_identity {
 
         let params =
             StudyParams::from_config(&config).expect("StudyParams::from_config must succeed");
-        let construction = params;
 
         StudySetup::from_broadcast_params(
             &system,
             stochastic,
-            construction,
+            params,
             hydro_models,
             &training_source,
             &simulation_source,
@@ -2452,19 +2429,27 @@ mod water_travel_time_no_arc_byte_identity {
 }
 
 mod water_travel_time_gate_byte_neutrality {
-    //! Byte-neutrality of the water-travel-time terminal keep-live gate when
-    //! `config.policy.boundary` is absent, on a DECLARED-ARC case (D44,
-    //! distinct from [`super::water_travel_time_no_arc_byte_identity`]'s
-    //! no-arc D06): a gated-off study must reproduce `final_lb` bit-for-bit
-    //! across two independent, freshly-constructed runs, and the gated-off
-    //! state layout must keep every terminal deep-lag bucket slot masked
-    //! exactly as the pre-keep-live layout — the "Terminal credit deferred"
-    //! contract the gate must preserve when no boundary is loaded. The
-    //! existing water goldens' own `.sha256` reproduction
+    //! Byte-neutrality of two independent gates on the same DECLARED-ARC deck
+    //! (D44, distinct from [`super::water_travel_time_no_arc_byte_identity`]'s
+    //! no-arc D06).
+    //!
+    //! The first is the water-travel-time terminal keep-live gate when
+    //! `config.policy.boundary` is absent: a gated-off study must reproduce
+    //! `final_lb` bit-for-bit across two independent, freshly-constructed
+    //! runs, and the gated-off state layout must keep every terminal deep-lag
+    //! bucket slot masked exactly as the pre-keep-live layout — the "Terminal
+    //! credit deferred" contract the gate must preserve when no boundary is
+    //! loaded. The existing water goldens' own `.sha256` reproduction
     //! (`d06_parity_hash_matches_existing_baseline_{highs,clp}` above) is the
     //! companion evidence that no baseline moved; this module adds the
     //! run-to-run reproducibility and mask-invariance checks a golden hash
     //! alone does not pin.
+    //!
+    //! The second is the arrival-calendar gate: the topology sizing derived
+    //! from a declared post-study calendar only diverges from today's
+    //! synthetic pad when the deck actually declares one. This deck declares
+    //! none, so that gate is structurally incapable of moving these goldens —
+    //! asserted directly below rather than assumed.
 
     use std::path::Path;
 
@@ -2519,7 +2504,7 @@ mod water_travel_time_gate_byte_neutrality {
         let setup_on = fresh_setup_with(&case_dir(), |cfg| {
             cfg.policy.boundary = Some(BoundaryPolicy {
                 path: "unused".to_string(),
-                source_stage: None,
+                strict: false,
             });
         });
 
@@ -2558,6 +2543,16 @@ mod water_travel_time_gate_byte_neutrality {
             any_masked_off,
             "fixture has no power unless at least one terminal bucket slot is masked \
              [0,0] with no boundary present"
+        );
+    }
+
+    #[test]
+    fn declared_arc_golden_deck_declares_no_post_study_calendar() {
+        let system = cobre_io::load_case(&case_dir()).expect("load_case must succeed");
+        assert!(
+            system.post_study_stages().is_none(),
+            "the water goldens' deck declares no post-study calendar, so the \
+             arrival-calendar extension cannot move them"
         );
     }
 }

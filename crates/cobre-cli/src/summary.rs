@@ -5,6 +5,7 @@
 //! `print_*` writer ignores write errors (fire-and-forget); each has a paired
 //! `format_*_string` returning the same content without ANSI escapes for tests.
 
+use chrono::NaiveDate;
 use cobre_comm::ExecutionTopology;
 use cobre_io::SetupTimings;
 use console::Term;
@@ -353,10 +354,10 @@ pub fn format_provenance_summary_string(report: &ModelProvenanceReport) -> Strin
 /// The `Reconciliation:` row's value: the four-total tally with a compact
 /// trailing "N dropped" phrase, or the dimension-only notice on the skip path.
 ///
-/// Wording is independent of [`BoundaryReconciliationReport::tally_clause`],
-/// which keeps the legacy "N source slots dropped" wording `summary_line` must
-/// render byte-identically for `cobre validate`; the totals themselves come
-/// from the same [`BoundaryReconciliationReport::tally_totals`] both share.
+/// Wording is independent of [`BoundaryReconciliationReport::summary_line`],
+/// which keeps the legacy "N source slots dropped" wording byte-identical for
+/// `cobre validate`; the totals themselves come from the same
+/// [`BoundaryReconciliationReport::tally_totals`] both share.
 fn format_boundary_reconciliation_row(report: &BoundaryReconciliationReport) -> String {
     if !report.reconciled {
         return "dimension-only load (entity manifest absent)".to_string();
@@ -371,13 +372,13 @@ fn format_boundary_reconciliation_row(report: &BoundaryReconciliationReport) -> 
 pub fn print_boundary_summary(
     stderr: &Term,
     loaded: usize,
-    source_stage: u32,
+    boundary_date: NaiveDate,
     path: &Path,
     report: &BoundaryReconciliationReport,
 ) {
     let _ = stderr.write_line(&format!("{}", console::style("Boundary policy").bold()));
     let _ = stderr.write_line(&format!(
-        "  Cuts loaded:    {loaded} (stage {source_stage})"
+        "  Cuts loaded:    {loaded} (priced at {boundary_date})"
     ));
     let _ = stderr.write_line(&format!("  Source:         {}", path.display()));
     let _ = stderr.write_line(&format!(
@@ -390,13 +391,15 @@ pub fn print_boundary_summary(
 #[cfg(test)]
 pub fn format_boundary_summary_string(
     loaded: usize,
-    source_stage: u32,
+    boundary_date: NaiveDate,
     path: &Path,
     report: &BoundaryReconciliationReport,
 ) -> String {
     let mut lines: Vec<String> = Vec::new();
     lines.push("Boundary policy".to_string());
-    lines.push(format!("  Cuts loaded:    {loaded} (stage {source_stage})"));
+    lines.push(format!(
+        "  Cuts loaded:    {loaded} (priced at {boundary_date})"
+    ));
     lines.push(format!("  Source:         {}", path.display()));
     lines.push(format!(
         "  Reconciliation: {}",
@@ -2361,6 +2364,8 @@ mod tests {
 
     use std::path::Path;
 
+    use chrono::NaiveDate;
+
     use super::{
         BoundaryReconciliationReport, format_boundary_summary_string, print_boundary_summary,
     };
@@ -2387,20 +2392,28 @@ mod tests {
             },
             anticipated_coverage: AnticipatedCoverage::default(),
             other_identity: FamilyTally::default(),
+            dropped_source_slots: Vec::new(),
+            straddling_slots: Vec::new(),
         }
     }
 
     #[test]
     fn format_boundary_summary_reconciled_renders_house_style() {
         let report = make_reconciled_boundary_report();
-        let s = format_boundary_summary_string(10_000, 4, Path::new("/case/boundary"), &report);
+        let boundary_date = NaiveDate::from_ymd_opt(2031, 12, 1).unwrap();
+        let s = format_boundary_summary_string(
+            10_000,
+            boundary_date,
+            Path::new("/case/boundary"),
+            &report,
+        );
 
         assert!(
             s.contains("Boundary policy"),
             "output must contain the 'Boundary policy' header, got: {s}"
         );
         assert!(
-            s.contains("Cuts loaded:    10000 (stage 4)"),
+            s.contains("Cuts loaded:    10000 (priced at 2031-12-01)"),
             "output must contain the aligned 'Cuts loaded:' row, got: {s}"
         );
         assert!(
@@ -2416,7 +2429,13 @@ mod tests {
     #[test]
     fn format_boundary_summary_dimension_only_renders_notice() {
         let report = BoundaryReconciliationReport::default();
-        let s = format_boundary_summary_string(500, 2, Path::new("/case/boundary"), &report);
+        let boundary_date = NaiveDate::from_ymd_opt(2030, 2, 1).unwrap();
+        let s = format_boundary_summary_string(
+            500,
+            boundary_date,
+            Path::new("/case/boundary"),
+            &report,
+        );
 
         assert!(
             s.contains("Reconciliation: dimension-only load (entity manifest absent)"),
@@ -2427,12 +2446,24 @@ mod tests {
     #[test]
     fn print_boundary_summary_does_not_panic() {
         let report = make_reconciled_boundary_report();
+        let boundary_date = NaiveDate::from_ymd_opt(2031, 12, 1).unwrap();
         print_boundary_summary(
             &Term::buffered_stderr(),
             10_000,
-            4,
+            boundary_date,
             Path::new("/case/boundary"),
             &report,
+        );
+
+        let s = format_boundary_summary_string(
+            10_000,
+            boundary_date,
+            Path::new("/case/boundary"),
+            &report,
+        );
+        assert!(
+            s.contains("2031-12-01"),
+            "the rendered line must contain the ISO date: {s}"
         );
     }
 

@@ -37,7 +37,6 @@ use pyo3::types::{PyBool, PyDict, PyList, PyString};
 
 use crate::errors::{ErrorSource, convert_error};
 
-/// Canonicalize a path and return an appropriate Python error on failure.
 fn canonicalize_dir(path: &Path) -> PyResult<PathBuf> {
     path.canonicalize().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
@@ -48,7 +47,6 @@ fn canonicalize_dir(path: &Path) -> PyResult<PathBuf> {
     })
 }
 
-/// Convert a `serde_json::Value` to a Python object recursively.
 fn json_value_to_py(py: Python<'_>, val: &serde_json::Value) -> PyResult<Py<PyAny>> {
     match val {
         serde_json::Value::Null => Ok(py.None()),
@@ -97,7 +95,6 @@ fn json_value_to_py(py: Python<'_>, val: &serde_json::Value) -> PyResult<Py<PyAn
     }
 }
 
-/// Read a JSON file and return its contents as a `serde_json::Value`.
 fn read_json_file(path: &std::path::Path) -> PyResult<serde_json::Value> {
     let content = fs::read_to_string(path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
@@ -483,8 +480,6 @@ fn open_stochastic_parquet(path: &Path) -> PyResult<fs::File> {
     })
 }
 
-/// Extract a typed column from `batch` by name, mapping a missing column or a
-/// type mismatch to `OSError`.
 fn stochastic_column<'a, T: Array + 'static>(
     batch: &'a RecordBatch,
     file: &str,
@@ -781,7 +776,6 @@ pub fn load_stochastic(py: Python<'_>, output_dir: PathBuf) -> PyResult<Stochast
     })
 }
 
-/// Extract a column from a batch and downcast to its expected type, or return an error.
 fn get_column_by_name<'a, T: Array + 'static>(
     batch: &'a RecordBatch,
     name: &str,
@@ -865,7 +859,6 @@ fn arrow_value_to_py(py: Python<'_>, col: &dyn Array, i: usize) -> PyResult<Py<P
     }
 }
 
-/// Convert a value to a Python object, mapping errors appropriately.
 fn into_py<'py, T>(py: Python<'py>, val: T) -> PyResult<Py<PyAny>>
 where
     T: pyo3::IntoPyObject<'py>,
@@ -1425,7 +1418,6 @@ fn load_entity_type_as_batch(
     Ok(Some((concatenated, schema)))
 }
 
-/// Serialize a `RecordBatch` to an Arrow IPC stream buffer.
 fn batch_to_ipc_bytes(batch: &RecordBatch, schema: &Schema) -> PyResult<Vec<u8>> {
     let mut buf = Vec::new();
     let mut writer = StreamWriter::try_new(&mut buf, schema)
@@ -1452,7 +1444,6 @@ fn entity_type_ipc_bytes(entity_dir: &Path) -> PyResult<Vec<u8>> {
     }
 }
 
-/// Reconstruct a `pyarrow.Table` from a raw Arrow IPC stream buffer.
 fn ipc_bytes_to_py_table<'py>(
     py: Python<'py>,
     ipc_bytes: &[u8],
@@ -1577,8 +1568,9 @@ pub fn load_simulation_arrow(
 /// ```python
 /// {
 ///     "metadata": {
-///         "format_version": 1,
+///         "format_version": 2,
 ///         "cobre_version": "1.0.0",
+///         "created_at": "2026-01-15T12:00:00Z",
 ///         "num_stages": 60,
 ///         "graph_manifest": { "n_pools": 60, "nodes": [ ... ], "edges": [ ... ] },
 ///         "producer": {
@@ -1596,13 +1588,16 @@ pub fn load_simulation_arrow(
 ///             "cost_scale_factor": 2500000.0,
 ///             "node_id": 0,
 ///             "graph_stage_id": 0,
+///             "priced_state_date": -2147483648,
 ///             "entity_manifest": [
 ///                 {
 ///                     "entity_type": 0,
 ///                     "entity_id": 0,
 ///                     "subindex": 0,
 ///                     "was_active": True,
-///                     "delivery_date": -1,
+///                     "reference_date": -2147483648,
+///                     "interval_start": -2147483648,
+///                     "interval_end": -2147483648,
 ///                 },
 ///                 ...
 ///             ],
@@ -1691,6 +1686,7 @@ pub fn load_policy(
         sc_dict.set_item("cost_scale_factor", into_py(py, sc.cost_scale_factor)?)?;
         sc_dict.set_item("node_id", into_py(py, sc.node_id)?)?;
         sc_dict.set_item("graph_stage_id", into_py(py, sc.graph_stage_id)?)?;
+        sc_dict.set_item("priced_state_date", into_py(py, sc.priced_state_date)?)?;
 
         // Emit the per-slot entity manifest so a loaded checkpoint round-trips
         // through `write_policy_checkpoint` (whose binding already accepts this
@@ -1703,7 +1699,9 @@ pub fn load_policy(
             slot_dict.set_item("entity_id", into_py(py, slot.entity_id)?)?;
             slot_dict.set_item("subindex", into_py(py, slot.subindex)?)?;
             slot_dict.set_item("was_active", PyBool::new(py, slot.was_active).to_owned())?;
-            slot_dict.set_item("delivery_date", into_py(py, slot.delivery_date)?)?;
+            slot_dict.set_item("reference_date", into_py(py, slot.reference_date)?)?;
+            slot_dict.set_item("interval_start", into_py(py, slot.interval_start)?)?;
+            slot_dict.set_item("interval_end", into_py(py, slot.interval_end)?)?;
             manifest_list.append(slot_dict)?;
         }
         sc_dict.set_item("entity_manifest", manifest_list)?;

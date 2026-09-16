@@ -596,11 +596,11 @@ inside the plant's `[min_mw, max_mw]` (here it sits exactly at the cap).
 a cobre checkpoint, is the terminal boundary:
 
 ```jsonc
-"policy": { "boundary": { "path": "boundary", "source_stage": 3 } }
+"policy": { "boundary": { "path": "boundary" } }
 ```
 
-`source_stage` names the source stage whose cut pool to load; omit it and the
-loader matches the source's dated stages against the study's terminal calendar.
+The loader picks the source pool whose priced state date equals this study's last
+stage `end_date`; there is no stage index to set.
 
 #### Step 4 — the ring
 
@@ -627,8 +627,10 @@ cell, charged that stage's `cost_per_mwh × hours`, and discounted by the
 cumulative factor **continued over the real post-study durations** — week 10's
 decision is discounted to 16 May and the June remainder's to 6 June, not to
 the horizon. The terminal state is the four post-horizon decisions per plant,
-dated in the policy manifest at their month anchors (`20260501` three times,
-then `20260601`). The three fixed windows never appear in it.
+dated in the policy manifest by their delivery interval: week 10's
+`[2026-05-16, 2026-05-23)`, week 11's `[2026-05-23, 2026-05-30)`, week 12's
+`[2026-05-30, 2026-06-06)`, then the June remainder's `[2026-06-06, 2026-06-30)`.
+The three fixed windows never appear in it.
 
 #### Step 5 — pricing at the boundary
 
@@ -650,15 +652,20 @@ cost output (sunk, §3.6).
 boundary reconciliation: 2184 copied, 6 fanned out, 2 defaulted to 0.0, 2 source slots dropped
 ```
 
-Reading it: the 6 fanned-out slots are the three May weeks of each plant; the
-2 defaulted slots are each plant's June remainder — this source checkpoint
-prices April and May only, so the June delivery is valued at zero, which is
-the thing to check whenever a delivery you expected priced comes back
-defaulted; the 2 dropped source slots are April months nothing in the study
-delivers into, a benign drop. `cobre validate --json` returns the same tally
-per state family. Without `config.policy.boundary` at all, setup warns once,
-naming SANTA CRUZ (a non-zero fixed value) and both plants (carried
-decisions): everything post-horizon prices at zero terminal value.
+Reading it: the 6 fanned-out slots are the three May weeks of each plant; the 2
+defaulted slots are each plant's June remainder — this source checkpoint prices
+April and May only, so the June delivery is valued at zero, which is the thing
+to check whenever a delivery you expected priced comes back defaulted; the 2
+dropped source slots are April months nothing in the study delivers into, a
+benign drop. A dropped source slot never triggers a warning: its detail lives
+in the reconciliation report's per-family `dropped_source` tally and in
+`dropped_source_slots`, which lists every dropped slot's entity and interval.
+Setting `policy.boundary.strict: true` (default `false`) turns a non-zero drop
+into a reject naming every dropping family and its count, instead of loading
+it. `cobre validate --json` returns the same tally per state family. Without
+`config.policy.boundary` at all, setup warns once, naming SANTA CRUZ (a
+non-zero fixed value) and both plants (carried decisions): everything
+post-horizon prices at zero terminal value.
 
 #### Step 6 — what you read back
 
@@ -947,9 +954,13 @@ dimensions up by identity:
 - `HydroTransitBucket` — an in-transit water bucket (subindex = maturity lag,
   entity = the downstream hydro).
 
-Each slot also carries a `delivery_date` (`YYYYMMDD`, day pinned to `01` for the
-month-granular anticipated anchors), so cross-study boundary reconciliation can
-join deliveries by date.
+Storage slots carry no per-slot date; the source policy pool itself is
+selected by date (`priced_state_date`, matched against the study's
+last-stage `end_date`). An inflow-lag slot carries the reference date of the
+past stage it realizes. A transit-bucket slot carries a half-open
+`[interval_start, interval_end)` arrival interval, and an anticipated-thermal
+slot the analogous delivery interval; cross-study boundary reconciliation
+joins both by interval overlap, not by a single date.
 
 ---
 

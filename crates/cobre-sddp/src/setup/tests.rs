@@ -1,6 +1,6 @@
 use super::{
     BoundaryStateRequirements, NodeId, NodePos, PhaseLibraries, ScenarioLibraries, StudySetup,
-    assert_external_library_widths, build_contract_prices_per_stage,
+    assert_external_library_widths, build_contract_prices_per_stage, study_horizon_end,
 };
 use crate::SddpError;
 use crate::hydro_models::{PrepareHydroModelsResult, ProductionModelSet, ResolvedProductionModel};
@@ -10307,4 +10307,50 @@ fn test_gapped_windows_contribute_additively() {
             "bucket {idx}: gapped windows must contribute additively, got {got} vs expected {want}"
         );
     }
+}
+
+// ── study_horizon_end ───────────────────────────────────────────────────────
+
+/// Given a system whose stages are `[-2, -1, 0, 1, 2]` (pre-study stages carry
+/// negative ids) with stage `2` ending `2031-12-01`, `study_horizon_end`
+/// returns `Some(2031-12-01)`, ignoring the pre-study stages entirely.
+#[test]
+fn study_horizon_end_ignores_pre_study_stages() {
+    let day = |y: i32, m: u32, d: u32| NaiveDate::from_ymd_opt(y, m, d).unwrap();
+    let stage = |id: i32, start: NaiveDate, end: NaiveDate| Stage {
+        index: 0,
+        id,
+        start_date: start,
+        end_date: end,
+        season_id: None,
+        blocks: vec![Block {
+            index: 0,
+            name: "S".to_string(),
+            duration_hours: 744.0,
+        }],
+        block_mode: BlockMode::Parallel,
+        state_config: StageStateConfig {
+            storage: true,
+            inflow_lags: false,
+        },
+        risk_config: StageRiskConfig::Expectation,
+        scenario_config: ScenarioSourceConfig {
+            branching_factor: 1,
+            noise_method: NoiseMethod::Saa,
+        },
+    };
+    let stages = vec![
+        stage(-2, day(2030, 9, 1), day(2030, 10, 1)),
+        stage(-1, day(2030, 10, 1), day(2030, 11, 1)),
+        stage(0, day(2030, 11, 1), day(2030, 12, 1)),
+        stage(1, day(2030, 12, 1), day(2031, 1, 1)),
+        stage(2, day(2031, 11, 1), day(2031, 12, 1)),
+    ];
+
+    let system = SystemBuilder::new()
+        .stages(stages)
+        .build()
+        .expect("a stages-only system with no cross-referenced entities is valid");
+
+    assert_eq!(study_horizon_end(&system), Some(day(2031, 12, 1)));
 }

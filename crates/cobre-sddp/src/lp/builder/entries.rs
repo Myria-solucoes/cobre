@@ -522,9 +522,16 @@ fn fill_arc_release_block_entries(
             continue;
         }
         let slot = range.start + ring.slot_target(0, d);
-        // A lag beyond this stage's reachable cap has no definition row: the share is
-        // dropped, never misdirected onto another lag's row (Terminal credit deferred).
         let Some(pos) = layout.rows.transit_bucket_row_pos[slot] else {
+            // A dropped lag targets only a stage past the horizon, unreachable once
+            // `boundary_present` un-caps the mask (sddp.md "Terminal credit deferred").
+            debug_assert!(
+                ctx.arc_stage_weights
+                    .get(&u_idx)
+                    .is_some_and(|k_by_stage| stage_idx + d >= k_by_stage.len()),
+                "arc {u_idx} -> {h_idx} stage {stage_idx}: lag-{d} deposit targeting inside the \
+                 horizon must have a bucket-definition row"
+            );
             continue;
         };
         let row_def = row_transit_bucket_def_start + pos;
@@ -780,9 +787,16 @@ fn fill_arc_release_chrono_block_entries(
             continue;
         }
         let slot = range.start + ring.slot_target(0, d);
-        // A lag beyond this stage's reachable cap has no row to deposit into (dropped,
-        // never misdirected — Terminal credit deferred).
         let Some(pos) = layout.rows.transit_bucket_row_pos[slot] else {
+            // A dropped block deposit targets only a lag past the horizon, unreachable
+            // once `boundary_present` un-caps the mask (sddp.md "Terminal credit deferred").
+            debug_assert!(
+                ctx.arc_spread_chrono
+                    .get(&u_idx)
+                    .is_some_and(|by_stage| stage_idx + d >= by_stage.len()),
+                "arc {u_idx} -> {h_idx} stage {stage_idx}: lag-{d} block deposit targeting \
+                 inside the horizon must have a bucket-definition row"
+            );
             continue;
         };
         let row_def = row_transit_bucket_def_start + pos;

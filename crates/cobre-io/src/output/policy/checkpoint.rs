@@ -8,8 +8,6 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use chrono::NaiveDate;
-
 use super::super::atomic::write_bytes_atomic;
 use super::super::error::OutputError;
 use super::codec::{
@@ -18,28 +16,131 @@ use super::codec::{
     serialize_stage_basis, serialize_stage_cuts, serialize_stage_states,
 };
 use super::records::{
-    CheckpointManifest, ENTITY_SLOT_DELIVERY_DATE_SENTINEL, OwnedPolicyBasisRecord,
+    CheckpointManifest, ENTITY_SLOT_DATE_SENTINEL, EntitySlot, OwnedPolicyBasisRecord,
     PolicyBasisRecord, PolicyCheckpoint, StageCutsPayload, StageCutsReadResult, StageStatesPayload,
-    StageStatesReadResult, StateFamily,
+    StageStatesReadResult, StateFamily, decode_slot_date,
 };
 
-/// Whether `delivery_date` is [`ENTITY_SLOT_DELIVERY_DATE_SENTINEL`] or decodes
-/// as a valid `YYYYMMDD` date.
-fn is_well_formed_delivery_date(delivery_date: i32) -> bool {
-    if delivery_date == ENTITY_SLOT_DELIVERY_DATE_SENTINEL {
-        return true;
+fn is_well_formed_slot_date(value: i32) -> bool {
+    value == ENTITY_SLOT_DATE_SENTINEL || decode_slot_date(value).is_some()
+}
+
+fn slot_date_error(pool_id: u32, slot: &EntitySlot, detail: &str) -> OutputError {
+    OutputError::serialization(
+        "policy_checkpoint_dates",
+        format!(
+            "pool {pool_id} entity {} subindex {} {detail}",
+            slot.entity_id, slot.subindex
+        ),
+    )
+}
+
+fn check_well_formed_slot_dates(pool_id: u32, slot: &EntitySlot) -> Result<(), OutputError> {
+    for (field_name, value) in [
+        ("reference_date", slot.reference_date),
+        ("interval_start", slot.interval_start),
+        ("interval_end", slot.interval_end),
+    ] {
+        if !is_well_formed_slot_date(value) {
+            return Err(slot_date_error(
+                pool_id,
+                slot,
+                &format!("carries malformed {field_name} {value}"),
+            ));
+        }
     }
-    let year = delivery_date / 10_000;
-    let month = (delivery_date / 100) % 100;
-    let day = delivery_date % 100;
-    let (Ok(month), Ok(day)) = (u32::try_from(month), u32::try_from(day)) else {
-        return false;
-    };
-    NaiveDate::from_ymd_opt(year, month, day).is_some()
+    Ok(())
+}
+
+fn check_interval_pairing(pool_id: u32, slot: &EntitySlot) -> Result<(), OutputError> {
+    let start_live = slot.interval_start != ENTITY_SLOT_DATE_SENTINEL;
+    let end_live = slot.interval_end != ENTITY_SLOT_DATE_SENTINEL;
+    match (start_live, end_live) {
+        (true, false) => Err(slot_date_error(
+            pool_id,
+            slot,
+            "carries a live interval_start with no interval_end",
+        )),
+        (false, true) => Err(slot_date_error(
+            pool_id,
+            slot,
+            "carries a live interval_end with no interval_start",
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn check_interval_ordering(pool_id: u32, slot: &EntitySlot) -> Result<(), OutputError> {
+    let start = slot.interval_start;
+    let end = slot.interval_end;
+    if start != ENTITY_SLOT_DATE_SENTINEL && end != ENTITY_SLOT_DATE_SENTINEL && start >= end {
+        return Err(slot_date_error(
+            pool_id,
+            slot,
+            &format!("carries interval_start {start} not before interval_end {end}"),
+        ));
+    }
+    Ok(())
+}
+
+fn check_family_applicability(pool_id: u32, slot: &EntitySlot) -> Result<(), OutputError> {
+    let interval_live = slot.interval_start != ENTITY_SLOT_DATE_SENTINEL
+        || slot.interval_end != ENTITY_SLOT_DATE_SENTINEL;
+    let reference_live = slot.reference_date != ENTITY_SLOT_DATE_SENTINEL;
+    match slot.family() {
+        Some(StateFamily::HydroStorage) => {
+            if reference_live {
+                return Err(slot_date_error(
+                    pool_id,
+                    slot,
+                    &format!(
+                        "is a storage slot, which carries no per-slot date, but carries a live reference_date {}",
+                        slot.reference_date
+                    ),
+                ));
+            }
+            if interval_live {
+                return Err(slot_date_error(
+                    pool_id,
+                    slot,
+                    "is a storage slot, which carries no per-slot date, but carries a live interval",
+                ));
+            }
+        }
+        Some(StateFamily::HydroInflowLag) => {
+            if interval_live {
+                return Err(slot_date_error(
+                    pool_id,
+                    slot,
+                    "is an inflow-lag slot, which carries no interval, but carries a live interval",
+                ));
+            }
+        }
+        other => {
+            if reference_live {
+                let noun = match other {
+                    Some(StateFamily::HydroTransitBucket) => "a transit-bucket slot",
+                    Some(StateFamily::AnticipatedThermalState) => {
+                        "an anticipated-thermal-state slot"
+                    }
+                    _ => "a slot with no recognized family",
+                };
+                return Err(slot_date_error(
+                    pool_id,
+                    slot,
+                    &format!(
+                        "is {noun}, which carries no reference_date (only inflow-lag slots do), but carries a live reference_date {}",
+                        slot.reference_date
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Verify one pool's [`StateFamily::HydroTransitBucket`] slots (grouped by
-/// `entity_id`) carry non-sentinel `delivery_date`s that are monotone
+/// `entity_id`) carry non-sentinel `interval_start`s that are monotone
 /// non-decreasing in `subindex` (the maturity-lag depth).
 ///
 /// Only this family is checked: its `subindex` is a genuine delivery-ordered
@@ -50,31 +151,31 @@ fn is_well_formed_delivery_date(delivery_date: i32) -> bool {
 /// # Errors
 ///
 /// Returns [`OutputError::SerializationError`] naming the pool, the offending
-/// subindex, and its `delivery_date`.
+/// subindex, and its `interval_start`.
 fn check_transit_bucket_monotonicity(pool: &StageCutsReadResult) -> Result<(), OutputError> {
     let mut by_entity: BTreeMap<i32, Vec<(u32, i32)>> = BTreeMap::new();
     for slot in &pool.entity_manifest {
         if slot.family() == Some(StateFamily::HydroTransitBucket)
-            && slot.delivery_date != ENTITY_SLOT_DELIVERY_DATE_SENTINEL
+            && slot.interval_start != ENTITY_SLOT_DATE_SENTINEL
         {
             by_entity
                 .entry(slot.entity_id)
                 .or_default()
-                .push((slot.subindex, slot.delivery_date));
+                .push((slot.subindex, slot.interval_start));
         }
     }
-    for dates in by_entity.values_mut() {
-        dates.sort_by_key(|&(subindex, _)| subindex);
-        for pair in dates.windows(2) {
-            let (prev_subindex, prev_date) = pair[0];
-            let (subindex, date) = pair[1];
-            if date < prev_date {
+    for starts in by_entity.values_mut() {
+        starts.sort_by_key(|&(subindex, _)| subindex);
+        for pair in starts.windows(2) {
+            let (prev_subindex, prev_start) = pair[0];
+            let (subindex, start) = pair[1];
+            if start < prev_start {
                 let pool_id = pool.stage_id;
                 return Err(OutputError::serialization(
                     "policy_checkpoint_dates",
                     format!(
-                        "pool {pool_id} subindex {subindex} carries delivery_date {date}, \
-                         earlier than subindex {prev_subindex}'s {prev_date}"
+                        "pool {pool_id} subindex {subindex} carries interval_start {start}, \
+                         earlier than subindex {prev_subindex}'s {prev_start}"
                     ),
                 ));
             }
@@ -83,28 +184,24 @@ fn check_transit_bucket_monotonicity(pool: &StageCutsReadResult) -> Result<(), O
     Ok(())
 }
 
-/// Validate that `checkpoint` is internally date-consistent: every
-/// [`EntitySlot`](super::records::EntitySlot)'s non-sentinel `delivery_date` is
-/// a well-formed `YYYYMMDD` date, and every pool's `HydroTransitBucket` slots
-/// are monotone non-decreasing in `subindex`
-/// (see [`check_transit_bucket_monotonicity`]).
+/// Validate that `checkpoint` is internally date-consistent, returning the
+/// first violation found.
 ///
 /// # Errors
 ///
-/// Returns [`OutputError::SerializationError`] naming the offending pool,
-/// subindex, and `delivery_date`.
+/// Returns [`OutputError::SerializationError`] naming the offending pool and
+/// slot.
 fn validate_checkpoint_dates(checkpoint: &PolicyCheckpoint) -> Result<(), OutputError> {
     for pool in &checkpoint.stage_cuts {
-        for slot in &pool.entity_manifest {
-            if !is_well_formed_delivery_date(slot.delivery_date) {
-                return Err(OutputError::serialization(
-                    "policy_checkpoint_dates",
-                    format!(
-                        "pool {} subindex {} carries malformed delivery_date {}",
-                        pool.stage_id, slot.subindex, slot.delivery_date
-                    ),
-                ));
-            }
+        let pool_id = pool.stage_id;
+        // Canonical order so the first reported error is declaration-order invariant.
+        let mut slots: Vec<&EntitySlot> = pool.entity_manifest.iter().collect();
+        slots.sort_by_key(|slot| (slot.entity_type, slot.entity_id, slot.subindex));
+        for slot in slots {
+            check_well_formed_slot_dates(pool_id, slot)?;
+            check_interval_pairing(pool_id, slot)?;
+            check_interval_ordering(pool_id, slot)?;
+            check_family_applicability(pool_id, slot)?;
         }
         check_transit_bucket_monotonicity(pool)?;
     }
@@ -158,7 +255,8 @@ fn bin_file_name(id: u32) -> String {
 /// ```no_run
 /// use cobre_io::{
 ///     write_policy_checkpoint, FORMAT_VERSION, GraphManifest, PolicyBasisRecord,
-///     CheckpointManifest, PolicyCutRecord, ProducerBlock, StageCutsPayload,
+///     CheckpointManifest, PolicyCutRecord, ProducerBlock, SeasonManifest,
+///     STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, StageCutsPayload,
 /// };
 /// use std::path::Path;
 ///
@@ -185,6 +283,7 @@ fn bin_file_name(id: u32) -> String {
 ///     cost_scale_factor: 1_000_000.0,
 ///     node_id: 0,
 ///     graph_stage_id: 0,
+///     priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
 /// }];
 /// let metadata = CheckpointManifest {
 ///     format_version: FORMAT_VERSION,
@@ -206,6 +305,7 @@ fn bin_file_name(id: u32) -> String {
 ///         training_block_mode_per_stage: vec![],
 ///         cost_scale_factor: None,
 ///     },
+///     season_manifest: SeasonManifest::default(),
 /// };
 /// write_policy_checkpoint(Path::new("/tmp/policy"), &stage_cuts, &[], &metadata, &[])?;
 /// # Ok(())

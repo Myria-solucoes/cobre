@@ -1,8 +1,5 @@
-//! Latin Hypercube Sampling (LHS) for batch and point-wise noise generation.
-//!
-//! - [`generate_lhs`]: batch LHS filling `n_openings × dim` N(0,1) values.
-//! - [`sample_lhs_point`]: point-wise LHS for a single scenario, no inter-worker
-//!   coordination.
+//! Latin Hypercube Sampling (LHS) for batch ([`generate_lhs`]) and point-wise
+//! ([`sample_lhs_point`], no inter-worker coordination) noise generation.
 //!
 //! Output layout is opening-major: `output[opening * dim + entity]`. Determinism:
 //! the same `(base_seed, stage_id)` always produces identical output.
@@ -18,7 +15,6 @@ use crate::noise::{
     seed::{derive_forward_seed, derive_opening_seed, derive_stage_seed},
 };
 
-/// Shuffle `perm` in place using the Fisher-Yates algorithm in O(n) time.
 pub(crate) fn fisher_yates(perm: &mut [usize], rng: &mut impl Rng) {
     let n = perm.len();
     for i in (1..n).rev() {
@@ -42,7 +38,7 @@ fn unit_uniform() -> Uniform<f64> {
 ///
 /// Each dimension is independently stratified into `N = n_openings` strata, one
 /// sample each, with a per-dimension Fisher-Yates shuffle assigning strata to
-/// openings. Output layout: `output[opening * dim + entity]`.
+/// openings.
 ///
 /// # Panics
 ///
@@ -252,7 +248,6 @@ mod tests {
         sample_lhs_point_reference,
     };
 
-    /// A shuffled slice must contain exactly all elements 0..N (is a permutation).
     #[test]
     fn fisher_yates_is_permutation() {
         let n = 20_usize;
@@ -269,7 +264,6 @@ mod tests {
         );
     }
 
-    /// Different RNG states must produce different permutations (with high probability).
     #[test]
     fn fisher_yates_different_states_differ() {
         let n = 10_usize;
@@ -286,7 +280,6 @@ mod tests {
         );
     }
 
-    /// Empty and single-element slices must not panic.
     #[test]
     fn fisher_yates_edge_cases_do_not_panic() {
         let mut rng = Pcg64::seed_from_u64(0);
@@ -299,7 +292,6 @@ mod tests {
         assert_eq!(single, vec![7]);
     }
 
-    /// Same (`base_seed`, `stage_id`) must produce bitwise identical output.
     #[test]
     #[allow(clippy::float_cmp)]
     fn lhs_determinism() {
@@ -315,7 +307,6 @@ mod tests {
         );
     }
 
-    /// Different seeds must produce different output.
     #[test]
     fn lhs_different_seeds_differ() {
         let n_openings = 20;
@@ -327,7 +318,6 @@ mod tests {
         assert_ne!(out_a, out_b, "different seeds produced identical output");
     }
 
-    /// Output length must equal `n_openings` * dim.
     #[test]
     fn lhs_correct_length() {
         let n_openings = 10;
@@ -337,7 +327,6 @@ mod tests {
         assert_eq!(output.len(), n_openings * dim);
     }
 
-    /// All output values must be finite.
     #[test]
     fn lhs_all_finite() {
         let n_openings = 30;
@@ -349,8 +338,6 @@ mod tests {
         }
     }
 
-    /// Marginal uniformity: for each dimension, `floor(Φ(x) * N)` over the output
-    /// must be a permutation of {0, …, N-1} (Φ approximated via `libm_erf`).
     #[test]
     #[allow(
         clippy::cast_sign_loss,
@@ -385,7 +372,6 @@ mod tests {
         }
     }
 
-    /// Statistical sanity: mean ≈ 0, std ≈ 1 for large N.
     #[test]
     #[allow(clippy::cast_precision_loss)]
     fn lhs_mean_and_std_within_tolerance() {
@@ -409,7 +395,6 @@ mod tests {
         );
     }
 
-    /// `n_openings=0` must not panic and must leave output unchanged.
     #[test]
     #[allow(clippy::float_cmp)]
     fn lhs_zero_openings_does_not_panic() {
@@ -418,7 +403,6 @@ mod tests {
         assert!(output.is_empty());
     }
 
-    /// dim=0 must not panic.
     #[test]
     fn lhs_zero_dim_does_not_panic() {
         let mut output: Vec<f64> = vec![];
@@ -437,7 +421,6 @@ mod tests {
         sign * (1.0 - poly * (-x * x).exp())
     }
 
-    /// Same inputs must produce bitwise identical output (determinism).
     #[test]
     #[allow(clippy::float_cmp, clippy::cast_possible_truncation)]
     fn lhs_point_determinism() {
@@ -464,7 +447,6 @@ mod tests {
         );
     }
 
-    /// Different `sampling_seed` values must produce different outputs.
     #[test]
     #[allow(clippy::cast_possible_truncation)]
     fn lhs_point_different_seeds_differ() {
@@ -505,7 +487,6 @@ mod tests {
         );
     }
 
-    /// All output values across all scenarios must be finite.
     #[test]
     #[allow(clippy::cast_possible_truncation)]
     fn lhs_point_all_finite() {
@@ -536,10 +517,8 @@ mod tests {
         }
     }
 
-    /// For all scenarios 0..N, the strata per dimension must form a permutation
-    /// of {0, …, N-1}, verifying a valid LHS design without communication.
-    ///
-    /// Uses the same Φ approximation as `lhs_marginal_stratification`.
+    /// Point-wise sampling forms a valid LHS design with no inter-worker
+    /// communication.
     #[test]
     #[allow(
         clippy::cast_sign_loss,
@@ -585,8 +564,6 @@ mod tests {
         }
     }
 
-    /// `sample_lhs_point` matches `sample_lhs_point_reference` element-wise
-    /// for every scenario, across several `(dim, total_scenarios)` pairs.
     #[test]
     #[allow(clippy::float_cmp)]
     fn lhs_point_matches_reference() {
@@ -617,8 +594,6 @@ mod tests {
         }
     }
 
-    /// Each of the `dim` rows of `strata` must be a permutation of `0..n`:
-    /// sorting row `d` recovers `0..n` with no stratum collision.
     #[test]
     fn lhs_precomputed_strata_rows_are_permutations() {
         let dim = 3_usize;

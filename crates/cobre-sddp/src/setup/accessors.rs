@@ -1,6 +1,5 @@
 //! Accessor methods and context builders for [`StudySetup`].
 
-use chrono::NaiveDate;
 use cobre_core::AnticipatedCommitmentHistory;
 use cobre_core::System;
 use cobre_core::commissioning::commissioning_active;
@@ -22,10 +21,9 @@ use crate::{
 };
 
 use super::StudySetup;
+use super::study_horizon_end;
 use crate::dcs::DcsParams;
-use crate::policy_export::{
-    build_graph_manifest, build_stage_entity_delivery_intervals, build_stage_entity_manifest,
-};
+use crate::policy_export::{build_graph_manifest, build_stage_entity_manifest};
 
 impl StudySetup {
     /// Replace the FCF with a pre-loaded policy.
@@ -118,10 +116,8 @@ impl StudySetup {
     /// `terminal_idx` is a pool ordinal (`== n_pools - 1`); its owning stage
     /// resolves through `node_graph.pool_stage`, never `study_stage_ids[terminal_idx]`,
     /// which is OOB once `n_pools > n_stages` on a branching graph. Sole owner of
-    /// this resolution so [`Self::build_terminal_entity_manifest`] and
-    /// [`Self::build_terminal_anticipated_delivery_intervals`] date a slot and
-    /// interval it at the SAME stage — a divergence would date a slot at one stage
-    /// and interval it at another.
+    /// this resolution so [`Self::build_terminal_entity_manifest`] resolves the
+    /// pool's stage once, consistently.
     fn terminal_pool_stage_id(&self) -> (usize, i32) {
         let terminal_idx = self.stage_data.cut_state_layouts.len() - 1;
         let stage_id = self.study_stage_ids[self.node_graph.pool_stage[terminal_idx].0];
@@ -153,35 +149,6 @@ impl StudySetup {
         )
     }
 
-    /// Build the per-slot delivery interval for the terminal cut pool, aligned
-    /// 1:1 with [`Self::build_terminal_entity_manifest`]: `Some((start, end))` for
-    /// a dated post-study target — an in-study ring slot whose modular delivery
-    /// target lands on a post-study stage — `None` elsewhere.
-    ///
-    /// Delegates to [`build_stage_entity_delivery_intervals`], the companion
-    /// [`build_stage_entity_manifest`] walks in lockstep, against the SAME
-    /// terminal pool projection — the two outputs are aligned by construction,
-    /// never a re-derived subindex convention. The caller passes the result to
-    /// [`load_boundary_cuts`](crate::load_boundary_cuts) so the boundary
-    /// reconciliation's date-driven fan-out
-    /// (`crate::policy::reconcile::build_rebind`) can resolve each target
-    /// slot's real calendar span.
-    ///
-    /// `system` is passed explicitly because [`StudySetup`] does not own it.
-    #[must_use]
-    pub fn build_terminal_anticipated_delivery_intervals(
-        &self,
-        system: &System,
-    ) -> Vec<Option<(NaiveDate, NaiveDate)>> {
-        let (terminal_idx, stage_id) = self.terminal_pool_stage_id();
-        build_stage_entity_delivery_intervals(
-            system,
-            &self.stage_data.state,
-            &self.stage_data.cut_state_layouts[terminal_idx],
-            stage_id,
-        )
-    }
-
     /// Build the study's fixed post-horizon (class-4) anticipated commitment
     /// windows — declared post-study deliveries the terminal boundary FCF
     /// prices by folding into each boundary cut's intercept — in canonical
@@ -202,12 +169,7 @@ impl StudySetup {
         &self,
         system: &System,
     ) -> Vec<AnticipatedCommitmentHistory> {
-        let Some(horizon_end) = system
-            .stages()
-            .iter()
-            .rfind(|s| s.id >= 0)
-            .map(|s| s.end_date)
-        else {
+        let Some(horizon_end) = study_horizon_end(system) else {
             return Vec::new();
         };
         let ic = system.initial_conditions();

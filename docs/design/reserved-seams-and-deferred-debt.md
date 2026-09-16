@@ -99,6 +99,29 @@ backed by `MPI_Win_allocate_shared`. When the first such consumer lands,
 stays reserved rather than removed, per the "unwired config is reserved, not
 dead" rule.
 
+### Boundary-cut wire `graph_stage_id` (`STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL`)
+
+**What it is.** Every exported stage-cuts payload carries a `graph_stage_id`
+field (`policy_export.rs`'s `build_stage_cuts_payloads`, falling back to
+`STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL` when a pool's `pool_stage` is out of
+range), round-trips through the FlatBuffers wire encoding
+(`cobre-io/src/output/policy/codec.rs`), and is exposed to Python callers
+(`cobre-python/src/policy.rs`, `results.rs`). No code in `cobre-sddp` reads the
+decoded value back off a loaded checkpoint any more — boundary-cut selection
+reads `priced_state_date` instead, which the node-graph-to-calendar switchover
+made the authoritative pool key.
+
+**Owner.** The policy / boundary owner
+(`crates/cobre-sddp/src/policy/policy_export.rs`, `policy_load.rs`;
+`crates/cobre-io/src/output/policy/codec.rs`).
+
+**Consuming milestone.** The first `cobre-sddp` reader that needs the
+originating node-graph stage id independent of the calendar-derived
+`priced_state_date` — for example a diagnostic cross-checking a loaded
+checkpoint's graph shape, or a future selection mode disambiguating pools that
+share one `priced_state_date` by graph position. Until such a reader lands the
+field stays a write-only wire and Python-visible diagnostic surface.
+
 ## Verified NOT reserved
 
 `historical_years` (`cobre_core::scenario::ScenarioSource`,
@@ -377,8 +400,8 @@ approximation.
 ### Boundary-policy source-node
 
 **What it is.** The boundary-policy config (`BoundaryPolicy`,
-`crates/cobre-io/src/config/policy.rs`) addresses its source by stage
-(`source_stage`), has no source-node selector, shares one leaf pool
+`crates/cobre-io/src/config/policy.rs`) addresses its source by the study's own
+boundary date, has no source-node selector, shares one leaf pool
 unconditionally, and rejects a multi-node source. It relocates once, under a
 study-level boundary configuration.
 
@@ -848,40 +871,39 @@ collapsing it is the setup-layer redesign above.
 #### Boundary state-family coupling channels are per-family bespoke
 
 **What it is.** The question "how does an externally-authored boundary
-future-cost function's coupling on a given state family reach the study's
-state space?" is answered by a different bespoke mechanism per family. The
-setup channel is now unified — the resolved requirements ride the carriers as
-one generic `BoundaryStateRequirements` (the entry above) — but the WRITER and
+future-cost function's coupling on a given state family reach the study's state
+space?" is answered by a different bespoke mechanism per family. The setup
+channel is now unified — the resolved requirements ride the carriers as one
+generic `BoundaryStateRequirements` (the entry above) — but the WRITER and
 manifest channels are still family-specific: the inflow-lag family carries a
 Python writer argument and per-cut keyed field, a family-specific manifest
 decoder (`boundary_cut_lag_depth`), a family-specific widening
 (`widen_lag_state_depth`), and a family-specific writer helper
-(`reserve_boundary_inflow_lag_slots`). The anticipated family has its own
-manifest decoder (`decode_pool_anticipated_months`) and reserves post-horizon
-lanes from study config with calendar fan-out reconciliation. Transit buckets
-reserve from study arc topology with boundary-gated terminal unmasking and have
-NO widening path — a boundary bucket coupling the study's topology does not
-reserve is dropped during reconciliation. That drop is now SURFACED (a
-per-family load-time warning in `load_boundary_cuts` naming the dropped
-family + slot), no longer silent, so the remaining transit limitation is only
-the absent widening path — which is intentional: a study cannot fabricate a
-transit arc it never declared, and rejecting would break a legitimate superset
-boundary source. Each new family under this shape still repeats the per-family
-manifest decoder + reservation slot-body. The generic frame half-exists: the
-checkpoint manifest already self-describes every slot
-(`entity_type`/`entity_id`/`subindex`/`delivery_date` — no format change
-needed) and the load-side rebind dispatch is already family-generic in frame.
-The setup half of the target is DONE (one `BoundaryStateRequirements` rides the
-config carriers, on the typed state-family enum's vocabulary), and the writer's
-family-INDEPENDENT core is now extracted (`splice_reserved_state_block` owns the
-prefix/reserved/tail splice + keyed-coefficient placement + alignment guards).
-What REMAINS for a second authored family is its own reserved slot-body
-constructor and keyed per-cut coefficient field — and, for the anticipated
-family, the resolver-derived `delivery_date` the writer cannot recover from
-coefficients alone (so it needs the resolution context or an author-supplied
-date). Per-family reconciliation SEMANTICS (widen vs calendar fan-out vs reject)
-are genuinely irreducible and stay per-family; the debt is the missing
-per-family slot-body wiring, not the shared mechanism.
+(`reserve_boundary_inflow_lag_slots`). The anticipated family reserves
+post-horizon lanes from study config with calendar fan-out reconciliation.
+Transit buckets reserve from study arc topology with boundary-gated terminal
+unmasking and have NO widening path — a boundary bucket coupling the study's
+topology does not reserve is dropped during reconciliation. That drop is now
+SURFACED (the reconciliation report's `superset_summary` names the dropping
+family and its count, and `dropped_source_slots` carries every dropped slot's
+own identity and interval; `policy.boundary.strict` rejects the load outright
+instead), no longer silent, so the remaining transit limitation is only the
+absent widening path — which is intentional: a study cannot fabricate a transit
+arc it never declared, and rejecting would break a legitimate superset boundary
+source. Each new family under this shape still repeats the per-family manifest
+decoder + reservation slot-body. The generic frame half-exists: the checkpoint
+manifest already self-describes every slot
+(`entity_type`/`entity_id`/`subindex`/`reference_date`/`interval_start`/
+`interval_end` — no format change needed) and the load-side rebind dispatch is
+already family-generic in frame. The setup half of the target is DONE (one
+`BoundaryStateRequirements` rides the config carriers, on the typed
+state-family enum's vocabulary), and the writer's family-INDEPENDENT core is
+now extracted (`splice_reserved_state_block` owns the prefix/reserved/tail
+splice + keyed-coefficient placement + alignment guards). What REMAINS for a
+second authored family is its own reserved slot-body constructor and keyed
+per-cut coefficient field. Per-family reconciliation SEMANTICS (widen vs
+calendar fan-out vs reject) are genuinely irreducible and stay per-family; the
+debt is the missing per-family slot-body wiring, not the shared mechanism.
 
 **Owner.** The policy / setup owner.
 

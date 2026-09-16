@@ -2614,6 +2614,49 @@ fn partial_year_par2_synthesizes_prestudy_lag_models() {
     );
 }
 
+/// `resolve_model_stage_seasons` must recover the ordinal of a synthesized
+/// pre-study stage id (never present in `stages`) via the same back-walk
+/// convention `synthesize_prestudy_stages` used to mint it, while a declared
+/// pre-study stage still resolves through its own `season_id` and an id that
+/// is not below the first study stage stays unmapped.
+#[test]
+fn resolve_model_stage_seasons_recovers_synthesized_prestudy_gap_seasons() {
+    let season_map = monthly_season_map();
+    // Declared study stages: ids 0..3, seasons 8..11 (Sep-Dec).
+    let mut stages = partial_year_stages(8, 4, 2030);
+    // A declared pre-study stage (season 3) — resolved directly, not via synthesis.
+    let mut declared_prestudy = partial_year_stages(3, 1, 2029);
+    declared_prestudy[0].id = -5;
+    stages.push(declared_prestudy.into_iter().next().unwrap());
+
+    let model_stage_ids = vec![-1, -2, -5, 100];
+
+    let (resolved, n_seasons) =
+        resolve_model_stage_seasons(&stages, model_stage_ids.into_iter(), &season_map);
+
+    assert_eq!(n_seasons, 12);
+    assert_eq!(
+        resolved.get(&-1),
+        Some(&7),
+        "synthesized stage -1 (1 lag before Sep) must resolve to season 7 (Aug)"
+    );
+    assert_eq!(
+        resolved.get(&-2),
+        Some(&6),
+        "synthesized stage -2 (2 lags before Sep) must resolve to season 6 (Jul)"
+    );
+    assert_eq!(
+        resolved.get(&-5),
+        Some(&3),
+        "declared pre-study stage -5 must resolve via its own season_id"
+    );
+    assert_eq!(
+        resolved.get(&100),
+        None,
+        "an id not below the first study stage id is underivable and stays unmapped"
+    );
+}
+
 // ── coverage-gated occurrence resolution ──────────────────────
 
 /// Build one full-coverage monthly `InflowHistoryRow` window for `hydro_id`

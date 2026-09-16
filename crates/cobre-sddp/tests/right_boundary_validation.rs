@@ -43,16 +43,13 @@ use cobre_core::{
     PostStudyStages, PostStudyThermalBound, PumpingBlockBounds, ResolvedBounds, System,
     SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
 };
-use cobre_io::{
-    GraphManifest, ManifestNode, PolicyCutRecord, ProducerBlock, StageCutsPayload,
-    write_policy_checkpoint,
-};
 use cobre_sddp::indexer::CutStateProjection;
 use cobre_sddp::setup::{NodeId, StageIdx};
 use cobre_sddp::test_support::{patch_backward_opening_for_probe, solve_stage_for_probe};
 use cobre_sddp::workspace::SolverWorkspace;
 use cobre_sddp::{
-    CutPool, StudySetup, build_cut_row_batch_into, inject_boundary_cuts, load_boundary_cuts,
+    BoundaryLoadRequest, CutPool, StudySetup, build_cut_row_batch_into, inject_boundary_cuts,
+    load_boundary_cuts,
 };
 use cobre_solver::{
     ActiveSolver, FreezeScratch, RowBatch, SolverInterface, StageTemplate,
@@ -359,65 +356,10 @@ fn post_study_ring_slot(setup: &StudySetup) -> usize {
     state.commit_out.start + (m % state.k_max) * state.n_anticipated
 }
 
-/// Write a synthetic single-cut boundary checkpoint carrying `intercept` and
-/// the explicit per-slot `coefficients`. No entity manifest (`&[]`): the
-/// loader's identity check short-circuits with a warning, so this test
-/// controls only the state dimension, not entity-identity matching.
-fn write_synthetic_boundary(
-    dir: &Path,
-    state_dimension: u32,
-    intercept: f64,
-    coefficients: &[f64],
-) {
-    let cuts = vec![PolicyCutRecord {
-        cut_id: 0,
-        slot_index: 0,
-        iteration: 0,
-        forward_pass_index: 0,
-        intercept,
-        coefficients,
-        is_active: true,
-    }];
-    let payload = StageCutsPayload {
-        stage_id: 0,
-        state_dimension,
-        capacity: 1,
-        warm_start_count: 0,
-        cuts: &cuts,
-        active_cut_indices: &[0],
-        populated_count: 1,
-        entity_manifest: &[],
-        cost_scale_factor: 1_000_000.0,
-        node_id: 100,
-        graph_stage_id: -1,
-    };
-    let metadata = cobre_sddp::test_support::checkpoint_metadata(
-        1,
-        GraphManifest {
-            n_pools: 1,
-            nodes: vec![ManifestNode {
-                id: 100,
-                stage_id: 0,
-                pool_id: 0,
-            }],
-            edges: vec![],
-        },
-        ProducerBlock {
-            completed_iterations: 0,
-            final_lower_bound: 0.0,
-            best_upper_bound: None,
-            max_iterations: 0,
-            forward_passes: 0,
-            warm_start_cuts: 0,
-            warm_start_counts: vec![],
-            rng_seed: 0,
-            total_visited_states: 0,
-            training_block_mode: "parallel".to_string(),
-            training_block_mode_per_stage: vec![],
-            cost_scale_factor: Some(1.0),
-        },
-    );
-    write_policy_checkpoint(dir, &[payload], &[], &metadata, &[]).expect("write checkpoint");
+/// Pool `pool`'s fixture `priced_state_date`: `2030-01-01` plus `pool`
+/// months.
+fn fixture_priced_date(pool: u32) -> NaiveDate {
+    cobre_sddp::test_support::fixture_priced_date(cobre_sddp::test_support::ymd(2030, 1, 1), pool)
 }
 
 /// Load a boundary carrying `beta` on [`post_study_ring_slot`] alone, zero
@@ -428,19 +370,21 @@ fn inject_ring_boundary(setup: &mut StudySetup, dir: &Path, beta: f64) {
     let slot = post_study_ring_slot(setup);
     let mut coefficients = vec![0.0_f64; state_dimension as usize];
     coefficients[slot] = beta;
-    write_synthetic_boundary(dir, state_dimension, ALPHA, &coefficients);
-
-    let boundary_cuts = load_boundary_cuts(
+    cobre_sddp::test_support::write_synthetic_boundary(
         dir,
-        0,
+        state_dimension,
+        ALPHA,
+        &coefficients,
+        fixture_priced_date(0),
+    );
+
+    let boundary_cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+        dir,
+        fixture_priced_date(0),
         state_dimension,
         &[],
-        &[],
-        &[],
-        None,
         1.0,
-        &mut |_msg| {},
-    )
+    ))
     .expect("boundary cut must load");
     inject_boundary_cuts(setup, &boundary_cuts);
 }

@@ -30,8 +30,9 @@ mod boundary_cuts {
     use std::path::Path;
 
     use cobre_core::scenario::ScenarioSource;
+    use cobre_io::STAGE_CUTS_PRICED_STATE_DATE_SENTINEL;
     use cobre_io::config::StoppingRuleConfig;
-    use cobre_io::output::policy::write_policy_checkpoint;
+    use cobre_io::output::policy::{read_policy_checkpoint, write_policy_checkpoint};
     use cobre_sddp::{StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic};
     use cobre_solver::ActiveSolver;
 
@@ -44,6 +45,17 @@ mod boundary_cuts {
             .parent()
             .unwrap()
             .join("examples/deterministic/d01-thermal-dispatch")
+    }
+
+    /// Ascending, distinct `end_date` per pool (`2030-01-01` plus the pool
+    /// index in months) — the study-stage calendar [`write_test_checkpoint`]
+    /// feeds [`build_stage_cuts_payloads`] to self-describe each pool's
+    /// `priced_state_date`.
+    fn ascending_stage_end_dates(n_pools: usize) -> Vec<chrono::NaiveDate> {
+        let base = chrono::NaiveDate::from_ymd_opt(2030, 1, 1).unwrap();
+        (0..n_pools as u32)
+            .map(|i| base.checked_add_months(chrono::Months::new(i)).unwrap())
+            .collect()
     }
 
     fn write_test_checkpoint(
@@ -61,10 +73,12 @@ mod boundary_cuts {
         let stage_active_indices = build_active_indices(&stage_records);
         let stage_manifests: Vec<Vec<cobre_io::EntitySlot>> = vec![Vec::new(); fcf.pools.len()];
         let study_stage_ids: Vec<i32> = (0..fcf.pools.len() as i32).collect();
+        let study_stage_end_dates = ascending_stage_end_dates(fcf.pools.len());
         let stage_cuts = build_stage_cuts_payloads(
             fcf,
             &setup.node_graph,
             &study_stage_ids,
+            &study_stage_end_dates,
             1_000_000.0,
             &stage_records,
             &stage_active_indices,
@@ -137,7 +151,8 @@ mod boundary_cuts {
         write_test_checkpoint(&source_policy_dir, &setup_a, &outcome_a.result, 42);
 
         let num_stages = setup_a.fcf.pools.len();
-        let source_stage = (num_stages - 2) as u32; // terminal stage has no backward-pass cuts
+        // terminal stage has no backward-pass cuts
+        let boundary_date = ascending_stage_end_dates(num_stages)[num_stages - 2];
 
         let (mut setup_b, _system_b) = build_setup(&case_dir, &config_5iter);
         let mut solver_b = ActiveSolver::new().expect("solver");
@@ -150,19 +165,15 @@ mod boundary_cuts {
         let (mut setup_c, system_c) = build_setup(&case_dir, &config_5iter);
         let state_dim = setup_c.fcf.state_dimension as u32;
         let current_manifest = setup_c.build_terminal_entity_manifest(&system_c);
-        let mut warnings: Vec<String> = Vec::new();
-        let boundary_records = cobre_sddp::load_boundary_cuts(
-            &source_policy_dir,
-            source_stage,
-            state_dim,
-            &current_manifest,
-            &vec![None; current_manifest.len()],
-            &[],
-            None,
-            1_000_000.0,
-            &mut |msg| warnings.push(msg.to_string()),
-        )
-        .expect("load_boundary_cuts");
+        let boundary_records =
+            cobre_sddp::load_boundary_cuts(&cobre_sddp::BoundaryLoadRequest::new(
+                &source_policy_dir,
+                boundary_date,
+                state_dim,
+                &current_manifest,
+                1_000_000.0,
+            ))
+            .expect("load_boundary_cuts");
         assert!(
             !boundary_records.is_empty(),
             "source stage must have cuts after training"
@@ -190,6 +201,47 @@ mod boundary_cuts {
             lb_with_boundary >= lb_no_boundary - 1e-6,
             "boundary LB ({lb_with_boundary}) must be >= baseline LB ({lb_no_boundary})"
         );
+    }
+
+    /// Every pool [`write_test_checkpoint`] writes carries a non-sentinel
+    /// `priced_state_date`, and no two pools share one.
+    #[test]
+    fn write_test_checkpoint_pools_carry_distinct_priced_dates() {
+        let case_dir = d01_case_dir();
+        let config_path = case_dir.join("config.json");
+        let config = cobre_io::parse_config(&config_path).expect("config");
+
+        let mut config_5iter = config.clone();
+        config_5iter.training.stopping_rules =
+            Some(vec![StoppingRuleConfig::IterationLimit { limit: 5 }]);
+
+        let (mut setup, _system) = build_setup(&case_dir, &config_5iter);
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("solver");
+        let outcome = setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("train");
+        assert!(outcome.error.is_none());
+
+        let tmpdir = tempfile::tempdir().expect("tempdir");
+        let policy_dir = tmpdir.path().join("policy");
+        write_test_checkpoint(&policy_dir, &setup, &outcome.result, 42);
+
+        let checkpoint = read_policy_checkpoint(&policy_dir).expect("read_policy_checkpoint");
+        let dates: Vec<i32> = checkpoint
+            .stage_cuts
+            .iter()
+            .map(|sr| sr.priced_state_date)
+            .collect();
+        assert!(
+            dates
+                .iter()
+                .all(|&d| d != STAGE_CUTS_PRICED_STATE_DATE_SENTINEL)
+        );
+        let mut sorted = dates.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), dates.len());
     }
 }
 
@@ -1534,6 +1586,17 @@ mod warm_start {
             .join("examples/deterministic/d01-thermal-dispatch")
     }
 
+    /// Ascending, distinct `end_date` per pool (`2030-01-01` plus the pool
+    /// index in months) — the study-stage calendar [`write_test_checkpoint`]
+    /// feeds [`build_stage_cuts_payloads`] to self-describe each pool's
+    /// `priced_state_date`.
+    fn ascending_stage_end_dates(n_pools: usize) -> Vec<chrono::NaiveDate> {
+        let base = chrono::NaiveDate::from_ymd_opt(2030, 1, 1).unwrap();
+        (0..n_pools as u32)
+            .map(|i| base.checked_add_months(chrono::Months::new(i)).unwrap())
+            .collect()
+    }
+
     fn write_test_checkpoint(
         policy_dir: &Path,
         setup: &StudySetup,
@@ -1549,10 +1612,12 @@ mod warm_start {
         let stage_active_indices = build_active_indices(&stage_records);
         let stage_manifests: Vec<Vec<cobre_io::EntitySlot>> = vec![Vec::new(); fcf.pools.len()];
         let study_stage_ids: Vec<i32> = (0..fcf.pools.len() as i32).collect();
+        let study_stage_end_dates = ascending_stage_end_dates(fcf.pools.len());
         let stage_cuts = build_stage_cuts_payloads(
             fcf,
             &setup.node_graph,
             &study_stage_ids,
+            &study_stage_end_dates,
             1_000_000.0,
             &stage_records,
             &stage_active_indices,
@@ -2673,6 +2738,17 @@ mod range_warm_start_determinism {
             .expect("the range row [3, 8] must be present in stage 0's structural template")
     }
 
+    /// Ascending, distinct `end_date` per pool (`2030-01-01` plus the pool
+    /// index in months) — the study-stage calendar [`write_test_checkpoint`]
+    /// feeds [`build_stage_cuts_payloads`] to self-describe each pool's
+    /// `priced_state_date`.
+    fn ascending_stage_end_dates(n_pools: usize) -> Vec<chrono::NaiveDate> {
+        let base = chrono::NaiveDate::from_ymd_opt(2030, 1, 1).unwrap();
+        (0..n_pools as u32)
+            .map(|i| base.checked_add_months(chrono::Months::new(i)).unwrap())
+            .collect()
+    }
+
     /// Local mirror of the `warm_start` mod's checkpoint writer (module-scoped
     /// helpers are not shared across `mod` blocks in this file).
     fn write_test_checkpoint(
@@ -2686,10 +2762,12 @@ mod range_warm_start_determinism {
         let stage_active_indices = build_active_indices(&stage_records);
         let stage_manifests: Vec<Vec<cobre_io::EntitySlot>> = vec![Vec::new(); fcf.pools.len()];
         let study_stage_ids: Vec<i32> = (0..fcf.pools.len() as i32).collect();
+        let study_stage_end_dates = ascending_stage_end_dates(fcf.pools.len());
         let stage_cuts = build_stage_cuts_payloads(
             fcf,
             &setup.node_graph,
             &study_stage_ids,
+            &study_stage_end_dates,
             1_000_000.0,
             &stage_records,
             &stage_active_indices,

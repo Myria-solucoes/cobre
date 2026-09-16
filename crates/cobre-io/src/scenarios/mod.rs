@@ -27,7 +27,9 @@ pub use annual_component::{InflowAnnualComponentRow, parse_inflow_annual_compone
 pub use ar_coefficients::{InflowArCoefficientRow, parse_inflow_ar_coefficients};
 pub use assembly::{assemble_inflow_models, assemble_load_models};
 pub use correlation::parse_correlation;
-pub use estimation::{EstimationError, EstimationPath, estimate_from_history};
+pub use estimation::{
+    EstimationError, EstimationPath, estimate_from_history, resolve_model_stage_seasons,
+};
 pub use external::{
     ExternalLoadRow, ExternalNcsRow, ExternalScenarioRow, parse_external_inflow_scenarios,
     parse_external_load_scenarios, parse_external_ncs_scenarios,

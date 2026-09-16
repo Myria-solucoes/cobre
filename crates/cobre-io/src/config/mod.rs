@@ -1513,36 +1513,10 @@ mod tests {
         );
     }
 
-    /// `policy.boundary` with `path` and `source_stage` deserializes
-    /// to `Some(BoundaryPolicy { .. })` with the correct field values.
+    /// `policy.boundary` with only `path` deserializes to
+    /// `Some(BoundaryPolicy { path })`.
     #[test]
     fn test_boundary_policy_present() {
-        let f = write_config(
-            r#"{
-            "training": {
-                "selection": {"method": "sampled", "forward_passes": 10},
-                "stopping_rules": [{"type": "iteration_limit", "limit": 5}]
-            },
-            "policy": {
-                "mode": "fresh",
-                "boundary": {
-                    "path": "../monthly/policy",
-                    "source_stage": 2
-                }
-            }
-        }"#,
-        );
-        let cfg = parse_config(f.path()).unwrap();
-        let boundary = cfg.policy.boundary.unwrap();
-        assert_eq!(boundary.path, "../monthly/policy");
-        assert_eq!(boundary.source_stage, Some(2));
-    }
-
-    /// `policy.boundary` with `path` but no `source_stage` deserializes to
-    /// `Some(BoundaryPolicy { source_stage: None, .. })`; an unknown key
-    /// under `boundary` is still rejected by `deny_unknown_fields`.
-    #[test]
-    fn test_boundary_policy_source_stage_absent_is_none() {
         let f = write_config(
             r#"{
             "training": {
@@ -1560,7 +1534,29 @@ mod tests {
         let cfg = parse_config(f.path()).unwrap();
         let boundary = cfg.policy.boundary.unwrap();
         assert_eq!(boundary.path, "../monthly/policy");
-        assert_eq!(boundary.source_stage, None);
+    }
+
+    /// A deck carrying the removed `source_stage` key under `policy.boundary`
+    /// fails to parse under `deny_unknown_fields`, naming the key; an unrelated
+    /// unknown key under `boundary` is rejected the same way.
+    #[test]
+    fn test_boundary_policy_rejects_removed_source_stage_key() {
+        let removed_key_json = r#"{
+            "training": {
+                "selection": {"method": "sampled", "forward_passes": 10},
+                "stopping_rules": [{"type": "iteration_limit", "limit": 5}]
+            },
+            "policy": {
+                "mode": "fresh",
+                "boundary": { "path": "../monthly/policy", "source_stage": 3 }
+            }
+        }"#;
+        let err = serde_json::from_str::<Config>(removed_key_json)
+            .expect_err("source_stage was removed from BoundaryPolicy and must be rejected");
+        assert!(
+            err.to_string().contains("source_stage"),
+            "rejection must name the removed key: {err}"
+        );
 
         let unknown_key_json = r#"{
             "training": {
@@ -1635,14 +1631,61 @@ mod tests {
             checkpointing: CheckpointingConfig::default(),
             boundary: Some(BoundaryPolicy {
                 path: "../monthly/policy".to_string(),
-                source_stage: Some(5),
+                strict: true,
             }),
         };
         let json = serde_json::to_string(&original).unwrap();
         let restored: PolicyConfig = serde_json::from_str(&json).unwrap();
         let boundary = restored.boundary.unwrap();
         assert_eq!(boundary.path, "../monthly/policy");
-        assert_eq!(boundary.source_stage, Some(5));
+        assert!(boundary.strict);
+    }
+
+    /// `policy.boundary` carrying only `path` deserializes with
+    /// `strict == false`.
+    #[test]
+    fn test_boundary_policy_strict_defaults_to_false() {
+        let f = write_config(
+            r#"{
+            "training": {
+                "selection": {"method": "sampled", "forward_passes": 10},
+                "stopping_rules": [{"type": "iteration_limit", "limit": 5}]
+            },
+            "policy": {
+                "mode": "fresh",
+                "boundary": {
+                    "path": "../monthly/policy"
+                }
+            }
+        }"#,
+        );
+        let cfg = parse_config(f.path()).unwrap();
+        let boundary = cfg.policy.boundary.unwrap();
+        assert!(!boundary.strict);
+    }
+
+    /// `policy.boundary` with an explicit `"strict": true` deserializes
+    /// to `true`.
+    #[test]
+    fn test_boundary_policy_strict_explicit_true() {
+        let f = write_config(
+            r#"{
+            "training": {
+                "selection": {"method": "sampled", "forward_passes": 10},
+                "stopping_rules": [{"type": "iteration_limit", "limit": 5}]
+            },
+            "policy": {
+                "mode": "fresh",
+                "boundary": {
+                    "path": "../monthly/policy",
+                    "strict": true
+                }
+            }
+        }"#,
+        );
+        let cfg = parse_config(f.path()).unwrap();
+        let boundary = cfg.policy.boundary.unwrap();
+        assert!(boundary.strict);
     }
 
     /// Stale `exports` keys (`training`, `cuts`, `vertices`, `simulation`,
@@ -2016,7 +2059,7 @@ mod tests {
                     "enabled": true, "initial_iteration": 1, "interval_iterations": 5,
                     "store_basis": true, "compress": false
                 },
-                "boundary": { "path": "./boundary", "source_stage": 3 }
+                "boundary": { "path": "./boundary", "strict": true }
             },
             "simulation": {
                 "enabled": true,

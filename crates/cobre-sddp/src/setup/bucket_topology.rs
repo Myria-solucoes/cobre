@@ -79,17 +79,20 @@ fn declared_arcs(system: &System) -> HashMap<EntityId, Vec<f64>> {
     arcs
 }
 
-/// Extend the study calendar with copies of its trailing stage duration so
-/// [`resolve_spread`] never sees a calendar too short to absorb the window —
-/// its conservation check panics otherwise. Horizon capping is a separate,
-/// later step this does not take.
-fn extend_for_resolution(study_durations: &[f64], t_v: f64) -> Vec<f64> {
-    let Some(&last) = study_durations.last() else {
-        return study_durations.to_vec();
+/// Extends the base calendar — study stages plus any declared post-study
+/// stages ([`super::delivery_stage_durations`]) — with copies of its trailing
+/// duration so [`resolve_spread`] never sees a window it cannot absorb; its
+/// conservation check panics otherwise. The pad runs only past what the base
+/// calendar already covers, so a declared post-study calendar shorter than
+/// the travel time still gets padded. Horizon capping is a separate, later
+/// step this does not take.
+fn extend_for_resolution(base_calendar: &[f64], t_v: f64) -> Vec<f64> {
+    let Some(&last) = base_calendar.last() else {
+        return base_calendar.to_vec();
     };
-    debug_assert!(last > 0.0, "every study stage duration must be > 0.0");
+    debug_assert!(last > 0.0, "every base calendar duration must be > 0.0");
 
-    let mut extended = study_durations.to_vec();
+    let mut extended = base_calendar.to_vec();
     let mut padded_hours = 0.0_f64;
     while padded_hours < t_v {
         extended.push(last);
@@ -138,6 +141,7 @@ pub(crate) fn build_transit_bucket_topology(
 ) -> TransitBucketTopology {
     let study_durations = study_stage_durations(system);
     let n_stages = study_durations.len();
+    let base_calendar = super::delivery_stage_durations(study_durations.clone(), system);
     let arcs_by_downstream = declared_arcs(system);
 
     let mut per_plant_depth = Vec::new();
@@ -152,7 +156,7 @@ pub(crate) fn build_transit_bucket_topology(
         let mut own_release_by_stage = vec![0_usize; n_stages];
         let mut ic_depth = 0_usize;
         for &t_v in t_vs {
-            let extended = extend_for_resolution(&study_durations, t_v);
+            let extended = extend_for_resolution(&base_calendar, t_v);
             for (stage, slot) in own_release_by_stage.iter_mut().enumerate() {
                 *slot = (*slot).max(in_study_depth(t_v, stage, &extended));
             }
@@ -216,6 +220,7 @@ pub(crate) fn build_transit_bucket_topology(
 pub(crate) fn build_arc_stage_weights(system: &System) -> HashMap<usize, Vec<Vec<f64>>> {
     let study_durations = study_stage_durations(system);
     let n_stages = study_durations.len();
+    let base_calendar = super::delivery_stage_durations(study_durations.clone(), system);
     let mut arc_stage_weights = HashMap::new();
 
     for (u_idx, hydro) in system.hydros().iter().enumerate() {
@@ -225,7 +230,7 @@ pub(crate) fn build_arc_stage_weights(system: &System) -> HashMap<usize, Vec<Vec
         if hydro.downstream_id.is_none() {
             continue;
         }
-        let extended = extend_for_resolution(&study_durations, t_v);
+        let extended = extend_for_resolution(&base_calendar, t_v);
         let k_by_stage: Vec<Vec<f64>> = (0..n_stages)
             .map(|stage| resolve_spread(t_v, stage, &extended, None).stage_weights)
             .collect();
@@ -246,6 +251,7 @@ pub(crate) fn build_arc_spread_chrono(
 ) -> HashMap<usize, Vec<Option<SpreadResolution>>> {
     let study_durations = study_stage_durations(system);
     let n_stages = study_durations.len();
+    let base_calendar = super::delivery_stage_durations(study_durations.clone(), system);
     let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
     debug_assert_eq!(study_stages.len(), n_stages);
 
@@ -258,7 +264,7 @@ pub(crate) fn build_arc_spread_chrono(
         if hydro.downstream_id.is_none() {
             continue;
         }
-        let extended = extend_for_resolution(&study_durations, t_v);
+        let extended = extend_for_resolution(&base_calendar, t_v);
         let by_stage: Vec<Option<SpreadResolution>> = (0..n_stages)
             .map(|stage_idx| {
                 if study_stages[stage_idx].block_mode != BlockMode::Chronological {
@@ -293,6 +299,7 @@ pub(crate) fn build_arc_arrival_density(
 ) -> HashMap<usize, Vec<Option<Vec<f64>>>> {
     let study_durations = study_stage_durations(system);
     let n_stages = study_durations.len();
+    let base_calendar = super::delivery_stage_durations(study_durations.clone(), system);
     let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
     debug_assert_eq!(study_stages.len(), n_stages);
 
@@ -308,7 +315,7 @@ pub(crate) fn build_arc_arrival_density(
         let Some(k_by_stage) = arc_stage_weights.get(&u_idx) else {
             continue;
         };
-        let extended = extend_for_resolution(&study_durations, t_v);
+        let extended = extend_for_resolution(&base_calendar, t_v);
 
         let density_by_stage: Vec<Option<Vec<f64>>> = (0..n_stages)
             .map(|arrival_stage| {
@@ -403,7 +410,8 @@ mod tests {
     use chrono::NaiveDate;
     use cobre_core::{
         Block, BlockMode, Bus, DeficitSegment, Hydro, HydroGenerationModel, HydroPenalties,
-        NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig, SystemBuilder,
+        NoiseMethod, PostStudyStage, PostStudyStages, ScenarioSourceConfig, Stage, StageRiskConfig,
+        StageStateConfig, SystemBuilder,
     };
 
     fn zero_penalties() -> HydroPenalties {
@@ -512,8 +520,8 @@ mod tests {
         stages_with_durations(&vec![hours; n])
     }
 
-    fn build_system(hydros: Vec<Hydro>, stages: Vec<Stage>) -> cobre_core::System {
-        let bus = Bus {
+    fn test_bus() -> Bus {
+        Bus {
             id: EntityId(1),
             name: "B1".to_string(),
             operational_start_date: date(2024, 1, 1),
@@ -522,13 +530,49 @@ mod tests {
                 cost_per_mwh: 500.0,
             }],
             excess_cost: 0.0,
-        };
+        }
+    }
+
+    fn build_system(hydros: Vec<Hydro>, stages: Vec<Stage>) -> cobre_core::System {
         SystemBuilder::new()
-            .buses(vec![bus])
+            .buses(vec![test_bus()])
             .hydros(hydros)
             .stages(stages)
             .build()
             .expect("valid system")
+    }
+
+    /// [`build_system`] with a declared post-study calendar threaded through
+    /// [`SystemBuilder::post_study_stages`], mirroring `policy_export.rs`'s
+    /// `system_2h_1ant` fixture shape.
+    fn build_system_with_post_study(
+        hydros: Vec<Hydro>,
+        stages: Vec<Stage>,
+        post_study: PostStudyStages,
+    ) -> cobre_core::System {
+        SystemBuilder::new()
+            .buses(vec![test_bus()])
+            .hydros(hydros)
+            .stages(stages)
+            .post_study_stages(Some(post_study))
+            .build()
+            .expect("valid system")
+    }
+
+    /// A post-study calendar with one stage per `hours` entry, each starting
+    /// a calendar month apart.
+    fn post_study_stages_hours(hours: &[f64]) -> PostStudyStages {
+        PostStudyStages {
+            stages: hours
+                .iter()
+                .enumerate()
+                .map(|(i, &duration_hours)| PostStudyStage {
+                    start_date: date(2024, 4 + u32::try_from(i).unwrap_or(0), 1),
+                    duration_hours,
+                })
+                .collect(),
+            thermal_bounds: Vec::new(),
+        }
     }
 
     #[test]
@@ -723,6 +767,74 @@ mod tests {
             vec![vec![3], vec![3], vec![3]],
             "boundary-present mask must reach the raw uncapped active lag at every \
              stage, terminal included"
+        );
+    }
+
+    /// Pins the confinement `entries.rs`'s two release-site `debug_assert!`s rely
+    /// on: under `boundary_present`, `per_stage_mask` dominates every arc's deposit
+    /// depth on both the parallel (`arc_stage_weights`) and chronological
+    /// (`arc_spread_chrono`) tables at every stage, so neither release site's row
+    /// lookup can miss; with the boundary gate off, the fixture still has power —
+    /// the horizon cap strictly undercuts that same depth at every stage.
+    #[test]
+    fn transit_bucket_mask_covers_every_arc_deposit_depth_under_boundary() {
+        let downstream = hydro(1, None, None);
+        let upstream = hydro(2, Some(1), Some(72.0));
+        let system = build_system(
+            vec![downstream, upstream],
+            vec![
+                chronological_stage_with_durations(0, &[12.0, 12.0]),
+                stage_with_durations(1, &[24.0]),
+                stage_with_durations(2, &[24.0]),
+            ],
+        );
+
+        let upstream_idx = 1;
+        let topology_on = build_transit_bucket_topology(&system, true);
+        let topology_off = build_transit_bucket_topology(&system, false);
+        let arc_stage_weights = build_arc_stage_weights(&system);
+        let arc_spread_chrono = build_arc_spread_chrono(&system);
+
+        let k_by_stage = arc_stage_weights
+            .get(&upstream_idx)
+            .expect("declared arc must have a stage-weights entry");
+        let by_stage_chrono = arc_spread_chrono
+            .get(&upstream_idx)
+            .expect("declared arc must have a chronological-spread entry");
+        assert!(
+            by_stage_chrono.iter().any(Option::is_some),
+            "fixture must exercise a chronological stage so arc_spread_chrono is populated"
+        );
+
+        for (stage, mask_row) in topology_on.per_stage_mask.iter().enumerate() {
+            let mask = mask_row[0];
+            let parallel_depth = k_by_stage[stage].len() - 1;
+            assert!(
+                mask >= parallel_depth,
+                "stage {stage}: boundary-present mask {mask} must dominate the parallel \
+                 deposit depth {parallel_depth}"
+            );
+            if let Some(resolution) = &by_stage_chrono[stage] {
+                for (b, deposit_row) in resolution.block_deposits.iter().enumerate() {
+                    let block_depth = deposit_row.len() - 1;
+                    assert!(
+                        mask >= block_depth,
+                        "stage {stage} block {b}: boundary-present mask {mask} must dominate \
+                         the chronological deposit depth {block_depth}"
+                    );
+                }
+            }
+        }
+
+        let undercut_stage_exists = topology_off
+            .per_stage_mask
+            .iter()
+            .enumerate()
+            .any(|(stage, mask_row)| mask_row[0] < k_by_stage[stage].len() - 1);
+        assert!(
+            undercut_stage_exists,
+            "the fixture must have power: with no boundary, at least one stage's mask must be \
+             strictly less than the arc's deposit depth"
         );
     }
 
@@ -975,5 +1087,200 @@ mod tests {
         let density_b = build_arc_arrival_density(&system_b, &build_arc_stage_weights(&system_b));
 
         assert_eq!(density_a, density_b);
+    }
+
+    /// Hand-derived against a 72h arc, 3 x 24h study stages, and a declared
+    /// post-study calendar of 2 x 12h stages: at the terminal study stage
+    /// (anchor 2, `h_anchor = 24`), the arrival window `[72, 96)` falls
+    /// entirely past the 2 x 12h post-study calendar (ending at `+24`) and
+    /// the 6 x 12h pad beyond it, landing on pad copies 3 and 4
+    /// (`k_5 = k_6 = 0.5`), so `stage_reach = 6`. The pad-only calendar
+    /// (`extend_for_resolution` on the study-only vector) instead replicates
+    /// 24h stages, whose window `[72, 96)` lands squarely on a single 24h pad
+    /// copy (`stage_reach = 3`) — the value `test_horizon_cap_drops_lag_
+    /// targeting_past_last_stage` pins for the same arc with no post-study
+    /// calendar declared.
+    #[test]
+    fn post_study_calendar_replaces_the_synthetic_pad_in_arrival_resolution() {
+        let downstream = hydro(1, None, None);
+        let upstream = hydro(2, Some(1), Some(72.0));
+        let durations = [24.0, 24.0, 24.0];
+
+        let system_with_post_study = build_system_with_post_study(
+            vec![downstream.clone(), upstream.clone()],
+            stages_with_durations(&durations),
+            post_study_stages_hours(&[12.0, 12.0]),
+        );
+        let system_pad_only = build_system(
+            vec![downstream, upstream],
+            stages_with_durations(&durations),
+        );
+
+        let topology = build_transit_bucket_topology(&system_with_post_study, true);
+        let topology_pad_only = build_transit_bucket_topology(&system_pad_only, true);
+
+        assert_eq!(
+            topology.per_plant_depth,
+            vec![6],
+            "depth must reach the hand-derived 12-hour-stage value"
+        );
+        assert_eq!(
+            topology.per_stage_mask[2],
+            vec![6],
+            "the terminal-stage mask must reach the hand-derived 12-hour-stage value"
+        );
+        assert_ne!(
+            topology.per_plant_depth, topology_pad_only.per_plant_depth,
+            "the real post-study calendar must size differently than the replicated pad"
+        );
+        assert_ne!(
+            topology.per_stage_mask[2], topology_pad_only.per_stage_mask[2],
+            "the real post-study calendar must resolve a different terminal mask than the replicated pad"
+        );
+    }
+
+    #[test]
+    fn post_study_calendar_shorter_than_travel_time_still_pads() {
+        let downstream = hydro(1, None, None);
+        let upstream = hydro(2, Some(1), Some(72.0));
+        let durations = [24.0, 24.0, 24.0];
+        let system = build_system_with_post_study(
+            vec![downstream, upstream],
+            stages_with_durations(&durations),
+            post_study_stages_hours(&[24.0]),
+        );
+
+        let arc_stage_weights = build_arc_stage_weights(&system);
+        let upstream_idx = 1;
+        let k_by_stage = arc_stage_weights
+            .get(&upstream_idx)
+            .expect("declared arc must have an entry");
+        assert_eq!(k_by_stage.len(), 3, "one k vector per in-study stage");
+        for k in k_by_stage {
+            let sum: f64 = k.iter().sum();
+            assert!(
+                (sum - 1.0).abs() < 1e-9,
+                "k must conserve to 1.0 even though the declared post-study calendar (24h) is \
+                 shorter than the travel time (72h), got {k:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn extended_calendar_topology_is_declaration_order_invariant() {
+        let downstream = hydro(1, None, None);
+        let upstream = hydro(2, Some(1), Some(48.0));
+        let post_study = post_study_stages_hours(&[12.0, 12.0]);
+
+        let system_a = build_system_with_post_study(
+            vec![downstream.clone(), upstream.clone()],
+            uniform_stages(5, 24.0),
+            post_study.clone(),
+        );
+        let system_b = build_system_with_post_study(
+            vec![upstream, downstream],
+            uniform_stages(5, 24.0),
+            post_study,
+        );
+
+        let topology_a = build_transit_bucket_topology(&system_a, false);
+        let topology_b = build_transit_bucket_topology(&system_b, false);
+
+        assert_eq!(topology_a.column_order, topology_b.column_order);
+        assert_eq!(topology_a.per_plant_depth, topology_b.per_plant_depth);
+        assert_eq!(topology_a.n_buckets, topology_b.n_buckets);
+    }
+
+    /// A declared post-study calendar whose stage durations exactly match the
+    /// synthetic pad (the last study stage's own duration) leaves
+    /// `extend_for_resolution`'s output unchanged, so every
+    /// [`TransitBucketTopology`] field and all three arc tables must equal
+    /// the same system built with no post-study calendar at all.
+    #[test]
+    fn post_study_calendar_matching_the_pad_is_topology_neutral() {
+        let downstream = hydro(1, None, None);
+        let upstream = hydro(2, Some(1), Some(72.0));
+        let durations = [24.0, 24.0, 24.0];
+
+        let system_with_calendar = build_system_with_post_study(
+            vec![downstream.clone(), upstream.clone()],
+            stages_with_durations(&durations),
+            post_study_stages_hours(&[24.0, 24.0]),
+        );
+        let system_no_calendar = build_system(
+            vec![downstream, upstream],
+            stages_with_durations(&durations),
+        );
+
+        let topology_with_calendar = build_transit_bucket_topology(&system_with_calendar, false);
+        let topology_no_calendar = build_transit_bucket_topology(&system_no_calendar, false);
+
+        assert!(
+            topology_no_calendar.n_buckets > 0,
+            "fixture has no power unless it declares at least one travel-time bucket"
+        );
+        assert_eq!(
+            topology_with_calendar.n_buckets,
+            topology_no_calendar.n_buckets
+        );
+        assert_eq!(
+            topology_with_calendar.per_plant_depth,
+            topology_no_calendar.per_plant_depth
+        );
+        assert_eq!(
+            topology_with_calendar.column_order,
+            topology_no_calendar.column_order
+        );
+        assert_eq!(
+            topology_with_calendar.per_stage_mask,
+            topology_no_calendar.per_stage_mask
+        );
+        assert_eq!(
+            topology_with_calendar.arc_stage_weights,
+            topology_no_calendar.arc_stage_weights
+        );
+        assert_eq!(
+            topology_with_calendar.arc_spread_chrono,
+            topology_no_calendar.arc_spread_chrono
+        );
+        assert_eq!(
+            topology_with_calendar.arc_arrival_density,
+            topology_no_calendar.arc_arrival_density
+        );
+    }
+
+    /// The power check for the neutral test above: a post-study calendar
+    /// whose duration DIFFERS from the pad must change the resolved
+    /// topology, or the neutral comparison would pass on a no-op
+    /// implementation.
+    #[test]
+    fn post_study_calendar_differing_from_the_pad_changes_the_topology() {
+        let downstream = hydro(1, None, None);
+        let upstream = hydro(2, Some(1), Some(72.0));
+        let durations = [24.0, 24.0, 24.0];
+
+        let system_with_calendar = build_system_with_post_study(
+            vec![downstream.clone(), upstream.clone()],
+            stages_with_durations(&durations),
+            post_study_stages_hours(&[6.0, 6.0]),
+        );
+        let system_no_calendar = build_system(
+            vec![downstream, upstream],
+            stages_with_durations(&durations),
+        );
+
+        let topology_with_calendar = build_transit_bucket_topology(&system_with_calendar, false);
+        let topology_no_calendar = build_transit_bucket_topology(&system_no_calendar, false);
+
+        assert!(
+            topology_no_calendar.n_buckets > 0,
+            "fixture has no power unless it declares at least one travel-time bucket"
+        );
+        assert!(
+            topology_with_calendar.per_stage_mask != topology_no_calendar.per_stage_mask
+                || topology_with_calendar.per_plant_depth != topology_no_calendar.per_plant_depth,
+            "a post-study calendar differing from the pad must change per_stage_mask or \
+             per_plant_depth, or the neutral test above has no power"
+        );
     }
 }

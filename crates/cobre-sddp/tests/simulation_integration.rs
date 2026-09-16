@@ -44,8 +44,8 @@ use cobre_io::output::simulation_writer::{
 };
 use cobre_io::{
     Config, EstimationConfig, MetadataSimulationSolveStats, ParquetWriterConfig, PolicyCutRecord,
-    PolicyMode, SimulationOutput, StageCutsPayload, read_policy_checkpoint,
-    write_policy_checkpoint, write_results,
+    PolicyMode, STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, SimulationOutput, StageCutsPayload,
+    read_policy_checkpoint, write_policy_checkpoint, write_results,
 };
 use cobre_sddp::{
     CapturedBasis, Phase, PrepareHydroModelsResult, ResolvedParameters, SimulationSummary,
@@ -745,6 +745,7 @@ fn train_simulate_write_cycle() {
             cost_scale_factor: 1_000_000.0,
             node_id: i32::try_from(stage_idx).unwrap_or(-1),
             graph_stage_id: -1,
+            priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
         })
         .collect();
 

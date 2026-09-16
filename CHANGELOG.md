@@ -11,6 +11,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING — `policy.boundary.source_stage` is removed and rejected by
+  `config.json`'s deny-unknown-fields contract; the source pool is now
+  chosen by calendar date instead of a stage index.** A `policy.boundary`
+  block that still sets `source_stage` fails validation; delete the
+  key. The boundary loader selects the source checkpoint's pool whose
+  priced state date equals the study's last stage `end_date`, replacing
+  the removed override and its calendar-overlap auto-resolution. Independently,
+  a source checkpoint written before `format_version` 2 is rejected on
+  load — warm-start, resume, simulation-only, and boundary injection
+  alike — with no migration path; re-export the source policy with a
+  current Cobre. `cobre validate --json`'s
+  `report.anticipated_coverage.source_month_count` field is renamed
+  `source_interval_count`. That same object drops its `source_span` and
+  `target_span` keys; the report's `dropped_source_slots` and
+  `straddling_slots` arrays carry each affected slot's own dating instead.
+
+- **BREAKING — `cobre_sddp::resolve_boundary_source_stage` is removed, and
+  `load_boundary_cuts` now takes a single request object instead of a long
+  positional argument list.** No deck, CLI output, or Python package output
+  is affected; only code that calls `cobre_sddp::load_boundary_cuts` or
+  `cobre_sddp::resolve_boundary_source_stage` directly needs to adapt. A
+  caller now builds a `BoundaryLoadRequest` with `BoundaryLoadRequest::new`
+  and its `with_*` builders and passes it by reference; the function
+  returns either a validation error or the validated boundary cuts
+  together with their reconciliation report, with no warning callback — a
+  caller that previously observed superset warnings through the callback
+  now reads them from the returned report instead.
+  `BoundaryReconciliationReport::tally_clause` is removed with it; the same
+  wording is `summary_line()` minus its `boundary reconciliation: ` prefix,
+  and `tally_totals()` still returns the four counts for a caller that wants
+  to render them itself. `cobre_io::ENTITY_SLOT_DELIVERY_DATE_SENTINEL` is
+  renamed `ENTITY_SLOT_DATE_SENTINEL`: the same value now sentinels every
+  `EntitySlot` date field, not only the retired delivery date.
+
+- **`policy.boundary.strict` (default `false`) turns a source pool that
+  prices an entity or commitment the study does not model into a hard
+  reject, naming every dropping family and its count.** Left `false`, such
+  a load still succeeds; boundary loading emits no warning lines at all —
+  every drop is instead recorded in the returned reconciliation report.
+  `cobre validate --json`'s output gains `boundary_date` (the date the
+  boundary pool was selected against) and the report's
+  `dropped_source_slots` and `straddling_slots`, each an array of the
+  affected slots' own identity and dating.
+
 - **BREAKING — a bound-override row whose `stage_id` is not a declared study
   stage is now rejected at validation, for every bound family.** Such rows
   were previously dropped without a warning or an error. A deck that relied on
@@ -89,6 +133,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Results are unchanged.
 
 ### Fixed
+
+- **A boundary policy load whose study horizon covers only part of the
+  source's declared season cycle no longer rejects on an artifact of the
+  unmodeled seasons.** The season/PAR-order compatibility gate previously
+  compared every season in the declared cycle, including seasons the loading
+  study's own stages never reach, so a partial-year study or a horizon
+  reduction against a longer source could reject at a season it held no
+  fitted opinion for at all. The comparison now runs only at the seasons the
+  loading study's stages reference, including the synthesized pre-study
+  seasons its inflow-lag coefficients reach back into. A genuine
+  autoregressive-order difference at a season the study does model still
+  rejects, and the checkpoint file format is unchanged. Reading a checkpoint
+  now also rejects a season descriptor whose hydro entries are not in
+  ascending id order or whose per-hydro order list does not span the declared
+  season count, before any consumer sees it.
 
 - **A multi-rank `cobre run` now applies the terminal boundary policy on every
   rank.** The cuts loaded from `policy.boundary` were injected only on rank 0

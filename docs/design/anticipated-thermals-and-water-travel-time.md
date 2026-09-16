@@ -209,6 +209,12 @@ n_buckets = Σ_j L_j
 column_order = [(j, 1), (j, 2), …, (j, L_j)] for each plant j in canonical order
 ```
 
+`extended` is the study calendar followed by any declared post-study calendar
+(`delivery_stage_durations`), padded with copies of its trailing duration only
+past what that base calendar already covers (`extend_for_resolution`,
+`bucket_topology.rs`). With no declared post-study calendar the base is the
+study-only vector and the formula above is unchanged.
+
 Key properties (each pinned by a named test in `bucket_topology.rs`):
 
 - **Confluence aggregates** — all arcs into one downstream collapse to a _single_
@@ -231,7 +237,8 @@ Sizing gives the _global_ depth; a per-stage mask (`per_stage_mask`) says which
 lags are live at each stage: the union of this stage's own-release depth with the
 **decaying IC residual** `ic_depth − stage`. With no boundary policy the mask is
 **horizon-capped** at `n_stages − 1 − stage` (deep terminal slots masked `[0,0]` —
-the "terminal credit deferred" imprecision); with a boundary policy present
+the "terminal credit deferred" imprecision, confined to this no-boundary path);
+with a boundary policy present
 (`config.policy.boundary.is_some()`, threaded as `boundary_present`) the mask is
 the **raw uncapped** depth at every stage so those terminal slots stay live and
 reach the boundary-priced cut projection. **Sizing is identical either way** —
@@ -526,16 +533,16 @@ Both rings share the `DeliveryRing` skeleton, one contiguous state region, the
 out-by-identity / in-pinned column resolution, the two-sided masking discipline,
 and the dual sign convention. They differ in exactly four call-site-local ways:
 
-| Aspect                   | Water travel time                                 | Anticipated thermal                                                             |
-| ------------------------ | ------------------------------------------------- | ------------------------------------------------------------------------------- |
-| Ring instances           | one per downstream plant (`n_lanes = 1`)          | one dense ring (`n_lanes = n_anticipated`)                                      |
-| Transition               | **shift** (`emit_shift_rows`, `slot → slot+1`)    | **hold** (`emit_carry_rows`, same slot)                                         |
-| Slot key                 | lag (distance in flight), one plant per ring      | delivery-target residue on the **ring axis** (`ring_index(m) mod k_max`)        |
-| Deposit                  | `k_d`-weighted release share at the call site     | single decision latch (`emit_deposit`)                                          |
-| Depth sizing             | overlap measure (`stage_reach`, IC overlap)       | `max(occupancy_max, n_none_in_study)` per plant                                 |
-| Reachable column bound   | `[0, inf)` (a volume)                             | `(-inf, inf)` (a signed MW value)                                               |
-| Masked terminal slot     | drops a **genuine** deposited share (imprecision) | provably **zero** (no commitment targets a masked slot)                         |
-| Terminal live-state gate | needs `config.policy.boundary` (not inert)        | post-study slot **existence** on declared `post_study_stages.json` + lead reach |
+| Aspect                   | Water travel time                                                                 | Anticipated thermal                                                             |
+| ------------------------ | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| Ring instances           | one per downstream plant (`n_lanes = 1`)                                          | one dense ring (`n_lanes = n_anticipated`)                                      |
+| Transition               | **shift** (`emit_shift_rows`, `slot → slot+1`)                                    | **hold** (`emit_carry_rows`, same slot)                                         |
+| Slot key                 | lag (distance in flight), one plant per ring                                      | delivery-target residue on the **ring axis** (`ring_index(m) mod k_max`)        |
+| Deposit                  | `k_d`-weighted release share at the call site                                     | single decision latch (`emit_deposit`)                                          |
+| Depth sizing             | overlap measure (`stage_reach`, IC overlap)                                       | `max(occupancy_max, n_none_in_study)` per plant                                 |
+| Reachable column bound   | `[0, inf)` (a volume)                                                             | `(-inf, inf)` (a signed MW value)                                               |
+| Masked terminal slot     | drops a **genuine** deposited share — only on the horizon-capped no-boundary path | provably **zero** (no commitment targets a masked slot)                         |
+| Terminal live-state gate | needs `config.policy.boundary` (not inert)                                        | post-study slot **existence** on declared `post_study_stages.json` + lead reach |
 
 These last two rows carry the deepest asymmetry, and it **survives** the
 ring-native re-derivation rather than collapsing into one rule. On the masked slot:

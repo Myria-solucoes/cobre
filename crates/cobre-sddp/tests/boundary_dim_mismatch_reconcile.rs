@@ -43,10 +43,14 @@ use cobre_io::config::{
     TrainingSolverConfig, UpperBoundEvaluationConfig,
 };
 use cobre_io::{
-    ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, GraphManifest, ManifestNode, PolicyCutRecord,
-    ProducerBlock, StageCutsPayload, StateFamily, write_policy_checkpoint,
+    ENTITY_SLOT_DATE_SENTINEL, EntitySlot, PolicyCutRecord, ProducerBlock, StageCutsPayload,
+    StateFamily, encode_slot_date, write_policy_checkpoint,
 };
-use cobre_sddp::{inject_boundary_cuts, load_boundary_cuts};
+use cobre_sddp::test_support::{
+    anticipated_slot_at, chain_graph_manifest, inflow_lag_slot, storage_slot, transit_bucket_slot,
+    ymd,
+};
+use cobre_sddp::{BoundaryLoadRequest, inject_boundary_cuts, load_boundary_cuts};
 use cobre_solver::ActiveSolver;
 
 mod common;
@@ -58,78 +62,21 @@ use common::builders::{
 
 // ── shared source-checkpoint helpers ────────────────────────────────────────
 
-fn ymd(year: i32, month: u32, day: u32) -> NaiveDate {
-    NaiveDate::from_ymd_opt(year, month, day).expect("valid calendar date")
-}
-
-fn storage_slot(id: i32) -> EntitySlot {
-    EntitySlot {
-        entity_type: StateFamily::HydroStorage.code(),
-        entity_id: id,
-        subindex: 0,
-        was_active: true,
-        delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-    }
-}
-
-fn inflow_lag_slot(id: i32, lag_depth: u32) -> EntitySlot {
-    EntitySlot {
-        entity_type: StateFamily::HydroInflowLag.code(),
-        entity_id: id,
-        subindex: lag_depth,
-        was_active: true,
-        delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-    }
-}
-
-fn transit_bucket_slot(downstream_hydro_id: i32, lag: u32) -> EntitySlot {
-    EntitySlot {
-        entity_type: StateFamily::HydroTransitBucket.code(),
-        entity_id: downstream_hydro_id,
-        subindex: lag,
-        was_active: true,
-        delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-    }
-}
-
-fn dated_anticipated_slot(thermal_id: i32, ring_slot: u32, delivery_date: i32) -> EntitySlot {
-    EntitySlot {
-        entity_type: StateFamily::AnticipatedThermalState.code(),
-        entity_id: thermal_id,
-        subindex: ring_slot,
-        was_active: true,
-        delivery_date,
-    }
+/// Pool `pool`'s fixture `priced_state_date`: `2026-04-01` plus `pool`
+/// months — at or before the April/May 2026 span the NEWAVE source fixture
+/// prices, so the boundary-date-driven anticipated predicate never zeroes
+/// the fan-out coefficients `newave_source_reconciles_into_decomp_current`
+/// asserts on.
+fn fixture_priced_date(pool: u32) -> NaiveDate {
+    cobre_sddp::test_support::fixture_priced_date(ymd(2026, 4, 1), pool)
 }
 
 fn producer_block() -> ProducerBlock {
     ProducerBlock {
         completed_iterations: 10,
-        final_lower_bound: 0.0,
-        best_upper_bound: None,
         max_iterations: 50,
         forward_passes: 1,
-        warm_start_cuts: 0,
-        warm_start_counts: vec![],
-        rng_seed: 0,
-        total_visited_states: 0,
-        training_block_mode: "parallel".to_string(),
-        training_block_mode_per_stage: vec![],
-        cost_scale_factor: None,
-    }
-}
-
-/// A 1-stage chain graph manifest (node id == stage id == pool id) — the shape
-/// `load_boundary_cuts`'s `source_stage -> pool` resolution walks.
-fn single_stage_manifest() -> GraphManifest {
-    GraphManifest {
-        n_pools: 1,
-        nodes: vec![ManifestNode {
-            id: 0,
-            stage_id: 0,
-            pool_id: 0,
-        }],
-        edges: Vec::new(),
+        ..cobre_sddp::test_support::producer_block()
     }
 }
 
@@ -165,10 +112,11 @@ fn write_source_checkpoint(
         cost_scale_factor: cost_scale_factor.unwrap_or(1_000_000.0),
         node_id: 0,
         graph_stage_id: -1,
+        priced_state_date: encode_slot_date(fixture_priced_date(0)),
     };
     let metadata = cobre_sddp::test_support::checkpoint_metadata(
         1,
-        single_stage_manifest(),
+        chain_graph_manifest(1),
         ProducerBlock {
             cost_scale_factor,
             ..producer_block()
@@ -197,8 +145,8 @@ fn newave_source_manifest() -> Vec<EntitySlot> {
     for lag in 1..=LAG_DEPTH {
         manifest.push(inflow_lag_slot(HYDRO_ID, lag));
     }
-    manifest.push(dated_anticipated_slot(THERMAL_ID, 0, 20_260_401));
-    manifest.push(dated_anticipated_slot(THERMAL_ID, 1, 20_260_501));
+    manifest.push(anticipated_slot_at(THERMAL_ID, 0, 20_260_401));
+    manifest.push(anticipated_slot_at(THERMAL_ID, 1, 20_260_501));
     manifest
 }
 
@@ -218,29 +166,36 @@ fn newave_source_coefficients() -> Vec<f64> {
 
 /// The DECOMP-shaped current terminal manifest: same storage + 12 lags (`Copy`
 /// targets), 2 hour-based anticipated ring slots dated to overlap the source
-/// months (`Blend` targets), and 2 transit-bucket slots the source lacks
-/// (`Zero` targets) — 17 slots, a larger `state_dimension` than the source's 15.
+/// months (`Blend` targets), and 2 DATED transit-bucket slots the source has
+/// no transit arc at all to overlap (`Zero` targets) — 17 slots, a larger
+/// `state_dimension` than the source's 15.
 fn decomp_current_manifest() -> Vec<EntitySlot> {
     let mut manifest = Vec::with_capacity(17);
     manifest.push(storage_slot(HYDRO_ID));
     for lag in 1..=LAG_DEPTH {
         manifest.push(inflow_lag_slot(HYDRO_ID, lag));
     }
-    manifest.push(dated_anticipated_slot(THERMAL_ID, 100, 20_260_401));
-    manifest.push(dated_anticipated_slot(THERMAL_ID, 101, 20_260_501));
-    manifest.push(transit_bucket_slot(DOWNSTREAM_ID, 1));
-    manifest.push(transit_bucket_slot(DOWNSTREAM_ID, 2));
+    manifest.push(
+        anticipated_slot_at(THERMAL_ID, 100, 20_260_401).with_interval(
+            encode_slot_date(ymd(2026, 4, 1)),
+            encode_slot_date(ymd(2026, 4, 8)),
+        ),
+    );
+    manifest.push(
+        anticipated_slot_at(THERMAL_ID, 101, 20_260_501).with_interval(
+            encode_slot_date(ymd(2026, 5, 1)),
+            encode_slot_date(ymd(2026, 5, 8)),
+        ),
+    );
+    manifest.push(transit_bucket_slot(DOWNSTREAM_ID, 1).with_interval(
+        encode_slot_date(ymd(2026, 4, 8)),
+        encode_slot_date(ymd(2026, 4, 15)),
+    ));
+    manifest.push(transit_bucket_slot(DOWNSTREAM_ID, 2).with_interval(
+        encode_slot_date(ymd(2026, 4, 15)),
+        encode_slot_date(ymd(2026, 4, 22)),
+    ));
     manifest
-}
-
-/// Delivery intervals aligned 1:1 with [`decomp_current_manifest`]: a sub-month
-/// week inside each source month for the two ring slots (fully covered ->
-/// `Blend`), `None` everywhere else.
-fn decomp_current_intervals() -> Vec<Option<(NaiveDate, NaiveDate)>> {
-    let mut intervals: Vec<Option<(NaiveDate, NaiveDate)>> = vec![None; 17];
-    intervals[13] = Some((ymd(2026, 4, 1), ymd(2026, 4, 8)));
-    intervals[14] = Some((ymd(2026, 5, 1), ymd(2026, 5, 8)));
-    intervals
 }
 
 /// Given the 15-dim NEWAVE source and the 17-dim DECOMP current manifest, the
@@ -262,24 +217,19 @@ fn newave_source_reconciles_into_decomp_current() {
     );
 
     let current = decomp_current_manifest();
-    let intervals = decomp_current_intervals();
     let current_state_dimension = u32::try_from(current.len()).expect("small dimension");
     assert_eq!(
         current_state_dimension, 17,
         "DECOMP current state dimension"
     );
 
-    let cuts = load_boundary_cuts(
+    let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
         tmp.path(),
-        0,
+        fixture_priced_date(0),
         current_state_dimension,
         &current,
-        &intervals,
-        &[],
-        None,
         RUN_LOADING_FACTOR,
-        &mut |_| {},
-    )
+    ))
     .expect("the differing-dimension NEWAVE source must reconcile into the DECOMP current");
 
     for record in cuts.iter() {
@@ -311,8 +261,8 @@ fn newave_source_reconciles_into_decomp_current() {
         "each week is fully covered by its month, so Blend not Renormalize"
     );
     assert_eq!(
-        report.anticipated_coverage.source_month_count, 2,
-        "two live dated source anticipated months"
+        report.anticipated_coverage.source_interval_count, 2,
+        "two live dated source anticipated delivery intervals"
     );
     assert_eq!(
         report.transit_bucket.default_zero, 2,
@@ -643,7 +593,7 @@ fn run_config() -> Config {
         policy: PolicyConfig {
             boundary: Some(BoundaryPolicy {
                 path: "unused-boundary-checkpoint".to_string(),
-                source_stage: None,
+                strict: false,
             }),
             ..PolicyConfig::default()
         },
@@ -659,10 +609,7 @@ fn run_config() -> Config {
 /// source slot per distinct dated post-study delivery month (so each dated ring
 /// target `Blend`s), and NO transit slot (so every transit target resolves to
 /// `Zero`).
-fn derive_newave_source(
-    manifest: &[EntitySlot],
-    intervals: &[Option<(NaiveDate, NaiveDate)>],
-) -> (Vec<EntitySlot>, Vec<f64>) {
+fn derive_newave_source(manifest: &[EntitySlot]) -> (Vec<EntitySlot>, Vec<f64>) {
     let mut source = Vec::new();
     let mut coefficients = Vec::new();
     let mut next = 1.0_f64;
@@ -678,16 +625,12 @@ fn derive_newave_source(
     }
 
     let mut months: BTreeSet<(i32, i32)> = BTreeSet::new();
-    for (slot, interval) in manifest.iter().zip(intervals) {
+    for slot in manifest {
         if slot.entity_type == StateFamily::AnticipatedThermalState.code()
-            && interval.is_some()
-            && months.insert((slot.entity_id, slot.delivery_date))
+            && slot.interval_start != ENTITY_SLOT_DATE_SENTINEL
+            && months.insert((slot.entity_id, slot.interval_start))
         {
-            source.push(dated_anticipated_slot(
-                slot.entity_id,
-                0,
-                slot.delivery_date,
-            ));
+            source.push(anticipated_slot_at(slot.entity_id, 0, slot.interval_start));
             coefficients.push(next);
             next += 1.0;
         }
@@ -706,7 +649,6 @@ fn run_injected_decomp() -> f64 {
     let mut setup = build_setup_in_code(run_build_system(), &run_config());
 
     let manifest = setup.build_terminal_entity_manifest(&system);
-    let intervals = setup.build_terminal_anticipated_delivery_intervals(&system);
     let fixed = setup.build_terminal_fixed_post_horizon_windows(&system);
 
     let n_storage = manifest
@@ -719,9 +661,9 @@ fn run_injected_decomp() -> f64 {
         .count();
     let n_dated_anticipated = manifest
         .iter()
-        .zip(&intervals)
-        .filter(|(s, iv)| {
-            s.entity_type == StateFamily::AnticipatedThermalState.code() && iv.is_some()
+        .filter(|s| {
+            s.entity_type == StateFamily::AnticipatedThermalState.code()
+                && s.interval_start != ENTITY_SLOT_DATE_SENTINEL
         })
         .count();
     assert!(
@@ -743,7 +685,7 @@ fn run_injected_decomp() -> f64 {
          aligns 1:1 with the injected pool's state dimension"
     );
 
-    let (source_manifest, source_coefficients) = derive_newave_source(&manifest, &intervals);
+    let (source_manifest, source_coefficients) = derive_newave_source(&manifest);
     write_source_checkpoint(
         tmp.path(),
         &source_manifest,
@@ -752,15 +694,14 @@ fn run_injected_decomp() -> f64 {
     );
 
     let cuts = load_boundary_cuts(
-        tmp.path(),
-        0,
-        setup.fcf.state_dimension as u32,
-        &manifest,
-        &intervals,
-        &fixed,
-        None,
-        RUN_LOADING_FACTOR,
-        &mut |_| {},
+        &BoundaryLoadRequest::new(
+            tmp.path(),
+            fixture_priced_date(0),
+            setup.fcf.state_dimension as u32,
+            &manifest,
+            RUN_LOADING_FACTOR,
+        )
+        .with_fixed_windows(&fixed),
     )
     .expect("the derived NEWAVE source must reconcile into the DECOMP terminal manifest");
     for record in cuts.iter() {

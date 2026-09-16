@@ -4,21 +4,13 @@
 //! dimensions. Dimension 1 uses the van der Corput sequence;
 //! dimensions 2+ read `SOBOL_DIRECTIONS` (array index 0 is dimension 2).
 //!
-//! ## Direction number convention
-//!
-//! `SobolDirEntry::initial_dirs` stores raw `m_i` values as listed in the Joe-Kuo
-//! file; the generator applies the left-shift `v[j] = m_j << (32 - j)` — do not
+//! `SobolDirEntry::initial_dirs` holds raw, unshifted `m_i` values as listed in
+//! the Joe-Kuo file; `build_direction_matrix` applies the left-shift — do not
 //! pre-shift the stored values.
 //!
-//! ## Entry points
-//!
-//! - [`generate_qmc_sobol`]: batch generation via Gray-code recurrence (O(1) per
-//!   point).
-//! - [`scrambled_sobol_point`]: single-scenario point-wise generation via direct
-//!   binary decomposition, for the out-of-sample forward pass.
-//!
-//! Both apply Matousek linear scrambling `x' = a*x + b (mod 2^32)` with
-//! seed-derived parameters, then map to N(0,1) via `norm_quantile`.
+//! [`generate_qmc_sobol`] walks the sequence by Gray-code recurrence (O(1) per
+//! point); [`scrambled_sobol_point`] reaches one scenario by direct binary
+//! decomposition. Both scramble via `scramble_to_normal`.
 
 mod sobol_directions;
 
@@ -84,8 +76,7 @@ fn build_direction_matrix(dim: usize) -> Vec<[u32; 32]> {
                 *slot = entry.initial_dirs[j] << (31 - j);
             }
 
-            // Joe-Kuo recurrence in 0-indexed j (the source states it 1-indexed):
-            //   v[j] = v[j-s] ^ (v[j-s] >> s) ^ sum_{k=1}^{s-1} ((a >> (s-1-k)) & 1) * v[j-k]
+            // Joe-Kuo recurrence re-indexed: the source states it with 1-indexed j.
             for j in s..32 {
                 let mut x = v[j - s] ^ (v[j - s] >> s);
                 for k in 1..s {
@@ -154,8 +145,8 @@ pub fn generate_qmc_sobol(
         output[d] = scramble_to_normal(sobol_state[d], a, b);
     }
 
-    // Gray-code recurrence: for point i, XOR direction c = i.trailing_zeros()
-    // (the rightmost set bit) into each dimension's state.
+    // Gray-code recurrence: XOR the direction at index `i.trailing_zeros()` into
+    // each dimension's state.
     for i in 1..n_openings {
         #[allow(clippy::cast_possible_truncation)]
         let c = i.trailing_zeros() as usize;
@@ -177,7 +168,8 @@ pub struct SobolPrecomputed {
 }
 
 impl SobolPrecomputed {
-    /// Precompute for a given (seed, iteration, stage, dim) combination.
+    /// Builds the direction matrix and scramble parameters described on
+    /// [`SobolPrecomputed`].
     ///
     /// # Panics
     ///
@@ -256,7 +248,6 @@ pub(crate) fn scrambled_sobol_point_reference(spec: &NoisePointSpec, output: &mu
     let scramble = derive_scramble_params(seed, spec.dim);
 
     for d in 0..spec.dim {
-        // Direct binary decomposition: XOR v[j] for each bit j set in scenario.
         let mut xd = 0u32;
         let mut scenario = spec.scenario;
         let mut j = 0usize;
@@ -311,7 +302,6 @@ mod tests {
         result
     }
 
-    /// Same `(base_seed, stage_id, n_openings, dim)` must produce bitwise identical output.
     #[test]
     fn test_sobol_batch_determinism() {
         let n_openings = 64;
@@ -323,7 +313,6 @@ mod tests {
         assert_eq!(out1, out2, "generate_qmc_sobol is not deterministic");
     }
 
-    /// Different `base_seed` values must produce different output.
     #[test]
     fn test_sobol_batch_different_seeds_differ() {
         let n_openings = 64;
@@ -335,7 +324,6 @@ mod tests {
         assert_ne!(out1, out2, "different seeds produced identical output");
     }
 
-    /// All output values must be finite for N=64, dim=5.
     #[test]
     fn test_sobol_batch_all_finite() {
         let n_openings = 64;
@@ -347,7 +335,6 @@ mod tests {
         }
     }
 
-    /// Output must fill exactly `n_openings * dim` elements.
     #[test]
     fn test_sobol_batch_correct_length() {
         let n_openings = 32;
@@ -357,7 +344,6 @@ mod tests {
         assert_eq!(output.len(), n_openings * dim);
     }
 
-    /// Same `NoisePointSpec` must produce bitwise identical output.
     #[test]
     fn test_sobol_point_determinism() {
         let dim = 2;
@@ -376,7 +362,6 @@ mod tests {
         assert_eq!(out1, out2, "scrambled_sobol_point is not deterministic");
     }
 
-    /// Different `sampling_seed` must produce different output.
     #[test]
     fn test_sobol_point_different_seeds_differ() {
         let dim = 3;
@@ -404,7 +389,6 @@ mod tests {
         );
     }
 
-    /// All values finite across all scenarios 0..N.
     #[test]
     fn test_sobol_point_all_finite() {
         let n = 64_usize;
@@ -429,8 +413,6 @@ mod tests {
         }
     }
 
-    /// `scrambled_sobol_point` matches `scrambled_sobol_point_reference`
-    /// element-wise for every scenario, across several `(dim, total_scenarios)`.
     #[test]
     fn sobol_point_matches_reference() {
         for (dim, total_scenarios) in [(1_usize, 4_u32), (2, 16), (5, 8)] {
@@ -459,7 +441,6 @@ mod tests {
         }
     }
 
-    /// Dimension 1 directions must equal `1 << (31 - j)` for j in 0..32.
     #[test]
     fn test_build_direction_matrix_dim1() {
         let dirs = build_direction_matrix(1);
@@ -473,10 +454,7 @@ mod tests {
         }
     }
 
-    /// All batch output values must be in the finite range expected for N(0,1).
-    ///
-    /// The BSM approximation clamps at ±8.22; all values must be within that
-    /// range and finite.
+    /// The BSM approximation clamps at ±8.22.
     #[test]
     fn test_sobol_batch_values_in_range() {
         let n_openings = 64;
@@ -492,19 +470,13 @@ mod tests {
         }
     }
 
-    /// `MAX_SOBOL_DIM` must equal 21,201.
     #[test]
     fn test_max_sobol_dim_constant() {
         assert_eq!(MAX_SOBOL_DIM, 21_201);
     }
 
-    /// Verify unscrambled dimension 1 (van der Corput base-2) first 8 points
-    /// against the known Gray-code Sobol values.
-    ///
-    /// The Gray-code Sobol sequence for dimension 1 produces the same set of
-    /// values as the van der Corput base-2 sequence but in a different traversal
-    /// order dictated by the Gray-code recurrence. The first 8 expected values
-    /// are computed from `v[j] = 1 << (31 - j)` with Gray-code XOR updates.
+    /// Dimension 1 yields the van der Corput base-2 values in Gray-code traversal
+    /// order, not in van der Corput order.
     #[test]
     fn test_unscrambled_dim1_first_8_points() {
         let pts = generate_unscrambled_sobol(8, 1);
@@ -528,13 +500,7 @@ mod tests {
         }
     }
 
-    /// Verify unscrambled dimension 2 first 8 points against the known
-    /// Joe-Kuo direction-table values.
-    ///
-    /// Dimension 2 uses `SOBOL_DIRECTIONS[0]` with degree=1, poly=0, and
-    /// `initial_dirs=[1,...]`. The direction vector recurrence with degree 1
-    /// is `v[j] = v[j-1] XOR (v[j-1] >> 1)`, giving a sequence of known
-    /// values when combined with the Gray-code update.
+    /// Dimension 2 reads `SOBOL_DIRECTIONS[0]` (degree 1, poly 0).
     #[test]
     fn test_unscrambled_dim2_first_8_points() {
         let pts = generate_unscrambled_sobol(8, 2);

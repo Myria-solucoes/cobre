@@ -20,11 +20,14 @@ pub use checkpoint::{read_policy_checkpoint, write_policy_checkpoint};
 pub use codec::{deserialize_stage_basis, deserialize_stage_cuts, deserialize_stage_states};
 pub use codec::{serialize_stage_basis, serialize_stage_cuts, serialize_stage_states};
 pub use records::{
-    CheckpointManifest, ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, FORMAT_VERSION,
-    GraphManifest, ManifestEdge, ManifestNode, OwnedPolicyBasisRecord, OwnedPolicyCutRecord,
-    PolicyBasisRecord, PolicyCheckpoint, PolicyCutRecord, ProducerBlock,
-    STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL, STAGE_CUTS_NODE_ID_SENTINEL, STAGE_STATES_NODE_ID_SENTINEL,
+    CheckpointManifest, ENTITY_SLOT_DATE_SENTINEL, EntitySlot, FORMAT_VERSION, GraphManifest,
+    HydroSeasonOrders, ManifestEdge, ManifestNode, OwnedPolicyBasisRecord, OwnedPolicyCutRecord,
+    PolicyBasisRecord, PolicyCheckpoint, PolicyCutRecord, ProducerBlock, SEASON_CYCLE_CODE_ABSENT,
+    SEASON_CYCLE_CODE_CUSTOM, SEASON_CYCLE_CODE_MONTHLY, SEASON_CYCLE_CODE_WEEKLY,
+    STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL, STAGE_CUTS_NODE_ID_SENTINEL,
+    STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, STAGE_STATES_NODE_ID_SENTINEL, SeasonManifest,
     StageCutsPayload, StageCutsReadResult, StageStatesPayload, StageStatesReadResult, StateFamily,
+    decode_slot_date, encode_slot_date,
 };
 
 #[cfg(test)]
@@ -79,6 +82,7 @@ mod tests {
             cost_scale_factor: 1_000_000.0,
             node_id: -1,
             graph_stage_id: -1,
+            priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
         })
     }
 
@@ -279,6 +283,7 @@ mod tests {
                 training_block_mode_per_stage: vec![],
                 cost_scale_factor: None,
             },
+            season_manifest: SeasonManifest::default(),
         }
     }
 
@@ -302,6 +307,7 @@ mod tests {
             cost_scale_factor: 1_000_000.0,
             node_id: -1,
             graph_stage_id: -1,
+            priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
         }
     }
 
@@ -477,6 +483,8 @@ mod tests {
         );
     }
 
+    // Root's read-only permission enforcement is unreliable, so callers that
+    // rely on read-only-directory failures skip the test in that case.
     #[cfg(unix)]
     fn is_root() -> bool {
         std::fs::read_to_string("/proc/self/status")
@@ -497,8 +505,6 @@ mod tests {
 
     #[test]
     fn write_policy_checkpoint_error_on_readonly_dir() {
-        // Skip this test on platforms where read-only enforcement is unreliable
-        // (e.g., when running as root).
         if is_root() {
             return;
         }
@@ -782,27 +788,9 @@ mod tests {
 
     fn sample_manifest() -> Vec<EntitySlot> {
         vec![
-            EntitySlot {
-                entity_type: 0,
-                entity_id: 12,
-                subindex: 0,
-                was_active: true,
-                delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-            },
-            EntitySlot {
-                entity_type: 1,
-                entity_id: -1,
-                subindex: 3,
-                was_active: false,
-                delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-            },
-            EntitySlot {
-                entity_type: 2,
-                entity_id: 7,
-                subindex: 1,
-                was_active: true,
-                delivery_date: 20240501,
-            },
+            EntitySlot::storage(12, true),
+            EntitySlot::inflow_lag(-1, 3, false),
+            EntitySlot::anticipated(7, 1, true).with_interval(20_240_501, 20_240_601),
         ]
     }
 
@@ -813,7 +801,10 @@ mod tests {
             assert_eq!(a.entity_id, e.entity_id, "slot {i} entity_id");
             assert_eq!(a.subindex, e.subindex, "slot {i} subindex");
             assert_eq!(a.was_active, e.was_active, "slot {i} was_active");
-            assert_eq!(a.delivery_date, e.delivery_date, "slot {i} delivery_date");
+            assert_eq!(
+                a.interval_start, e.interval_start,
+                "slot {i} interval_start"
+            );
         }
     }
 
@@ -1244,8 +1235,6 @@ mod tests {
 
     #[test]
     fn interrupted_rewrite_never_pairs_an_old_manifest_with_new_payloads() {
-        // Skip this test on platforms where read-only enforcement is unreliable
-        // (e.g., when running as root).
         if is_root() {
             return;
         }
@@ -1412,6 +1401,7 @@ mod tests {
                 cost_scale_factor: 1_000_000.0,
                 node_id: -1,
                 graph_stage_id: -1,
+                priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
             },
             StageCutsPayload {
                 stage_id: 1,
@@ -1425,6 +1415,7 @@ mod tests {
                 cost_scale_factor: 1_000_000.0,
                 node_id: -1,
                 graph_stage_id: -1,
+                priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
             },
             StageCutsPayload {
                 stage_id: 2,
@@ -1438,6 +1429,7 @@ mod tests {
                 cost_scale_factor: 1_000_000.0,
                 node_id: -1,
                 graph_stage_id: -1,
+                priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
             },
         ];
 
@@ -1470,8 +1462,6 @@ mod tests {
         write_policy_checkpoint(tmp.path(), &stage_cuts, &[], &make_metadata(1, 1), &[])
             .expect("write must succeed");
 
-        // Overwrite manifest.bin with a stale format_version and corrupt the
-        // payload, proving the version gate fires before any payload parse.
         let mut stale = make_metadata(1, 1);
         stale.format_version = FORMAT_VERSION + 1;
         std::fs::write(
@@ -1487,6 +1477,39 @@ mod tests {
         assert!(
             msg.contains("format_version"),
             "must reject on the version marker, not the corrupt payload: {msg}"
+        );
+    }
+
+    /// The older-version mirror of the test above: a manifest predating
+    /// [`FORMAT_VERSION`] is rejected on the same version marker BEFORE any
+    /// payload is parsed, naming both versions and instructing a re-export.
+    #[test]
+    fn read_policy_checkpoint_rejects_older_manifest_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c0 = [1.0_f64];
+        let cuts_s0 = [make_cut_record(1, 0, 1, &c0)];
+        let stage_cuts = [make_stage_cuts_payload(0, &cuts_s0, &[0], 1)];
+        write_policy_checkpoint(tmp.path(), &stage_cuts, &[], &make_metadata(1, 1), &[])
+            .expect("write must succeed");
+
+        let mut older = make_metadata(1, 1);
+        older.format_version = FORMAT_VERSION - 1;
+        std::fs::write(
+            tmp.path().join("manifest.bin"),
+            super::codec::serialize_checkpoint_manifest(&older),
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join("cuts/000.bin"), b"garbage").unwrap();
+
+        let err =
+            read_policy_checkpoint(tmp.path()).expect_err("older manifest version must reject");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("format_version")
+                && msg.contains(&(FORMAT_VERSION - 1).to_string())
+                && msg.contains(&FORMAT_VERSION.to_string())
+                && msg.contains("re-export"),
+            "must name both versions and instruct a re-export, not surface the corrupt payload: {msg}"
         );
     }
 
