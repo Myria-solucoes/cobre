@@ -1010,8 +1010,7 @@ pub(crate) fn build_study_setup(
         build_stochastic_summary(&system, &setup.stochastic, estimation_report.as_ref(), seed);
     let hydro_models_summary = build_hydro_model_summary(&setup.hydro_models, &system);
 
-    // Sidecar so `cobre summary` can render the Hydro-models section from a
-    // completed run.
+    // Write the `training/hydro_models.json` output file.
     let hydro_models_path = output_dir.join("training/hydro_models.json");
     write_hydro_model_summary(&hydro_models_path, &hydro_models_summary)
         .map_err(|e| format!("output write error: failed to write hydro model summary: {e}"))?;

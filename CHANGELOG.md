@@ -132,6 +132,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   single applier that handles every group width from caller-owned scratch.
   Results are unchanged.
 
+### Removed
+
+- **BREAKING — the `cobre report` subcommand is removed, and so is
+  `cobre summary`.** `cobre --help` now lists only `init`, `run`,
+  `validate`, `schema` and `version`. No deck, output file, schema or
+  checkpoint format changed. Read `training/metadata.json` and
+  `simulation/metadata.json` directly, or use the Python `load_*` loaders.
+
+- **BREAKING — `cobre.results.report()` is removed, and so is
+  `cobre.results.summary()`; `cobre.results` is now the compiled module rather
+  than a pure-Python wrapper.** No deck, output file, schema or checkpoint
+  format changed; every `load_*` function and the `Stochastic` class are
+  unchanged. Read the same `training/metadata.json` and
+  `simulation/metadata.json` files, or use the unchanged `load_*` loaders.
+
+- **BREAKING — `cobre-io`'s `ConvergenceSummary` and the readers that produced
+  it are removed.** No deck, output file, schema or checkpoint format changed,
+  and the corresponding writers are unchanged; a caller reads the written
+  artefact directly with `serde_json` instead:
+  - `ConvergenceSummary`
+  - `read_convergence_summary`
+  - `read_initial_gap_percent`
+  - `read_hydro_model_summary`
+  - `read_provenance_report`
+
 ### Fixed
 
 - **A boundary policy load whose study horizon covers only part of the

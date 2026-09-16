@@ -11,8 +11,6 @@
 //! |---------|-------------|
 //! | `cobre run <CASE_DIR>` | Load, train, simulate, and write results |
 //! | `cobre validate <CASE_DIR>` | Validate a case directory |
-//! | `cobre report <RESULTS_DIR>` | Query results and print to stdout |
-//! | `cobre summary <OUTPUT_DIR>` | Display the post-run summary from a completed output directory |
 //! | `cobre schema export` | Export JSON Schema files for all input types |
 //! | `cobre version` | Print version and build information |
 
@@ -29,10 +27,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use commands::{
     init::{self, InitArgs},
-    report::{self, ReportArgs},
     run::{self, RunArgs},
     schema::{self, SchemaArgs},
-    summary::{self as summary_cmd, SummaryArgs},
     validate::{self, ValidateArgs},
     version,
 };
@@ -91,10 +87,6 @@ enum Command {
     Run(RunArgs),
     /// Validate a case directory and print a structured diagnostic report.
     Validate(ValidateArgs),
-    /// Query results from a completed run and print them to stdout.
-    Report(ReportArgs),
-    /// Display the post-run summary from a completed output directory.
-    Summary(SummaryArgs),
     /// Manage JSON Schema files for case directory input types.
     Schema(SchemaArgs),
     /// Print version, solver backend, and build information.
@@ -124,8 +116,6 @@ fn main() {
         Command::Init(args) => init::execute(args),
         Command::Run(ref args) => run::execute(args),
         Command::Validate(args) => validate::execute(args),
-        Command::Report(args) => report::execute(args),
-        Command::Summary(args) => summary_cmd::execute(args),
         Command::Schema(args) => schema::execute(args),
         Command::Version => version::execute(),
     };

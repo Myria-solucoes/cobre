@@ -31,7 +31,6 @@ use arrow::array::{Float64Builder, Int32Builder, RecordBatch, StringBuilder};
 #[cfg(test)]
 use arrow::datatypes::DataType;
 use serde::Serialize;
-use serde::de::DeserializeOwned;
 
 use crate::extensions::{EvaporationModelRow, FphaDeviationPointRow, FphaHyperplaneRow};
 use crate::output::atomic::{ensure_parent_dir, write_batch_atomic, write_json_atomic};
@@ -328,27 +327,6 @@ fn build_fpha_deviation_points_batch(
 pub fn write_hydro_model_summary(path: &Path, summary: &impl Serialize) -> Result<(), OutputError> {
     ensure_parent_dir(path)?;
     write_json_atomic(path, summary, "hydro_models")
-}
-
-/// Read a structural hydro-model summary from a JSON file.
-///
-/// Generic over `DeserializeOwned` so the summary struct can stay in the calling
-/// algorithm crate, keeping this crate algorithm-agnostic (mirrors
-/// [`write_hydro_model_summary`]).
-///
-/// # Errors
-///
-/// Returns [`OutputError::IoError`] if the file cannot be read — a missing file
-/// surfaces as an `IoError` whose `source.kind()` is
-/// [`std::io::ErrorKind::NotFound`], so callers can treat the section as absent
-/// and degrade gracefully. Returns [`OutputError::ManifestError`] if the file
-/// contains malformed JSON.
-pub fn read_hydro_model_summary<T: DeserializeOwned>(path: &Path) -> Result<T, OutputError> {
-    let content = std::fs::read_to_string(path).map_err(|e| OutputError::io(path, e))?;
-    serde_json::from_str(&content).map_err(|e| OutputError::ManifestError {
-        manifest_type: "hydro_models".to_string(),
-        message: e.to_string(),
-    })
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -915,8 +893,9 @@ mod tests {
 
         write_hydro_model_summary(&path, &summary).expect("write should succeed");
 
+        let content = std::fs::read_to_string(&path).expect("read");
         let decoded: MockHydroModelSummary =
-            read_hydro_model_summary(&path).expect("read should succeed");
+            serde_json::from_str(&content).expect("valid JSON after round-trip");
         assert_eq!(decoded, summary);
     }
 
@@ -939,23 +918,5 @@ mod tests {
             "tmp file should be removed after rename"
         );
         assert!(path.exists(), "final file should exist");
-    }
-
-    #[test]
-    fn read_hydro_model_summary_missing_file_is_not_found() {
-        let tmp = tempdir().expect("tempdir");
-        let path = tmp.path().join("does_not_exist.json");
-
-        let result = read_hydro_model_summary::<MockHydroModelSummary>(&path);
-
-        assert!(
-            matches!(
-                &result,
-                Err(OutputError::IoError { source, .. })
-                    if source.kind() == std::io::ErrorKind::NotFound
-            ),
-            "missing file must return IoError with NotFound kind so callers \
-             can degrade gracefully, got: {result:?}"
-        );
     }
 }

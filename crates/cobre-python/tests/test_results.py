@@ -273,114 +273,6 @@ def test_load_policy_missing_dir_raises(tmp_path: pathlib.Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# report / summary tests
-# ---------------------------------------------------------------------------
-
-
-def test_report_top_level_keys(run_output: pathlib.Path) -> None:
-    """report() returns a dict with the six expected top-level keys."""
-    import cobre.results  # noqa: PLC0415
-
-    report = cobre.results.report(str(run_output))
-
-    assert isinstance(report, dict), "report must return a dict"
-    expected_keys = {
-        "output_directory",
-        "status",
-        "bounds",
-        "training",
-        "cost",
-        "simulation",
-    }
-    missing = expected_keys - report.keys()
-    assert not missing, f"report is missing top-level keys: {missing}"
-
-
-def test_report_bounds_hoist_is_consistent(run_output: pathlib.Path) -> None:
-    """report()['bounds'] mirrors report()['training']['bounds']."""
-    import cobre.results  # noqa: PLC0415
-
-    report = cobre.results.report(str(run_output))
-
-    assert (
-        report["bounds"]["final_lower_bound"]
-        == (report["training"]["bounds"]["final_lower_bound"])
-    ), "top-level bounds must match nested training.bounds"
-
-
-def test_report_cost_hoist_is_consistent(run_output: pathlib.Path) -> None:
-    """report()['cost'] mirrors report()['simulation']['cost'] when simulation ran."""
-    import cobre.results  # noqa: PLC0415
-
-    report = cobre.results.report(str(run_output))
-
-    assert report["simulation"] is not None, "1dtoy runs simulation"
-    assert report["cost"] is not None, "cost must be present when simulation ran"
-    assert report["cost"]["mean_cost"] == (report["simulation"]["cost"]["mean_cost"]), (
-        "top-level cost must match nested simulation.cost"
-    )
-
-
-def test_report_simulation_none_when_absent(run_output: pathlib.Path) -> None:
-    """report() returns None for cost/simulation when simulation metadata is absent."""
-    import shutil
-
-    import cobre.results  # noqa: PLC0415
-
-    # Copy the run output and strip the simulation directory.
-    stripped = run_output.parent / "report_no_simulation"
-    if stripped.exists():
-        shutil.rmtree(stripped)
-    shutil.copytree(run_output, stripped)
-    shutil.rmtree(stripped / "simulation", ignore_errors=True)
-
-    report = cobre.results.report(str(stripped))
-
-    assert report["simulation"] is None, "simulation must be None when metadata absent"
-    assert report["cost"] is None, "cost must be None when simulation metadata absent"
-
-
-def test_report_missing_training_raises(tmp_path: pathlib.Path) -> None:
-    """report() raises FileNotFoundError when training/metadata.json is absent."""
-    import cobre.results  # noqa: PLC0415
-
-    with pytest.raises(FileNotFoundError):
-        cobre.results.report(str(tmp_path))
-
-
-def test_summary_returns_string(run_output: pathlib.Path) -> None:
-    """summary() returns a non-empty str containing a recognizable bounds label."""
-    import cobre.results  # noqa: PLC0415
-
-    text = cobre.results.summary(str(run_output))
-
-    assert isinstance(text, str), "summary must return a str"
-    assert len(text) > 0, "summary string must be non-empty"
-    assert "lower bound" in text.lower(), (
-        "summary must include the training bounds section"
-    )
-
-
-def test_report_still_returns_dict(run_output: pathlib.Path) -> None:
-    """report() still returns the structured dict with bounds + training keys."""
-    import cobre.results  # noqa: PLC0415
-
-    report = cobre.results.report(str(run_output))
-
-    assert isinstance(report, dict), "report must still return a dict"
-    assert "bounds" in report, "report must contain 'bounds'"
-    assert "training" in report, "report must contain 'training'"
-
-
-def test_summary_missing_dir_raises() -> None:
-    """summary() raises FileNotFoundError, delegated from report()."""
-    import cobre.results  # noqa: PLC0415
-
-    with pytest.raises(FileNotFoundError):
-        cobre.results.summary("/tmp/nonexistent_cobre_output_xzy123")
-
-
-# ---------------------------------------------------------------------------
 # load_stochastic tests
 # ---------------------------------------------------------------------------
 
@@ -467,9 +359,9 @@ def test_load_stochastic_opening_tree_bad_stage_raises(
 
 
 def test_load_stochastic_reexport_identity() -> None:
-    """load_stochastic is in __all__ and is the compiled function (identity)."""
+    """load_stochastic is present and is the compiled function (identity)."""
     import cobre._native.results  # noqa: PLC0415
     import cobre.results  # noqa: PLC0415
 
-    assert "load_stochastic" in cobre.results.__all__
+    assert hasattr(cobre.results, "load_stochastic")
     assert cobre.results.load_stochastic is cobre._native.results.load_stochastic

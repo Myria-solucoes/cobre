@@ -424,7 +424,7 @@ fn fmt_sci(v: f64) -> String {
 ///
 /// Every `*_seconds` timing field is the run-level sum of its per-iteration
 /// `*_ms` source counter divided by 1000, and is `None` when per-iteration
-/// timing is unavailable (e.g. a `metadata.json`-reconstructed summary).
+/// timing is unavailable.
 pub struct TrainingSummary {
     /// Total number of iterations completed.
     pub iterations: u64,
@@ -492,9 +492,6 @@ pub struct TrainingSummary {
     pub total_time_ms: u64,
 
     /// Number of solves that returned optimal on the first attempt.
-    ///
-    /// `None` when solver stats are unavailable (e.g. `cobre summary`
-    /// reads metadata.json which does not persist per-solve stats).
     pub total_first_try: Option<u64>,
 
     /// Number of solves that required retry escalation.
@@ -516,9 +513,7 @@ pub struct TrainingSummary {
 
     /// Effective parallelism = `n_ranks * n_workers_local`. Used to
     /// normalize cumulative solve times into per-worker wall-time
-    /// equivalents for the time-split breakdown. `None` when the
-    /// summary was reconstructed from `metadata.json` and parallelism
-    /// is unknown.
+    /// equivalents for the time-split breakdown.
     pub parallelism: Option<u32>,
 
     /// Initial optimality gap (iteration 1) in percent. Read from the
@@ -671,8 +666,7 @@ fn format_pct(pct: f64) -> String {
 }
 
 /// The three training Time-split component walls (forward, backward, serial),
-/// in seconds. `None` when per-iteration phase-wall timing is unavailable
-/// (e.g. a `metadata.json`-reconstructed [`TrainingSummary`]).
+/// in seconds. `None` when per-iteration phase-wall timing is unavailable.
 #[allow(clippy::cast_precision_loss)]
 fn time_split_training_walls(t: &TrainingSummary) -> Option<(f64, f64, f64)> {
     let forward_wall = t.forward_phase_wall_seconds?;

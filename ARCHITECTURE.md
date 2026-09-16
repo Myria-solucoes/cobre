@@ -83,7 +83,7 @@ SolverInterface`).
 ### Entry points
 
 - **[`cobre-cli`](crates/cobre-cli/README.md)** — The `cobre` binary:
-  `run`/`validate`/`report`/`summary`/`init`/`schema`/`version` subcommands
+  `run`/`validate`/`init`/`schema`/`version` subcommands
   with a typed `CliError` → exit-code contract. Wires `cobre-io`,
   `cobre-stochastic`, `cobre-solver`, `cobre-comm`, and `cobre-sddp` into a
   single executable. Selects the concrete solver backend (`highs`/`clp`

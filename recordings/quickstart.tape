@@ -25,7 +25,7 @@ Type "cobre run demo/"
 Enter
 Sleep 10s
 
-Type "cobre report demo/output/ | head -20"
+Type "jq '{status, bounds}' demo/output/training/metadata.json"
 Enter
 Sleep 5s
 

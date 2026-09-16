@@ -532,8 +532,8 @@ fn run_root_exports(
     root_estimation_report: Option<&EstimationReport>,
     root_estimation_path: Option<EstimationPath>,
 ) -> Result<(), CliError> {
-    // Built regardless of `quiet`: it also feeds the persisted sidecar consumed
-    // by `cobre summary`, not just the optional print.
+    // Built regardless of `quiet`: it feeds the `training/hydro_models.json`
+    // output file, not just the optional print.
     let hydro_summary = build_hydro_model_summary(&setup.hydro_models, system);
     if !ctx.quiet {
         print_hydro_model_summary(&ctx.stderr, &hydro_summary);

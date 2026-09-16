@@ -2,8 +2,8 @@
 
 Command-line interface for the [Cobre](https://github.com/cobre-rs/cobre) power systems ecosystem.
 
-Provides seven subcommands for running SDDP studies, scaffolding case
-directories, validating input data, querying results, and inspecting build
+Provides five subcommands for running SDDP studies, scaffolding case
+directories, validating input data, and inspecting build
 information from the terminal.
 
 ## When to Use
@@ -17,8 +17,6 @@ programmatic embedding of the solver, depend on `cobre-sddp` directly.
 - **`init`** — scaffold a new case directory from an embedded template
 - **`run`** — load a case directory, train an SDDP policy, and run simulation
 - **`validate`** — validate a case directory and print a structured diagnostic report
-- **`report`** — query results from a completed run and print them to stdout
-- **`summary`** — display the post-run summary from a completed output directory
 - **`schema`** — manage JSON Schema files for case directory input types
 - **`version`** — print version, solver backend, and build information
 
@@ -46,14 +44,8 @@ schedulers by inspecting the process exit code. `CliError` also carries the
 - **`cobre run`** writes a live progress bar to stderr and a run summary after
   completion (both suppressed in `--quiet` mode). Error messages are always
   written to stderr.
-- **`cobre report`** prints pretty-printed JSON to stdout only — stdout is
-  reserved exclusively for this machine-readable output, suitable for piping
-  to `jq`.
-- **`cobre summary`** prints the same human-readable summary table as
-  `cobre run` to stderr, reading it from `training/metadata.json` and the
-  optional `training/hydro_models.json`, `training/model_provenance.json`, and
-  `simulation/metadata.json` files in a completed output directory, rather
-  than from a live run.
+- **`cobre validate --json`** prints a single JSON object to stdout — stdout is
+  reserved for machine-readable output.
 
 ## `cobre init`
 

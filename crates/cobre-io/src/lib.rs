@@ -112,14 +112,13 @@ pub use output::policy::{
     serialize_stage_states, write_policy_checkpoint,
 };
 pub use output::{
-    ConvergenceSummary, DeviationSummary, DeviationWorstEntry, DistributionInfo, FixedDeliveryRow,
+    DeviationSummary, DeviationWorstEntry, DistributionInfo, FixedDeliveryRow,
     GenericConstraintEchoRow, HostLayout, IterationRecord, MetadataBounds, MetadataConfiguration,
     MetadataConvergence, MetadataCost, MetadataIterations, MetadataProblemDimensions,
     MetadataRowPool, MetadataScenarios, MetadataSimulationSolveStats, MetadataTrainingSolveStats,
     OutputContext, OutputError, ParquetWriterConfig, RowPoolStatistics, RowSelectionRecord,
     SetupTimings, SimulationMetadata, SimulationOutput, SolverStatsRow, TrainingMetadata,
     TrainingOutput, TrainingParquetWriter, WorkerTimingRecord, get_hostname, now_iso8601,
-    read_convergence_summary, read_hydro_model_summary, read_provenance_report,
     read_simulation_metadata, read_training_metadata, write_dictionaries, write_evaporation_models,
     write_fixed_delivery, write_fpha_deviation_points, write_fpha_hyperplanes,
     write_generic_constraint_echo, write_hydro_model_summary, write_provenance_report,

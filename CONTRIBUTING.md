@@ -206,7 +206,7 @@ The CLI forwards the active backend to both `cobre-solver` and `cobre-sddp`, so 
 takes one backend at a time — not `--all-features` (see
 [Solver Backend Selection](#solver-backend-selection)). Integration tests exercise
 the binary via `assert_cmd`, organized by subcommand
-(`tests/cli_run.rs`, `tests/cli_validate.rs`, `tests/cli_report.rs`,
+(`tests/cli_run.rs`, `tests/cli_validate.rs`, `tests/cli_e2e_run_end_block.rs`,
 `tests/cli_smoke.rs`). Each verifies exit codes, output, and file creation.
 
 ### Testing cobre-python
@@ -278,10 +278,20 @@ assert report["straddling_slots"] == [], report["straddling_slots"]
 print("boundary_date:", out["boundary_date"])
 '
 
-# 4. Run the reduced case, then pull both reports for the cost comparison below.
+# 4. Run the reduced case, then read both runs' mean_cost for comparison.
 cobre run "$COBRE_BOUNDARY_DECK_ROOT/reduced" --output "$COBRE_BOUNDARY_DECK_ROOT/reduced/output"
-cobre report "$COBRE_BOUNDARY_DECK_ROOT/full/output"
-cobre report "$COBRE_BOUNDARY_DECK_ROOT/reduced/output"
+for label in full reduced; do
+  python3 -c '
+import json, sys, os
+label = sys.argv[1]
+path = os.path.join(os.environ["COBRE_BOUNDARY_DECK_ROOT"], label, "output/simulation/metadata.json")
+with open(path) as f:
+    meta = json.load(f)
+assert meta["cost"] is not None, f"missing cost block in {label} run"
+cost_mean = meta["cost"]["mean_cost"]
+print(f"{label} mean_cost: {cost_mean}")
+' "$label"
+done
 ```
 
 Confirm all four before trusting the run:
@@ -296,7 +306,8 @@ Confirm all four before trusting the run:
   boundary load. One there is itself a regression: the reconciliation path only ever
   records drops in the report or rejects outright under `policy.boundary.strict`; it never
   warns.
-- The reduced run's total cost (`cost.mean_cost` from its `cobre report`, step 4) agrees with
+- The reduced run's total cost (`cost.mean_cost` from the run's
+  `simulation/metadata.json`, step 4) agrees with
   the full-horizon run's cost restricted to the same stage count: from the full run's
   `simulation/costs/` output, sum each scenario's `immediate_cost` over the stages the
   reduced case also covers, add that last included stage's `future_cost`, and average
@@ -326,7 +337,7 @@ cobre/
 │   ├── cobre-solver/       # LP solver abstraction (HiGHS backend)
 │   ├── cobre-comm/         # Communication abstraction (MPI, local)
 │   ├── cobre-sddp/         # SDDP training loop, simulation, cut management
-│   ├── cobre-cli/          # Binary: run/validate/report/init/schema/summary/version
+│   ├── cobre-cli/          # Binary: run/validate/init/schema/version
 │   ├── cobre-mcp/          # Binary: MCP server for AI agent integration (reserved)
 │   ├── cobre-python/       # cdylib: PyO3 Python bindings
 │   ├── cobre-tui/          # Library: ratatui terminal UI (reserved)
