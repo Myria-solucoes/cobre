@@ -2,13 +2,7 @@
 # Lock structural invariants of a fresh `cobre init` -> `run` against the live
 # binary, so the CLI's on-disk output shape cannot silently drift.
 #
-# Formerly framed as "book cannot drift from the CLI" (each invariant below
-# was a claim made in book/src/); the book was retired (mdBook decommission)
-# but these constants were always hardcoded here, not re-read from book/ at
-# run time, so the gate's value is independent of the book's existence — it is
-# now a plain CLI output-shape regression gate. What it asserts (bump the
-# constant here when the CLI's output shape intentionally changes, or the
-# gate fails):
+# What it asserts (bump constants when CLI output shape intentionally changes):
 #   1. `cobre init --template 1dtoy` materializes exactly EXPECTED_INPUT_FILES
 #      regular files. Single source of truth below.
 #   2. training/metadata.json EXISTS and carries every TRAINING_METADATA_KEYS
@@ -33,7 +27,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
-# ── Single source of truth for the expected init file count ───────────────────
+# Single source of truth for the expected init file count.
 # A future template addition must update this constant, or this gate fails.
 readonly EXPECTED_INPUT_FILES=11
 readonly TEMPLATE="1dtoy"
@@ -114,7 +108,7 @@ check_keys() {
   done
 }
 
-# ── Invariant 1: init materializes exactly the expected file count ───────────
+# Invariant 1: init materializes exactly the expected file count
 "$BIN" init --template "$TEMPLATE" "$CASE_DIR" >/dev/null
 actual_files="$(find "$CASE_DIR" -type f | wc -l | tr -d '[:space:]')"
 if [[ "$actual_files" -ne "$EXPECTED_INPUT_FILES" ]]; then
@@ -125,18 +119,18 @@ echo "init file count: $actual_files == $EXPECTED_INPUT_FILES (expected) ✓"
 # Drive a fresh run so the metadata assertions read live output.
 "$BIN" run "$CASE_DIR" --output "$OUT_DIR" --quiet --color never >/dev/null
 
-# ── Invariant 2: training/metadata.json exists + expected top-level keys ─────
+# Invariant 2: training/metadata.json exists + expected top-level keys
 training_meta="$OUT_DIR/training/metadata.json"
 [[ -f "$training_meta" ]] || fail "training/metadata.json was not written."
 check_keys "$training_meta" "training/metadata.json" "${TRAINING_METADATA_KEYS[@]}"
 echo "training/metadata.json: ${#TRAINING_METADATA_KEYS[@]} expected top-level keys present (incl. row_pool) ✓"
 
-# ── Invariant 3: policy/manifest.bin exists (the checkpoint commit signal) ────
+# Invariant 3: policy/manifest.bin exists (the checkpoint commit signal)
 policy_manifest="$OUT_DIR/policy/manifest.bin"
 [[ -f "$policy_manifest" ]] || fail "policy/manifest.bin was not written."
 echo "policy/manifest.bin: present (self-describing checkpoint commit signal) ✓"
 
-# ── Invariant 4: simulation/metadata.json exists + expected top-level keys ───
+# Invariant 4: simulation/metadata.json exists + expected top-level keys
 simulation_meta="$OUT_DIR/simulation/metadata.json"
 [[ -f "$simulation_meta" ]] || fail "simulation/metadata.json was not written."
 check_keys "$simulation_meta" "simulation/metadata.json" "${SIMULATION_METADATA_KEYS[@]}"

@@ -80,9 +80,8 @@ pub(crate) struct PyCutRecord {
     coefficients: Vec<f64>,
     is_active: bool,
     /// Inflow-lag gradient terms keyed by hydro id (`hydro_id -> [coef_by_depth]`,
-    /// index `0` = lag depth 1), separate from the storage-aligned
-    /// `coefficients`. Requires the top-level `inflow_lag_depth`; empty (the
-    /// default) leaves the checkpoint byte-identical.
+    /// index `0` = lag depth 1). Requires the top-level `inflow_lag_depth`; empty
+    /// (the default) leaves the checkpoint byte-identical.
     #[pyo3(default)]
     inflow_lag_coefficients: HashMap<i32, Vec<f64>>,
 }
@@ -102,8 +101,8 @@ pub(crate) struct PyStageCutsPayload {
     populated_count: Option<u32>,
     #[pyo3(default)]
     entity_manifest: Vec<PyEntitySlot>,
-    /// Cost-scale provenance; defaults to the metadata producer block's factor
-    /// when omitted (see [`write_policy_checkpoint`]).
+    /// Defaults to the metadata producer block's factor when omitted (see
+    /// [`write_policy_checkpoint`]).
     #[pyo3(default)]
     cost_scale_factor: Option<f64>,
     #[pyo3(default = STAGE_CUTS_NODE_ID_SENTINEL)]
@@ -266,8 +265,7 @@ impl From<PyProducerBlock> for ProducerBlock {
 #[derive(Debug, FromPyObject)]
 #[pyo3(from_item_all)]
 pub(crate) struct PyPolicyCheckpointMetadata {
-    /// Stamped to [`FORMAT_VERSION`] when omitted, so a checkpoint authored from
-    /// raw records is always readable; a round-tripped one carries it back.
+    /// Format version, defaults to `FORMAT_VERSION` when omitted.
     #[pyo3(default = FORMAT_VERSION)]
     format_version: u32,
     cobre_version: String,
@@ -437,7 +435,8 @@ fn build_stage_cuts_data(
 ///
 /// `ValueError` when a cut's `coefficients` length does not match its stage's
 /// `state_dimension`, a stage's state data length does not match
-/// `count * state_dimension`, or (under `inflow_lag_depth`) a manifest lacks a
+/// `count * state_dimension`, a cut carries `inflow_lag_coefficients` without a
+/// positive `inflow_lag_depth`, or (under `inflow_lag_depth`) a manifest lacks a
 /// leading storage block or an inflow-lag coefficient is unplaceable. A
 /// `season_manifest` whose `hydro_orders` are not ascending by `hydro_id` or
 /// whose `orders` lengths disagree with `n_seasons` is written as given and
@@ -505,8 +504,6 @@ pub fn write_policy_checkpoint(
                 active_cut_indices: &sc.active_cut_indices,
                 populated_count: populated_counts[i],
                 entity_manifest: &data.manifest,
-                // None (per-stage and metadata) is the legacy at-rest scale
-                // (`ProducerBlock::cost_scale_factor`).
                 cost_scale_factor: sc
                     .cost_scale_factor
                     .or(metadata_cost_scale_factor)

@@ -1,11 +1,5 @@
-//! End-to-end determinism test: `cobre run` on the committed `examples/1dtoy`
-//! case (seed 42, all `in_sample`). Asserts deterministic strings in the live
-//! run's stderr end-block, the shape and ordering of the Time-split block, and
-//! golden LP-solve counts and mean cost read from the written metadata files.
-//!
-//! The golden numbers are stable because the case is deterministic, seed-pinned,
-//! and input-committed; they move only when the committed case changes or the
-//! solver/algorithm produces a different optimum.
+//! E2E determinism: golden LP counts and cost on input-committed `examples/1dtoy`
+//! (seed 42, all `in_sample`). Goldens change only when the case, solver or algorithm changes.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 

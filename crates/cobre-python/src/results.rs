@@ -849,13 +849,6 @@ where
         .map(|b| b.into_any().unbind())
 }
 
-/// Convert a [`cobre_io::OutputError`] to an appropriate Python exception via the
-/// single [`crate::errors::convert_error`] mapping site (which owns the per-variant
-/// mapping and the read-path `NotFound` fold).
-fn output_error_to_py(err: &cobre_io::OutputError) -> PyErr {
-    convert_error(ErrorSource::Output(err))
-}
-
 /// Build the `metadata` dict field-by-field from a [`cobre_io::CheckpointManifest`],
 /// mirroring the `stage_cuts` surface in [`load_policy`] so the emitted dict shape
 /// does not depend on a whole-struct serde path.
@@ -1523,8 +1516,8 @@ pub fn load_policy(
         )));
     }
 
-    let checkpoint =
-        cobre_io::read_policy_checkpoint(&policy_dir).map_err(|e| output_error_to_py(&e))?;
+    let checkpoint = cobre_io::read_policy_checkpoint(&policy_dir)
+        .map_err(|e| convert_error(ErrorSource::Output(&e)))?;
 
     let metadata_py = metadata_to_py(py, &checkpoint.metadata)?;
 

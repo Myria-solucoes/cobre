@@ -34,9 +34,6 @@ def _make_metadata(
     }
     if cost_scale_factor is not None:
         producer["cost_scale_factor"] = cost_scale_factor
-    # The neutral core: format_version defaults when omitted; the graph manifest
-    # and season_manifest are optional (a checkpoint authored from raw records
-    # carries none).
     metadata = {
         "cobre_version": "0.13.0",
         "created_at": "2026-07-30T00:00:00Z",

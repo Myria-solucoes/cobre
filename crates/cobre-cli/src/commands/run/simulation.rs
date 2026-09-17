@@ -158,10 +158,7 @@ pub(super) fn run_simulation_phase(
     let global_path_rows = aggregate_simulation_paths(&ctx.comm, &local_path_rows)?;
 
     // Aggregate across all ranks so the printed mean/std/CI95 reflect every
-    // scenario, not just rank 0's. The weighting rides out on the run result,
-    // resolved once from the simulation Traversal inside `simulate()` — `Census`
-    // (exact leaf-path expectation) when `census_weights` is `Some`, the uniform
-    // Monte-Carlo sample mean when `None`.
+    // scenario, not just rank 0's.
     let weighting = match sim_run_result.census_weights.as_deref() {
         Some(weights) => SimulationWeighting::Census { weights },
         None => SimulationWeighting::Uniform,

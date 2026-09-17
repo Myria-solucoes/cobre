@@ -1,10 +1,7 @@
 //! Integration test: Python parity check.
 //!
-//! `scripts/ci/check_python_parity.py` parses `crates/cobre-cli/src/` and
-//! `crates/cobre-python/src/` for `cobre_io` / `cobre_sddp::orchestration`
-//! writer calls, resolves bare imported calls through `use` statements, and
-//! asserts the two sets are identical — the canonical source-level enforcement
-//! of the CLI↔Python output-parity hard rule.
+//! Runs `scripts/ci/check_python_parity.py`, the canonical source-level
+//! enforcement of the CLI↔Python output-parity hard rule.
 
 #![allow(clippy::expect_used, clippy::panic, clippy::manual_assert)]
 

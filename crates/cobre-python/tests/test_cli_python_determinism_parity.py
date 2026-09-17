@@ -1,9 +1,9 @@
 """Golden CLI-versus-Python determinism test on examples/1dtoy.
 
-This module verifies the byte-identity claim made in two places in the bindings:
-`crates/cobre-python/src/study.rs:570` and `:681` both state that `Study.train`
-/ `Study.simulate` invoke the same writers as `crates/cobre-python/src/run.rs`'s
-`run_via_study`, and that the resulting outputs are identical. This test asserts
+This module verifies the byte-identity claim the bindings make in the docstrings
+of `Study.train` and `Study.simulate` (`crates/cobre-python/src/study.rs`): both
+state that they invoke the same writers as `run_via_study` in
+`crates/cobre-python/src/run.rs`, and that the resulting outputs are identical. This test asserts
 that claim by running the same case (`examples/1dtoy`) through both the compiled
 CLI and the Python `cobre.run.run()` entry point, then comparing the two output
 trees.
@@ -202,22 +202,32 @@ def toy_cli_output(
 
 
 @pytest.fixture(scope="module")
-def toy_python_output(tmp_path_factory: pytest.TempPathFactory) -> pathlib.Path:
-    """Run 1dtoy through the module-level Python bindings entry point."""
+def toy_python_run(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> tuple[pathlib.Path, dict[str, Any]]:
+    """Run 1dtoy once through `cobre.run.run()`; return the output dir and result."""
     import cobre.run  # noqa: PLC0415
 
     assert TOY_CASE.is_dir(), f"the 1dtoy fixture must exist at {TOY_CASE}"
     output_dir = tmp_path_factory.mktemp("toy_python_out")
-    cobre.run.run(str(TOY_CASE), output_dir=str(output_dir))
-    return output_dir
+    result = cobre.run.run(str(TOY_CASE), output_dir=str(output_dir))
+    return output_dir, result
 
 
 @pytest.fixture(scope="module")
-def toy_python_result(toy_python_output: pathlib.Path) -> dict[str, Any]:
-    """Run 1dtoy through Python and return the result dict."""
-    import cobre.run  # noqa: PLC0415
+def toy_python_output(
+    toy_python_run: tuple[pathlib.Path, dict[str, Any]],
+) -> pathlib.Path:
+    """The output directory of the single Python run."""
+    return toy_python_run[0]
 
-    return cobre.run.run(str(TOY_CASE), output_dir=str(toy_python_output))
+
+@pytest.fixture(scope="module")
+def toy_python_result(
+    toy_python_run: tuple[pathlib.Path, dict[str, Any]],
+) -> dict[str, Any]:
+    """The result dict of the single Python run (the run that wrote `toy_python_output`)."""
+    return toy_python_run[1]
 
 
 def test_cli_python_output_file_sets_are_equal(
