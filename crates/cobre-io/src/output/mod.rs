@@ -14,7 +14,6 @@
 use chrono::{Datelike, NaiveDate};
 
 pub(crate) mod atomic;
-pub mod convergence_reader;
 pub mod dictionary;
 pub mod error;
 pub mod fixed_delivery;
@@ -32,16 +31,13 @@ pub mod solver_stats_writer;
 pub mod stochastic;
 pub mod training_writer;
 
-pub use convergence_reader::{
-    ConvergenceSummary, read_convergence_summary, read_initial_gap_percent,
-};
 pub use dictionary::write_dictionaries;
 pub use error::OutputError;
 pub use fixed_delivery::{FixedDeliveryRow, write_fixed_delivery};
 pub use generic_constraints_echo::{GenericConstraintEchoRow, write_generic_constraint_echo};
 pub use hydro_models::{
-    read_hydro_model_summary, write_evaporation_models, write_fpha_deviation_points,
-    write_fpha_hyperplanes, write_hydro_model_summary,
+    write_evaporation_models, write_fpha_deviation_points, write_fpha_hyperplanes,
+    write_hydro_model_summary,
 };
 pub use manifest::{
     DeviationSummary, DeviationWorstEntry, DistributionInfo, HostLayout, MetadataBounds,
@@ -52,7 +48,7 @@ pub use manifest::{
     write_simulation_metadata, write_training_metadata,
 };
 pub use parquet_config::ParquetWriterConfig;
-pub use provenance::{read_provenance_report, write_provenance_report};
+pub use provenance::write_provenance_report;
 pub use results_writer::{write_results, write_simulation_results, write_training_results};
 pub use scaling_report::write_scaling_report;
 pub use simulation_writer::SimulationParquetWriter;

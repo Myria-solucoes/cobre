@@ -4,17 +4,6 @@
 //!
 //! Provides commands for running optimization studies, validating input data,
 //! and inspecting results from the terminal.
-//!
-//! ## Subcommands
-//!
-//! | Command | Description |
-//! |---------|-------------|
-//! | `cobre run <CASE_DIR>` | Load, train, simulate, and write results |
-//! | `cobre validate <CASE_DIR>` | Validate a case directory |
-//! | `cobre report <RESULTS_DIR>` | Query results and print to stdout |
-//! | `cobre summary <OUTPUT_DIR>` | Display the post-run summary from a completed output directory |
-//! | `cobre schema export` | Export JSON Schema files for all input types |
-//! | `cobre version` | Print version and build information |
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -29,17 +18,13 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use commands::{
     init::{self, InitArgs},
-    report::{self, ReportArgs},
     run::{self, RunArgs},
     schema::{self, SchemaArgs},
-    summary::{self as summary_cmd, SummaryArgs},
     validate::{self, ValidateArgs},
     version,
 };
 
-/// Controls when ANSI color/style escapes are emitted on stderr.
-///
-/// Selected solely by the `--color <WHEN>` CLI flag (no environment override).
+/// Controls when ANSI color/style escapes are emitted on stderr (no environment override).
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub(crate) enum ColorWhen {
     /// Enable color when stderr is connected to a TTY (default).
@@ -50,11 +35,7 @@ pub(crate) enum ColorWhen {
     Never,
 }
 
-/// Apply the resolved color setting to the `console` crate's global stderr flag.
-///
-/// Must be called before any output is written to stderr so that the banner,
-/// progress bars, and error messages all honour the chosen setting. `Auto` leaves
-/// the `console` crate's TTY auto-detection in place.
+/// Must be called before stderr output; `Auto` leaves TTY auto-detection in place.
 pub(crate) fn resolve_color(cli_color: ColorWhen) {
     match cli_color {
         ColorWhen::Always => console::set_colors_enabled_stderr(true),
@@ -63,7 +44,6 @@ pub(crate) fn resolve_color(cli_color: ColorWhen) {
     }
 }
 
-/// Open infrastructure for power system computation.
 #[derive(Debug, Parser)]
 #[command(
     name = "cobre",
@@ -91,10 +71,6 @@ enum Command {
     Run(RunArgs),
     /// Validate a case directory and print a structured diagnostic report.
     Validate(ValidateArgs),
-    /// Query results from a completed run and print them to stdout.
-    Report(ReportArgs),
-    /// Display the post-run summary from a completed output directory.
-    Summary(SummaryArgs),
     /// Manage JSON Schema files for case directory input types.
     Schema(SchemaArgs),
     /// Print version, solver backend, and build information.
@@ -106,10 +82,7 @@ fn main() {
 
     resolve_color(cli.color);
 
-    // The default `warn` level surfaces library deprecation notices on stderr
-    // while staying quiet for ordinary runs; `RUST_LOG` overrides it. Init
-    // errors are ignored — the subscriber can only install once, and a CLI that
-    // cannot subscribe must still run its command.
+    // A subscriber can only install once, so a failed init must not stop the command.
     let _ = tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_target(false)
@@ -124,8 +97,6 @@ fn main() {
         Command::Init(args) => init::execute(args),
         Command::Run(ref args) => run::execute(args),
         Command::Validate(args) => validate::execute(args),
-        Command::Report(args) => report::execute(args),
-        Command::Summary(args) => summary_cmd::execute(args),
         Command::Schema(args) => schema::execute(args),
         Command::Version => version::execute(),
     };

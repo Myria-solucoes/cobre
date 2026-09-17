@@ -307,8 +307,8 @@ fn run_boundary_check(
     }
 }
 
-/// Serialize `output` as `cobre validate --json`'s single stdout JSON object
-/// (the `cobre report` convention).
+/// Serialize `output` as `cobre validate --json`'s single stdout JSON object.
+/// Stdout carries exactly one JSON object and no human-readable text.
 fn emit_validate_json(output: &ValidateBoundaryOutput) -> Result<(), CliError> {
     let json = serde_json::to_string_pretty(output).map_err(|e| CliError::Internal {
         message: format!("failed to serialize validate output: {e}"),

@@ -24,10 +24,11 @@ the echo on both write paths.
 from __future__ import annotations
 
 import pathlib
-import subprocess
 
 import pyarrow.parquet as pq
 import pytest
+
+from _cobre_cli import run_cli
 
 _REPO_ROOT = pathlib.Path(__file__).parents[3]
 D13_CASE = _REPO_ROOT / "examples" / "deterministic" / "d13-generic-constraint"
@@ -35,43 +36,14 @@ D13_CASE = _REPO_ROOT / "examples" / "deterministic" / "d13-generic-constraint"
 _ECHO_REL = "generic_constraints/resolved_echo.parquet"
 
 
-def _cli_binary() -> pathlib.Path:
-    """Return the compiled `cobre` CLI binary path, skipping if absent."""
-    for profile in ("release", "debug"):
-        candidate = _REPO_ROOT / "target" / profile / "cobre"
-        if candidate.is_file():
-            return candidate
-    pytest.skip(
-        "No compiled `cobre` binary found in target/release or target/debug. "
-        "Run `cargo build -p cobre-cli` first."
-    )
-    raise RuntimeError("unreachable: pytest.skip raises Skipped")
-
-
-def _run_cli(case_dir: pathlib.Path, output_dir: pathlib.Path) -> None:
-    """Run the cobre CLI for `case_dir`, writing outputs to `output_dir`."""
-    binary = _cli_binary()
-    result = subprocess.run(
-        [str(binary), "run", str(case_dir), "--output", str(output_dir)],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=120,
-    )
-    if result.returncode != 0:
-        pytest.fail(
-            f"cobre CLI failed (exit {result.returncode}):\n"
-            f"stdout: {result.stdout}\n"
-            f"stderr: {result.stderr}"
-        )
-
-
 @pytest.fixture(scope="module")
-def d13_cli_output(tmp_path_factory: pytest.TempPathFactory) -> pathlib.Path:
+def d13_cli_output(
+    tmp_path_factory: pytest.TempPathFactory, cli_binary: pathlib.Path
+) -> pathlib.Path:
     """Run D13 through the compiled CLI binary."""
     assert D13_CASE.is_dir(), f"the D13 fixture must exist at {D13_CASE}"
     output_dir = tmp_path_factory.mktemp("d13_cli_out")
-    _run_cli(D13_CASE, output_dir)
+    run_cli(D13_CASE, output_dir, cli_binary)
     return output_dir
 
 

@@ -3,7 +3,10 @@
 //! `cobre_io`.
 //!
 //! Input dict shapes mirror what [`crate::results::load_policy`] emits, so a
-//! loaded checkpoint round-trips: load -> edit -> write.
+//! loaded checkpoint round-trips: load -> edit -> write. `season_manifest` and
+//! `graph_manifest` round-trip; `active_cut_indices` is written but not returned
+//! by `load_policy`, so a load → write cycle resets it (cut activity round-trips
+//! through each cut's `is_active`).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -12,9 +15,9 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use cobre_io::{
-    CheckpointManifest, ENTITY_SLOT_DATE_SENTINEL, EntitySlot, FORMAT_VERSION,
-    GraphManifest, ManifestEdge, ManifestNode, PolicyBasisRecord, PolicyCutRecord, ProducerBlock,
-    STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL, STAGE_CUTS_NODE_ID_SENTINEL,
+    CheckpointManifest, ENTITY_SLOT_DATE_SENTINEL, EntitySlot, FORMAT_VERSION, GraphManifest,
+    HydroSeasonOrders, ManifestEdge, ManifestNode, PolicyBasisRecord, PolicyCutRecord,
+    ProducerBlock, STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL, STAGE_CUTS_NODE_ID_SENTINEL,
     STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, STAGE_STATES_NODE_ID_SENTINEL, SeasonManifest,
     StageCutsPayload, StageStatesPayload, StateFamily,
 };
@@ -77,9 +80,8 @@ pub(crate) struct PyCutRecord {
     coefficients: Vec<f64>,
     is_active: bool,
     /// Inflow-lag gradient terms keyed by hydro id (`hydro_id -> [coef_by_depth]`,
-    /// index `0` = lag depth 1), separate from the storage-aligned
-    /// `coefficients`. Consumed only when the top-level `inflow_lag_depth` is
-    /// set; empty (the default) leaves the checkpoint byte-identical.
+    /// index `0` = lag depth 1). Requires the top-level `inflow_lag_depth`; empty
+    /// (the default) leaves the checkpoint byte-identical.
     #[pyo3(default)]
     inflow_lag_coefficients: HashMap<i32, Vec<f64>>,
 }
@@ -99,8 +101,8 @@ pub(crate) struct PyStageCutsPayload {
     populated_count: Option<u32>,
     #[pyo3(default)]
     entity_manifest: Vec<PyEntitySlot>,
-    /// Cost-scale provenance; defaults to the metadata producer block's factor
-    /// when omitted (see [`write_policy_checkpoint`]).
+    /// Defaults to the metadata producer block's factor when omitted (see
+    /// [`write_policy_checkpoint`]).
     #[pyo3(default)]
     cost_scale_factor: Option<f64>,
     #[pyo3(default = STAGE_CUTS_NODE_ID_SENTINEL)]
@@ -184,6 +186,38 @@ impl From<PyGraphManifest> for GraphManifest {
     }
 }
 
+#[derive(Debug, FromPyObject)]
+#[pyo3(from_item_all)]
+pub(crate) struct PyHydroSeasonOrders {
+    hydro_id: i32,
+    orders: Vec<u32>,
+}
+
+#[derive(Debug, FromPyObject)]
+#[pyo3(from_item_all)]
+pub(crate) struct PySeasonManifest {
+    cycle_code: u8,
+    n_seasons: u32,
+    hydro_orders: Vec<PyHydroSeasonOrders>,
+}
+
+impl From<PySeasonManifest> for SeasonManifest {
+    fn from(s: PySeasonManifest) -> Self {
+        Self {
+            cycle_code: s.cycle_code,
+            n_seasons: s.n_seasons,
+            hydro_orders: s
+                .hydro_orders
+                .into_iter()
+                .map(|h| HydroSeasonOrders {
+                    hydro_id: h.hydro_id,
+                    orders: h.orders,
+                })
+                .collect(),
+        }
+    }
+}
+
 /// The producer-namespaced metadata block, mirroring what
 /// [`crate::results::load_policy`] emits under `metadata["producer"]`.
 #[derive(Debug, FromPyObject)]
@@ -231,8 +265,7 @@ impl From<PyProducerBlock> for ProducerBlock {
 #[derive(Debug, FromPyObject)]
 #[pyo3(from_item_all)]
 pub(crate) struct PyPolicyCheckpointMetadata {
-    /// Stamped to [`FORMAT_VERSION`] when omitted, so a checkpoint authored from
-    /// raw records is always readable; a round-tripped one carries it back.
+    /// Format version, defaults to `FORMAT_VERSION` when omitted.
     #[pyo3(default = FORMAT_VERSION)]
     format_version: u32,
     cobre_version: String,
@@ -240,6 +273,8 @@ pub(crate) struct PyPolicyCheckpointMetadata {
     num_stages: u32,
     #[pyo3(default)]
     graph_manifest: Option<PyGraphManifest>,
+    #[pyo3(default)]
+    season_manifest: Option<PySeasonManifest>,
     producer: PyProducerBlock,
 }
 
@@ -254,9 +289,11 @@ impl From<PyPolicyCheckpointMetadata> for CheckpointManifest {
                 .graph_manifest
                 .map(GraphManifest::from)
                 .unwrap_or_default(),
+            season_manifest: m
+                .season_manifest
+                .map(SeasonManifest::from)
+                .unwrap_or_default(),
             producer: m.producer.into(),
-            // A Python author writing a checkpoint has no season data to supply.
-            season_manifest: SeasonManifest::default(),
         }
     }
 }
@@ -304,6 +341,29 @@ fn validate_stage_states(stage_states: &[PyStageStatesPayload]) -> PyResult<()> 
                 ss.data.len(),
                 expected
             )));
+        }
+    }
+    Ok(())
+}
+
+/// Reject `inflow_lag_coefficients` supplied without a positive
+/// `inflow_lag_depth` — they would be silently dropped.
+fn reject_unreserved_lag_coefficients(
+    stage_cuts: &[PyStageCutsPayload],
+    reserve_depth: Option<u32>,
+) -> PyResult<()> {
+    if reserve_depth.is_some() {
+        return Ok(());
+    }
+    for sc in stage_cuts {
+        for cut in &sc.cuts {
+            if !cut.inflow_lag_coefficients.is_empty() {
+                return Err(PyValueError::new_err(format!(
+                    "stage {} cut {}: inflow_lag_coefficients supplied without \
+                     inflow_lag_depth; pass inflow_lag_depth=N to reserve the lag slots",
+                    sc.stage_id, cut.cut_id
+                )));
+            }
         }
     }
     Ok(())
@@ -375,8 +435,12 @@ fn build_stage_cuts_data(
 ///
 /// `ValueError` when a cut's `coefficients` length does not match its stage's
 /// `state_dimension`, a stage's state data length does not match
-/// `count * state_dimension`, or (under `inflow_lag_depth`) a manifest lacks a
-/// leading storage block or an inflow-lag coefficient is unplaceable; otherwise
+/// `count * state_dimension`, a cut carries `inflow_lag_coefficients` without a
+/// positive `inflow_lag_depth`, or (under `inflow_lag_depth`) a manifest lacks a
+/// leading storage block or an inflow-lag coefficient is unplaceable. A
+/// `season_manifest` whose `hydro_orders` are not ascending by `hydro_id` or
+/// whose `orders` lengths disagree with `n_seasons` is written as given and
+/// rejected by [`crate::results::load_policy`] with `OutputError`. Otherwise
 /// the `cobre.errors` leaf mapped from the underlying [`cobre_io::OutputError`].
 #[pyfunction]
 #[pyo3(signature = (path, stage_cuts, metadata, stage_bases=None, stage_states=None, inflow_lag_depth=None))]
@@ -397,6 +461,7 @@ pub fn write_policy_checkpoint(
     validate_stage_states(&stage_states)?;
 
     let reserve_depth = inflow_lag_depth.filter(|&n| n > 0);
+    reject_unreserved_lag_coefficients(&stage_cuts, reserve_depth)?;
     let stage_data: Vec<StageCutsData> = stage_cuts
         .iter()
         .map(|sc| build_stage_cuts_data(sc, reserve_depth))
@@ -439,8 +504,6 @@ pub fn write_policy_checkpoint(
                 active_cut_indices: &sc.active_cut_indices,
                 populated_count: populated_counts[i],
                 entity_manifest: &data.manifest,
-                // None (per-stage and metadata) is the legacy at-rest scale
-                // (`ProducerBlock::cost_scale_factor`).
                 cost_scale_factor: sc
                     .cost_scale_factor
                     .or(metadata_cost_scale_factor)

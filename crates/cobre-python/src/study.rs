@@ -1,13 +1,11 @@
 //! The `cobre.Study` pyclass — a live, in-memory study loaded once from a case
 //! directory and reused across the solve lifecycle.
 //!
-//! `Study.__new__` runs the front half of the solve lifecycle (load →
-//! stochastic preprocessing → hydro models → `StudySetup` construction →
-//! provenance/summary build + sidecar writes) exactly once via the shared
-//! [`crate::run::build_study_setup`] helper, then stores the live [`StudySetup`]
-//! and the adjacent immutable state so later `train`/`simulate` methods need no
-//! reload. It also exposes [`Study::validate`], which replays the validation
-//! warnings captured during construction without re-reading disk.
+//! `Study.__new__` runs the front half of the solve lifecycle via
+//! [`crate::run::build_study_setup`], storing the live [`StudySetup`] and
+//! adjacent immutable state so later `train`/`simulate` methods need no reload.
+//! [`Study::validate`] replays the validation warnings captured during
+//! construction without re-reading disk.
 //!
 //! ## Single-process only
 //!
@@ -31,7 +29,7 @@ use crate::errors::{ErrorSource, convert_error};
 use crate::io::build_warnings_list;
 use crate::model::PySystem;
 use crate::run::{
-    LoadedStudy, PhaseError, SimSummary, TrainingPhaseResult, apply_training_policy_mode,
+    LoadedStudy, PhaseError, RunError, SimSummary, TrainingPhaseResult, apply_training_policy_mode,
     build_study_setup, reconstruct_policy_from_checkpoint, run_in_scoped_pool,
     run_simulation_phase_py, run_training_phase_py, run_training_phase_py_streaming,
     write_evaporation_models_if_any, write_fixed_delivery_if_any,
@@ -41,11 +39,13 @@ use crate::run::{
 
 /// Map a [`PhaseError`] to a Python exception through the single
 /// [`convert_error`] mapping site, so `run_via_study` and the `Study` methods map
-/// identically. The `Sddp` arm preserves the typed error's structured fields (e.g.
+/// identically. The `Load` arm maps each [`cobre_io::LoadError`] variant to its
+/// typed class; the `Sddp` arm preserves the typed error's structured fields (e.g.
 /// `Infeasible`'s stage/iteration/scenario) as `SolverError` attributes.
 fn phase_error_to_pyerr(err: PhaseError) -> PyErr {
     match err {
         PhaseError::Message(msg) => convert_error(ErrorSource::Message(msg)),
+        PhaseError::Load(err) => convert_error(ErrorSource::Load(&err)),
         PhaseError::Sddp { error, message } => convert_error(ErrorSource::Sddp {
             error: &error,
             message,
@@ -59,10 +59,9 @@ fn phase_error_to_pyerr(err: PhaseError) -> PyErr {
 /// Constructed once via [`Study::__new__`] (which runs
 /// [`crate::run::build_study_setup`]); `train`/`simulate` reuse the stored
 /// state, and [`Study::validate`] replays the captured warnings.
-/// The `output_dir` is fixed at construction time so every artifact this study
-/// writes lands in the same directory (the always-writes contract).
-// The `dead_code` fields below are captured once at construction and read only by
-// `simulate`, so it need not re-load the case (the always-load-once contract).
+/// The `output_dir` from construction is the default write target for
+/// [`Study::train`]; [`Study::simulate`] and [`Study::load_policy`] each accept
+/// a per-call `output_dir` override.
 #[pyclass(name = "Study")]
 pub struct Study {
     /// The live, fully prepared study setup; the only field `train`/`simulate`
@@ -76,18 +75,17 @@ pub struct Study {
     config: cobre_io::Config,
     /// The resolved tree seed.
     seed: u64,
-    /// The model-provenance report, read by `simulate` for its output report.
-    #[allow(dead_code)]
+    /// The model-provenance report.
     provenance: ModelProvenanceReport,
-    /// The structural stochastic summary, read by `simulate` for its output report.
-    #[allow(dead_code)]
+    /// The structural stochastic summary.
     stochastic_summary: StochasticSummary,
-    /// The structural hydro-model summary, read by `simulate` for its output report.
-    #[allow(dead_code)]
+    /// The structural hydro-model summary.
     hydro_models_summary: HydroModelSummary,
     /// Validation-pipeline warnings captured during the case load, replayed by
     /// [`Study::validate`].
     warnings: Vec<cobre_io::ReportEntry>,
+    /// Wall-clock setup-phase timings captured during construction.
+    setup_timings: cobre_io::SetupTimings,
     /// The output directory fixed at construction time.
     output_dir: PathBuf,
     /// The case (input) directory fixed at construction time — the root
@@ -121,6 +119,9 @@ pub struct Policy {
     /// the chain degeneracy; `fcf.pools` is keyed by pool id, resolved through
     /// the node graph's `node → pool` map).
     num_stages: usize,
+    /// Whether training converged. Set from `training.output.converged` on the
+    /// trained path and to `false` on the training-disabled / loaded paths.
+    pub(crate) converged: bool,
 }
 
 #[pymethods]
@@ -236,6 +237,211 @@ impl Policy {
     }
 }
 
+impl Policy {
+    /// Access the training result carried by this policy.
+    pub(crate) fn training_result(&self) -> &TrainingResult {
+        &self.training_result
+    }
+}
+
+impl Study {
+    /// Whether training is enabled.
+    pub(crate) fn training_enabled(&self) -> bool {
+        self.config.training.enabled
+    }
+
+    /// Whether simulation is enabled: `config.simulation.enabled` AND non-zero scenario count.
+    pub(crate) fn simulation_enabled(&self) -> bool {
+        self.config.simulation.enabled && self.setup.simulation_config.n_scenarios > 0
+    }
+
+    /// The structural stochastic summary.
+    pub(crate) fn stochastic_summary(&self) -> &StochasticSummary {
+        &self.stochastic_summary
+    }
+
+    /// The structural hydro-model summary.
+    pub(crate) fn hydro_models_summary(&self) -> &HydroModelSummary {
+        &self.hydro_models_summary
+    }
+
+    /// The model-provenance report.
+    pub(crate) fn provenance(&self) -> &ModelProvenanceReport {
+        &self.provenance
+    }
+
+    /// GIL-free constructor: load case, resolve config, build [`StudySetup`], write front-half sidecars.
+    // needless_pass_by_value: `overrides` is only borrowed via `.as_ref()`, but
+    // taking it by value keeps the signature identical to the owned map `new`
+    // converts under the GIL and `run_via_study` already holds.
+    #[allow(clippy::needless_pass_by_value)]
+    pub(crate) fn new_native(
+        case_dir: &std::path::Path,
+        output_dir: Option<PathBuf>,
+        threads: Option<u32>,
+        overrides: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<Self, PhaseError> {
+        let resolved_output = output_dir.unwrap_or_else(|| case_dir.join("output"));
+
+        let LoadedStudy {
+            setup,
+            system,
+            config,
+            seed,
+            provenance,
+            stochastic_summary,
+            hydro_models_summary,
+            warnings,
+            setup_timings,
+        } = build_study_setup(case_dir, &resolved_output, overrides.as_ref())?;
+
+        Ok(Study {
+            setup,
+            system: Arc::new(system),
+            config,
+            seed,
+            provenance,
+            stochastic_summary,
+            hydro_models_summary,
+            warnings,
+            setup_timings,
+            output_dir: resolved_output,
+            case_dir: case_dir.to_path_buf(),
+            threads,
+        })
+    }
+
+    /// GIL-free training: apply policy mode, train (streaming or collect), write artifacts, return [`Policy`].
+    pub(crate) fn train_native(
+        &mut self,
+        on_iteration: Option<Py<PyAny>>,
+    ) -> Result<Policy, RunError> {
+        if !self.config.training.enabled {
+            let synthetic = TrainingResult::new(
+                0.0,
+                f64::INFINITY,
+                0.0,
+                0.0,
+                0,
+                "training disabled".to_string(),
+                0,
+                Vec::new(),
+                Vec::new(),
+                None,
+                None,
+            );
+            return Ok(Policy {
+                training_result: synthetic,
+                fcf: self.setup.fcf.clone(),
+                num_stages: self.setup.num_stages(),
+                converged: false,
+            });
+        }
+
+        let seed = self.seed;
+        let output_dir = self.output_dir.clone();
+        let case_dir = self.case_dir.clone();
+        let threads = self.threads;
+        let setup_timings = self.setup_timings.clone();
+        let setup = &mut self.setup;
+        let system = self.system.as_ref();
+        let config = &self.config;
+
+        let phase_result: Result<(TrainingPhaseResult, Option<PyErr>), PhaseError> =
+            run_in_scoped_pool(threads, |n| {
+                apply_training_policy_mode(setup, system, config, &output_dir, &case_dir)?;
+
+                let (training, callback_error) = match on_iteration {
+                    Some(callback) => run_training_phase_py_streaming(setup, n, callback)?,
+                    None => (run_training_phase_py(setup, n)?, None),
+                };
+
+                write_training_artifacts(
+                    &output_dir,
+                    system,
+                    config,
+                    setup,
+                    &training,
+                    &setup_timings,
+                    seed,
+                    n,
+                )?;
+                write_fpha_hyperplanes_if_any(&output_dir, setup)?;
+                write_evaporation_models_if_any(&output_dir, setup, system)?;
+                write_fpha_deviation_points_if_any(&output_dir, setup, config)?;
+                write_generic_constraint_echo_if_any(&output_dir, setup, system)?;
+                write_fixed_delivery_if_any(&output_dir, setup, system)?;
+
+                Ok::<_, PhaseError>((training, callback_error))
+            })?;
+
+        let (mut training, callback_error) = phase_result?;
+
+        if let Some(err) = callback_error {
+            return Err(RunError::Callback(err));
+        }
+
+        if let Some(error) = training.error.take() {
+            let iterations = training.result.iterations;
+            let message = format!("training failed after {iterations} iterations: {error}");
+            return Err(RunError::Sddp { error, message });
+        }
+
+        Ok(Policy {
+            training_result: training.result,
+            fcf: setup.fcf.clone(),
+            num_stages: setup.num_stages(),
+            converged: training.output.converged,
+        })
+    }
+
+    /// GIL-free policy reconstruction: read checkpoint from disk, validate, return [`Policy`].
+    pub(crate) fn load_policy_native(&self, output_dir: Option<PathBuf>) -> Result<Policy, String> {
+        let out_dir = output_dir.unwrap_or_else(|| self.output_dir.clone());
+        let policy_dir = out_dir.join(&self.setup.policy_path);
+
+        let setup = &self.setup;
+        let system = self.system.as_ref();
+
+        let (fcf, training_result) =
+            reconstruct_policy_from_checkpoint(setup, system, &policy_dir)?;
+        Ok(Policy {
+            training_result,
+            fcf,
+            num_stages: setup.num_stages(),
+            converged: false,
+        })
+    }
+
+    /// GIL-free simulation: install FCF, simulate, write artifacts, return [`SimSummary`].
+    pub(crate) fn simulate_native(
+        &mut self,
+        policy: &Policy,
+        output_dir: Option<PathBuf>,
+    ) -> Result<SimSummary, PhaseError> {
+        let out_dir = output_dir.unwrap_or_else(|| self.output_dir.clone());
+
+        if policy.fcf.total_active_cuts() == 0 {
+            return Err(PhaseError::Message(
+                "Policy has no cuts to simulate; when training is disabled, call \
+                 Study.load_policy() to load a trained policy before simulate()"
+                    .to_string(),
+            ));
+        }
+
+        self.setup.replace_fcf(policy.fcf.clone());
+
+        let threads = self.threads;
+        let setup = &mut self.setup;
+        let system = self.system.as_ref();
+        let training_result = &policy.training_result;
+
+        run_in_scoped_pool(threads, |n| {
+            run_simulation_phase_py(setup, &out_dir, system, training_result, n)
+        })?
+    }
+}
+
 #[pymethods]
 impl Study {
     /// Load a case directory into a live, reusable [`Study`].
@@ -255,15 +461,24 @@ impl Study {
     ///
     /// # Errors
     ///
-    /// - Raises `OSError` if `case_dir` does not exist (before any work).
-    /// - Raises `ValueError` on a malformed override dict (non-str key or
-    ///   unsupported value type), or on a config override/parse/read failure.
-    /// - Raises `OSError` on a sidecar write failure, and `RuntimeError` on any
-    ///   other load/preprocessing/construction failure.
+    /// - Raises `OSError` when `case_dir` does not exist (before any work).
+    /// - Raises a plain `ValueError` (not the typed `ValidationError`) if
+    ///   `threads == 0`.
+    /// - Raises `ValidationError` (a `ValueError`) on a malformed override dict
+    ///   (non-str key or unsupported value type) or on a config
+    ///   override/parse/read failure.
+    /// - Raises `CaseIoError` (an `OSError`) on a sidecar write failure or an
+    ///   unreadable case file.
+    /// - Raises `ValidationError` on a schema, parse, or constraint failure in
+    ///   the case data.
+    /// - Raises `PolicyIncompatibleError` (a `ValueError`) when a warm-start
+    ///   policy does not match the system.
+    /// - Raises `SolverError` (a `RuntimeError`) on any other preprocessing or
+    ///   construction failure.
     #[new]
     #[pyo3(signature = (case_dir, output_dir=None, threads=None, config_overrides=None))]
-    // PyO3 `#[new]` extracts owned argument types; the path values are then used
-    // only by reference here, so clippy's pass-by-value lint does not apply.
+    // needless_pass_by_value: PyO3's from-Python extraction hands over owned
+    // values, so the `PathBuf`/`Bound` arguments cannot be borrowed here.
     #[allow(clippy::needless_pass_by_value)]
     fn new(
         py: Python<'_>,
@@ -279,43 +494,14 @@ impl Study {
             )));
         }
 
-        let resolved_output = output_dir.unwrap_or_else(|| case_dir.join("output"));
+        let threads = crate::run::validated_threads(threads)?;
 
-        // Convert UNDER THE GIL, before py.detach releases it; the resulting owned
-        // `serde_json::Map` is Send and crosses the py.detach boundary.
         let overrides = config_overrides
             .map(|dict| pydict_to_json_map(&dict))
             .transpose()?;
 
-        // Release the GIL for the slow PAR estimation. No rayon work runs here, so
-        // no scoped pool (built per-call in `train`/`simulate`).
-        let loaded: Result<LoadedStudy, String> =
-            py.detach(|| build_study_setup(&case_dir, &resolved_output, overrides.as_ref()));
-
-        let LoadedStudy {
-            setup,
-            system,
-            config,
-            seed,
-            provenance,
-            stochastic_summary,
-            hydro_models_summary,
-            warnings,
-        } = loaded.map_err(|msg| convert_error(ErrorSource::Message(msg)))?;
-
-        Ok(Study {
-            setup,
-            system: Arc::new(system),
-            config,
-            seed,
-            provenance,
-            stochastic_summary,
-            hydro_models_summary,
-            warnings,
-            output_dir: resolved_output,
-            case_dir,
-            threads,
-        })
+        py.detach(|| Self::new_native(&case_dir, output_dir, threads, overrides))
+            .map_err(phase_error_to_pyerr)
     }
 
     /// The resolved output directory as a string.
@@ -334,15 +520,31 @@ impl Study {
         PySystem::from_arc(Arc::clone(&self.system))
     }
 
+    /// The structural stochastic summary fixed at construction time.
+    #[getter]
+    fn stochastic<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        crate::run::stochastic_summary_to_dict(py, self.stochastic_summary())
+    }
+
+    /// The structural hydro-model summary fixed at construction time.
+    #[getter]
+    fn hydro_models<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        crate::run::hydro_model_summary_to_dict(py, self.hydro_models_summary())
+    }
+
+    /// The model-provenance report fixed at construction time.
+    #[getter(provenance)]
+    fn provenance_property<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        crate::run::provenance_to_dict(py, &self.provenance)
+    }
+
     /// Validate the loaded study, returning the same report dict shape as
     /// `cobre.io.validate`: keys `"valid"` (bool), `"errors"` (`list[dict]`),
     /// `"warnings"` (`list[dict]`).
     ///
-    /// Because `__new__` already ran every `cobre.io.validate` phase (a failure
-    /// there would have raised), the study is known valid here: this returns
-    /// `{"valid": True, "errors": [], "warnings": [...]}`, where the warnings are
-    /// the `cobre-io` pipeline warnings captured during construction. It never
-    /// re-reads disk and never raises.
+    /// `__new__` raises on any construction-time validation failure, so this
+    /// method reports the warnings captured then without re-reading disk. Always
+    /// returns `{"valid": True, "errors": [], "warnings": [...]}`.
     fn validate<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let dict = PyDict::new(py);
         dict.set_item("valid", true)?;
@@ -363,13 +565,30 @@ impl Study {
     /// reacquires the GIL only at those boundaries (never in the solver's hot
     /// loop).
     ///
-    /// Writes `training/policy/`, `training/solver_stats.parquet` (when
-    /// non-empty), `training/cut_selection.parquet` (when non-empty),
-    /// `training/metadata.json`, `training/_SUCCESS`, and
-    /// `hydro_models/fpha_hyperplanes.parquet` (when non-empty) — bit-identical
-    /// to `cobre.run.run`. Artifacts are always written before any captured
-    /// callback exception is propagated, so a stopped or raising run still
-    /// persists what it completed.
+    /// Writes the trained policy tree to `<output_dir>/<config.policy.path>`
+    /// (default `policy/`), plus the training artifacts: `training/metadata.json`,
+    /// `training/_SUCCESS`, `training/convergence.parquet`,
+    /// `training/timing/iterations.parquet`, `training/solver/iterations.parquet`,
+    /// `training/solver/retry_histogram.parquet`, and the four
+    /// `training/dictionaries/` files (`variables.csv`, `entities.csv`,
+    /// `codes.json`, `bounds.parquet`). When cut selection is enabled and produces
+    /// rows, a `training/cut_selection/` directory is written. Several sidecars
+    /// are written conditionally when their source data is non-empty:
+    /// `hydro_models/fpha_hyperplanes.parquet` (FPHA planes),
+    /// `hydro_models/fpha_deviation_points.parquet` (FPHA deviation tracking),
+    /// `hydro_models/evaporation_models.json` (evaporation config),
+    /// `constraints/generic_constraints_echo.json` (generic constraint reflection),
+    /// `delivery/fixed_delivery.parquet` (fixed-delivery schedules).
+    ///
+    /// Artifacts reach disk via an identical call sequence to
+    /// [`crate::run::run_via_study`], invoking the same writers; byte-identity
+    /// is not yet asserted by a test. Artifacts are always written before any
+    /// captured callback exception is propagated, so a stopped or raising run
+    /// still persists what it completed.
+    ///
+    /// Calling [`Study::train`] more than once on the same [`Study`] re-runs
+    /// training against a [`StudySetup`] whose FCF already carries the previous
+    /// call's cuts, so the second policy is not equivalent to a fresh train.
     ///
     /// When `config.training.enabled` is `false`, this is a no-op that returns
     /// a [`Policy`] whose `TrainingResult` is a synthetic zero-iteration result
@@ -378,6 +597,11 @@ impl Study {
     /// cuts would silently produce a wrong result. When training is disabled, use
     /// [`Study::load_policy`] to load a previously trained policy from disk before
     /// calling [`Study::simulate`].
+    ///
+    /// Policy validation warnings and boundary reconciliation summaries are
+    /// written directly to standard error from Rust, with no parameter to
+    /// suppress them. They go to file descriptor 2 and are **not** captured by
+    /// `contextlib.redirect_stderr` or pytest's `capsys`.
     ///
     /// # Arguments
     ///
@@ -391,105 +615,24 @@ impl Study {
     ///
     /// # Errors
     ///
-    /// - `RuntimeError` / `OSError` on `HiGHS` init failure, a training error, a
-    ///   drain-thread panic, or a policy-mode failure (e.g. a missing prior
-    ///   policy directory under `WarmStart`/`Resume`), mapped from the
-    ///   descriptive message.
+    /// - `SolverError` (a `RuntimeError`) on `HiGHS` init failure, a training
+    ///   error, or a policy-mode failure (e.g. a missing prior policy directory
+    ///   under `WarmStart`/`Resume`).
+    /// - `InternalError` (a `RuntimeError`) on a drain-thread panic.
     /// - The original exception raised by a callback (or `KeyboardInterrupt`)
     ///   re-raised verbatim AFTER the training artifacts are written.
     #[pyo3(signature = (on_iteration=None))]
     fn train(&mut self, py: Python<'_>, on_iteration: Option<Py<PyAny>>) -> PyResult<Policy> {
-        // Mirrors the training-disabled branch of `run_via_study`.
-        if !self.config.training.enabled {
-            let synthetic = TrainingResult::new(
-                0.0,
-                f64::INFINITY,
-                0.0,
-                0.0,
-                0,
-                "training disabled".to_string(),
-                0,
-                Vec::new(),
-                Vec::new(),
-                None,
-                None,
-            );
-            return Ok(Policy {
-                training_result: synthetic,
-                fcf: self.setup.fcf.clone(),
-                num_stages: self.setup.num_stages(),
-            });
-        }
-
-        let seed = self.seed;
-        let output_dir = self.output_dir.clone();
-        let case_dir = self.case_dir.clone();
-        let threads = self.threads;
-        let setup = &mut self.setup;
-        let system = self.system.as_ref();
-        let config = &self.config;
-
-        // `on_iteration` (`Py<PyAny>`), `PyErr`, and the returned tuple are all
-        // Send, so crossing the `py.detach` boundary into the drain thread is sound.
-        let phase_result: Result<(TrainingPhaseResult, Option<PyErr>), PhaseError> =
-            py.detach(|| {
-                // Outer `?` surfaces pool-construction failure (a `String`);
-                // the inner `Result<_, PhaseError>` is the training/artifact outcome.
-                run_in_scoped_pool(threads, |n| {
-                    // FCF replacement BEFORE training — shared verbatim with
-                    // `run_via_study`.
-                    apply_training_policy_mode(setup, system, config, &output_dir, &case_dir)?;
-
-                    // `None` keeps the collect-after-return path bit-identical (the
-                    // no-callback golden parity anchor); `Some` uses the drain thread.
-                    let (training, callback_error) = match on_iteration {
-                        Some(callback) => run_training_phase_py_streaming(setup, n, callback)?,
-                        None => (run_training_phase_py(setup, n)?, None),
-                    };
-
-                    // Write ALL artifacts BEFORE surfacing a captured callback error,
-                    // so a stopped/raising run still persists its partial artifacts.
-                    write_training_artifacts(
-                        &output_dir,
-                        system,
-                        config,
-                        setup,
-                        &training,
-                        seed,
-                        n,
-                    )?;
-                    write_fpha_hyperplanes_if_any(&output_dir, setup)?;
-                    write_evaporation_models_if_any(&output_dir, setup, system)?;
-                    write_fpha_deviation_points_if_any(&output_dir, setup, config)?;
-                    write_generic_constraint_echo_if_any(&output_dir, setup, system)?;
-                    write_fixed_delivery_if_any(&output_dir, setup, system)?;
-
-                    Ok::<_, PhaseError>((training, callback_error))
-                })?
-            });
-
-        let (mut training, callback_error) = phase_result.map_err(phase_error_to_pyerr)?;
-
-        if let Some(err) = callback_error {
-            return Err(err);
-        }
-
-        // Move the typed error out of the carrier so its structured fields (e.g.
-        // `Infeasible`) survive to `convert_error`.
-        if let Some(error) = training.error.take() {
-            let iterations = training.result.iterations;
-            let message = format!("training failed after {iterations} iterations: {error}");
-            return Err(convert_error(ErrorSource::Sddp {
+        match py.detach(|| self.train_native(on_iteration)) {
+            Ok(policy) => Ok(policy),
+            Err(RunError::Callback(err)) => Err(err),
+            Err(RunError::Load(err)) => Err(convert_error(ErrorSource::Load(&err))),
+            Err(RunError::Sddp { error, message }) => Err(convert_error(ErrorSource::Sddp {
                 error: &error,
                 message,
-            }));
+            })),
+            Err(RunError::Message(m)) => Err(convert_error(ErrorSource::Message(m))),
         }
-
-        Ok(Policy {
-            training_result: training.result,
-            fcf: setup.fcf.clone(),
-            num_stages: setup.num_stages(),
-        })
     }
 
     /// Reconstruct a [`Policy`] from an on-disk policy checkpoint so a loaded
@@ -510,31 +653,15 @@ impl Study {
     ///
     /// # Errors
     ///
-    /// - `RuntimeError` when the policy directory does not exist (message
-    ///   containing `"Policy directory not found"`), when the checkpoint cannot
-    ///   be read, or when FCF reconstruction fails.
-    /// - `ValueError` when policy validation fails (incompatible state dimension,
-    ///   stage count, or entity manifest), mapped from the descriptive message.
+    /// - `SolverError` (a `RuntimeError`) when the policy directory is missing or
+    ///   the checkpoint cannot be read or reconstructed.
+    /// - `PolicyIncompatibleError` (a `ValueError`) when policy validation
+    ///   rejects it.
     #[pyo3(signature = (output_dir=None))]
     #[allow(clippy::needless_pass_by_value)]
     fn load_policy(&self, py: Python<'_>, output_dir: Option<PathBuf>) -> PyResult<Policy> {
-        let out_dir = output_dir.unwrap_or_else(|| self.output_dir.clone());
-        let policy_dir = out_dir.join(&self.setup.policy_path);
-
-        let setup = &self.setup;
-        let system = self.system.as_ref();
-
-        // The reconstruction reads parquet/JSON from disk; release the GIL.
-        let reconstructed: Result<(FutureCostFunction, TrainingResult), String> =
-            py.detach(|| reconstruct_policy_from_checkpoint(setup, system, &policy_dir));
-
-        let (fcf, training_result) =
-            reconstructed.map_err(|msg| convert_error(ErrorSource::Message(msg)))?;
-        Ok(Policy {
-            training_result,
-            fcf,
-            num_stages: setup.num_stages(),
-        })
+        py.detach(|| self.load_policy_native(output_dir))
+            .map_err(|msg| convert_error(ErrorSource::Message(msg)))
     }
 
     /// Run the simulation phase against this study's in-memory [`StudySetup`]
@@ -557,21 +684,33 @@ impl Study {
     /// [`StudySetup::replace_fcf`] before simulating, so repeated calls remain
     /// deterministic (each one re-installs the same cut pool).
     ///
-    /// Writes `simulation/metadata.json`, the per-scenario parquet,
-    /// `simulation/_SUCCESS`, and `simulation/solver_stats.parquet` (when the
-    /// solver log is non-empty) to `output_dir` — bit-identical to
-    /// `cobre.run.run`'s simulation phase.
+    /// Writes `simulation/metadata.json`, `simulation/_SUCCESS`,
+    /// `simulation/paths.parquet`, `simulation/scenario_summary.parquet`,
+    /// `simulation/solver/iterations.parquet`, and
+    /// `simulation/solver/retry_histogram.parquet`, plus a per-entity directory
+    /// tree `simulation/<entity>/scenario_id=NNNN/data.parquet` (the entity set
+    /// is case-dependent).
+    ///
+    /// Artifacts reach disk via an identical call sequence to
+    /// [`crate::run::run_via_study`], invoking the same writers; byte-identity
+    /// is not yet asserted by a test.
+    ///
+    /// Simulation write warnings are written directly to standard error from
+    /// Rust, with no parameter to suppress them. They go to file descriptor 2
+    /// and are **not** captured by `contextlib.redirect_stderr` or pytest's
+    /// `capsys`.
     ///
     /// # Errors
     ///
-    /// - `RuntimeError` when `policy` carries no Benders cuts (zero active cuts).
-    ///   A cut-less policy — e.g. the synthetic handle [`Study::train`] returns
-    ///   when `config.training.enabled` is `false` — would silently simulate a
-    ///   wrong result, so this guard rejects it up front and asks the caller to
-    ///   load a trained policy via [`Study::load_policy`] first.
-    /// - `OSError` on a simulation workspace-pool (`HiGHS`) init failure.
-    /// - `RuntimeError` on a simulation error (infeasibility) or a writer/output
-    ///   failure, mapped from the descriptive message.
+    /// - `SolverError` (a `RuntimeError`) when `policy` carries no Benders cuts
+    ///   (zero active cuts) — a cut-less policy (e.g. the synthetic handle
+    ///   [`Study::train`] returns when `config.training.enabled` is `false`) would
+    ///   silently simulate a wrong result, so this guard rejects it up front and
+    ///   asks the caller to load a trained policy via [`Study::load_policy`]
+    ///   first — or on a simulation workspace-pool (`HiGHS`) init failure.
+    /// - `SimulationError` (a `RuntimeError`) on a simulation failure.
+    /// - `CaseIoError` (an `OSError`) on a writer/output failure.
+    /// - `InternalError` (a `RuntimeError`) on a drain-thread panic.
     #[pyo3(signature = (policy, output_dir=None))]
     #[allow(clippy::needless_pass_by_value)]
     fn simulate(
@@ -580,38 +719,10 @@ impl Study {
         policy: PyRef<'_, Policy>,
         output_dir: Option<PathBuf>,
     ) -> PyResult<Py<PyAny>> {
-        let out_dir = output_dir.unwrap_or_else(|| self.output_dir.clone());
-
-        // A zero-cut policy would let `StudySetup::simulate` run with no future-cost
-        // approximation and silently emit a wrong result, so reject it up front.
-        if policy.fcf.total_active_cuts() == 0 {
-            // No recognized prefix, so the message falls through to `SolverError`
-            // (a `RuntimeError` subclass) with the text preserved verbatim.
-            return Err(convert_error(ErrorSource::Message(
-                "Policy has no cuts to simulate; when training is disabled, call \
-                 Study.load_policy() to load a trained policy before simulate()"
-                    .to_string(),
-            )));
-        }
-
-        self.setup.replace_fcf(policy.fcf.clone());
-
-        let threads = self.threads;
-        let setup = &mut self.setup;
-        let system = self.system.as_ref();
-        let training_result = &policy.training_result;
-
-        // Release the GIL for the scenario sweep; the rayon pool is built per call
-        // so sequential `simulate` invocations each honor their own thread count.
-        let summary: Result<SimSummary, PhaseError> = py.detach(|| {
-            // Outer `?` surfaces pool-construction failure (a `String`); the inner
-            // `Result<SimSummary, PhaseError>` is the simulation outcome.
-            run_in_scoped_pool(threads, |n| {
-                run_simulation_phase_py(setup, &out_dir, system, training_result, n)
-            })?
-        });
-
-        let summary = summary.map_err(phase_error_to_pyerr)?;
+        let policy: &Policy = &policy;
+        let summary = py
+            .detach(|| self.simulate_native(policy, output_dir))
+            .map_err(phase_error_to_pyerr)?;
 
         let dict = PyDict::new(py);
         dict.set_item("n_scenarios", summary.n_scenarios)?;

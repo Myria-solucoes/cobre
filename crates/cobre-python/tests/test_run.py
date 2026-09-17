@@ -79,14 +79,30 @@ def test_run_d56_external_authoritative_converges(tmp_path: pathlib.Path) -> Non
     assert success_marker.exists(), "training/_SUCCESS must exist after run()"
 
 
-def test_run_skip_simulation(tmp_path: pathlib.Path) -> None:
-    """run() with skip_simulation=True returns result['simulation'] as None."""
+def test_run_simulation_disabled_by_config(tmp_path: pathlib.Path) -> None:
+    """run() with config_overrides disabling simulation returns result['simulation'] as None."""
     import cobre.run  # noqa: PLC0415
 
-    result = cobre.run.run(VALID_CASE, output_dir=str(tmp_path), skip_simulation=True)
+    result = cobre.run.run(
+        VALID_CASE,
+        output_dir=str(tmp_path),
+        config_overrides={"simulation": {"enabled": False}},
+    )
 
     assert result["simulation"] is None, (
-        "simulation must be None when skip_simulation=True"
+        "simulation must be None when config.simulation.enabled is False"
+    )
+
+
+def test_run_rejects_skip_simulation_parameter(tmp_path: pathlib.Path) -> None:
+    """run() raises TypeError when the removed skip_simulation parameter is passed."""
+    import cobre.run  # noqa: PLC0415
+
+    with pytest.raises(TypeError, match="unexpected keyword argument") as exc_info:
+        cobre.run.run(VALID_CASE, output_dir=str(tmp_path), skip_simulation=True)
+
+    assert "skip_simulation" in str(exc_info.value), (
+        "TypeError message must mention 'skip_simulation'"
     )
 
 
@@ -106,6 +122,14 @@ def test_run_threads_parameter(tmp_path: pathlib.Path) -> None:
 
     assert isinstance(result["converged"], bool), "converged must be bool"
     assert result["iterations"] > 0, "iterations must be > 0"
+
+
+def test_run_rejects_threads_zero(tmp_path: pathlib.Path) -> None:
+    """run() raises ValueError when threads=0."""
+    import cobre.run  # noqa: PLC0415
+
+    with pytest.raises(ValueError, match="threads"):
+        cobre.run.run(VALID_CASE, output_dir=str(tmp_path), threads=0)
 
 
 def _read_metadata_seed(output_dir: pathlib.Path) -> object:

@@ -1,33 +1,11 @@
 //! The `cobre.errors` exception hierarchy and the single error-mapping site.
 //!
-//! Cobre's Rust layer fails with a handful of typed error enums
-//! ([`cobre_io::LoadError`], [`cobre_io::OutputError`], [`cobre_sddp::SddpError`])
-//! and a few string-prefixed messages produced by the run/study front ends.
-//! This module funnels every one of those failures through a single
-//! [`convert_error`] function that maps them to a structured Python exception
-//! hierarchy rooted at `cobre.errors.CobreError`.
-//!
-//! ## Hierarchy
-//!
-//! Every leaf class subclasses BOTH [`CobreError`] and the matching builtin, so
-//! existing `except OSError` / `except ValueError` / `except RuntimeError` code
-//! keeps catching while new code can catch the typed class or the common
-//! `CobreError` base:
-//!
-//! ```text
-//! CobreError(Exception)
-//! ├── ValidationError(CobreError, ValueError)
-//! ├── PolicyIncompatibleError(CobreError, ValueError)
-//! ├── CaseIoError(CobreError, OSError)
-//! ├── OutputError(CobreError, OSError)
-//! ├── SolverError(CobreError, RuntimeError)        ← stage/iteration/scenario
-//! └── SimulationError(CobreError, RuntimeError)
-//! ```
-//!
-//! The qualified name of every class is `cobre.errors.<Name>` so tracebacks read
+//! Every leaf class subclasses BOTH `CobreError` and the matching builtin
+//! (`OSError`, `ValueError`, `RuntimeError`), so existing `except OSError` /
+//! `except ValueError` / `except RuntimeError` code keeps catching while new code
+//! can catch the typed class or the common `CobreError` base. The qualified name
+//! of every class is `cobre.errors.<Name>` so tracebacks read
 //! `cobre.errors.SolverError`.
-//!
-//! ## Single mapping site
 //!
 //! [`convert_error`] is the ONLY place Rust errors become Python exceptions for
 //! the raising paths. It accepts a concrete [`ErrorSource`] enum (never a
@@ -168,6 +146,13 @@ static SIMULATION_ERROR: LeafClass = LeafClass::new(
     "Raised on a simulation-phase failure (subclasses RuntimeError).",
 );
 
+/// `InternalError(CobreError, RuntimeError)` — software or environment faults.
+static INTERNAL_ERROR: LeafClass = LeafClass::new(
+    "InternalError",
+    BuiltinBase::Runtime,
+    "Raised on an internal software or environment fault (subclasses RuntimeError).",
+);
+
 /// The owned/borrowed source of an error to be mapped to a Python exception.
 ///
 /// A concrete enum (NOT a `Box<dyn Trait>`, per the hard rules) so every call
@@ -192,12 +177,10 @@ pub(crate) enum ErrorSource<'a> {
     Message(String),
 }
 
-/// Build a [`CaseIoError`] `PyErr` from a message.
 fn case_io_error(py: Python<'_>, message: &str) -> PyErr {
     new_leaf_err(py, &CASE_IO_ERROR, message)
 }
 
-/// Build a [`ValidationError`] `PyErr` from a message.
 fn validation_error(py: Python<'_>, message: &str) -> PyErr {
     new_leaf_err(py, &VALIDATION_ERROR, message)
 }
@@ -282,6 +265,8 @@ fn message_prefix_to_pyerr(py: Python<'_>, msg: &str) -> PyErr {
         new_leaf_err(py, &POLICY_INCOMPATIBLE_ERROR, msg)
     } else if msg.starts_with("simulation error") {
         new_leaf_err(py, &SIMULATION_ERROR, msg)
+    } else if msg.starts_with("internal error") {
+        new_leaf_err(py, &INTERNAL_ERROR, msg)
     } else {
         // Unrecognized prefix (e.g. "training error" / "training failed after")
         // falls through to SolverError.
@@ -362,6 +347,7 @@ pub(crate) fn register_errors(m: &Bound<'_, PyModule>) -> PyResult<()> {
         &OUTPUT_ERROR,
         &SOLVER_ERROR,
         &SIMULATION_ERROR,
+        &INTERNAL_ERROR,
     ] {
         let class = leaf.get(py)?;
         m.add(leaf.name, class.clone_ref(py))?;
@@ -372,7 +358,9 @@ pub(crate) fn register_errors(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::{ErrorSource, LeafClass, SIMULATION_ERROR, SOLVER_ERROR, convert_error_with};
+    use super::{
+        ErrorSource, INTERNAL_ERROR, LeafClass, SIMULATION_ERROR, SOLVER_ERROR, convert_error_with,
+    };
     use cobre_sddp::SddpError;
     use pyo3::prelude::*;
 
@@ -466,6 +454,19 @@ mod tests {
             assert!(value.getattr("scenario").unwrap().is_none());
             let solver_rendered: String = value.str().unwrap().extract().unwrap();
             assert_eq!(solver_rendered, solver_msg);
+        });
+    }
+
+    /// An "internal error: " prefixed message maps to `InternalError`.
+    #[test]
+    fn convert_error_internal_error_prefix() {
+        Python::initialize();
+        Python::attach(|py| {
+            let msg = "internal error: drain thread panicked".to_string();
+            let err = convert_error_with(py, ErrorSource::Message(msg.clone()));
+            assert_leaf(py, &err, &INTERNAL_ERROR);
+            let rendered: String = err.value(py).str().unwrap().extract().unwrap();
+            assert_eq!(rendered, msg);
         });
     }
 }

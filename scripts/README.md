@@ -27,16 +27,16 @@ still carry the canonical boundary regex).
 | `check-doc-paths.sh`                 | Repo-relative paths in README/CONTRIBUTING/CLAUDE.md resolve against the tree.                             |
 | `check_doc_voice.py`                 | No promotional voice or unpinned "typical" numbers in prose (doc-integrity §5/§2).                         |
 | `check-doc-placeholders.sh`          | No placeholder text (TODO/TBD/…) in shipped docs.                                                          |
-| `check-docs-examples.sh`             | A fresh `init`→`run`→`report` matches the expected output structure (needs the release binary; `--build`). |
+| `check-docs-examples.sh`             | A fresh `init`→`run` matches the expected output structure (needs the release binary; `--build`).          |
 | `check-no-plan-leaks.sh`             | No plan-structure tokens (`Epic`/`ticket`/…) in shipped artifacts.                                         |
 | `check-comment-refs.sh`              | No un-rottable `file.rs:NNN`-style references in shipped comments.                                         |
-| `check-comment-line-refs.sh`         | No drift-prone line references in shipped comments.                                                        |
+| `check-comment-line-refs.sh`         | No drift-prone line references in shipped comments and stubs.                                              |
 | `check-comment-banners.sh`           | Flags in-function banner-divider comments (advisory).                                                      |
 | `check-comment-bloat.sh`             | Ranks comment-bloat candidates (advisory; also surfaced by `quality-report.sh`).                           |
 | `check-allow-rationale.sh`           | Every `#[allow]` carries a `// Rationale:` (E4; diff-scoped via `BASE_REF`).                               |
 | `check-infra-genericity.sh`          | No algorithm-specific vocabulary in the infrastructure crates.                                             |
 | `check-cut-selection-determinism.sh` | Cut-selection code stays declaration-order deterministic.                                                  |
-| `check_python_parity.py`             | Every output file the CLI writes is also written by the Python bindings.                                   |
+| `check_python_parity.py`             | Both write paths call the same set of `cobre_io` / `cobre_sddp::orchestration` writers.                   |
 | `check_schemas.sh`                   | Exported JSON schemas match the source types (needs the release binary; `--build`).                        |
 | `quality-report.sh`                  | Advisory code-quality hotspot report; also runs the comment-bloat advisory.                                |
 | `lib/comment_scan.sh`                | Shared `cfg(test)`-boundary helpers, sourced by the comment gates.                                         |

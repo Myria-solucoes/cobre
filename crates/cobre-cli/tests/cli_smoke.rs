@@ -16,9 +16,10 @@ fn help_exits_0_and_lists_subcommands() {
         .arg("--help")
         .assert()
         .success()
+        .stdout(predicate::str::contains("init"))
         .stdout(predicate::str::contains("run"))
         .stdout(predicate::str::contains("validate"))
-        .stdout(predicate::str::contains("report"))
+        .stdout(predicate::str::contains("schema"))
         .stdout(predicate::str::contains("version"));
 }
 
@@ -100,15 +101,6 @@ fn run_nonexistent_path_exits_2_with_io_error() {
 fn validate_nonexistent_path_exits_2() {
     cobre()
         .args(["validate", "/nonexistent/path"])
-        .assert()
-        .failure()
-        .code(2);
-}
-
-#[test]
-fn report_nonexistent_path_exits_2() {
-    cobre()
-        .args(["report", "/nonexistent/path"])
         .assert()
         .failure()
         .code(2);

@@ -4,23 +4,11 @@
 //! `cobre.run.run()`. JSON manifest and metadata files are read in Rust
 //! and returned as Python dicts. Parquet file paths are returned as strings
 //! so that callers can load them with `polars` or `pandas`.
-//!
-//! ## Design
-//!
-//! - [`load_results`] reads the JSON manifest/metadata files and returns a
-//!   nested dict with training and simulation sections.
-//! - [`load_convergence`] reads `training/convergence.parquet` using the
-//!   `parquet` + `arrow` crates and returns a list of dicts (one per row).
-//! - [`load_simulation`] reads Hive-partitioned Parquet files under
-//!   `simulation/{entity_type}/scenario_id=NNNN/data.parquet` with dynamic
-//!   schema discovery and returns rows as Python dicts.
-//! - [`load_policy`] reads a `FlatBuffers` policy checkpoint from
-//!   `<output_dir>/<policy_subdir>` (default `policy`) via
-//!   `cobre_io::read_policy_checkpoint` and returns a nested Python dict.
 
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use arrow::array::{
     Array, BooleanArray, Float64Array, Int8Array, Int32Array, Int64Array, StringArray, UInt32Array,
@@ -95,7 +83,7 @@ fn json_value_to_py(py: Python<'_>, val: &serde_json::Value) -> PyResult<Py<PyAn
     }
 }
 
-fn read_json_file(path: &std::path::Path) -> PyResult<serde_json::Value> {
+fn read_json_file(path: &Path) -> PyResult<serde_json::Value> {
     let content = fs::read_to_string(path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             PyFileNotFoundError::new_err(format!("file not found: {}", path.display()))
@@ -106,6 +94,16 @@ fn read_json_file(path: &std::path::Path) -> PyResult<serde_json::Value> {
 
     serde_json::from_str(&content)
         .map_err(|e| PyValueError::new_err(format!("malformed JSON in {}: {e}", path.display())))
+}
+
+fn open_parquet_file(path: &Path, missing_label: &str) -> PyResult<fs::File> {
+    fs::File::open(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            PyFileNotFoundError::new_err(format!("{missing_label} not found: {}", path.display()))
+        } else {
+            PyOSError::new_err(format!("failed to open {}: {e}", path.display()))
+        }
+    })
 }
 
 /// Load and inspect the output artifacts produced by a completed solver run.
@@ -247,16 +245,7 @@ pub fn load_convergence(py: Python<'_>, output_dir: PathBuf) -> PyResult<Py<PyAn
 
     let parquet_path = output_dir.join("training").join("convergence.parquet");
 
-    let file = fs::File::open(&parquet_path).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            PyFileNotFoundError::new_err(format!(
-                "parquet file not found: {}",
-                parquet_path.display()
-            ))
-        } else {
-            PyOSError::new_err(format!("failed to open {}: {e}", parquet_path.display()))
-        }
-    })?;
+    let file = open_parquet_file(&parquet_path, "parquet file")?;
 
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
         .map_err(|e| PyOSError::new_err(format!("failed to open Parquet file: {e}")))?;
@@ -387,16 +376,7 @@ pub fn load_convergence_arrow(py: Python<'_>, output_dir: PathBuf) -> PyResult<P
     let parquet_path = output_dir.join("training").join("convergence.parquet");
 
     let ipc_bytes = py.detach(|| -> PyResult<Vec<u8>> {
-        let file = fs::File::open(&parquet_path).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                PyFileNotFoundError::new_err(format!(
-                    "parquet file not found: {}",
-                    parquet_path.display()
-                ))
-            } else {
-                PyOSError::new_err(format!("failed to open {}: {e}", parquet_path.display()))
-            }
-        })?;
+        let file = open_parquet_file(&parquet_path, "parquet file")?;
 
         let builder = ParquetRecordBatchReaderBuilder::try_new(file)
             .map_err(|e| PyOSError::new_err(format!("failed to open Parquet file: {e}")))?;
@@ -869,13 +849,6 @@ where
         .map(|b| b.into_any().unbind())
 }
 
-/// Convert a [`cobre_io::OutputError`] to an appropriate Python exception via the
-/// single [`crate::errors::convert_error`] mapping site (which owns the per-variant
-/// mapping and the read-path `NotFound` fold).
-fn output_error_to_py(err: &cobre_io::OutputError) -> PyErr {
-    convert_error(ErrorSource::Output(err))
-}
-
 /// Build the `metadata` dict field-by-field from a [`cobre_io::CheckpointManifest`],
 /// mirroring the `stage_cuts` surface in [`load_policy`] so the emitted dict shape
 /// does not depend on a whole-struct serde path.
@@ -914,6 +887,24 @@ fn metadata_to_py<'py>(
     }
     graph_dict.set_item("edges", edges)?;
     dict.set_item("graph_manifest", graph_dict)?;
+
+    let season = &metadata.season_manifest;
+    let season_dict = PyDict::new(py);
+    season_dict.set_item("cycle_code", into_py(py, season.cycle_code)?)?;
+    season_dict.set_item("n_seasons", into_py(py, season.n_seasons)?)?;
+    let hydro_orders = PyList::empty(py);
+    for h in &season.hydro_orders {
+        let h_dict = PyDict::new(py);
+        h_dict.set_item("hydro_id", into_py(py, h.hydro_id)?)?;
+        let orders = PyList::empty(py);
+        for &o in &h.orders {
+            orders.append(into_py(py, o)?)?;
+        }
+        h_dict.set_item("orders", orders)?;
+        hydro_orders.append(h_dict)?;
+    }
+    season_dict.set_item("hydro_orders", hydro_orders)?;
+    dict.set_item("season_manifest", season_dict)?;
 
     let producer = &metadata.producer;
     let producer_dict = PyDict::new(py);
@@ -957,144 +948,17 @@ fn metadata_to_py<'py>(
     Ok(dict)
 }
 
-/// Read an optional simulation-metadata file, treating file-not-found as `None`.
-///
-/// Mirrors the CLI's `read_optional_metadata` (`cobre-cli`'s `report.rs`):
-/// a missing file yields `Ok(None)`; malformed JSON yields `Err(ValueError)`;
-/// any other I/O error yields `Err(OSError)`.
-fn read_optional_simulation_metadata(
-    path: &Path,
-) -> PyResult<Option<cobre_io::SimulationMetadata>> {
-    match fs::read_to_string(path) {
-        Ok(content) => {
-            let value: cobre_io::SimulationMetadata =
-                serde_json::from_str(&content).map_err(|e| {
-                    PyValueError::new_err(format!("malformed JSON in {}: {e}", path.display()))
-                })?;
-            Ok(Some(value))
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(PyOSError::new_err(format!(
-            "failed to read {}: {e}",
-            path.display()
-        ))),
-    }
-}
-
-/// Assemble the `cobre report` JSON value for `output_dir`.
-///
-/// Reproduces the CLI `report` subcommand's assembly exactly: it reads the
-/// required `training/metadata.json`, the optional `simulation/metadata.json`
-/// (absent → `None`), and builds a [`serde_json::Value`] with the same shape,
-/// including the hoisted top-level `bounds` and `cost` convenience keys.
-///
-/// Returns a plain [`serde_json::Value`] (no Python token) so this helper can be
-/// unit-tested without linking the Python interpreter; callers convert the value
-/// to a Python dict via [`json_value_to_py`].
-///
-/// # Errors
-///
-/// - `FileNotFoundError` when `training/metadata.json` is absent.
-/// - `ValueError` when a metadata file contains malformed JSON.
-/// - `OSError` for other I/O failures.
-fn build_report_value(output_dir: &Path) -> PyResult<serde_json::Value> {
-    let training_metadata_path = output_dir.join("training/metadata.json");
-    let training = cobre_io::read_training_metadata(&training_metadata_path)
-        .map_err(|e| output_error_to_py(&e))?;
-
-    let simulation_metadata_path = output_dir.join("simulation/metadata.json");
-    let simulation = read_optional_simulation_metadata(&simulation_metadata_path)?;
-
-    let output_directory = output_dir.canonicalize().map_or_else(
-        |_| output_dir.display().to_string(),
-        |p| p.display().to_string(),
-    );
-
-    let bounds = serde_json::to_value(&training.bounds)
-        .map_err(|e| PyValueError::new_err(format!("failed to serialize bounds: {e}")))?;
-    let cost = match simulation.as_ref().and_then(|s| s.cost.as_ref()) {
-        Some(cost) => serde_json::to_value(cost)
-            .map_err(|e| PyValueError::new_err(format!("failed to serialize cost: {e}")))?,
-        None => serde_json::Value::Null,
-    };
-    let simulation_value = match simulation.as_ref() {
-        Some(simulation) => serde_json::to_value(simulation)
-            .map_err(|e| PyValueError::new_err(format!("failed to serialize simulation: {e}")))?,
-        None => serde_json::Value::Null,
-    };
-
-    Ok(serde_json::json!({
-        "output_directory": output_directory,
-        "status": training.status.clone(),
-        "bounds": bounds,
-        "training": serde_json::to_value(&training)
-            .map_err(|e| PyValueError::new_err(format!("failed to serialize training: {e}")))?,
-        "cost": cost,
-        "simulation": simulation_value,
-    }))
-}
-
-/// Assemble the machine-readable `cobre report` summary for a run output directory.
-///
-/// Reads `training/metadata.json` (required) and `simulation/metadata.json`
-/// (optional — `None` when absent), and returns a dict matching the shape of the
-/// `cobre report` CLI subcommand, with top-level `bounds` and `cost` convenience
-/// keys hoisted from `training.bounds` and `simulation.cost`.
-///
-/// ## Returns
-///
-/// A dict with the keys:
-///
-/// - `output_directory` — canonicalized absolute path to `output_dir`.
-/// - `status` — run status from `training/metadata.json`.
-/// - `bounds` — headline final objective bounds (hoisted from `training.bounds`).
-/// - `training` — full training metadata.
-/// - `cost` — simulation expected cost (hoisted from `simulation.cost`), or `None`.
-/// - `simulation` — full simulation metadata, or `None` when simulation was skipped.
-///
-/// ## Errors
-///
-/// - `FileNotFoundError` if `training/metadata.json` is absent.
-/// - `ValueError` if a metadata file contains malformed JSON.
-/// - `OSError` for other I/O failures.
-///
-/// ## Examples (Python)
-///
-/// ```python
-/// import cobre.results
-///
-/// report = cobre.results.report("output/")
-/// print(report["bounds"]["final_lower_bound"])
-/// if report["cost"] is not None:
-///     print(report["cost"]["mean_cost"])
-/// ```
-#[pyfunction]
-#[allow(clippy::needless_pass_by_value)]
-pub fn report(py: Python<'_>, output_dir: PathBuf) -> PyResult<Py<PyAny>> {
-    let value = build_report_value(&output_dir)?;
-    json_value_to_py(py, &value)
-}
-
 /// Read one `scenario_id=NNNN/data.parquet` partition and append rows to `result_list`.
 ///
 /// Each row is a Python dict of column values. The `scenario_id` integer is injected
 /// into every row from `scenario_id_val`.
 fn read_parquet_partition_into(
     py: Python<'_>,
-    parquet_path: &std::path::Path,
+    parquet_path: &Path,
     scenario_id_val: i64,
     result_list: &Bound<'_, PyList>,
 ) -> PyResult<()> {
-    let file = fs::File::open(parquet_path).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            PyFileNotFoundError::new_err(format!(
-                "simulation Parquet file not found: {}",
-                parquet_path.display()
-            ))
-        } else {
-            PyOSError::new_err(format!("failed to open {}: {e}", parquet_path.display()))
-        }
-    })?;
+    let file = open_parquet_file(parquet_path, "simulation Parquet file")?;
 
     let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| {
         PyOSError::new_err(format!(
@@ -1139,9 +1003,7 @@ fn read_parquet_partition_into(
 /// Collect the `scenario_id=NNNN` subdirectories of `entity_dir`, pairing each
 /// parsed id with its `data.parquet` path, sorted ascending by id for
 /// deterministic output order.
-fn collect_sorted_scenario_entries(
-    entity_dir: &std::path::Path,
-) -> PyResult<Vec<(i64, std::path::PathBuf)>> {
+fn collect_sorted_scenario_entries(entity_dir: &Path) -> PyResult<Vec<(i64, PathBuf)>> {
     let read_dir = fs::read_dir(entity_dir).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             PyFileNotFoundError::new_err(format!(
@@ -1156,7 +1018,7 @@ fn collect_sorted_scenario_entries(
         }
     })?;
 
-    let mut entries: Vec<(i64, std::path::PathBuf)> = Vec::new();
+    let mut entries: Vec<(i64, PathBuf)> = Vec::new();
 
     for dir_entry in read_dir {
         let dir_entry = dir_entry.map_err(|e| {
@@ -1190,7 +1052,7 @@ fn collect_sorted_scenario_entries(
 ///
 /// Returns an empty list if the directory exists but contains no scenario
 /// subdirectories.
-fn load_entity_type(py: Python<'_>, entity_dir: &std::path::Path) -> PyResult<Py<PyList>> {
+fn load_entity_type(py: Python<'_>, entity_dir: &Path) -> PyResult<Py<PyList>> {
     let result_list = PyList::empty(py);
 
     let entries = collect_sorted_scenario_entries(entity_dir)?;
@@ -1299,21 +1161,12 @@ pub fn load_simulation(
 /// `out_schema` is the extended schema, written on the first call (when `None`)
 /// and reused by later calls so all batches share one schema for concatenation.
 fn read_parquet_partition_as_batches(
-    parquet_path: &std::path::Path,
+    parquet_path: &Path,
     scenario_id_val: i64,
     out_batches: &mut Vec<RecordBatch>,
-    out_schema: &mut Option<std::sync::Arc<Schema>>,
+    out_schema: &mut Option<Arc<Schema>>,
 ) -> PyResult<()> {
-    let file = fs::File::open(parquet_path).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            PyFileNotFoundError::new_err(format!(
-                "simulation Parquet file not found: {}",
-                parquet_path.display()
-            ))
-        } else {
-            PyOSError::new_err(format!("failed to open {}: {e}", parquet_path.display()))
-        }
-    })?;
+    let file = open_parquet_file(parquet_path, "simulation Parquet file")?;
 
     let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| {
         PyOSError::new_err(format!(
@@ -1354,8 +1207,8 @@ fn read_parquet_partition_as_batches(
         }
 
         let n_rows = batch.num_rows();
-        let scenario_id_array = std::sync::Arc::new(Int64Array::from(vec![scenario_id_val; n_rows]))
-            as std::sync::Arc<dyn arrow::array::Array>;
+        let scenario_id_array =
+            Arc::new(Int64Array::from(vec![scenario_id_val; n_rows])) as Arc<dyn Array>;
 
         let extended_schema = if let Some(schema) = out_schema.as_ref() {
             schema.clone()
@@ -1363,13 +1216,12 @@ fn read_parquet_partition_as_batches(
             let orig_schema = batch.schema();
             let mut fields: Vec<Field> = vec![Field::new("scenario_id", DataType::Int64, false)];
             fields.extend(orig_schema.fields().iter().map(|f| f.as_ref().clone()));
-            let schema = std::sync::Arc::new(Schema::new(fields));
+            let schema = Arc::new(Schema::new(fields));
             *out_schema = Some(schema.clone());
             schema
         };
 
-        let mut columns: Vec<std::sync::Arc<dyn arrow::array::Array>> =
-            Vec::with_capacity(batch.num_columns() + 1);
+        let mut columns: Vec<Arc<dyn Array>> = Vec::with_capacity(batch.num_columns() + 1);
         columns.push(scenario_id_array);
         columns.extend(batch.columns().iter().cloned());
 
@@ -1387,9 +1239,7 @@ fn read_parquet_partition_as_batches(
 /// concatenated across scenarios (ordered by `scenario_id` ascending).
 ///
 /// Returns `None` when the directory exists but contains no scenario subdirectories.
-fn load_entity_type_as_batch(
-    entity_dir: &std::path::Path,
-) -> PyResult<Option<(RecordBatch, std::sync::Arc<Schema>)>> {
+fn load_entity_type_as_batch(entity_dir: &Path) -> PyResult<Option<(RecordBatch, Arc<Schema>)>> {
     let entries = collect_sorted_scenario_entries(entity_dir)?;
 
     if entries.is_empty() {
@@ -1397,7 +1247,7 @@ fn load_entity_type_as_batch(
     }
 
     let mut all_batches: Vec<RecordBatch> = Vec::new();
-    let mut schema: Option<std::sync::Arc<Schema>> = None;
+    let mut schema: Option<Arc<Schema>> = None;
 
     for (scenario_id, parquet_path) in &entries {
         read_parquet_partition_as_batches(
@@ -1439,7 +1289,7 @@ fn entity_type_ipc_bytes(entity_dir: &Path) -> PyResult<Vec<u8>> {
         batch_to_ipc_bytes(&batch, &schema)
     } else {
         let empty_schema = Schema::new(vec![Field::new("scenario_id", DataType::Int64, false)]);
-        let empty_batch = RecordBatch::new_empty(std::sync::Arc::new(empty_schema.clone()));
+        let empty_batch = RecordBatch::new_empty(Arc::new(empty_schema.clone()));
         batch_to_ipc_bytes(&empty_batch, &empty_schema)
     }
 }
@@ -1666,8 +1516,8 @@ pub fn load_policy(
         )));
     }
 
-    let checkpoint =
-        cobre_io::read_policy_checkpoint(&policy_dir).map_err(|e| output_error_to_py(&e))?;
+    let checkpoint = cobre_io::read_policy_checkpoint(&policy_dir)
+        .map_err(|e| convert_error(ErrorSource::Output(&e)))?;
 
     let metadata_py = metadata_to_py(py, &checkpoint.metadata)?;
 
@@ -1759,216 +1609,4 @@ pub fn load_policy(
     result.set_item("stage_bases", stage_bases_list)?;
 
     Ok(result.unbind().into())
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-mod tests {
-    use std::fs;
-
-    use pyo3::Python;
-    use tempfile::TempDir;
-
-    use super::build_report_value;
-
-    /// Training metadata carrying an explicit `bounds` object.
-    ///
-    /// Mirrors the shape of the CLI report test's `make_training_metadata_json`
-    /// fixture (`cobre-cli`'s `report.rs`).
-    fn training_metadata_json() -> &'static str {
-        r#"{
-            "cobre_version": "0.3.2",
-            "hostname": "test-host",
-            "solver": "highs",
-            "started_at": "2026-01-17T08:00:00Z",
-            "completed_at": "2026-01-17T12:30:00Z",
-            "duration_seconds": 16200.0,
-            "status": "complete",
-            "configuration": {
-                "seed": 42,
-                "max_iterations": 100,
-                "forward_passes": 192,
-                "stopping_mode": "any",
-                "policy_mode": "fresh"
-            },
-            "problem_dimensions": {
-                "num_stages": 12,
-                "num_hydros": 160,
-                "num_thermals": 200,
-                "num_buses": 5,
-                "num_lines": 8
-            },
-            "iterations": { "completed": 10, "converged_at": 10 },
-            "convergence": {
-                "achieved": true,
-                "final_gap_percent": 0.45,
-                "termination_reason": "bound_stalling"
-            },
-            "row_pool": {
-                "total_generated": 1250000,
-                "total_active": 980000,
-                "peak_active": 1100000
-            },
-            "bounds": {
-                "final_lower_bound": 123456.0,
-                "final_upper_bound": 124000.0,
-                "final_upper_bound_std": 12.5
-            },
-            "distribution": {
-                "backend": "local",
-                "world_size": 1,
-                "ranks_participated": 1,
-                "num_hosts": 1,
-                "threads_per_rank": 1
-            }
-        }"#
-    }
-
-    /// Simulation metadata carrying an explicit `cost` object.
-    fn simulation_metadata_json() -> &'static str {
-        r#"{
-            "cobre_version": "0.3.2",
-            "hostname": "test-host",
-            "solver": "highs",
-            "started_at": "2026-01-17T13:00:00Z",
-            "completed_at": "2026-01-17T13:15:00Z",
-            "duration_seconds": 900.0,
-            "status": "complete",
-            "scenarios": { "total": 100, "completed": 100, "failed": 0 },
-            "cost": {
-                "mean_cost": 789012.0,
-                "std_cost": 4321.0
-            },
-            "distribution": {
-                "backend": "local",
-                "world_size": 1,
-                "ranks_participated": 1,
-                "num_hosts": 1,
-                "threads_per_rank": 1
-            }
-        }"#
-    }
-
-    /// Write `training/metadata.json` under `dir`, creating the subdirectory.
-    fn write_training_metadata(dir: &std::path::Path, json: &str) {
-        let training_dir = dir.join("training");
-        fs::create_dir_all(&training_dir).unwrap();
-        fs::write(training_dir.join("metadata.json"), json).unwrap();
-    }
-
-    /// Write `simulation/metadata.json` under `dir`, creating the subdirectory.
-    fn write_simulation_metadata(dir: &std::path::Path, json: &str) {
-        let simulation_dir = dir.join("simulation");
-        fs::create_dir_all(&simulation_dir).unwrap();
-        fs::write(simulation_dir.join("metadata.json"), json).unwrap();
-    }
-
-    #[test]
-    fn build_report_value_has_six_top_level_keys() {
-        let dir = TempDir::new().unwrap();
-        write_training_metadata(dir.path(), training_metadata_json());
-        write_simulation_metadata(dir.path(), simulation_metadata_json());
-
-        let value = build_report_value(dir.path()).unwrap();
-
-        let obj = value.as_object().expect("report value must be an object");
-        for key in [
-            "output_directory",
-            "status",
-            "bounds",
-            "training",
-            "cost",
-            "simulation",
-        ] {
-            assert!(
-                obj.contains_key(key),
-                "report must contain top-level '{key}'"
-            );
-        }
-        assert_eq!(value["status"].as_str(), Some("complete"));
-    }
-
-    #[test]
-    fn build_report_value_hoists_bounds() {
-        let dir = TempDir::new().unwrap();
-        write_training_metadata(dir.path(), training_metadata_json());
-
-        let value = build_report_value(dir.path()).unwrap();
-
-        assert_eq!(
-            value["bounds"]["final_lower_bound"].as_f64(),
-            Some(123_456.0),
-            "top-level .bounds.final_lower_bound must match the fixture"
-        );
-        assert_eq!(
-            value["training"]["bounds"]["final_lower_bound"].as_f64(),
-            Some(123_456.0),
-            "nested .training.bounds.final_lower_bound must match the fixture"
-        );
-        assert_eq!(
-            value["bounds"]["final_lower_bound"].as_f64(),
-            value["training"]["bounds"]["final_lower_bound"].as_f64(),
-            "the bounds hoist must be consistent with the nested value"
-        );
-    }
-
-    #[test]
-    fn build_report_value_hoists_cost() {
-        let dir = TempDir::new().unwrap();
-        write_training_metadata(dir.path(), training_metadata_json());
-        write_simulation_metadata(dir.path(), simulation_metadata_json());
-
-        let value = build_report_value(dir.path()).unwrap();
-
-        assert_eq!(
-            value["cost"]["mean_cost"].as_f64(),
-            Some(789_012.0),
-            "top-level .cost.mean_cost must match the fixture"
-        );
-        assert_eq!(
-            value["simulation"]["cost"]["mean_cost"].as_f64(),
-            Some(789_012.0),
-            "nested .simulation.cost.mean_cost must match the fixture"
-        );
-        assert_eq!(
-            value["cost"]["mean_cost"].as_f64(),
-            value["simulation"]["cost"]["mean_cost"].as_f64(),
-            "the cost hoist must be consistent with the nested value"
-        );
-    }
-
-    #[test]
-    fn build_report_value_simulation_none_when_absent() {
-        let dir = TempDir::new().unwrap();
-        write_training_metadata(dir.path(), training_metadata_json());
-        // No simulation/metadata.json written.
-
-        let value = build_report_value(dir.path()).unwrap();
-
-        assert!(
-            value["simulation"].is_null(),
-            ".simulation must be null when simulation metadata is absent"
-        );
-        assert!(
-            value["cost"].is_null(),
-            ".cost must be null when simulation metadata is absent"
-        );
-    }
-
-    #[test]
-    fn build_report_value_missing_training_is_err() {
-        // This error path routes through `crate::errors::convert_error`, which
-        // attaches the GIL (`Python::attach`) to build the typed exception, so the
-        // interpreter must be initialized first.
-        Python::initialize();
-        let dir = TempDir::new().unwrap();
-        // No training/metadata.json written.
-
-        let result = build_report_value(dir.path());
-
-        assert!(
-            result.is_err(),
-            "missing training/metadata.json must produce an error"
-        );
-    }
 }

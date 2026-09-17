@@ -2,9 +2,6 @@
 //!
 //! Entity collections are cloned into the wrappers because entity data is small
 //! (strings + floats) and cloning avoids lifetime complexity at the `PyO3` boundary.
-//!
-//! Stub entities (`EnergyContract`, `PumpingStation`, `NonControllableSource`) are
-//! data-complete but contribute no LP variables or constraints.
 
 use std::sync::Arc;
 
@@ -398,6 +395,7 @@ impl PyNonControllableSource {
 /// Top-level system representation wrapping a loaded Cobre case.
 ///
 /// Cannot be constructed from Python — use `cobre.io.load_case()` to obtain one.
+/// Every entity-list getter below returns its items in canonical ID order.
 #[pyclass(name = "System", frozen)]
 pub struct PySystem {
     inner: Arc<System>,
@@ -405,7 +403,6 @@ pub struct PySystem {
 
 #[pymethods]
 impl PySystem {
-    /// All buses in canonical ID order.
     #[getter]
     fn buses(&self) -> Vec<PyBus> {
         self.inner
@@ -416,7 +413,6 @@ impl PySystem {
             .collect()
     }
 
-    /// All transmission lines in canonical ID order.
     #[getter]
     fn lines(&self) -> Vec<PyLine> {
         self.inner
@@ -427,7 +423,6 @@ impl PySystem {
             .collect()
     }
 
-    /// All thermal plants in canonical ID order.
     #[getter]
     fn thermals(&self) -> Vec<PyThermal> {
         self.inner
@@ -438,7 +433,6 @@ impl PySystem {
             .collect()
     }
 
-    /// All hydro plants in canonical ID order.
     #[getter]
     fn hydros(&self) -> Vec<PyHydro> {
         self.inner
@@ -449,7 +443,6 @@ impl PySystem {
             .collect()
     }
 
-    /// All energy contracts in canonical ID order.
     #[getter]
     fn contracts(&self) -> Vec<PyEnergyContract> {
         self.inner
@@ -460,7 +453,6 @@ impl PySystem {
             .collect()
     }
 
-    /// All pumping stations in canonical ID order.
     #[getter]
     fn pumping_stations(&self) -> Vec<PyPumpingStation> {
         self.inner
@@ -471,7 +463,6 @@ impl PySystem {
             .collect()
     }
 
-    /// All non-controllable sources in canonical ID order.
     #[getter]
     fn non_controllable_sources(&self) -> Vec<PyNonControllableSource> {
         self.inner
@@ -482,25 +473,21 @@ impl PySystem {
             .collect()
     }
 
-    /// Number of buses in the system.
     #[getter]
     fn n_buses(&self) -> usize {
         self.inner.n_buses()
     }
 
-    /// Number of transmission lines in the system.
     #[getter]
     fn n_lines(&self) -> usize {
         self.inner.n_lines()
     }
 
-    /// Number of hydro plants in the system.
     #[getter]
     fn n_hydros(&self) -> usize {
         self.inner.n_hydros()
     }
 
-    /// Number of thermal plants in the system.
     #[getter]
     fn n_thermals(&self) -> usize {
         self.inner.n_thermals()

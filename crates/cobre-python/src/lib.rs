@@ -2,11 +2,6 @@
 //!
 //! Python bindings for the [Cobre](https://github.com/cobre-rs/cobre) power systems solver.
 //!
-//! Exposes the Cobre solver as a Python extension module (`import cobre`),
-//! providing programmatic access to case loading, validation, training,
-//! simulation, and result inspection from Python scripts, Jupyter notebooks,
-//! and orchestration frameworks.
-//!
 //! ## Constraints
 //!
 //! - **Single-process only** — this crate MUST NOT initialize MPI or depend
@@ -18,12 +13,6 @@
 //!   within `cobre-sddp` to run at full parallelism.
 //! - **No Python callbacks in the hot loop** — all customization is
 //!   via configuration structs, not Python callables.
-//!
-//! ## Status
-//!
-//! This crate is in early development. The API **will** change.
-//!
-//! See the [repository](https://github.com/cobre-rs/cobre) for the current status.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
@@ -92,7 +81,6 @@ fn results_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(results::load_simulation_arrow, m)?)?;
     m.add_function(wrap_pyfunction!(results::load_policy, m)?)?;
     m.add_function(wrap_pyfunction!(results::load_stochastic, m)?)?;
-    m.add_function(wrap_pyfunction!(results::report, m)?)?;
     m.add_class::<results::Stochastic>()?;
     Ok(())
 }
@@ -131,9 +119,7 @@ fn register_submodule<'py>(
     parent.add_submodule(child)
 }
 
-/// Python bindings for the Cobre power systems solver. Single-process only -- for distributed execution, launch `mpiexec cobre` as a subprocess.
-///
-/// This is the compiled extension module, imported privately as `cobre._native`.
+/// The compiled extension module, imported privately as `cobre._native`.
 /// The public `cobre` package (pure-Python `__init__.py`) re-exports everything
 /// from here under the documented `cobre.*` names.
 #[pymodule]
