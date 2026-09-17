@@ -89,7 +89,8 @@ fn run_produces_deterministic_end_block_and_metadata() {
     for needle in [
         "Lower bound:  1.55955e7",
         "Upper bound:  5.79592e5",
-        "LP solves:    5632",
+        "LP solves:    5632 (",
+        "LP solves:    400 (",
         "Expected cost: 9.67939e6",
         "1 constant",
         "0 linearized, 1 without",

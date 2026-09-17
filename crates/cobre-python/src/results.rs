@@ -895,6 +895,24 @@ fn metadata_to_py<'py>(
     graph_dict.set_item("edges", edges)?;
     dict.set_item("graph_manifest", graph_dict)?;
 
+    let season = &metadata.season_manifest;
+    let season_dict = PyDict::new(py);
+    season_dict.set_item("cycle_code", into_py(py, season.cycle_code)?)?;
+    season_dict.set_item("n_seasons", into_py(py, season.n_seasons)?)?;
+    let hydro_orders = PyList::empty(py);
+    for h in &season.hydro_orders {
+        let h_dict = PyDict::new(py);
+        h_dict.set_item("hydro_id", into_py(py, h.hydro_id)?)?;
+        let orders = PyList::empty(py);
+        for &o in &h.orders {
+            orders.append(into_py(py, o)?)?;
+        }
+        h_dict.set_item("orders", orders)?;
+        hydro_orders.append(h_dict)?;
+    }
+    season_dict.set_item("hydro_orders", hydro_orders)?;
+    dict.set_item("season_manifest", season_dict)?;
+
     let producer = &metadata.producer;
     let producer_dict = PyDict::new(py);
     producer_dict.set_item(

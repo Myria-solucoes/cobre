@@ -119,9 +119,7 @@ fn register_submodule<'py>(
     parent.add_submodule(child)
 }
 
-/// Python bindings for the Cobre power systems solver. Single-process only -- for distributed execution, launch `mpiexec cobre` as a subprocess.
-///
-/// This is the compiled extension module, imported privately as `cobre._native`.
+/// The compiled extension module, imported privately as `cobre._native`.
 /// The public `cobre` package (pure-Python `__init__.py`) re-exports everything
 /// from here under the documented `cobre.*` names.
 #[pymodule]

@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`Study.stochastic`, `Study.hydro_models` and `Study.provenance` accessors
+  read the three structural summaries a study captures at construction.** A
+  caller can now read the stochastic summary, the hydro-model summary and the
+  model-provenance report from the object without reloading the case or
+  running a phase. The same three reports were already returned as keys of
+  `cobre.run.run`'s result dict; they are now reachable from the `Study`
+  object too.
+
+- **`cobre.errors.InternalError` completes the exception hierarchy the module's
+  documentation described.** Software and environment faults raise
+  `cobre.errors.InternalError`, subclassing `RuntimeError` and
+  `cobre.errors.CobreError`.
+
+- **`cobre.write_policy_checkpoint` accepts an optional
+  `metadata["season_manifest"]` dict with `cycle_code`, `n_seasons` and
+  `hydro_orders` keys, and `cobre.results.load_policy` always emits it, so a
+  checkpoint authored from Python can carry the study's season descriptor.**
+  Omitting the key writes a checkpoint byte-identical to before. A
+  Python-authored boundary policy no longer trips the season compatibility
+  check of a seasonal study, and a loaded checkpoint round-trips unchanged.
+
 ### Changed
 
 - **BREAKING — `policy.boundary.source_stage` is removed and rejected by
@@ -132,6 +155,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   single applier that handles every group width from caller-owned scratch.
   Results are unchanged.
 
+- **BREAKING — `cobre.run.run(threads=0)` now raises `ValueError`.** Previously,
+  `threads=0` was accepted and treated as unspecified; it is now rejected at
+  argument validation. Pass `threads=1` or omit the keyword to let the runtime
+  choose.
+
+- **BREAKING — case-load and policy-load failures now raise
+  `cobre.errors.CaseIoError` or `cobre.errors.ValidationError`, where they
+  previously raised `cobre.errors.SolverError`.** Filesystem read failures
+  raise `cobre.errors.CaseIoError`; schema, parse, constraint and
+  configuration validation failures raise `cobre.errors.ValidationError`. Both
+  subclass `cobre.errors.CobreError`, so a caller catching
+  `cobre.errors.CobreError` covers all three. A caller that previously caught
+  `cobre.errors.SolverError` to handle case-load failures should now catch
+  `cobre.errors.CaseIoError` and `cobre.errors.ValidationError` instead, or
+  catch the base `cobre.errors.CobreError` to handle every error class the
+  package raises.
+
 ### Removed
 
 - **BREAKING — the `cobre report` subcommand is removed, and so is
@@ -156,6 +196,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `read_initial_gap_percent`
   - `read_hydro_model_summary`
   - `read_provenance_report`
+
+- **BREAKING — the `skip_simulation` keyword argument to `cobre.run.run` is
+  removed.** A call passing `skip_simulation` now raises `TypeError`. No deck,
+  output file, schema or checkpoint format changed. Remove the keyword; to run
+  only the training phase, pass
+  `config_overrides={"simulation": {"enabled": False}}` to `cobre.run.run`, or
+  construct a `Study` and call `train()` without `simulate()`.
 
 ### Fixed
 
@@ -245,6 +292,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rewrite can no longer leave that old manifest pointing at a mix of old and
   new payloads: a reader sees either the complete previous checkpoint or none
   at all.
+
+- **`cobre.io.validate` now runs the boundary-reconciliation phase that
+  `cobre validate` already ran.** A boundary configuration the CLI rejects is
+  no longer accepted by the Python validator. `cobre.io.validate` now builds
+  the study setup and reconciles the boundary checkpoint against the terminal
+  entity manifest when `config.policy.boundary` is configured, matching
+  `cobre validate` and `cobre run`.
+
+- **`simulation/metadata.json` written by `cobre run` now carries
+  `solver_version`, the key the training file and both Python paths already
+  wrote.** The CLI simulation path previously omitted the key;
+  `simulation/metadata.json` and `training/metadata.json` are now symmetric.
+
+- **The `cobre-python` package metadata now describes what is built — the
+  `abi3-py312` target, a `rust-version` matching the workspace, the wheel
+  platform list and the README's module census — and the bindings crate's own
+  Rust test suite runs in continuous integration, where it had never
+  executed.** The package declaration and the continuous-integration matrix
+  previously described a build that did not match what the release workflow
+  wrote or what the wheel contained.
 
 ## [0.15.0] - 2026-08-24
 

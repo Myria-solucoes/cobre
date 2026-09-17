@@ -42,6 +42,19 @@ policy = cobre.results.load_policy("output/")
 print(f"Iterations completed: {policy['metadata']['producer']['completed_iterations']}")
 ```
 
+The same workflow, driven step by step:
+
+```python
+# The Study lifecycle — construct, train, simulate
+study = cobre.Study("path/to/case", output_dir="output/")
+policy = study.train()
+summary = study.simulate(policy)
+print(f"Scenarios: {summary['n_scenarios']}, Completed: {summary['completed']}")
+
+# Inspect the study before running any phase
+print(f"Stages: {study.stochastic['n_stages']}, Seed: {study.stochastic['seed']}")
+```
+
 ## Modules
 
 - **`cobre.io`** — Load and validate case directories

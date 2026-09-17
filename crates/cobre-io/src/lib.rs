@@ -32,12 +32,6 @@
 //! failing, so users see every problem in a single report.  Final errors are reported
 //! via [`LoadError`], which carries enough context for diagnostic messages without
 //! re-reading input files.
-//!
-//! ## Status
-//!
-//! This crate is in early development. The API **will** change.
-//!
-//! See the [repository](https://github.com/cobre-rs/cobre) for the current status.
 
 // Internal (unpublished) workspace crate: public items intra-doc-link their
 // pub(crate) collaborators as a maintainer aid (docs read with

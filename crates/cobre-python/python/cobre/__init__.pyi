@@ -20,7 +20,17 @@ def write_policy_checkpoint(
     stage_bases: Optional[Sequence[Mapping[str, Any]]] = None,
     stage_states: Optional[Sequence[Mapping[str, Any]]] = None,
     inflow_lag_depth: Optional[int] = None,
-) -> None: ...
+) -> None:
+    """Write a policy checkpoint from plain Python dicts.
+
+    metadata may include an optional "season_manifest" dict with keys:
+    - "cycle_code": int (0 monthly / 1 weekly / 2 custom / 255 absent)
+    - "n_seasons": int
+    - "hydro_orders": list of {"hydro_id": int, "orders": list[int]} dicts
+
+    Omitted, the checkpoint carries the absent descriptor (cycle_code=255).
+    """
+    ...
 
 class Study:
     def __init__(

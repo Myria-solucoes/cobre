@@ -233,7 +233,7 @@ fn write_sim_outputs_on_root(
     let sim_ctx = OutputContext {
         hostname: hostname.to_string(),
         solver: active_solver_metadata_id().to_string(),
-        solver_version: None,
+        solver_version: Some(ctx.solver_version.clone()),
         started_at: sim_started_at,
         completed_at: now_iso8601(),
         distribution: build_distribution_info(&ctx.topology, ctx.n_threads, mpi_world_size),
@@ -270,12 +270,12 @@ fn print_sim_summary(
             total_time_ms: sim_time_ms,
             mean_cost: Some(cost_summary.mean_cost),
             std_cost: Some(cost_summary.std_cost),
-            total_lp_solves: Some(agg.lp_solves),
-            total_first_try: Some(agg.first_try_successes),
-            total_retried: Some(agg.lp_successes.saturating_sub(agg.first_try_successes)),
-            total_failed_solves: Some(agg.lp_failures),
-            total_solve_time_seconds: Some(agg.solve_time_ms / 1000.0),
-            parallelism: Some(parallelism),
+            total_lp_solves: agg.lp_solves,
+            total_first_try: agg.first_try_successes,
+            total_retried: agg.lp_successes.saturating_sub(agg.first_try_successes),
+            total_failed_solves: agg.lp_failures,
+            total_solve_time_seconds: agg.solve_time_ms / 1000.0,
+            parallelism,
         },
     );
 }

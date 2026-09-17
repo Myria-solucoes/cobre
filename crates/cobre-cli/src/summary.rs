@@ -422,9 +422,8 @@ fn fmt_sci(v: f64) -> String {
 
 /// Training convergence metrics and timing for display in the post-run summary.
 ///
-/// Every `*_seconds` timing field is the run-level sum of its per-iteration
-/// `*_ms` source counter divided by 1000, and is `None` when per-iteration
-/// timing is unavailable.
+/// The phase-wall, wait, and serial `*_seconds` timing fields are `None` when
+/// per-iteration timing is unavailable.
 pub struct TrainingSummary {
     /// Total number of iterations completed.
     pub iterations: u64,
@@ -492,29 +491,29 @@ pub struct TrainingSummary {
     pub total_time_ms: u64,
 
     /// Number of solves that returned optimal on the first attempt.
-    pub total_first_try: Option<u64>,
+    pub total_first_try: u64,
 
     /// Number of solves that required retry escalation.
-    pub total_retried: Option<u64>,
+    pub total_retried: u64,
 
     /// Number of solves that exhausted all retry levels.
-    pub total_failed: Option<u64>,
+    pub total_failed: u64,
 
     /// Forward-phase cumulative LP solve wall time in seconds, summed
     /// across all (rank, worker) pairs. Divide by `parallelism` to obtain
     /// the average per-worker forward solve wall time, which is bounded
     /// by `total_time_ms` and represents the wall-time attributable to
     /// forward LP solving.
-    pub total_forward_solve_seconds: Option<f64>,
+    pub total_forward_solve_seconds: f64,
 
     /// Backward-phase cumulative LP solve wall time in seconds, summed
     /// across all (rank, worker) pairs. See [`Self::total_forward_solve_seconds`].
-    pub total_backward_solve_seconds: Option<f64>,
+    pub total_backward_solve_seconds: f64,
 
     /// Effective parallelism = `n_ranks * n_workers_local`. Used to
     /// normalize cumulative solve times into per-worker wall-time
     /// equivalents for the time-split breakdown.
-    pub parallelism: Option<u32>,
+    pub parallelism: u32,
 
     /// Initial optimality gap (iteration 1) in percent. Read from the
     /// first row of `convergence.parquet`. `None` when convergence
@@ -572,26 +571,26 @@ pub struct SimulationSummary {
     pub std_cost: Option<f64>,
 
     /// Total LP solves across all scenarios.
-    pub total_lp_solves: Option<u64>,
+    pub total_lp_solves: u64,
 
     /// Solves that returned optimal on the first attempt.
-    pub total_first_try: Option<u64>,
+    pub total_first_try: u64,
 
     /// Solves that required retry escalation before succeeding.
-    pub total_retried: Option<u64>,
+    pub total_retried: u64,
 
     /// Solves that exhausted all retry levels.
-    pub total_failed_solves: Option<u64>,
+    pub total_failed_solves: u64,
 
     /// Cumulative LP solve wall time in seconds, summed across all
     /// (rank, worker) pairs. Divide by `parallelism` to obtain the
     /// average per-worker solve wall time, which is bounded by
     /// `total_time_ms`.
-    pub total_solve_time_seconds: Option<f64>,
+    pub total_solve_time_seconds: f64,
 
     /// Effective parallelism = `n_ranks * n_workers_local`. See
     /// [`TrainingSummary::parallelism`].
-    pub parallelism: Option<u32>,
+    pub parallelism: u32,
 }
 
 /// All data needed to render the complete post-run summary block.
@@ -689,14 +688,12 @@ fn time_split_training_walls(t: &TrainingSummary) -> Option<(f64, f64, f64)> {
 /// the seam that lets a phase-wall-only path (no per-worker walls yet) land
 /// without printing a bogus `solve 0`.
 fn format_phase_solve_wait(
-    solve_cumulative: Option<f64>,
+    solve_cumulative: f64,
     wait: Option<f64>,
-    parallelism: Option<u32>,
+    parallelism: u32,
     phase_wall: f64,
 ) -> String {
-    let (Some(solve_cumulative), Some(wait), Some(parallelism)) =
-        (solve_cumulative, wait, parallelism)
-    else {
+    let Some(wait) = wait else {
         return String::new();
     };
     if parallelism == 0 {
@@ -810,7 +807,7 @@ fn format_time_split_training(t: &TrainingSummary) -> Vec<String> {
 ///
 /// The simulation section is omitted entirely when `summary.simulation` is `None`.
 #[cfg(test)]
-pub fn format_summary_string(summary: &RunSummary) -> String {
+pub fn format_summary_string_reference(summary: &RunSummary) -> String {
     let t = &summary.training;
     let duration = format_duration(t.total_time_ms);
     let convergence_detail = format_convergence_detail(t.converged, t.converged_at, &t.reason);
@@ -935,16 +932,10 @@ pub fn print_training_summary(stderr: &Term, t: &TrainingSummary) {
     for line in policy_rows_lines(t) {
         let _ = stderr.write_line(&line);
     }
-    if let (Some(first_try), Some(retried), Some(failed)) =
-        (t.total_first_try, t.total_retried, t.total_failed)
-    {
-        let _ = stderr.write_line(&format!(
-            "  LP solves:    {} ({first_try} first-try, {retried} retried, {failed} failed)",
-            t.total_lp_solves
-        ));
-    } else {
-        let _ = stderr.write_line(&format!("  LP solves:    {}", t.total_lp_solves));
-    }
+    let _ = stderr.write_line(&format!(
+        "  LP solves:    {} ({} first-try, {} retried, {} failed)",
+        t.total_lp_solves, t.total_first_try, t.total_retried, t.total_failed
+    ));
     if t.iterations > 0 {
         #[allow(clippy::cast_precision_loss)]
         let avg_iter_ms = t.total_time_ms as f64 / t.iterations as f64;
@@ -978,39 +969,29 @@ pub fn print_simulation_summary(stderr: &Term, sim: &SimulationSummary) {
             "  Expected cost: {mean:.5e} +/- {ci95:.5e} (std: {std:.5e})"
         ));
     }
-    if let (Some(lp_solves), Some(first_try), Some(retried), Some(failed)) = (
-        sim.total_lp_solves,
-        sim.total_first_try,
-        sim.total_retried,
-        sim.total_failed_solves,
-    ) {
-        let _ = stderr.write_line(&format!(
-            "  LP solves:    {lp_solves} ({first_try} first-try, {retried} retried, {failed} failed)"
-        ));
-    } else if let Some(lp_solves) = sim.total_lp_solves {
-        let _ = stderr.write_line(&format!("  LP solves:    {lp_solves}"));
-    }
+    let _ = stderr.write_line(&format!(
+        "  LP solves:    {} ({} first-try, {} retried, {} failed)",
+        sim.total_lp_solves, sim.total_first_try, sim.total_retried, sim.total_failed_solves
+    ));
     if sim.completed > 0 {
         #[allow(clippy::cast_precision_loss)]
         let avg_s = sim.total_time_ms as f64 / 1000.0 / f64::from(sim.completed);
         let _ = stderr.write_line(&format!("  Avg/scenario: {avg_s:.3}s"));
     }
-    if let (Some(solve_time), Some(parallelism)) = (sim.total_solve_time_seconds, sim.parallelism) {
-        #[allow(clippy::cast_precision_loss)]
-        let total_s = sim.total_time_ms as f64 / 1000.0;
-        let solver = per_worker_mean_seconds(solve_time, parallelism, total_s);
-        let other = (total_s - solver).max(0.0);
-        let _ = stderr.write_line(&format!(
-            "  Time split:   Solver {} ({:.0}%)",
-            format_split_duration(solver),
-            pct_of(solver, total_s)
-        ));
-        let _ = stderr.write_line(&format!(
-            "                Other  {} ({:.0}%)",
-            format_split_duration(other),
-            pct_of(other, total_s)
-        ));
-    }
+    #[allow(clippy::cast_precision_loss)]
+    let total_s = sim.total_time_ms as f64 / 1000.0;
+    let solver = per_worker_mean_seconds(sim.total_solve_time_seconds, sim.parallelism, total_s);
+    let other = (total_s - solver).max(0.0);
+    let _ = stderr.write_line(&format!(
+        "  Time split:   Solver {} ({:.0}%)",
+        format_split_duration(solver),
+        pct_of(solver, total_s)
+    ));
+    let _ = stderr.write_line(&format!(
+        "                Other  {} ({:.0}%)",
+        format_split_duration(other),
+        pct_of(other, total_s)
+    ));
 }
 
 /// Print the output directory path and write duration to `stderr`.
@@ -1025,7 +1006,7 @@ pub fn print_output_path(stderr: &Term, output_dir: &Path, write_secs: f64) {
 
 /// Write the complete post-run summary block to `stderr`.
 #[cfg(test)]
-pub fn print_summary(stderr: &Term, summary: &RunSummary) {
+pub fn print_summary_reference(stderr: &Term, summary: &RunSummary) {
     print_training_summary(stderr, &summary.training);
     if let Some(sim) = &summary.simulation {
         let _ = stderr.write_line("");
@@ -1045,7 +1026,8 @@ mod tests {
 
     use super::{
         RunSummary, SimulationSummary, TrainingSummary, format_duration, format_split_duration,
-        format_summary_string, policy_rows_lines, print_summary, time_split_training_walls,
+        format_summary_string_reference, policy_rows_lines, print_summary_reference,
+        time_split_training_walls,
     };
 
     fn make_training_summary() -> TrainingSummary {
@@ -1067,12 +1049,12 @@ mod tests {
             num_stages: 40,
             total_lp_solves: 36_000,
             total_time_ms: 5_000,
-            total_first_try: Some(35_900),
-            total_retried: Some(100),
-            total_failed: Some(0),
-            total_forward_solve_seconds: Some(12.0),
-            total_backward_solve_seconds: Some(16.8),
-            parallelism: Some(1),
+            total_first_try: 35_900,
+            total_retried: 100,
+            total_failed: 0,
+            total_forward_solve_seconds: 12.0,
+            total_backward_solve_seconds: 16.8,
+            parallelism: 1,
             initial_gap_percent: Some(28.0),
             forward_phase_wall_seconds: Some(15.0),
             backward_phase_wall_seconds: Some(20.0),
@@ -1204,7 +1186,7 @@ mod tests {
     #[test]
     fn test_format_summary_training_only() {
         let summary = make_run_summary(None);
-        let s = format_summary_string(&summary);
+        let s = format_summary_string_reference(&summary);
 
         assert!(
             s.contains("Training complete"),
@@ -1225,15 +1207,15 @@ mod tests {
             total_time_ms: 10_000,
             mean_cost: None,
             std_cost: None,
-            total_lp_solves: None,
-            total_first_try: None,
-            total_retried: None,
-            total_failed_solves: None,
-            total_solve_time_seconds: None,
-            parallelism: None,
+            total_lp_solves: 7920,
+            total_first_try: 7850,
+            total_retried: 60,
+            total_failed_solves: 10,
+            total_solve_time_seconds: 8.5,
+            parallelism: 4,
         };
         let summary = make_run_summary(Some(sim));
-        let s = format_summary_string(&summary);
+        let s = format_summary_string_reference(&summary);
 
         assert!(
             s.contains("Training complete"),
@@ -1255,7 +1237,7 @@ mod tests {
             simulation: None,
             output_dir: PathBuf::from("/tmp/out"),
         };
-        let s = format_summary_string(&summary);
+        let s = format_summary_string_reference(&summary);
 
         assert!(
             s.contains("1.00500e2"),
@@ -1275,7 +1257,7 @@ mod tests {
             simulation: None,
             output_dir: PathBuf::from("/tmp/out"),
         };
-        let s = format_summary_string(&summary);
+        let s = format_summary_string_reference(&summary);
 
         assert!(
             s.contains("converged at iter 38"),
@@ -1295,7 +1277,7 @@ mod tests {
             simulation: None,
             output_dir: PathBuf::from("/tmp/out"),
         };
-        let s = format_summary_string(&summary);
+        let s = format_summary_string_reference(&summary);
 
         assert!(
             s.contains("iteration_limit"),
@@ -1313,7 +1295,7 @@ mod tests {
             simulation: None,
             output_dir: PathBuf::from("/tmp/out"),
         };
-        let s = format_summary_string(&summary);
+        let s = format_summary_string_reference(&summary);
 
         assert!(
             s.contains("3m 42s"),
@@ -1331,7 +1313,7 @@ mod tests {
             simulation: None,
             output_dir: PathBuf::from("/tmp/out"),
         };
-        let s = format_summary_string(&summary);
+        let s = format_summary_string_reference(&summary);
 
         assert!(
             s.contains("4.52304e4"),
@@ -1346,7 +1328,7 @@ mod tests {
             simulation: None,
             output_dir: PathBuf::from("/my/output/dir"),
         };
-        let s = format_summary_string(&summary);
+        let s = format_summary_string_reference(&summary);
 
         assert!(
             s.contains("/my/output/dir"),
@@ -1365,7 +1347,7 @@ mod tests {
             simulation: None,
             output_dir: PathBuf::from("/tmp/out"),
         };
-        let s = format_summary_string(&summary);
+        let s = format_summary_string_reference(&summary);
 
         assert!(
             s.contains("480 active / 1200 generated"),
@@ -1378,7 +1360,7 @@ mod tests {
     #[test]
     fn format_time_split_training_forward_line_shows_solve_and_wait() {
         let summary = make_run_summary(None);
-        let s = format_summary_string(&summary);
+        let s = format_summary_string_reference(&summary);
 
         let forward_line = s.lines().find(|l| l.contains("Forward"));
         assert!(forward_line.is_some(), "expected a Forward line in: {s}");
@@ -1394,9 +1376,9 @@ mod tests {
     }
 
     #[test]
-    fn format_time_split_training_backward_degrades_without_solve_data() {
+    fn format_time_split_training_backward_degrades_without_backward_wait() {
         let training = TrainingSummary {
-            total_backward_solve_seconds: None,
+            backward_wait_seconds: None,
             ..make_training_summary()
         };
         let summary = RunSummary {
@@ -1404,7 +1386,7 @@ mod tests {
             simulation: None,
             output_dir: PathBuf::from("/tmp/out"),
         };
-        let s = format_summary_string(&summary);
+        let s = format_summary_string_reference(&summary);
 
         let backward_line = s.lines().find(|l| l.contains("Backward"));
         assert!(backward_line.is_some(), "expected a Backward line in: {s}");
@@ -1426,7 +1408,7 @@ mod tests {
     #[test]
     fn format_phase_solve_wait_degrades_when_parallelism_zero() {
         let training = TrainingSummary {
-            parallelism: Some(0),
+            parallelism: 0,
             ..make_training_summary()
         };
         let summary = RunSummary {
@@ -1434,7 +1416,7 @@ mod tests {
             simulation: None,
             output_dir: PathBuf::from("/tmp/out"),
         };
-        let s = format_summary_string(&summary);
+        let s = format_summary_string_reference(&summary);
 
         let forward_line = s.lines().find(|l| l.contains("Forward"));
         assert!(forward_line.is_some(), "expected a Forward line in: {s}");
@@ -1465,7 +1447,7 @@ mod tests {
             simulation: None,
             output_dir: PathBuf::from("/tmp/out"),
         };
-        let s = format_summary_string(&summary);
+        let s = format_summary_string_reference(&summary);
         assert!(s.contains(&format_split_duration(forward_wall)), "got: {s}");
         assert!(
             s.contains(&format_split_duration(backward_wall)),
@@ -1488,7 +1470,7 @@ mod tests {
             simulation: None,
             output_dir: PathBuf::from("/tmp/out"),
         };
-        let s = format_summary_string(&summary);
+        let s = format_summary_string_reference(&summary);
         assert!(
             !s.contains("Time split"),
             "the training Time split block must be omitted entirely when phase-wall data is unavailable, got: {s}"
@@ -1520,7 +1502,7 @@ mod tests {
             simulation: None,
             output_dir: PathBuf::from("/tmp/out"),
         };
-        let s = format_summary_string(&summary);
+        let s = format_summary_string_reference(&summary);
         let serial_line = s.lines().find(|l| l.contains("Serial"));
         assert!(serial_line.is_some(), "expected a Serial line in: {s}");
         let serial_line = serial_line.expect("checked above");
@@ -1693,13 +1675,13 @@ mod tests {
     }
 
     #[test]
-    fn test_print_summary_does_not_panic() {
+    fn test_print_summary_reference_does_not_panic() {
         let summary = make_run_summary(None);
-        print_summary(&Term::buffered_stderr(), &summary);
+        print_summary_reference(&Term::buffered_stderr(), &summary);
     }
 
     #[test]
-    fn test_print_summary_with_simulation_does_not_panic() {
+    fn test_print_summary_reference_with_simulation_does_not_panic() {
         let sim = SimulationSummary {
             n_scenarios: 100,
             completed: 100,
@@ -1707,15 +1689,15 @@ mod tests {
             total_time_ms: 5_000,
             mean_cost: None,
             std_cost: None,
-            total_lp_solves: None,
-            total_first_try: None,
-            total_retried: None,
-            total_failed_solves: None,
-            total_solve_time_seconds: None,
-            parallelism: None,
+            total_lp_solves: 4000,
+            total_first_try: 3950,
+            total_retried: 40,
+            total_failed_solves: 10,
+            total_solve_time_seconds: 4.2,
+            parallelism: 2,
         };
         let summary = make_run_summary(Some(sim));
-        print_summary(&Term::buffered_stderr(), &summary);
+        print_summary_reference(&Term::buffered_stderr(), &summary);
     }
 
     // ── HydroModelSummary tests ────────────────────────────────────────────

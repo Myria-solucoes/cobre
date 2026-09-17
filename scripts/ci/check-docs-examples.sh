@@ -61,12 +61,12 @@ readonly TRAINING_METADATA_KEYS=(
 )
 
 # Expected top-level keys of simulation/metadata.json. Source of truth is the
-# SimulationMetadata struct's serde field names; solver_version is omitted
-# because the CLI simulation writer does not populate it.
+# SimulationMetadata struct's serde field names.
 readonly SIMULATION_METADATA_KEYS=(
   cobre_version
   hostname
   solver
+  solver_version
   started_at
   completed_at
   duration_seconds

@@ -4,15 +4,6 @@
 //!
 //! Provides commands for running optimization studies, validating input data,
 //! and inspecting results from the terminal.
-//!
-//! ## Subcommands
-//!
-//! | Command | Description |
-//! |---------|-------------|
-//! | `cobre run <CASE_DIR>` | Load, train, simulate, and write results |
-//! | `cobre validate <CASE_DIR>` | Validate a case directory |
-//! | `cobre schema export` | Export JSON Schema files for all input types |
-//! | `cobre version` | Print version and build information |
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -46,8 +37,6 @@ pub(crate) enum ColorWhen {
     Never,
 }
 
-/// Apply the resolved color setting to the `console` crate's global stderr flag.
-///
 /// Must be called before any output is written to stderr so that the banner,
 /// progress bars, and error messages all honour the chosen setting. `Auto` leaves
 /// the `console` crate's TTY auto-detection in place.
@@ -59,7 +48,6 @@ pub(crate) fn resolve_color(cli_color: ColorWhen) {
     }
 }
 
-/// Open infrastructure for power system computation.
 #[derive(Debug, Parser)]
 #[command(
     name = "cobre",
@@ -98,10 +86,7 @@ fn main() {
 
     resolve_color(cli.color);
 
-    // The default `warn` level surfaces library deprecation notices on stderr
-    // while staying quiet for ordinary runs; `RUST_LOG` overrides it. Init
-    // errors are ignored — the subscriber can only install once, and a CLI that
-    // cannot subscribe must still run its command.
+    // A subscriber can only install once, so a failed init must not stop the command.
     let _ = tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_target(false)

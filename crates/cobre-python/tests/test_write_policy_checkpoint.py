@@ -15,7 +15,10 @@ from typing import Any, Optional
 import pytest
 
 
-def _make_metadata(cost_scale_factor: Optional[float] = 2_500_000.0) -> dict[str, Any]:
+def _make_metadata(
+    cost_scale_factor: Optional[float] = 2_500_000.0,
+    season_manifest: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
     producer: dict[str, Any] = {
         "completed_iterations": 5,
         "final_lower_bound": 123.45,
@@ -32,13 +35,17 @@ def _make_metadata(cost_scale_factor: Optional[float] = 2_500_000.0) -> dict[str
     if cost_scale_factor is not None:
         producer["cost_scale_factor"] = cost_scale_factor
     # The neutral core: format_version defaults when omitted; the graph manifest
-    # is optional (a checkpoint authored from raw records carries none).
-    return {
+    # and season_manifest are optional (a checkpoint authored from raw records
+    # carries none).
+    metadata = {
         "cobre_version": "0.13.0",
         "created_at": "2026-07-30T00:00:00Z",
         "num_stages": 1,
         "producer": producer,
     }
+    if season_manifest is not None:
+        metadata["season_manifest"] = season_manifest
+    return metadata
 
 
 def _make_stage_cuts() -> list[dict[str, Any]]:
@@ -406,3 +413,122 @@ def test_write_policy_checkpoint_lag_coefficients_without_depth_raises(
         cobre.write_policy_checkpoint(
             str(tmp_path / "policy"), stage_cuts, _make_metadata()
         )
+
+
+def test_write_policy_checkpoint_season_manifest_round_trips(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A checkpoint authored with season_manifest reads back with the same
+    descriptor, and writing the loaded metadata produces a byte-identical
+    checkpoint file.
+    """
+    import cobre  # noqa: PLC0415
+    import cobre.results  # noqa: PLC0415
+
+    season_manifest = {
+        "cycle_code": 0,
+        "n_seasons": 3,
+        "hydro_orders": [
+            {"hydro_id": 1, "orders": [1, 2, 1]},
+            {"hydro_id": 6, "orders": [2, 2, 1]},
+        ],
+    }
+
+    first_dir = tmp_path / "first"
+    cobre.write_policy_checkpoint(
+        str(first_dir / "policy"),
+        _make_stage_cuts(),
+        _make_metadata(season_manifest=season_manifest),
+    )
+
+    loaded = cobre.results.load_policy(str(first_dir))
+    assert loaded["metadata"]["season_manifest"] == season_manifest
+
+    second_dir = tmp_path / "second"
+    cobre.write_policy_checkpoint(
+        str(second_dir / "policy"),
+        loaded["stage_cuts"],
+        loaded["metadata"],
+    )
+
+    first_manifest = (first_dir / "policy" / "manifest.bin").read_bytes()
+    second_manifest = (second_dir / "policy" / "manifest.bin").read_bytes()
+    assert first_manifest == second_manifest
+
+
+def test_write_policy_checkpoint_season_manifest_omitted_is_absent(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A checkpoint authored with today's _make_metadata() (no season_manifest
+    key) reads back with the absent descriptor.
+    """
+    import cobre  # noqa: PLC0415
+    import cobre.results  # noqa: PLC0415
+
+    cobre.write_policy_checkpoint(
+        str(tmp_path / "policy"), _make_stage_cuts(), _make_metadata()
+    )
+
+    loaded = cobre.results.load_policy(str(tmp_path))
+    assert loaded["metadata"]["season_manifest"] == {
+        "cycle_code": 255,
+        "n_seasons": 0,
+        "hydro_orders": [],
+    }
+
+
+def test_write_policy_checkpoint_season_manifest_unsorted_hydros_rejected_on_load(
+    tmp_path: pathlib.Path,
+) -> None:
+    """hydro_orders with non-ascending hydro_id values: the write succeeds, and
+    load_policy raises OutputError with 'not ascending by hydro_id'.
+    """
+    import cobre  # noqa: PLC0415
+    import cobre.errors  # noqa: PLC0415
+    import cobre.results  # noqa: PLC0415
+
+    season_manifest = {
+        "cycle_code": 0,
+        "n_seasons": 2,
+        "hydro_orders": [
+            {"hydro_id": 6, "orders": [1, 2]},
+            {"hydro_id": 1, "orders": [2, 1]},
+        ],
+    }
+
+    cobre.write_policy_checkpoint(
+        str(tmp_path / "policy"),
+        _make_stage_cuts(),
+        _make_metadata(season_manifest=season_manifest),
+    )
+
+    with pytest.raises(cobre.errors.OutputError, match=r"not ascending by hydro_id"):
+        cobre.results.load_policy(str(tmp_path))
+
+
+def test_write_policy_checkpoint_season_manifest_order_length_rejected_on_load(
+    tmp_path: pathlib.Path,
+) -> None:
+    """n_seasons=3 but one hydro with two orders: the write succeeds, and
+    load_policy raises OutputError with 'expected n_seasons=3'.
+    """
+    import cobre  # noqa: PLC0415
+    import cobre.errors  # noqa: PLC0415
+    import cobre.results  # noqa: PLC0415
+
+    season_manifest = {
+        "cycle_code": 0,
+        "n_seasons": 3,
+        "hydro_orders": [
+            {"hydro_id": 1, "orders": [1, 2]},
+        ],
+    }
+
+    cobre.write_policy_checkpoint(
+        str(tmp_path / "policy"),
+        _make_stage_cuts(),
+        _make_metadata(season_manifest=season_manifest),
+    )
+
+    with pytest.raises(cobre.errors.OutputError, match=r"expected n_seasons=3"):
+        cobre.results.load_policy(str(tmp_path))

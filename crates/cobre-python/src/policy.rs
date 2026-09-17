@@ -3,10 +3,10 @@
 //! `cobre_io`.
 //!
 //! Input dict shapes mirror what [`crate::results::load_policy`] emits, so a
-//! loaded checkpoint round-trips: load -> edit -> write, with one exception:
-//! `active_cut_indices` is written but not returned by `load_policy`, so a
-//! load → write cycle resets it (cut activity round-trips through each cut's
-//! `is_active`).
+//! loaded checkpoint round-trips: load -> edit -> write. `season_manifest` and
+//! `graph_manifest` round-trip; `active_cut_indices` is written but not returned
+//! by `load_policy`, so a load → write cycle resets it (cut activity round-trips
+//! through each cut's `is_active`).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -16,8 +16,8 @@ use pyo3::prelude::*;
 
 use cobre_io::{
     CheckpointManifest, ENTITY_SLOT_DATE_SENTINEL, EntitySlot, FORMAT_VERSION, GraphManifest,
-    ManifestEdge, ManifestNode, PolicyBasisRecord, PolicyCutRecord, ProducerBlock,
-    STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL, STAGE_CUTS_NODE_ID_SENTINEL,
+    HydroSeasonOrders, ManifestEdge, ManifestNode, PolicyBasisRecord, PolicyCutRecord,
+    ProducerBlock, STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL, STAGE_CUTS_NODE_ID_SENTINEL,
     STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, STAGE_STATES_NODE_ID_SENTINEL, SeasonManifest,
     StageCutsPayload, StageStatesPayload, StateFamily,
 };
@@ -187,6 +187,38 @@ impl From<PyGraphManifest> for GraphManifest {
     }
 }
 
+#[derive(Debug, FromPyObject)]
+#[pyo3(from_item_all)]
+pub(crate) struct PyHydroSeasonOrders {
+    hydro_id: i32,
+    orders: Vec<u32>,
+}
+
+#[derive(Debug, FromPyObject)]
+#[pyo3(from_item_all)]
+pub(crate) struct PySeasonManifest {
+    cycle_code: u8,
+    n_seasons: u32,
+    hydro_orders: Vec<PyHydroSeasonOrders>,
+}
+
+impl From<PySeasonManifest> for SeasonManifest {
+    fn from(s: PySeasonManifest) -> Self {
+        Self {
+            cycle_code: s.cycle_code,
+            n_seasons: s.n_seasons,
+            hydro_orders: s
+                .hydro_orders
+                .into_iter()
+                .map(|h| HydroSeasonOrders {
+                    hydro_id: h.hydro_id,
+                    orders: h.orders,
+                })
+                .collect(),
+        }
+    }
+}
+
 /// The producer-namespaced metadata block, mirroring what
 /// [`crate::results::load_policy`] emits under `metadata["producer"]`.
 #[derive(Debug, FromPyObject)]
@@ -243,6 +275,8 @@ pub(crate) struct PyPolicyCheckpointMetadata {
     num_stages: u32,
     #[pyo3(default)]
     graph_manifest: Option<PyGraphManifest>,
+    #[pyo3(default)]
+    season_manifest: Option<PySeasonManifest>,
     producer: PyProducerBlock,
 }
 
@@ -257,9 +291,11 @@ impl From<PyPolicyCheckpointMetadata> for CheckpointManifest {
                 .graph_manifest
                 .map(GraphManifest::from)
                 .unwrap_or_default(),
+            season_manifest: m
+                .season_manifest
+                .map(SeasonManifest::from)
+                .unwrap_or_default(),
             producer: m.producer.into(),
-            // A Python author writing a checkpoint has no season data to supply.
-            season_manifest: SeasonManifest::default(),
         }
     }
 }
@@ -402,7 +438,10 @@ fn build_stage_cuts_data(
 /// `ValueError` when a cut's `coefficients` length does not match its stage's
 /// `state_dimension`, a stage's state data length does not match
 /// `count * state_dimension`, or (under `inflow_lag_depth`) a manifest lacks a
-/// leading storage block or an inflow-lag coefficient is unplaceable; otherwise
+/// leading storage block or an inflow-lag coefficient is unplaceable. A
+/// `season_manifest` whose `hydro_orders` are not ascending by `hydro_id` or
+/// whose `orders` lengths disagree with `n_seasons` is written as given and
+/// rejected by [`crate::results::load_policy`] with `OutputError`. Otherwise
 /// the `cobre.errors` leaf mapped from the underlying [`cobre_io::OutputError`].
 #[pyfunction]
 #[pyo3(signature = (path, stage_cuts, metadata, stage_bases=None, stage_states=None, inflow_lag_depth=None))]

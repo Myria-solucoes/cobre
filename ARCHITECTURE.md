@@ -107,10 +107,10 @@ SolverInterface`).
 
 ### Reserved crates (not yet implemented)
 
-Five crate names are reserved in the workspace with a skeleton `Cargo.toml`
+Reserved crate names hold skeleton stub files — each with a `Cargo.toml`
 (empty `[dependencies]`), a stub `src/lib.rs` or `src/main.rs`, and a README
-stating their intended future scope. None currently build any functionality
-or participate in the dependency graph below:
+stating their intended future scope — until their functionality is implemented.
+None currently build any functionality or participate in the dependency graph below:
 
 - **[`cobre-mcp`](crates/cobre-mcp/README.md)** — reserved for an MCP
   (Model Context Protocol) server binary for AI-agent integration; depend on
@@ -180,13 +180,11 @@ graph TD
     classDef reserved stroke-dasharray: 4 3;
 ```
 
-20 edges: 3 among the foundation/infrastructure/I-O crates
-(`core`→`io`, `core`→`stochastic`, `stochastic`→`io`), 5 into `cobre-sddp`
-(`core`, `io`, `solver`, `comm`, `stochastic`), and 6 each into `cobre-cli`
-and `cobre-python` (`core`, `io`, `solver`, `comm`, `stochastic`, `sddp`).
-`cobre-cli` and `cobre-python` depend directly on `cobre-core`/`cobre-io`/
-`cobre-solver`/`cobre-comm`/`cobre-stochastic` in addition to `cobre-sddp` —
-they do not reach those crates only transitively through `cobre-sddp`.
+The diagram shows direct workspace-member dependencies as declared in each crate's
+`Cargo.toml` `[dependencies]` — none are inferred or transitive-only. `cobre-cli`
+and `cobre-python` depend directly on `cobre-core`, `cobre-io`, `cobre-solver`,
+`cobre-comm` and `cobre-stochastic` in addition to `cobre-sddp`; they do not reach
+those crates only transitively through `cobre-sddp`.
 
 ## Case file formats — JSON for structure, Parquet for bulk
 
