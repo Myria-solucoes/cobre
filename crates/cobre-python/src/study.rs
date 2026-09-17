@@ -29,7 +29,7 @@ use crate::errors::{ErrorSource, convert_error};
 use crate::io::build_warnings_list;
 use crate::model::PySystem;
 use crate::run::{
-    LoadedStudy, PhaseError, SimSummary, TrainingPhaseResult, apply_training_policy_mode,
+    LoadedStudy, PhaseError, RunError, SimSummary, TrainingPhaseResult, apply_training_policy_mode,
     build_study_setup, reconstruct_policy_from_checkpoint, run_in_scoped_pool,
     run_simulation_phase_py, run_training_phase_py, run_training_phase_py_streaming,
     write_evaporation_models_if_any, write_fixed_delivery_if_any,
@@ -269,6 +269,9 @@ impl Study {
     }
 
     /// GIL-free constructor: load case, resolve config, build [`StudySetup`], write front-half sidecars.
+    // needless_pass_by_value: `overrides` is only borrowed via `.as_ref()`, but
+    // taking it by value keeps the signature identical to the owned map `new`
+    // converts under the GIL and `run_via_study` already holds.
     #[allow(clippy::needless_pass_by_value)]
     pub(crate) fn new_native(
         case_dir: &std::path::Path,
@@ -277,9 +280,6 @@ impl Study {
         overrides: Option<serde_json::Map<String, serde_json::Value>>,
     ) -> Result<Self, PhaseError> {
         let resolved_output = output_dir.unwrap_or_else(|| case_dir.join("output"));
-
-        let loaded: Result<LoadedStudy, PhaseError> =
-            build_study_setup(case_dir, &resolved_output, overrides.as_ref());
 
         let LoadedStudy {
             setup,
@@ -290,7 +290,7 @@ impl Study {
             stochastic_summary,
             hydro_models_summary,
             warnings,
-        } = loaded?;
+        } = build_study_setup(case_dir, &resolved_output, overrides.as_ref())?;
 
         Ok(Study {
             setup,
@@ -311,9 +311,7 @@ impl Study {
     pub(crate) fn train_native(
         &mut self,
         on_iteration: Option<Py<PyAny>>,
-    ) -> Result<Policy, crate::run::RunError> {
-        use crate::run::RunError;
-
+    ) -> Result<Policy, RunError> {
         if !self.config.training.enabled {
             let synthetic = TrainingResult::new(
                 0.0,
@@ -447,18 +445,14 @@ impl Study {
     /// `{"training.tree_seed": 7}`) converted under the GIL before the load runs
     /// with the GIL released.
     ///
-    /// Warning diagnostics (simulation write warnings, policy validation warnings,
-    /// and boundary reconciliation summaries) are written directly to standard error
-    /// from Rust, with no parameter to suppress them. These diagnostics are emitted to
-    /// file descriptor 2 and are **not** captured by `contextlib.redirect_stderr` or
-    /// pytest's `capsys`.
-    ///
     /// # Errors
     ///
     /// - Raises `OSError` when `case_dir` does not exist (before any work).
+    /// - Raises a plain `ValueError` (not the typed `ValidationError`) if
+    ///   `threads == 0`.
     /// - Raises `ValidationError` (a `ValueError`) on a malformed override dict
-    ///   (non-str key or unsupported value type), on a config override/parse/read
-    ///   failure, or if `threads == 0`.
+    ///   (non-str key or unsupported value type) or on a config
+    ///   override/parse/read failure.
     /// - Raises `CaseIoError` (an `OSError`) on a sidecar write failure or an
     ///   unreadable case file.
     /// - Raises `ValidationError` on a schema, parse, or constraint failure in
@@ -469,6 +463,8 @@ impl Study {
     ///   construction failure.
     #[new]
     #[pyo3(signature = (case_dir, output_dir=None, threads=None, config_overrides=None))]
+    // needless_pass_by_value: PyO3's from-Python extraction hands over owned
+    // values, so the `PathBuf`/`Bound` arguments cannot be borrowed here.
     #[allow(clippy::needless_pass_by_value)]
     fn new(
         py: Python<'_>,
@@ -588,6 +584,11 @@ impl Study {
     /// [`Study::load_policy`] to load a previously trained policy from disk before
     /// calling [`Study::simulate`].
     ///
+    /// Policy validation warnings and boundary reconciliation summaries are
+    /// written directly to standard error from Rust, with no parameter to
+    /// suppress them. They go to file descriptor 2 and are **not** captured by
+    /// `contextlib.redirect_stderr` or pytest's `capsys`.
+    ///
     /// # Arguments
     ///
     /// - `on_iteration` — optional Python callable invoked once per training
@@ -608,8 +609,6 @@ impl Study {
     ///   re-raised verbatim AFTER the training artifacts are written.
     #[pyo3(signature = (on_iteration=None))]
     fn train(&mut self, py: Python<'_>, on_iteration: Option<Py<PyAny>>) -> PyResult<Policy> {
-        use crate::run::RunError;
-
         match py.detach(|| self.train_native(on_iteration)) {
             Ok(policy) => Ok(policy),
             Err(RunError::Callback(err)) => Err(err),
@@ -682,6 +681,11 @@ impl Study {
     /// [`crate::run::run_via_study`], invoking the same writers; byte-identity
     /// is not yet asserted by a test.
     ///
+    /// Simulation write warnings are written directly to standard error from
+    /// Rust, with no parameter to suppress them. They go to file descriptor 2
+    /// and are **not** captured by `contextlib.redirect_stderr` or pytest's
+    /// `capsys`.
+    ///
     /// # Errors
     ///
     /// - `SolverError` (a `RuntimeError`) when `policy` carries no Benders cuts
@@ -701,30 +705,10 @@ impl Study {
         policy: PyRef<'_, Policy>,
         output_dir: Option<PathBuf>,
     ) -> PyResult<Py<PyAny>> {
-        let out_dir = output_dir.unwrap_or_else(|| self.output_dir.clone());
-
-        if policy.fcf.total_active_cuts() == 0 {
-            return Err(convert_error(ErrorSource::Message(
-                "Policy has no cuts to simulate; when training is disabled, call \
-                 Study.load_policy() to load a trained policy before simulate()"
-                    .to_string(),
-            )));
-        }
-
-        self.setup.replace_fcf(policy.fcf.clone());
-
-        let threads = self.threads;
-        let setup = &mut self.setup;
-        let system = self.system.as_ref();
-        let training_result = &policy.training_result;
-
-        let summary: Result<SimSummary, PhaseError> = py.detach(|| {
-            run_in_scoped_pool(threads, |n| {
-                run_simulation_phase_py(setup, &out_dir, system, training_result, n)
-            })?
-        });
-
-        let summary = summary.map_err(phase_error_to_pyerr)?;
+        let policy: &Policy = &policy;
+        let summary = py
+            .detach(|| self.simulate_native(policy, output_dir))
+            .map_err(phase_error_to_pyerr)?;
 
         let dict = PyDict::new(py);
         dict.set_item("n_scenarios", summary.n_scenarios)?;

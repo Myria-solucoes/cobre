@@ -229,7 +229,6 @@ def test_validate_never_raises_for_missing_case() -> None:
     """validate() must not raise any exception, even for bad inputs."""
     import cobre.io  # noqa: PLC0415
 
-    # Should not raise — must return a dict with valid=False.
     result = cobre.io.validate("/dev/null/this/cannot/exist")
     assert isinstance(result, dict)
     assert result["valid"] is False

@@ -459,7 +459,6 @@ def test_train_and_simulate_docstrings_name_written_paths(
     policy = study.train()
     study.simulate(policy)
 
-    # Unconditional train paths
     train_paths = [
         "policy/",  # Policy tree directory
         "training/metadata.json",
@@ -484,18 +483,15 @@ def test_train_and_simulate_docstrings_name_written_paths(
     for path in train_paths:
         full_path = tmp_path / path
         if path.endswith("/"):
-            # Directory check
             assert full_path.exists() and full_path.is_dir(), (
                 f"train() must write {path} directory"
             )
         else:
-            # File check
             assert full_path.exists() and full_path.is_file(), (
                 f"train() must write {path} file"
             )
         assert path in train_doc, f"train() docstring must mention {path}"
 
-    # Check dictionary files exist and their directory is mentioned
     assert "training/dictionaries/" in train_doc, (
         "train() docstring must mention training/dictionaries/"
     )
@@ -504,11 +500,9 @@ def test_train_and_simulate_docstrings_name_written_paths(
         assert full_path.exists() and full_path.is_file(), (
             f"train() must write {dict_file} file"
         )
-        # Check that the filename (not full path) is mentioned
         filename = dict_file.split("/")[-1]
         assert filename in train_doc, f"train() docstring must mention {filename}"
 
-    # Unconditional simulate paths
     simulate_paths = [
         "simulation/metadata.json",
         "simulation/_SUCCESS",
@@ -528,7 +522,6 @@ def test_train_and_simulate_docstrings_name_written_paths(
         )
         assert path in simulate_doc, f"simulate() docstring must mention {path}"
 
-    # The four historically drifted paths must be absent from both docstrings
     false_paths = [
         "training/solver_stats.parquet",
         "training/cut_selection.parquet",

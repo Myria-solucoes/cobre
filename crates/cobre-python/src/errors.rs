@@ -177,12 +177,10 @@ pub(crate) enum ErrorSource<'a> {
     Message(String),
 }
 
-/// Build a [`CaseIoError`] `PyErr` from a message.
 fn case_io_error(py: Python<'_>, message: &str) -> PyErr {
     new_leaf_err(py, &CASE_IO_ERROR, message)
 }
 
-/// Build a [`ValidationError`] `PyErr` from a message.
 fn validation_error(py: Python<'_>, message: &str) -> PyErr {
     new_leaf_err(py, &VALIDATION_ERROR, message)
 }

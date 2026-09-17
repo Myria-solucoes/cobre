@@ -21,20 +21,6 @@ import re
 import sys
 from pathlib import Path
 
-# Patterns for imports and calls.
-# Match `use cobre_io::` and `use cobre_sddp::orchestration::` imports.
-IMPORT_RE = re.compile(
-    r"""
-    ^\s*(?:pub\s+)?use\s+
-    (?:cobre_io|cobre_sddp::orchestration)
-    (?:::[\w:]+)*\s*
-    (?:\{[^}]+\}|::[\w]+)
-    \s*(?:as\s+\w+)?
-    \s*;
-    """,
-    re.VERBOSE | re.MULTILINE,
-)
-
 # Normalisation map: different names that map to the same logical write.
 NORMALISE: dict[str, str] = {
     "write_checkpoint": "write_policy_checkpoint",
@@ -50,10 +36,9 @@ def parse_imports(text: str) -> dict[str, str]:
     import_map: dict[str, str] = {}
 
     # Join continuation lines into whole statements by accumulating until `;`.
-    lines_iter = iter(text.splitlines())
     current = ""
 
-    for line in lines_iter:
+    for line in text.splitlines():
         stripped = line.strip()
         # Skip comments and attributes.
         if stripped.startswith("//") or stripped.startswith("#["):
@@ -80,7 +65,6 @@ def parse_imports(text: str) -> dict[str, str]:
 
 def _parse_import_statement(statement: str, import_map: dict[str, str]) -> None:
     """Parse a single import statement and update import_map."""
-    # Extract the path and items.
     statement = statement.strip()
 
     # Handle `as` aliases.
@@ -99,7 +83,6 @@ def _parse_import_statement(statement: str, import_map: dict[str, str]) -> None:
         # Extract base path and items.
         match = re.match(r".*use\s+([\w:]+)::\{([^}]+)\}", statement)
         if match:
-            base = match.group(1)
             items_str = match.group(2)
 
             for item in items_str.split(","):
@@ -138,15 +121,8 @@ def _extract_from_text(text: str, names: set[str], import_map: dict[str, str]) -
 
         # Match fully-qualified calls.
         for match in re.finditer(
-            r"cobre_io::([\w:]+::)*(write_\w+|export_\w+)\s*\(", line
-        ):
-            name = match.group(2)
-            if name:
-                name = NORMALISE.get(name, name)
-                names.add(name)
-
-        for match in re.finditer(
-            r"cobre_sddp::orchestration::([\w:]+::)*(write_\w+|export_\w+)\s*\(", line
+            r"(?:cobre_io|cobre_sddp::orchestration)::([\w:]+::)*(write_\w+|export_\w+)\s*\(",
+            line,
         ):
             name = match.group(2)
             if name:

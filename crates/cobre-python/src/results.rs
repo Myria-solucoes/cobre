@@ -96,6 +96,16 @@ fn read_json_file(path: &Path) -> PyResult<serde_json::Value> {
         .map_err(|e| PyValueError::new_err(format!("malformed JSON in {}: {e}", path.display())))
 }
 
+fn open_parquet_file(path: &Path, missing_label: &str) -> PyResult<fs::File> {
+    fs::File::open(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            PyFileNotFoundError::new_err(format!("{missing_label} not found: {}", path.display()))
+        } else {
+            PyOSError::new_err(format!("failed to open {}: {e}", path.display()))
+        }
+    })
+}
+
 /// Load and inspect the output artifacts produced by a completed solver run.
 ///
 /// Returns a nested dict with the following structure:
@@ -235,16 +245,7 @@ pub fn load_convergence(py: Python<'_>, output_dir: PathBuf) -> PyResult<Py<PyAn
 
     let parquet_path = output_dir.join("training").join("convergence.parquet");
 
-    let file = fs::File::open(&parquet_path).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            PyFileNotFoundError::new_err(format!(
-                "parquet file not found: {}",
-                parquet_path.display()
-            ))
-        } else {
-            PyOSError::new_err(format!("failed to open {}: {e}", parquet_path.display()))
-        }
-    })?;
+    let file = open_parquet_file(&parquet_path, "parquet file")?;
 
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
         .map_err(|e| PyOSError::new_err(format!("failed to open Parquet file: {e}")))?;
@@ -375,16 +376,7 @@ pub fn load_convergence_arrow(py: Python<'_>, output_dir: PathBuf) -> PyResult<P
     let parquet_path = output_dir.join("training").join("convergence.parquet");
 
     let ipc_bytes = py.detach(|| -> PyResult<Vec<u8>> {
-        let file = fs::File::open(&parquet_path).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                PyFileNotFoundError::new_err(format!(
-                    "parquet file not found: {}",
-                    parquet_path.display()
-                ))
-            } else {
-                PyOSError::new_err(format!("failed to open {}: {e}", parquet_path.display()))
-            }
-        })?;
+        let file = open_parquet_file(&parquet_path, "parquet file")?;
 
         let builder = ParquetRecordBatchReaderBuilder::try_new(file)
             .map_err(|e| PyOSError::new_err(format!("failed to open Parquet file: {e}")))?;
@@ -955,16 +947,7 @@ fn read_parquet_partition_into(
     scenario_id_val: i64,
     result_list: &Bound<'_, PyList>,
 ) -> PyResult<()> {
-    let file = fs::File::open(parquet_path).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            PyFileNotFoundError::new_err(format!(
-                "simulation Parquet file not found: {}",
-                parquet_path.display()
-            ))
-        } else {
-            PyOSError::new_err(format!("failed to open {}: {e}", parquet_path.display()))
-        }
-    })?;
+    let file = open_parquet_file(parquet_path, "simulation Parquet file")?;
 
     let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| {
         PyOSError::new_err(format!(
@@ -1172,16 +1155,7 @@ fn read_parquet_partition_as_batches(
     out_batches: &mut Vec<RecordBatch>,
     out_schema: &mut Option<Arc<Schema>>,
 ) -> PyResult<()> {
-    let file = fs::File::open(parquet_path).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            PyFileNotFoundError::new_err(format!(
-                "simulation Parquet file not found: {}",
-                parquet_path.display()
-            ))
-        } else {
-            PyOSError::new_err(format!("failed to open {}: {e}", parquet_path.display()))
-        }
-    })?;
+    let file = open_parquet_file(parquet_path, "simulation Parquet file")?;
 
     let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| {
         PyOSError::new_err(format!(

@@ -202,18 +202,6 @@ pub(crate) struct SimSummary {
     pub(crate) completed: u32,
 }
 
-/// Build a scoped rayon thread pool for the requested thread count and run the
-/// closure inside `pool.install(...)`.
-///
-/// A fresh pool per call — not a process-global pool, which can only be
-/// configured once per process — so two sequential `run` invocations with
-/// different thread counts each honor their own value. The effective `n` is
-/// passed into the closure so callers can record it in metadata.
-///
-/// # Errors
-///
-/// Returns a descriptive `Err(String)` on pool-construction failure rather than
-/// silently falling back to an implicit pool.
 /// Validate that `threads`, when given, is >= 1.
 ///
 /// `None` is valid (means "let the runtime choose", defaulting to 1);
@@ -229,6 +217,18 @@ pub(crate) fn validated_threads(threads: Option<u32>) -> PyResult<Option<u32>> {
     Ok(threads)
 }
 
+/// Build a scoped rayon thread pool for the requested thread count and run the
+/// closure inside `pool.install(...)`.
+///
+/// A fresh pool per call — not a process-global pool, which can only be
+/// configured once per process — so two sequential `run` invocations with
+/// different thread counts each honor their own value. The effective `n` is
+/// passed into the closure so callers can record it in metadata.
+///
+/// # Errors
+///
+/// Returns a descriptive `Err(String)` on pool-construction failure rather than
+/// silently falling back to an implicit pool.
 pub(crate) fn run_in_scoped_pool<T>(
     threads: Option<u32>,
     f: impl FnOnce(usize) -> T + Send,
@@ -587,8 +587,9 @@ pub(crate) fn write_training_artifacts(
 
 /// Write the trained FPHA hyperplanes sidecar, when the model produced any.
 ///
-/// Shared call site so both [`run_via_study`] and `Study::train` emit it
-/// identically. Training-only: simulation-only runs do not write it.
+/// Both `run()` and `Study.train()` reach this through the shared
+/// `Study::train_native`, so they emit it identically. Training-only:
+/// simulation-only runs do not write it.
 pub(crate) fn write_fpha_hyperplanes_if_any(
     output_dir: &Path,
     setup: &StudySetup,
@@ -606,9 +607,9 @@ pub(crate) fn write_fpha_hyperplanes_if_any(
 /// Write the resolved evaporation-model coefficients sidecar, when the case
 /// models evaporation for at least one hydro.
 ///
-/// Both Python write sites ([`run_via_study`] and `Study::train`) must emit this
-/// to match the CLI's `write_evaporation_models` output (the Python-parity hard
-/// rule); the shared call site is what holds them to it.
+/// Both `run()` and `Study.train()` reach this through the shared
+/// `Study::train_native`, which keeps them matched to the CLI's
+/// `write_evaporation_models` output (the Python-parity hard rule).
 pub(crate) fn write_evaporation_models_if_any(
     output_dir: &Path,
     setup: &StudySetup,
@@ -628,9 +629,9 @@ pub(crate) fn write_evaporation_models_if_any(
 /// Write the resolved generic-constraint echo sidecar, when the case declares at
 /// least one generic constraint.
 ///
-/// Both Python write sites ([`run_via_study`] and `Study::train`) must emit this
-/// to match the CLI's `write_generic_constraint_echo` output (the Python-parity
-/// hard rule).
+/// Both `run()` and `Study.train()` reach this through the shared
+/// `Study::train_native`, which keeps them matched to the CLI's
+/// `write_generic_constraint_echo` output (the Python-parity hard rule).
 pub(crate) fn write_generic_constraint_echo_if_any(
     output_dir: &Path,
     setup: &StudySetup,
@@ -650,9 +651,9 @@ pub(crate) fn write_generic_constraint_echo_if_any(
 
 /// Write the run-level fixed post-horizon commitment echo.
 ///
-/// Both Python write sites ([`run_via_study`] and `Study::train`) must emit this
-/// to match the CLI's `write_fixed_delivery` output (the Python-parity hard
-/// rule).
+/// Both `run()` and `Study.train()` reach this through the shared
+/// `Study::train_native`, which keeps them matched to the CLI's
+/// `write_fixed_delivery` output (the Python-parity hard rule).
 pub(crate) fn write_fixed_delivery_if_any(
     output_dir: &Path,
     setup: &StudySetup,
@@ -667,9 +668,9 @@ pub(crate) fn write_fixed_delivery_if_any(
 /// in (`config.exports.fpha_deviation_points`) AND the fit produced any points.
 ///
 /// Off by default, so a default run writes no file and is byte-identical to the
-/// CLI. Both Python write sites ([`run_via_study`] and `Study::train`) must call
-/// this to match the CLI's `write_fpha_deviation_points` output (the
-/// Python-parity hard rule); the shared helper is what holds them to it.
+/// CLI. Both `run()` and `Study.train()` reach this through the shared
+/// `Study::train_native`, which keeps them matched to the CLI's
+/// `write_fpha_deviation_points` output (the Python-parity hard rule).
 pub(crate) fn write_fpha_deviation_points_if_any(
     output_dir: &Path,
     setup: &StudySetup,

@@ -9,7 +9,7 @@ import pytest
 
 def test_module_census_matches_registered_submodules() -> None:
     """The README's `## Modules` section lists all public submodules."""
-    import cobre
+    import cobre  # noqa: F401 -- registers the cobre.* submodules in sys.modules
 
     readme_path = Path(__file__).resolve().parents[1] / "README.md"
     readme_text = readme_path.read_text(encoding="utf-8")

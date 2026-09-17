@@ -20,7 +20,6 @@ def test_errors_importable_and_subclass_builtins() -> None:
     """The eight classes import from cobre.errors and subclass the right builtins."""
     import cobre.errors as e  # noqa: PLC0415
 
-    # All eight names resolve from cobre.errors.
     assert e.CobreError is not None
     assert e.ValidationError is not None
     assert e.CaseIoError is not None
@@ -111,8 +110,6 @@ def test_study_empty_dir_raises_validation_error(tmp_path: pathlib.Path) -> None
     output = tmp_path / "output"
 
     with pytest.raises(cobre.errors.ValidationError, match="constraint violation"):
-        import cobre  # noqa: PLC0415
-
         cobre.Study(str(empty_case), output_dir=str(output))
 
 
@@ -144,7 +141,6 @@ def test_validation_failure_raises_validation_error(tmp_path: pathlib.Path) -> N
     empty_case = tmp_path / "empty_case"
     empty_case.mkdir()
 
-    # Raises ValidationError with the verbatim "constraint violation" message.
     with pytest.raises(cobre.errors.ValidationError, match="constraint violation"):
         cobre.io.load_case(str(empty_case))
 
@@ -182,7 +178,6 @@ def test_io_failure_raises_caseio_error(tmp_path: pathlib.Path) -> None:
 
     os.chmod(out, 0o500)  # read + execute, no write
     try:
-        # Raises CaseIoError carrying the verbatim "output write error" message.
         with pytest.raises(cobre.errors.CaseIoError, match="output write error"):
             cobre.run.run(str(case_dir), output_dir=str(out))
 

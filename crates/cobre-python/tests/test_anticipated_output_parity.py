@@ -34,7 +34,6 @@ import pathlib
 import shutil
 
 import pyarrow.parquet as pq
-import pytest
 
 from _cobre_cli import run_cli
 

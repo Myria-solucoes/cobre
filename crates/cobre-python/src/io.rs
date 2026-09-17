@@ -59,12 +59,10 @@ fn load_error_kind(err: &LoadError) -> &'static str {
 
 /// Load and validate the effective config for [`validate`]'s phase 7.
 ///
-/// When `overrides` is `None` or empty this is exactly [`cobre_io::parse_config`].
-/// Otherwise the file is read to a `serde_json::Value` and deep-merged with the
-/// overrides via [`cobre_io::Config::with_overrides`], which re-deserializes and
-/// runs the same `validate_config` checks. Both branches yield a [`LoadError`] on
-/// failure, so the caller's [`load_error_kind`] mapping applies uniformly —
-/// overrides are validated identically to an edited `config.json`.
+/// Deep-merges `overrides` onto the config file via
+/// [`cobre_io::Config::with_overrides`] when present, so overrides are
+/// validated identically to an edited `config.json`; otherwise behaves like
+/// [`cobre_io::parse_config`].
 fn load_validate_config(
     config_path: &std::path::Path,
     overrides: Option<&serde_json::Map<String, serde_json::Value>>,

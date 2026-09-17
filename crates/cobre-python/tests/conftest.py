@@ -37,5 +37,5 @@ def cli_binary(pytestconfig: Config) -> pathlib.Path:
     Uses the `--require-cli-binary` flag to determine whether absence is a
     skip (default, for local development) or a failure (CI).
     """
-    required = pytestconfig.getoption("--require-cli-binary", default=False)
+    required = pytestconfig.getoption("--require-cli-binary")
     return resolve_cli_binary(_REPO_ROOT, required=required)
