@@ -27,50 +27,17 @@ Run with (from the repo root)::
 from __future__ import annotations
 
 import pathlib
-import subprocess
 
 import pytest
+
+from _cobre_cli import run_cli
 
 D12_CASE = "examples/deterministic/d12-par-annual"
 
 
-def _cli_binary() -> pathlib.Path:
-    """Return the path to the compiled ``cobre`` CLI binary.
-
-    Looks for a release build first, then a debug build.  Skips the test
-    with a clear message if neither is found.
-    """
-    repo_root = pathlib.Path(__file__).parents[3]
-    for profile in ("release", "debug"):
-        candidate = repo_root / "target" / profile / "cobre"
-        if candidate.is_file():
-            return candidate
-    pytest.skip(
-        "No compiled `cobre` binary found in target/release or target/debug. "
-        "Run `cargo build -p cobre-cli --release` first."
-    )
-    raise RuntimeError("unreachable: pytest.skip raises Skipped")
-
-
-def _run_cli(case_dir: pathlib.Path, output_dir: pathlib.Path) -> None:
-    """Run the cobre CLI for ``case_dir`` and write outputs to ``output_dir``."""
-    binary = _cli_binary()
-    result = subprocess.run(
-        [str(binary), "run", str(case_dir), "--output", str(output_dir)],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=120,
-    )
-    if result.returncode != 0:
-        pytest.fail(
-            f"cobre CLI failed (exit {result.returncode}):\n"
-            f"stdout: {result.stdout}\n"
-            f"stderr: {result.stderr}"
-        )
-
-
-def test_inflow_annual_component_byte_identical(tmp_path: pathlib.Path) -> None:
+def test_inflow_annual_component_byte_identical(
+    tmp_path: pathlib.Path, cli_binary: pathlib.Path
+) -> None:
     """CLI and Python produce byte-identical ``inflow_annual_component.parquet``.
 
     Both the CLI and Python paths write through the same Rust writer with
@@ -94,7 +61,7 @@ def test_inflow_annual_component_byte_identical(tmp_path: pathlib.Path) -> None:
     py_out.mkdir()
 
     # Run CLI.
-    _run_cli(case_dir, cli_out)
+    run_cli(case_dir, cli_out, cli_binary)
 
     # Run Python.
     cobre_run.run(str(case_dir), output_dir=str(py_out))

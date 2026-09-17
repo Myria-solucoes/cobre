@@ -557,10 +557,19 @@ jobs:
         run: |
           source ../../.venv/bin/activate
           maturin develop --release
+      - name: Build the CLI for the parity tests
+        run: cargo build --release -p cobre-cli
+      - name: Run Rust tests for the bindings crate
+        if: matrix.python-version == '3.12'
+        run: |
+          source .venv/bin/activate
+          export LD_LIBRARY_PATH="$(python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))'):${LD_LIBRARY_PATH:-}"
+          cargo test --manifest-path crates/cobre-python/Cargo.toml \
+            --no-default-features --features highs
       - name: Run Python tests with coverage
         run: |
           source .venv/bin/activate
-          pytest crates/cobre-python/tests/ -v --cov=cobre --cov-report=xml:python-coverage.xml
+          pytest crates/cobre-python/tests/ -v --cov=cobre --cov-report=xml:python-coverage.xml --require-cli-binary
       # Execute the quickstart notebook end-to-end against the locally built
       # wheel (the `maturin develop` artifact above — never a PyPI install) so
       # it cannot silently break. Run once on the lowest matrix Python; nbmake

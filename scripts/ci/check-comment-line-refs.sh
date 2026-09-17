@@ -16,17 +16,18 @@
 #     * comma-chained form   — `file.rs:10,15`  (`:N,M` line list)
 #   Only the token span is reported (grep -oP style), not the whole comment.
 #
-# Scope: production source under crates/*/src/ (including stub crates). The
+# Scope: production source under crates/*/src/ (including stub crates) and the
+#   shipped Python package under crates/cobre-python/python. For .rs files the
 #   cfg(test) tail-block awk pre-filter (borrowed from check-comment-refs.sh /
 #   check-no-plan-leaks.sh) drops everything from the first `#[cfg(test)]` line
-#   onward, so test-scope comments are out of scope. Production src is currently
-#   clean (the line refs were swept to stable symbols), so a clean tree prints
-#   no hits.
+#   onward, so test-scope comments are out of scope. For .py/.pyi files no
+#   comment-marker filter applies (citations live inside docstrings) and no
+#   cfg(test) block exists (stubs have no tail block).
 #
-#   Known limitation (same as the sibling gates): the exclusion assumes the test
-#   module is a tail block. Files with a mid-file test module followed by
-#   production code would incorrectly skip that trailing code. In practice cobre
-#   files follow the tail-block convention.
+#   Known limitation for .rs files (same as the sibling gates): the exclusion
+#   assumes the test module is a tail block. Files with a mid-file test module
+#   followed by production code would incorrectly skip that trailing code. In
+#   practice cobre files follow the tail-block convention.
 #
 # Reporting: each hit is printed as `FILE:LINE: <matched token span>` under an
 #   `ADVISORY:` banner, followed by a footer.
@@ -58,6 +59,12 @@ readonly SCAN_DIRS=(
     "${REPO_ROOT}/crates/cobre-tui/src"
 )
 
+# Shipped Python package: type stubs and package sources are read by users
+# and IDEs, so a line citation there rots exactly as it does in .rs source.
+readonly STUB_DIRS=(
+    "${REPO_ROOT}/crates/cobre-python/python"
+)
+
 # Token pattern (grep -oP extracts the matched span only).
 #   [a-z_]+\.rs            — a lowercase-snake basename ending in `.rs`
 #   :[0-9]+                — the first line number
@@ -72,6 +79,14 @@ readonly TOKEN_PATTERN='[a-z_]+\.rs:[0-9]+((\x{2013}[0-9]+)|(,[0-9]+))*'
 # (covers `//`, `///`, and `//!`).
 emit_comment_lines() {
     cs_emit_comment_lines "$1"
+}
+
+# emit_stub_lines <file>
+#   Emit "<file>:<lineno>:<line>" for every line. Unlike the .rs path there is
+#   no cfg(test) tail block to truncate and no comment marker to filter on --
+#   a stub's citations live inside docstrings.
+emit_stub_lines() {
+    awk -v f="$1" '{ printf "%s:%d:%s\n", f, NR, $0 }' "$1"
 }
 
 # From a pre-filtered `FILE:LINE:CONTENT` stream, re-extract each matched TOKEN
@@ -101,6 +116,14 @@ for dir in "${SCAN_DIRS[@]}"; do
         [[ -n "$file_stream" ]] || continue
         comment_stream+="${file_stream}"$'\n'
     done < <(find "$dir" -name "*.rs" -print0)
+done
+for dir in "${STUB_DIRS[@]}"; do
+    [[ -d "$dir" ]] || continue
+    while IFS= read -r -d '' file; do
+        file_stream="$(emit_stub_lines "$file")"
+        [[ -n "$file_stream" ]] || continue
+        comment_stream+="${file_stream}"$'\n'
+    done < <(find "$dir" \( -name "*.pyi" -o -name "*.py" \) -print0)
 done
 comment_stream="${comment_stream%$'\n'}"
 

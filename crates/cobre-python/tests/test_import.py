@@ -52,3 +52,21 @@ def test_version_matches_native() -> None:
     import cobre._native  # noqa: PLC0415
 
     assert cobre.__version__ == cobre._native.__version__
+
+
+def test_submodule_docstrings_are_the_installed_one_liners() -> None:
+    """Each cobre.* submodule __doc__ is the lib.rs override, not the //! module doc."""
+    import cobre  # noqa: PLC0415
+
+    expected = {
+        "model": "Data model types for the Cobre power systems solver.",
+        "io": "I/O helpers for loading Cobre case directories.",
+        "run": "Solver execution entry points for training and simulation.",
+        "results": "Result loading and inspection functions for Cobre output artifacts.",
+        "errors": "Structured exception hierarchy for Cobre errors.",
+        "schema": "JSON Schema export helpers for Cobre case directory input types.",
+    }
+
+    for module_name, expected_doc in expected.items():
+        module = getattr(cobre, module_name)
+        assert module.__doc__ == expected_doc

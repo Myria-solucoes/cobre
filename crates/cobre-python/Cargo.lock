@@ -357,6 +357,7 @@ name = "cobre-python"
 version = "0.15.0"
 dependencies = [
  "arrow",
+ "chrono",
  "cobre-comm",
  "cobre-core",
  "cobre-io",

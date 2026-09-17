@@ -91,3 +91,13 @@ def test_validate_nonexistent_case() -> None:
     error = result["errors"][0]
     assert "kind" in error
     assert "message" in error
+
+
+def test_validate_docstring_names_the_raising_path() -> None:
+    """validate.__doc__ names ValueError for malformed config_overrides, does not claim never raises."""
+    import cobre.io  # noqa: PLC0415
+
+    docstring = cobre.io.validate.__doc__
+    assert docstring is not None
+    assert "ValueError" in docstring
+    assert "never raise" not in docstring

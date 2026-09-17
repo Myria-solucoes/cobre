@@ -367,3 +367,42 @@ def test_load_policy_self_describing_fields_survive_rewrite(
     assert stage["node_id"] == 3
     assert stage["graph_stage_id"] == 7
     assert stage["cost_scale_factor"] == pytest.approx(7_777.0)
+
+
+def test_write_policy_checkpoint_active_cut_indices_do_not_survive_the_round_trip(
+    tmp_path: pathlib.Path,
+) -> None:
+    """active_cut_indices is written but not returned by load_policy, so a
+    load -> write cycle resets it; cut activity round-trips through is_active.
+    """
+    import cobre  # noqa: PLC0415
+    import cobre.results  # noqa: PLC0415
+
+    stage_cuts = _make_stage_cuts()
+    stage_cuts[0]["active_cut_indices"] = [0]
+
+    cobre.write_policy_checkpoint(
+        str(tmp_path / "policy"), stage_cuts, _make_metadata()
+    )
+
+    loaded = cobre.results.load_policy(str(tmp_path))
+    stage = loaded["stage_cuts"][0]
+
+    assert "active_cut_indices" not in stage
+    assert stage["cuts"][0]["is_active"] is True
+
+
+def test_write_policy_checkpoint_lag_coefficients_without_depth_raises(
+    tmp_path: pathlib.Path,
+) -> None:
+    """inflow_lag_coefficients supplied without inflow_lag_depth raises
+    ValueError naming the stage and cut — never silently dropped.
+    """
+    import cobre  # noqa: PLC0415
+
+    stage_cuts = _storage_only_stage_cuts([1, 2], {1: [0.5]})
+
+    with pytest.raises(ValueError, match=r"stage 0 cut .*inflow_lag_depth"):
+        cobre.write_policy_checkpoint(
+            str(tmp_path / "policy"), stage_cuts, _make_metadata()
+        )

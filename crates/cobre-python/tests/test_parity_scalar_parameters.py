@@ -18,11 +18,12 @@ from __future__ import annotations
 import json
 import pathlib
 import shutil
-import subprocess
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+
+from _cobre_cli import run_cli
 
 D13_CASE = "examples/deterministic/d13-generic-constraint"
 
@@ -30,38 +31,6 @@ D13_CASE = "examples/deterministic/d13-generic-constraint"
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _cli_binary() -> pathlib.Path:
-    """Return the compiled ``cobre`` CLI binary path, skipping if absent."""
-    repo_root = pathlib.Path(__file__).parents[3]
-    for profile in ("release", "debug"):
-        candidate = repo_root / "target" / profile / "cobre"
-        if candidate.is_file():
-            return candidate
-    pytest.skip(
-        "No compiled `cobre` binary found in target/release or target/debug. "
-        "Run `cargo build -p cobre-cli` first."
-    )
-    raise RuntimeError("unreachable: pytest.skip raises Skipped")
-
-
-def _run_cli(case_dir: pathlib.Path, output_dir: pathlib.Path) -> None:
-    """Run the cobre CLI for ``case_dir``, writing outputs to ``output_dir``."""
-    binary = _cli_binary()
-    result = subprocess.run(
-        [str(binary), "run", str(case_dir), "--output", str(output_dir)],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=120,
-    )
-    if result.returncode != 0:
-        pytest.fail(
-            f"cobre CLI failed (exit {result.returncode}):\n"
-            f"stdout: {result.stdout}\n"
-            f"stderr: {result.stderr}"
-        )
 
 
 def _seed_case(src: pathlib.Path, dst: pathlib.Path) -> None:
@@ -144,10 +113,11 @@ def d13_scalar_case_dir(tmp_path_factory: pytest.TempPathFactory) -> pathlib.Pat
 def d13_cli_output(
     d13_scalar_case_dir: pathlib.Path,
     tmp_path_factory: pytest.TempPathFactory,
+    cli_binary: pathlib.Path,
 ) -> pathlib.Path:
     """Run the scalar-parameter D13 fixture via the CLI and return the output dir."""
     output_dir = tmp_path_factory.mktemp("d13_cli_out")
-    _run_cli(d13_scalar_case_dir, output_dir)
+    run_cli(d13_scalar_case_dir, output_dir, cli_binary)
     return output_dir
 
 

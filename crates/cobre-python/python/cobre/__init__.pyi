@@ -7,6 +7,7 @@ from . import model as model
 from . import results as results
 from . import run as run
 from . import schema as schema
+from ._types import HydroModelsSummary, ProvenanceReport, StochasticSummary
 from .model import System
 
 __version__: str
@@ -33,6 +34,12 @@ class Study:
     def output_dir(self) -> str: ...
     @property
     def system(self) -> System: ...
+    @property
+    def stochastic(self) -> StochasticSummary: ...
+    @property
+    def hydro_models(self) -> HydroModelsSummary: ...
+    @property
+    def provenance(self) -> ProvenanceReport: ...
     def validate(self) -> dict[str, Any]: ...
     def train(
         self,

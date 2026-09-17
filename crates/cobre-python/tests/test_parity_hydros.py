@@ -19,11 +19,12 @@ from __future__ import annotations
 import json
 import pathlib
 import shutil
-import subprocess
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+
+from _cobre_cli import run_cli
 
 D02_CASE = "examples/deterministic/d02-single-hydro"
 
@@ -40,38 +41,6 @@ ENERGY_COLUMNS: list[str] = [
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _cli_binary() -> pathlib.Path:
-    """Return the compiled ``cobre`` CLI binary path, skipping if absent."""
-    repo_root = pathlib.Path(__file__).parents[3]
-    for profile in ("release", "debug"):
-        candidate = repo_root / "target" / profile / "cobre"
-        if candidate.is_file():
-            return candidate
-    pytest.skip(
-        "No compiled `cobre` binary found in target/release or target/debug. "
-        "Run `cargo build -p cobre-cli` first."
-    )
-    raise RuntimeError("unreachable: pytest.skip raises Skipped")
-
-
-def _run_cli(case_dir: pathlib.Path, output_dir: pathlib.Path) -> None:
-    """Run the cobre CLI for ``case_dir``, writing outputs to ``output_dir``."""
-    binary = _cli_binary()
-    result = subprocess.run(
-        [str(binary), "run", str(case_dir), "--output", str(output_dir)],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=120,
-    )
-    if result.returncode != 0:
-        pytest.fail(
-            f"cobre CLI failed (exit {result.returncode}):\n"
-            f"stdout: {result.stdout}\n"
-            f"stderr: {result.stderr}"
-        )
 
 
 def _make_case_with_simulation(src: pathlib.Path, dest: pathlib.Path) -> None:
@@ -134,10 +103,11 @@ def d02_case_dir(tmp_path_factory: pytest.TempPathFactory) -> pathlib.Path:
 def d02_cli_output(
     d02_case_dir: pathlib.Path,
     tmp_path_factory: pytest.TempPathFactory,
+    cli_binary: pathlib.Path,
 ) -> pathlib.Path:
     """Run D02 via the CLI and return the output directory."""
     output_dir = tmp_path_factory.mktemp("d02_cli_out")
-    _run_cli(d02_case_dir, output_dir)
+    run_cli(d02_case_dir, output_dir, cli_binary)
     return output_dir
 
 

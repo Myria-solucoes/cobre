@@ -19,9 +19,8 @@
 //! | `LoadError::ConstraintError`        | `ValidationError` (`ValueError`) |
 //! | `LoadError::PolicyIncompatible`     | `PolicyIncompatibleError` (`ValueError`) |
 //!
-//! The [`validate`] function never raises — errors are returned as data in a
-//! Python dict (with a stable `kind` string, decoupled from these class names)
-//! so that callers see all problems at once.
+//! [`validate`] returns case-validation failures as data; a malformed
+//! `config_overrides` dict raises `ValueError` at call time.
 
 use std::path::PathBuf;
 
@@ -36,12 +35,15 @@ use cobre_io::parse_config;
 use cobre_io::validate_case_with_artifacts;
 use cobre_sddp::hydro_models::prepare_hydro_models_from_artifacts;
 use cobre_sddp::validate_phases::{PrepPhase, prep_phase_metadata};
-use cobre_sddp::{StudyParams, prepare_stochastic};
+use cobre_sddp::{
+    StudyParams, StudySetup, prepare_stochastic, resolve_boundary_state_requirements,
+};
 
 use crate::convert::pydict_to_json_map;
 use crate::errors::ErrorSource::Load;
 use crate::errors::convert_error;
 use crate::model::PySystem;
+use crate::run::reconcile_boundary_policy;
 
 // ── Error conversion ──────────────────────────────────────────────────────────
 
@@ -150,12 +152,11 @@ pub fn load_case(path: PathBuf) -> PyResult<PySystem> {
 
 /// Validate a Cobre case directory and return a structured report dict.
 ///
-/// Unlike [`load_case`], this function **never raises** — all errors are
-/// returned as data in the result dict. This is intentional: Jupyter workflows
-/// need to see all validation problems at once rather than stopping at the
-/// first failure.
+/// Case-validation failures are returned as data in the result dict so that
+/// callers see all problems at once. A malformed `config_overrides` dict
+/// raises `ValueError` at call time.
 ///
-/// The pipeline executes ten phases:
+/// The pipeline executes these phases:
 ///
 /// 1. Path existence check
 /// 2–6. `cobre-io` six-layer pipeline (structural, schema, referential,
@@ -165,6 +166,9 @@ pub fn load_case(path: PathBuf) -> PyResult<PySystem> {
 ///    and surfaces deprecation warnings for fields scheduled for removal
 /// 9. [`prepare_stochastic`] — PAR estimation, opening trees, stochastic context
 /// 10. [`prepare_hydro_models_from_artifacts`] — production/evaporation models
+/// 11. Boundary reconciliation — when `config.policy.boundary` is configured,
+///     build the `StudySetup` and reconcile the boundary checkpoint against the
+///     terminal entity manifest. Skipped when no boundary policy is configured.
 ///
 /// If any phase fails, the remaining phases are skipped and the error is
 /// returned immediately (short-circuit semantics matching `cobre validate`).
@@ -177,7 +181,7 @@ pub fn load_case(path: PathBuf) -> PyResult<PySystem> {
 ///
 /// A dict with the following keys:
 ///
-/// * `"valid"` (`bool`) — `True` when all ten phases completed without errors.
+/// * `"valid"` (`bool`) — `True` when every phase completed without errors.
 /// * `"errors"` (`list[dict]`) — list of error dicts, each with `"kind"` and
 ///   `"message"` string fields. Empty when `valid` is `True`.
 /// * `"warnings"` (`list[dict]`) — list of warning dicts, each with `"kind"`,
@@ -200,10 +204,6 @@ pub fn validate(
     path: PathBuf,
     config_overrides: Option<Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // A malformed override dict (non-str key or unsupported value) raises
-    // PyValueError here — a malformed call, not a case-validation failure, so it is
-    // the one path that may raise despite this function otherwise returning errors
-    // as data.
     let overrides = config_overrides
         .map(|d| pydict_to_json_map(&d))
         .transpose()?;
@@ -263,6 +263,16 @@ pub fn validate(
 
     let seed = study_params.seed;
 
+    let boundary_requirements = match resolve_boundary_state_requirements(&path, &config) {
+        Ok(r) => r,
+        Err(ref err) => {
+            return_error!(
+                "BoundaryReconciliationError",
+                format!("policy.boundary: {err}")
+            );
+        }
+    };
+
     let training_source = match config.training_scenario_source(&config_path) {
         Ok(s) => s,
         Err(ref err) => {
@@ -270,7 +280,14 @@ pub fn validate(
         }
     };
 
-    let prepared = match prepare_stochastic(system, &path, &config, seed, &training_source, None) {
+    let prepared = match prepare_stochastic(
+        system,
+        &path,
+        &config,
+        seed,
+        &training_source,
+        boundary_requirements.inflow_lag_depth(),
+    ) {
         Ok(p) => p,
         Err(ref err) => {
             let (kind, file_label) = prep_phase_metadata(PrepPhase::Stochastic, err);
@@ -278,11 +295,38 @@ pub fn validate(
         }
     };
 
-    if let Err(ref err) =
-        prepare_hydro_models_from_artifacts(&prepared.system, &artifacts, false, None)
-    {
-        let (kind, file_label) = prep_phase_metadata(PrepPhase::HydroModels, err);
-        return_error!(kind, format!("{file_label}: {err}"));
+    let hydro_models =
+        match prepare_hydro_models_from_artifacts(&prepared.system, &artifacts, false, None) {
+            Ok(h) => h,
+            Err(ref err) => {
+                let (kind, file_label) = prep_phase_metadata(PrepPhase::HydroModels, err);
+                return_error!(kind, format!("{file_label}: {err}"));
+            }
+        };
+
+    if let Some(bp) = config.policy.boundary.as_ref() {
+        let setup = match StudySetup::new_with_boundary_requirements(
+            &prepared.system,
+            &config,
+            prepared.stochastic,
+            hydro_models,
+            boundary_requirements,
+        ) {
+            Ok(s) => s,
+            Err(ref err) => {
+                return_error!(
+                    "BoundaryReconciliationError",
+                    format!("policy.boundary: {err}")
+                );
+            }
+        };
+
+        if let Err(ref err) = reconcile_boundary_policy(&setup, &prepared.system, bp, &path) {
+            return_error!(
+                "BoundaryReconciliationError",
+                format!("policy.boundary: {err}")
+            );
+        }
     }
 
     dict.set_item("valid", true)?;

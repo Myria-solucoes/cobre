@@ -3,7 +3,10 @@
 //! `cobre_io`.
 //!
 //! Input dict shapes mirror what [`crate::results::load_policy`] emits, so a
-//! loaded checkpoint round-trips: load -> edit -> write.
+//! loaded checkpoint round-trips: load -> edit -> write, with one exception:
+//! `active_cut_indices` is written but not returned by `load_policy`, so a
+//! load → write cycle resets it (cut activity round-trips through each cut's
+//! `is_active`).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -78,8 +81,8 @@ pub(crate) struct PyCutRecord {
     is_active: bool,
     /// Inflow-lag gradient terms keyed by hydro id (`hydro_id -> [coef_by_depth]`,
     /// index `0` = lag depth 1), separate from the storage-aligned
-    /// `coefficients`. Consumed only when the top-level `inflow_lag_depth` is
-    /// set; empty (the default) leaves the checkpoint byte-identical.
+    /// `coefficients`. Requires the top-level `inflow_lag_depth`; empty (the
+    /// default) leaves the checkpoint byte-identical.
     #[pyo3(default)]
     inflow_lag_coefficients: HashMap<i32, Vec<f64>>,
 }
@@ -309,6 +312,29 @@ fn validate_stage_states(stage_states: &[PyStageStatesPayload]) -> PyResult<()> 
     Ok(())
 }
 
+/// Reject `inflow_lag_coefficients` supplied without a positive
+/// `inflow_lag_depth` — they would be silently dropped.
+fn reject_unreserved_lag_coefficients(
+    stage_cuts: &[PyStageCutsPayload],
+    reserve_depth: Option<u32>,
+) -> PyResult<()> {
+    if reserve_depth.is_some() {
+        return Ok(());
+    }
+    for sc in stage_cuts {
+        for cut in &sc.cuts {
+            if !cut.inflow_lag_coefficients.is_empty() {
+                return Err(PyValueError::new_err(format!(
+                    "stage {} cut {}: inflow_lag_coefficients supplied without \
+                     inflow_lag_depth; pass inflow_lag_depth=N to reserve the lag slots",
+                    sc.stage_id, cut.cut_id
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Owned per-stage payload data: the entity manifest and each cut's coefficient
 /// vector, either as supplied or widened by an inflow-lag reservation, plus the
 /// resulting `state_dimension`. Owning these lets the borrowed
@@ -397,6 +423,7 @@ pub fn write_policy_checkpoint(
     validate_stage_states(&stage_states)?;
 
     let reserve_depth = inflow_lag_depth.filter(|&n| n > 0);
+    reject_unreserved_lag_coefficients(&stage_cuts, reserve_depth)?;
     let stage_data: Vec<StageCutsData> = stage_cuts
         .iter()
         .map(|sc| build_stage_cuts_data(sc, reserve_depth))

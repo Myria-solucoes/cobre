@@ -1,8 +1,8 @@
 """Tests for the cobre.io.validate full pre-solver pipeline.
 
-Verifies that validate() exercises all ten phases (path check + six cobre-io
-layers + three SDDP preparation phases) and returns a correctly shaped result
-dict without ever raising.
+Verifies that validate() exercises the full phase sequence (path check,
+cobre-io validation layers, SDDP preparation phases, and boundary
+reconciliation) and returns a correctly shaped result dict.
 
 Run with (from the repo root):
     pytest crates/cobre-python/tests/test_validate.py -v
@@ -303,3 +303,53 @@ def test_validate_config_overrides_unsupported_value_raises_value_error() -> Non
             VALID_CASE_1DTOY,
             config_overrides={"training.cut_selection.row_activity_tolerance": {1, 2}},
         )
+
+
+# ── Phase 11: boundary reconciliation (BoundaryReconciliationError) ───────────
+
+
+def test_validate_missing_boundary_checkpoint_returns_invalid() -> None:
+    """A case pointing to a non-existent boundary checkpoint returns valid=False
+    with a BoundaryReconciliationError naming manifest.bin.
+
+    Pre-fix: this same call returned {"valid": True, "errors": []}, diverging from
+    the CLI validate which exited 1 for the identical case.
+    """
+    import cobre.io  # noqa: PLC0415
+
+    case_dir = copy_case_to_tempdir(VALID_CASE_1DTOY)
+    try:
+        config_path = case_dir / "config.json"
+        with config_path.open() as f:
+            config = json.load(f)
+
+        policy = config.get("policy", {})
+        policy["boundary"] = {"path": str(case_dir / "no_such_policy")}
+        config["policy"] = policy
+
+        with config_path.open("w") as f:
+            json.dump(config, f)
+
+        result = cobre.io.validate(str(case_dir))
+        assert result["valid"] is False, (
+            f"expected valid=False for missing boundary checkpoint, got: {result!r}"
+        )
+        assert len(result["errors"]) == 1
+        err = result["errors"][0]
+        assert err["kind"] == "BoundaryReconciliationError"
+        assert err["message"].startswith("policy.boundary: ")
+        assert "manifest.bin" in err["message"]
+    finally:
+        shutil.rmtree(case_dir.parent, ignore_errors=True)
+
+
+def test_validate_without_boundary_policy_is_unchanged() -> None:
+    """Validate with no boundary policy skips phase 11 and returns the same
+    result as before the phase 11 addition.
+    """
+    import cobre.io  # noqa: PLC0415
+
+    result = cobre.io.validate(VALID_CASE_1DTOY)
+    assert result["valid"] is True
+    assert result["errors"] == []
+    assert isinstance(result["warnings"], list)

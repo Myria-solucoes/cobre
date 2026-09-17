@@ -1,4 +1,4 @@
-"""Typing-only result shapes for `cobre.run.run(...)`.
+"""Typing-only result shapes for `cobre.run.run(...)` and `cobre.Study` properties.
 
 This module carries **no** compiled counterpart: the leading underscore marks it
 as a pure typing helper (`PEP 589` `TypedDict`s). It is never registered as a
@@ -11,7 +11,7 @@ keys.
 from typing import Any, Optional, TypedDict
 
 class SimulationSummary(TypedDict):
-    """Nested `simulation` sub-dict (mirrors `run.rs:1530-1531`)."""
+    """Nested `simulation` sub-dict built by `cobre.run.run`."""
 
     n_scenarios: int
     completed: int
@@ -36,10 +36,10 @@ class TrainingSummary(TypedDict):
 class StochasticSummary(TypedDict, total=False):
     """Nested `stochastic` sub-dict.
 
-    Keys mirror `stochastic_summary_to_dict` (`run.rs:1326-1350`). `ar_order` is
-    the nested AR-order summary: `None` when no AR model is fitted, otherwise the
-    dict built by `ar_order_to_dict` (`run.rs:1332-1336`). `total=False` because
-    the `ar_order` value is conditionally `None`.
+    Keys mirror `stochastic_summary_to_dict`. `ar_order` is the nested AR-order
+    summary: `None` when no AR model is fitted, otherwise the dict built by
+    `ar_order_to_dict`. `total=False` because the `ar_order` value is conditionally
+    `None`.
     """
 
     inflow_source: Optional[str]
@@ -55,7 +55,7 @@ class StochasticSummary(TypedDict, total=False):
     seed: Any
 
 class HydroModelsSummary(TypedDict, total=False):
-    """Nested `hydro_models` sub-dict (mirrors `run.rs:1312-1316`)."""
+    """Nested `hydro_models` sub-dict (mirrors `hydro_model_summary_to_dict`)."""
 
     n_constant: int
     n_fpha: int
@@ -64,7 +64,7 @@ class HydroModelsSummary(TypedDict, total=False):
     n_no_evaporation: int
 
 class ProvenanceReport(TypedDict, total=False):
-    """Nested `provenance` sub-dict (mirrors `provenance_to_dict`, `run.rs:1360-1402`).
+    """Nested `provenance` sub-dict (mirrors `provenance_to_dict`).
 
     `total=False` because the report carries conditional/variable nested keys;
     `hydro_production` is itself a nested dict whose precise shape is not
@@ -83,13 +83,13 @@ class ProvenanceReport(TypedDict, total=False):
     hydro_production: Any
 
 class RunResult(TypedDict):
-    """Top-level result of `cobre.run.run(...)` (mirrors `run.rs:1518-1557`).
+    """Top-level result of `cobre.run.run(...)`.
 
-    All 11 keys are always present; the `Optional[...]` values are `None` (not
-    absent) when the corresponding phase did not run, so `RunResult` is **not**
-    `total=False`. `upper_bound` and `gap_percent` are `None` on simulation-only
-    and both-disabled runs (mirrors `RunSummary.{upper_bound,gap_percent}:
-    Option<f64>`); `lower_bound` is always present.
+    All keys are always present; the `Optional[...]` values are `None` (not absent)
+    when the corresponding phase did not run, so `RunResult` is **not** `total=False`.
+    `upper_bound` and `gap_percent` are `None` on simulation-only and both-disabled
+    runs (mirrors `RunSummary.{upper_bound,gap_percent}: Option<f64>`); `lower_bound`
+    is always present.
     """
 
     converged: bool

@@ -35,3 +35,6 @@ class SolverError(CobreError, RuntimeError):
 
 class SimulationError(CobreError, RuntimeError):
     """A simulation-phase failure."""
+
+class InternalError(CobreError, RuntimeError):
+    """An internal software or environment fault."""

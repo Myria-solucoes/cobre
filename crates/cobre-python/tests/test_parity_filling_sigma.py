@@ -38,11 +38,11 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from _cobre_cli import run_cli
 from test_parity_hydros import (
     _collect_hydros_parquet,
     _make_case_with_simulation,
     _read_hydros,
-    _run_cli,
 )
 
 # Filling case re-derived to a sufficiency-passing, binding per-stage sigma_fill.
@@ -120,10 +120,11 @@ def d38_case_dir(tmp_path_factory: pytest.TempPathFactory) -> pathlib.Path:
 def d38_cli_output(
     d38_case_dir: pathlib.Path,
     tmp_path_factory: pytest.TempPathFactory,
+    cli_binary: pathlib.Path,
 ) -> pathlib.Path:
     """Run d38 via the CLI and return the output directory."""
     output_dir = tmp_path_factory.mktemp("d38_cli_out")
-    _run_cli(d38_case_dir, output_dir)
+    run_cli(d38_case_dir, output_dir, cli_binary)
     return output_dir
 
 

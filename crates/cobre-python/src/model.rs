@@ -2,9 +2,6 @@
 //!
 //! Entity collections are cloned into the wrappers because entity data is small
 //! (strings + floats) and cloning avoids lifetime complexity at the `PyO3` boundary.
-//!
-//! Stub entities (`EnergyContract`, `PumpingStation`, `NonControllableSource`) are
-//! data-complete but contribute no LP variables or constraints.
 
 use std::sync::Arc;
 

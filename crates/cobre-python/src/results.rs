@@ -4,19 +4,6 @@
 //! `cobre.run.run()`. JSON manifest and metadata files are read in Rust
 //! and returned as Python dicts. Parquet file paths are returned as strings
 //! so that callers can load them with `polars` or `pandas`.
-//!
-//! ## Design
-//!
-//! - [`load_results`] reads the JSON manifest/metadata files and returns a
-//!   nested dict with training and simulation sections.
-//! - [`load_convergence`] reads `training/convergence.parquet` using the
-//!   `parquet` + `arrow` crates and returns a list of dicts (one per row).
-//! - [`load_simulation`] reads Hive-partitioned Parquet files under
-//!   `simulation/{entity_type}/scenario_id=NNNN/data.parquet` with dynamic
-//!   schema discovery and returns rows as Python dicts.
-//! - [`load_policy`] reads a `FlatBuffers` policy checkpoint from
-//!   `<output_dir>/<policy_subdir>` (default `policy`) via
-//!   `cobre_io::read_policy_checkpoint` and returns a nested Python dict.
 
 use std::fs;
 use std::path::Path;
