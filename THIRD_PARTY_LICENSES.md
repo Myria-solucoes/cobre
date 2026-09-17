@@ -9,7 +9,7 @@ propagated Apache-2.0 `NOTICE` text lives in `NOTICE`.
 
 ## Overview
 
-- Apache License 2.0: 168 crate(s)
+- Apache License 2.0: 170 crate(s)
 - MIT License: 31 crate(s)
 - Creative Commons Zero v1.0 Universal: 1 crate(s)
 - Unicode License v3: 1 crate(s)
@@ -1754,6 +1754,7 @@ Used by:
 - crossbeam-utils 0.8.21
 - either 1.16.0
 - errno 0.3.14
+- fastrand 2.4.1
 - gethostname 1.1.0
 - gimli 0.32.3
 - hash32 0.2.1
@@ -1787,6 +1788,7 @@ Used by:
 - scopeguard 1.2.0
 - smallvec 1.15.2
 - stable_deref_trait 1.2.1
+- tempfile 3.27.0
 - thousands 0.2.0
 - thread_local 1.1.9
 - unicode-segmentation 1.13.3
