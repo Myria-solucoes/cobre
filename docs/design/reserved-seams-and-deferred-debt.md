@@ -595,6 +595,12 @@ on both sides and pinned by a test that itself exists in both crates. Target:
 hoist the shared "output set + guards" (the pattern the Python `*_if_any`
 helpers already prove) into a crate both the CLI and Python depend on.
 
+**Current state (2026-09-17).** The Python side now has one internal owner (`cobre.run.run`
+drives the `Study` lifecycle), and a golden test runs the toy example through both entry
+points and compares every output value under a literal wall-clock mask, with an
+import-resolving parity gate in CI; the two content divergences that test exposed were fixed
+rather than masked. Drift is caught, but the write orchestration is still two copies.
+
 **Owner.** The architecture owner.
 
 **Trigger.** The setup-layer redesign.
