@@ -84,6 +84,8 @@ pub struct Study {
     /// Validation-pipeline warnings captured during the case load, replayed by
     /// [`Study::validate`].
     warnings: Vec<cobre_io::ReportEntry>,
+    /// Wall-clock setup-phase timings captured during construction.
+    setup_timings: cobre_io::SetupTimings,
     /// The output directory fixed at construction time.
     output_dir: PathBuf,
     /// The case (input) directory fixed at construction time — the root
@@ -290,6 +292,7 @@ impl Study {
             stochastic_summary,
             hydro_models_summary,
             warnings,
+            setup_timings,
         } = build_study_setup(case_dir, &resolved_output, overrides.as_ref())?;
 
         Ok(Study {
@@ -301,6 +304,7 @@ impl Study {
             stochastic_summary,
             hydro_models_summary,
             warnings,
+            setup_timings,
             output_dir: resolved_output,
             case_dir: case_dir.to_path_buf(),
             threads,
@@ -338,6 +342,7 @@ impl Study {
         let output_dir = self.output_dir.clone();
         let case_dir = self.case_dir.clone();
         let threads = self.threads;
+        let setup_timings = self.setup_timings.clone();
         let setup = &mut self.setup;
         let system = self.system.as_ref();
         let config = &self.config;
@@ -351,7 +356,16 @@ impl Study {
                     None => (run_training_phase_py(setup, n)?, None),
                 };
 
-                write_training_artifacts(&output_dir, system, config, setup, &training, seed, n)?;
+                write_training_artifacts(
+                    &output_dir,
+                    system,
+                    config,
+                    setup,
+                    &training,
+                    &setup_timings,
+                    seed,
+                    n,
+                )?;
                 write_fpha_hyperplanes_if_any(&output_dir, setup)?;
                 write_evaporation_models_if_any(&output_dir, setup, system)?;
                 write_fpha_deviation_points_if_any(&output_dir, setup, config)?;

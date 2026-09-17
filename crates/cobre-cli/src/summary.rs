@@ -2,8 +2,11 @@
 //!
 //! One printing function per run phase, each emitting its section independently
 //! so the caller can place it at the right point in the execution flow. Every
-//! `print_*` writer ignores write errors (fire-and-forget); each has a paired
-//! `format_*_string` returning the same content without ANSI escapes for tests.
+//! `print_*` writer ignores write errors (fire-and-forget). Most pair with a
+//! `format_*_string` returning the same content for tests; `print_training_summary`,
+//! `print_simulation_summary`, and `print_output_path` instead share their exact
+//! rendered lines with tests through a private `*_lines`/`*_line` helper, so tests
+//! assert on the same code path production prints from.
 
 use chrono::NaiveDate;
 use cobre_comm::ExecutionTopology;
@@ -572,14 +575,6 @@ pub struct SimulationSummary {
     pub parallelism: u32,
 }
 
-/// All data needed to render the complete post-run summary block.
-#[cfg(test)]
-pub struct RunSummary {
-    pub training: TrainingSummary,
-    pub simulation: Option<SimulationSummary>,
-    pub output_dir: std::path::PathBuf,
-}
-
 fn format_duration(ms: u64) -> String {
     let total_secs = ms / 1000;
     if total_secs < 60 {
@@ -754,73 +749,6 @@ fn format_time_split_training(t: &TrainingSummary) -> Vec<String> {
     ]
 }
 
-/// Render the complete post-run summary as a plain-text `String`.
-///
-/// # Format
-///
-/// ```text
-/// Training complete in {time} ({iterations} iterations, {reason_detail})
-///   Lower bound:  {lb} $/stage
-///   Upper bound:  {ub} +/- {std} $/stage
-///   Gap:          {gap}%
-///   Policy rows:  {active} active / {generated} generated
-///   LP solves:    {total_lp}
-///
-/// Simulation complete ({scenarios} scenarios)
-///   Completed: {completed}  Failed: {failed}
-///
-/// Output written to {output_dir}/
-/// ```
-///
-/// The simulation section is omitted entirely when `summary.simulation` is `None`.
-#[cfg(test)]
-pub fn format_summary_string_reference(summary: &RunSummary) -> String {
-    let t = &summary.training;
-    let duration = format_duration(t.total_time_ms);
-    let convergence_detail = format_convergence_detail(t.converged, t.converged_at, &t.reason);
-
-    let mut lines: Vec<String> = Vec::new();
-
-    lines.push(format!(
-        "Training complete in {duration} ({} iterations, {convergence_detail})",
-        t.iterations
-    ));
-    lines.push(format!(
-        "  Lower bound:  {} $/stage",
-        fmt_sci(t.lower_bound)
-    ));
-    lines.push(format!(
-        "  Upper bound:  {} +/- {} $/stage",
-        fmt_sci(t.upper_bound),
-        fmt_sci(t.upper_bound_std)
-    ));
-    lines.push(format!("  Gap:          {:.1}%", t.gap_percent));
-    lines.extend(policy_rows_lines(t));
-    lines.push(format!("  LP solves:    {}", t.total_lp_solves));
-    lines.extend(format_time_split_training(t));
-
-    if let Some(sim) = &summary.simulation {
-        let sim_duration = format_duration(sim.total_time_ms);
-        lines.push(String::new());
-        lines.push(format!(
-            "Simulation complete in {sim_duration} ({} scenarios)",
-            sim.n_scenarios
-        ));
-        lines.push(format!(
-            "  Completed: {}  Failed: {}",
-            sim.completed, sim.failed
-        ));
-    }
-
-    lines.push(String::new());
-    lines.push(format!(
-        "Output written to {}/",
-        summary.output_dir.display()
-    ));
-
-    lines.join("\n")
-}
-
 /// Pool-level `active / generated` counts, plus a rows-in-LP line when lazy selection ran (`rows_in_lp_solve_count > 0`).
 /// Lazy runs annotate the pool total per-stage so it's comparable to per-solve rows-in-LP figures.
 /// Boundary-loaded cuts split the generated count when `total_rows_loaded > 0`.
@@ -856,59 +784,66 @@ fn policy_rows_lines(t: &TrainingSummary) -> Vec<String> {
     out
 }
 
-/// Print the training completion summary to `stderr`.
-pub fn print_training_summary(stderr: &Term, t: &TrainingSummary) {
+/// The exact lines `print_training_summary` writes, one per `stderr` line.
+fn training_summary_lines(t: &TrainingSummary) -> Vec<String> {
     let duration = format_duration(t.total_time_ms);
     let convergence_detail = format_convergence_detail(t.converged, t.converged_at, &t.reason);
 
-    let _ = stderr.write_line(&format!(
+    let mut lines: Vec<String> = Vec::new();
+    lines.push(format!(
         "{} ({} iterations, {convergence_detail})",
         console::style(format!("Training complete in {duration}")).bold(),
         t.iterations
     ));
-    let _ = stderr.write_line(&format!(
+    lines.push(format!(
         "  Lower bound:  {} $/stage",
         fmt_sci(t.lower_bound)
     ));
-    let _ = stderr.write_line(&format!(
+    lines.push(format!(
         "  Upper bound:  {} +/- {} $/stage",
         fmt_sci(t.upper_bound),
         fmt_sci(t.upper_bound_std)
     ));
     if let Some(initial) = t.initial_gap_percent {
-        let _ = stderr.write_line(&format!(
+        lines.push(format!(
             "  Gap:          {:.1}% (started at {:.1}%)",
             t.gap_percent, initial
         ));
     } else {
-        let _ = stderr.write_line(&format!("  Gap:          {:.1}%", t.gap_percent));
+        lines.push(format!("  Gap:          {:.1}%", t.gap_percent));
     }
-    for line in policy_rows_lines(t) {
-        let _ = stderr.write_line(&line);
-    }
-    let _ = stderr.write_line(&format!(
+    lines.extend(policy_rows_lines(t));
+    lines.push(format!(
         "  LP solves:    {} ({} first-try, {} retried, {} failed)",
         t.total_lp_solves, t.total_first_try, t.total_retried, t.total_failed
     ));
     if t.iterations > 0 {
         #[allow(clippy::cast_precision_loss)]
         let avg_iter_ms = t.total_time_ms as f64 / t.iterations as f64;
-        let _ = stderr.write_line(&format!("  Avg iter:     {avg_iter_ms:.0}ms"));
+        lines.push(format!("  Avg iter:     {avg_iter_ms:.0}ms"));
     }
-    for line in format_time_split_training(t) {
+    lines.extend(format_time_split_training(t));
+    lines
+}
+
+/// Print the training completion summary to `stderr`.
+pub fn print_training_summary(stderr: &Term, t: &TrainingSummary) {
+    for line in training_summary_lines(t) {
         let _ = stderr.write_line(&line);
     }
 }
 
-/// Print the simulation completion summary to `stderr`.
-pub fn print_simulation_summary(stderr: &Term, sim: &SimulationSummary) {
+/// The exact lines `print_simulation_summary` writes, one per `stderr` line.
+fn simulation_summary_lines(sim: &SimulationSummary) -> Vec<String> {
     let duration = format_duration(sim.total_time_ms);
-    let _ = stderr.write_line(&format!(
+
+    let mut lines: Vec<String> = Vec::new();
+    lines.push(format!(
         "{} ({} scenarios)",
         console::style(format!("Simulation complete in {duration}")).bold(),
         sim.n_scenarios
     ));
-    let _ = stderr.write_line(&format!(
+    lines.push(format!(
         "  Completed: {}  Failed: {}",
         sim.completed, sim.failed
     ));
@@ -919,55 +854,56 @@ pub fn print_simulation_summary(stderr: &Term, sim: &SimulationSummary) {
         } else {
             0.0
         };
-        let _ = stderr.write_line(&format!(
+        lines.push(format!(
             "  Expected cost: {mean:.5e} +/- {ci95:.5e} (std: {std:.5e})"
         ));
     }
-    let _ = stderr.write_line(&format!(
+    lines.push(format!(
         "  LP solves:    {} ({} first-try, {} retried, {} failed)",
         sim.total_lp_solves, sim.total_first_try, sim.total_retried, sim.total_failed_solves
     ));
     if sim.completed > 0 {
         #[allow(clippy::cast_precision_loss)]
         let avg_s = sim.total_time_ms as f64 / 1000.0 / f64::from(sim.completed);
-        let _ = stderr.write_line(&format!("  Avg/scenario: {avg_s:.3}s"));
+        lines.push(format!("  Avg/scenario: {avg_s:.3}s"));
     }
     #[allow(clippy::cast_precision_loss)]
     let total_s = sim.total_time_ms as f64 / 1000.0;
     let solver = per_worker_mean_seconds(sim.total_solve_time_seconds, sim.parallelism, total_s);
     let other = (total_s - solver).max(0.0);
-    let _ = stderr.write_line(&format!(
+    lines.push(format!(
         "  Time split:   Solver {} ({:.0}%)",
         format_split_duration(solver),
         pct_of(solver, total_s)
     ));
-    let _ = stderr.write_line(&format!(
+    lines.push(format!(
         "                Other  {} ({:.0}%)",
         format_split_duration(other),
         pct_of(other, total_s)
     ));
+    lines
 }
 
-/// Print the output directory path and write duration to `stderr`.
-pub fn print_output_path(stderr: &Term, output_dir: &Path, write_secs: f64) {
-    let _ = stderr.write_line(&format!(
+/// Print the simulation completion summary to `stderr`.
+pub fn print_simulation_summary(stderr: &Term, sim: &SimulationSummary) {
+    for line in simulation_summary_lines(sim) {
+        let _ = stderr.write_line(&line);
+    }
+}
+
+/// The exact line `print_output_path` writes to `stderr`.
+fn output_path_line(output_dir: &Path, write_secs: f64) -> String {
+    format!(
         "{} {}/ {}",
         console::style("Output written to").bold(),
         console::style(output_dir.display()).dim(),
         console::style(format!("({write_secs:.1}s)")).dim()
-    ));
+    )
 }
 
-/// Write the complete post-run summary block to `stderr`.
-#[cfg(test)]
-pub fn print_summary_reference(stderr: &Term, summary: &RunSummary) {
-    print_training_summary(stderr, &summary.training);
-    if let Some(sim) = &summary.simulation {
-        let _ = stderr.write_line("");
-        print_simulation_summary(stderr, sim);
-    }
-    let _ = stderr.write_line("");
-    print_output_path(stderr, &summary.output_dir, 0.0);
+/// Print the output directory path and write duration to `stderr`.
+pub fn print_output_path(stderr: &Term, output_dir: &Path, write_secs: f64) {
+    let _ = stderr.write_line(&output_path_line(output_dir, write_secs));
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -979,9 +915,10 @@ mod tests {
     use console::Term;
 
     use super::{
-        RunSummary, SimulationSummary, TrainingSummary, format_duration, format_split_duration,
-        format_summary_string_reference, policy_rows_lines, print_summary_reference,
-        time_split_training_walls,
+        SimulationSummary, TrainingSummary, format_duration, format_split_duration,
+        output_path_line, policy_rows_lines, print_output_path, print_simulation_summary,
+        print_training_summary, simulation_summary_lines, time_split_training_walls,
+        training_summary_lines,
     };
 
     fn make_training_summary() -> TrainingSummary {
@@ -1099,14 +1036,6 @@ mod tests {
         );
     }
 
-    fn make_run_summary(simulation: Option<SimulationSummary>) -> RunSummary {
-        RunSummary {
-            training: make_training_summary(),
-            simulation,
-            output_dir: PathBuf::from("/results/study-001"),
-        }
-    }
-
     #[test]
     fn test_format_duration_seconds() {
         assert_eq!(format_duration(12_300), "12.3s");
@@ -1138,22 +1067,21 @@ mod tests {
     }
 
     #[test]
-    fn test_format_summary_training_only() {
-        let summary = make_run_summary(None);
-        let s = format_summary_string_reference(&summary);
+    fn training_summary_lines_never_mentions_simulation() {
+        let s = training_summary_lines(&make_training_summary()).join("\n");
 
         assert!(
             s.contains("Training complete"),
-            "summary must contain 'Training complete'"
+            "training summary must contain 'Training complete'"
         );
         assert!(
             !s.contains("Simulation"),
-            "summary must NOT contain 'Simulation' when simulation is None, got: {s}"
+            "training summary must never mention 'Simulation', got: {s}"
         );
     }
 
     #[test]
-    fn test_format_summary_with_simulation() {
+    fn training_and_simulation_lines_each_contain_their_header() {
         let sim = SimulationSummary {
             n_scenarios: 200,
             completed: 198,
@@ -1168,30 +1096,26 @@ mod tests {
             total_solve_time_seconds: 8.5,
             parallelism: 4,
         };
-        let summary = make_run_summary(Some(sim));
-        let s = format_summary_string_reference(&summary);
+        let training_s = training_summary_lines(&make_training_summary()).join("\n");
+        let simulation_s = simulation_summary_lines(&sim).join("\n");
 
         assert!(
-            s.contains("Training complete"),
-            "summary must contain 'Training complete'"
+            training_s.contains("Training complete"),
+            "training summary must contain 'Training complete'"
         );
         assert!(
-            s.contains("Simulation complete"),
-            "summary must contain 'Simulation complete' when simulation is Some"
+            simulation_s.contains("Simulation complete"),
+            "simulation summary must contain 'Simulation complete'"
         );
     }
 
     #[test]
-    fn test_format_summary_contains_bounds() {
-        let summary = RunSummary {
-            training: TrainingSummary {
-                lower_bound: 100.5,
-                ..make_training_summary()
-            },
-            simulation: None,
-            output_dir: PathBuf::from("/tmp/out"),
+    fn training_summary_lines_contains_bounds() {
+        let training = TrainingSummary {
+            lower_bound: 100.5,
+            ..make_training_summary()
         };
-        let s = format_summary_string_reference(&summary);
+        let s = training_summary_lines(&training).join("\n");
 
         assert!(
             s.contains("1.00500e2"),
@@ -1200,18 +1124,14 @@ mod tests {
     }
 
     #[test]
-    fn test_format_summary_converged_detail() {
-        let summary = RunSummary {
-            training: TrainingSummary {
-                converged: true,
-                converged_at: Some(38),
-                reason: "bound_stalling".to_string(),
-                ..make_training_summary()
-            },
-            simulation: None,
-            output_dir: PathBuf::from("/tmp/out"),
+    fn training_summary_lines_converged_detail() {
+        let training = TrainingSummary {
+            converged: true,
+            converged_at: Some(38),
+            reason: "bound_stalling".to_string(),
+            ..make_training_summary()
         };
-        let s = format_summary_string_reference(&summary);
+        let s = training_summary_lines(&training).join("\n");
 
         assert!(
             s.contains("converged at iter 38"),
@@ -1220,18 +1140,14 @@ mod tests {
     }
 
     #[test]
-    fn test_format_summary_non_converged_shows_reason() {
-        let summary = RunSummary {
-            training: TrainingSummary {
-                converged: false,
-                converged_at: None,
-                reason: "iteration_limit".to_string(),
-                ..make_training_summary()
-            },
-            simulation: None,
-            output_dir: PathBuf::from("/tmp/out"),
+    fn training_summary_lines_non_converged_shows_reason() {
+        let training = TrainingSummary {
+            converged: false,
+            converged_at: None,
+            reason: "iteration_limit".to_string(),
+            ..make_training_summary()
         };
-        let s = format_summary_string_reference(&summary);
+        let s = training_summary_lines(&training).join("\n");
 
         assert!(
             s.contains("iteration_limit"),
@@ -1240,16 +1156,12 @@ mod tests {
     }
 
     #[test]
-    fn test_format_summary_time_3m42s() {
-        let summary = RunSummary {
-            training: TrainingSummary {
-                total_time_ms: 222_000,
-                ..make_training_summary()
-            },
-            simulation: None,
-            output_dir: PathBuf::from("/tmp/out"),
+    fn training_summary_lines_time_3m42s() {
+        let training = TrainingSummary {
+            total_time_ms: 222_000,
+            ..make_training_summary()
         };
-        let s = format_summary_string_reference(&summary);
+        let s = training_summary_lines(&training).join("\n");
 
         assert!(
             s.contains("3m 42s"),
@@ -1258,16 +1170,12 @@ mod tests {
     }
 
     #[test]
-    fn test_format_summary_scientific_notation() {
-        let summary = RunSummary {
-            training: TrainingSummary {
-                lower_bound: 45230.41,
-                ..make_training_summary()
-            },
-            simulation: None,
-            output_dir: PathBuf::from("/tmp/out"),
+    fn training_summary_lines_scientific_notation() {
+        let training = TrainingSummary {
+            lower_bound: 45230.41,
+            ..make_training_summary()
         };
-        let s = format_summary_string_reference(&summary);
+        let s = training_summary_lines(&training).join("\n");
 
         assert!(
             s.contains("4.52304e4"),
@@ -1276,32 +1184,23 @@ mod tests {
     }
 
     #[test]
-    fn test_format_summary_output_dir() {
-        let summary = RunSummary {
-            training: make_training_summary(),
-            simulation: None,
-            output_dir: PathBuf::from("/my/output/dir"),
-        };
-        let s = format_summary_string_reference(&summary);
+    fn output_path_line_contains_output_dir() {
+        let s = output_path_line(&PathBuf::from("/my/output/dir"), 0.0);
 
         assert!(
             s.contains("/my/output/dir"),
-            "summary must contain the output_dir path, got: {s}"
+            "output path line must contain the output_dir path, got: {s}"
         );
     }
 
     #[test]
-    fn test_format_summary_row_stats() {
-        let summary = RunSummary {
-            training: TrainingSummary {
-                total_rows_active: 480,
-                total_rows_generated: 1200,
-                ..make_training_summary()
-            },
-            simulation: None,
-            output_dir: PathBuf::from("/tmp/out"),
+    fn training_summary_lines_includes_row_stats() {
+        let training = TrainingSummary {
+            total_rows_active: 480,
+            total_rows_generated: 1200,
+            ..make_training_summary()
         };
-        let s = format_summary_string_reference(&summary);
+        let s = training_summary_lines(&training).join("\n");
 
         assert!(
             s.contains("480 active / 1200 generated"),
@@ -1313,8 +1212,7 @@ mod tests {
 
     #[test]
     fn format_time_split_training_forward_line_shows_solve_and_wait() {
-        let summary = make_run_summary(None);
-        let s = format_summary_string_reference(&summary);
+        let s = training_summary_lines(&make_training_summary()).join("\n");
 
         let forward_line = s.lines().find(|l| l.contains("Forward"));
         assert!(forward_line.is_some(), "expected a Forward line in: {s}");
@@ -1335,12 +1233,7 @@ mod tests {
             backward_wait_seconds: None,
             ..make_training_summary()
         };
-        let summary = RunSummary {
-            training,
-            simulation: None,
-            output_dir: PathBuf::from("/tmp/out"),
-        };
-        let s = format_summary_string_reference(&summary);
+        let s = training_summary_lines(&training).join("\n");
 
         let backward_line = s.lines().find(|l| l.contains("Backward"));
         assert!(backward_line.is_some(), "expected a Backward line in: {s}");
@@ -1365,12 +1258,7 @@ mod tests {
             parallelism: 0,
             ..make_training_summary()
         };
-        let summary = RunSummary {
-            training,
-            simulation: None,
-            output_dir: PathBuf::from("/tmp/out"),
-        };
-        let s = format_summary_string_reference(&summary);
+        let s = training_summary_lines(&training).join("\n");
 
         let forward_line = s.lines().find(|l| l.contains("Forward"));
         assert!(forward_line.is_some(), "expected a Forward line in: {s}");
@@ -1396,12 +1284,7 @@ mod tests {
             "the three phase walls must sum to total_time_ms/1000, got {forward_wall} + {backward_wall} + {serial_wall}"
         );
 
-        let summary = RunSummary {
-            training,
-            simulation: None,
-            output_dir: PathBuf::from("/tmp/out"),
-        };
-        let s = format_summary_string_reference(&summary);
+        let s = training_summary_lines(&training).join("\n");
         assert!(s.contains(&format_split_duration(forward_wall)), "got: {s}");
         assert!(
             s.contains(&format_split_duration(backward_wall)),
@@ -1419,12 +1302,7 @@ mod tests {
         };
         assert!(time_split_training_walls(&training).is_none());
 
-        let summary = RunSummary {
-            training,
-            simulation: None,
-            output_dir: PathBuf::from("/tmp/out"),
-        };
-        let s = format_summary_string_reference(&summary);
+        let s = training_summary_lines(&training).join("\n");
         assert!(
             !s.contains("Time split"),
             "the training Time split block must be omitted entirely when phase-wall data is unavailable, got: {s}"
@@ -1451,12 +1329,7 @@ mod tests {
             time_split_training_walls(&training).expect("phase walls are present");
         let expected_other = (serial_wall - bound - selection).max(scheduling).max(0.0);
 
-        let summary = RunSummary {
-            training,
-            simulation: None,
-            output_dir: PathBuf::from("/tmp/out"),
-        };
-        let s = format_summary_string_reference(&summary);
+        let s = training_summary_lines(&training).join("\n");
         let serial_line = s.lines().find(|l| l.contains("Serial"));
         assert!(serial_line.is_some(), "expected a Serial line in: {s}");
         let serial_line = serial_line.expect("checked above");
@@ -1629,13 +1502,13 @@ mod tests {
     }
 
     #[test]
-    fn test_print_summary_reference_does_not_panic() {
-        let summary = make_run_summary(None);
-        print_summary_reference(&Term::buffered_stderr(), &summary);
+    fn print_training_summary_does_not_panic() {
+        let training = make_training_summary();
+        print_training_summary(&Term::buffered_stderr(), &training);
     }
 
     #[test]
-    fn test_print_summary_reference_with_simulation_does_not_panic() {
+    fn print_simulation_summary_does_not_panic() {
         let sim = SimulationSummary {
             n_scenarios: 100,
             completed: 100,
@@ -1650,8 +1523,12 @@ mod tests {
             total_solve_time_seconds: 4.2,
             parallelism: 2,
         };
-        let summary = make_run_summary(Some(sim));
-        print_summary_reference(&Term::buffered_stderr(), &summary);
+        print_simulation_summary(&Term::buffered_stderr(), &sim);
+    }
+
+    #[test]
+    fn print_output_path_does_not_panic() {
+        print_output_path(&Term::buffered_stderr(), &PathBuf::from("/tmp/out"), 1.2);
     }
 
     // ── HydroModelSummary tests ────────────────────────────────────────────

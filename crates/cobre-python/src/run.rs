@@ -52,6 +52,7 @@ use cobre_io::OutputContext;
 use cobre_io::PolicyMode::Resume;
 use cobre_io::PolicyMode::WarmStart;
 use cobre_io::ReportEntry;
+use cobre_io::SetupTimings;
 use cobre_io::TrainingOutput;
 use cobre_io::get_hostname;
 use cobre_io::now_iso8601;
@@ -78,6 +79,7 @@ use cobre_io::{ParquetWriterConfig, SolverStatsRow};
 use cobre_sddp::BoundaryLoadRequest;
 use cobre_sddp::FullFcf;
 use cobre_sddp::FutureCostFunction;
+use cobre_sddp::HydroFitTimings;
 use cobre_sddp::PolicyLoadProof;
 use cobre_sddp::PolicyStageManifest;
 use cobre_sddp::SddpError;
@@ -533,6 +535,7 @@ pub(crate) fn write_training_artifacts(
     config: &Config,
     setup: &StudySetup,
     training: &TrainingPhaseResult,
+    setup_timings: &SetupTimings,
     seed: u64,
     n_threads: usize,
 ) -> Result<(), String> {
@@ -572,9 +575,7 @@ pub(crate) fn write_training_artifacts(
         started_at: training.started_at.clone(),
         completed_at: now_iso8601(),
         distribution: single_process_distribution(n_threads),
-        // Absent (CLI-only): the Python single-process path collects no
-        // setup-phase timings. Matches the CLI shape via `skip_serializing_if`.
-        setup: None,
+        setup: Some(setup_timings.clone()),
         // Mirrors the CLI write site so Python and CLI emit the same
         // `production_fit_deviation` section.
         production_fit_deviation: build_deviation_summary(&setup.hydro_models.fpha_fit_deviations),
@@ -906,6 +907,9 @@ pub(crate) struct LoadedStudy {
     pub hydro_models_summary: HydroModelSummary,
     /// Validation-pipeline warnings captured during the case load.
     pub warnings: Vec<ReportEntry>,
+    /// Wall-clock setup-phase timings, mirroring the CLI's `SetupTimings`
+    /// collection in `crates/cobre-cli/src/commands/run/setup.rs`.
+    pub setup_timings: SetupTimings,
 }
 
 /// Run the front half of the solve lifecycle: load the case, resolve the
@@ -931,6 +935,9 @@ pub(crate) fn build_study_setup(
     output_dir: &Path,
     overrides: Option<&Map<String, Value>>,
 ) -> Result<LoadedStudy, PhaseError> {
+    let mut timings = SetupTimings::default();
+    let load_start = std::time::Instant::now();
+
     // The `validate_*` variant (rather than `load_case_with_artifacts`) captures
     // the warnings so `Study::validate` can replay them without re-reading disk.
     let (loaded, report) = validate_case_with_artifacts(case_dir).map_err(PhaseError::Load)?;
@@ -938,6 +945,7 @@ pub(crate) fn build_study_setup(
     let warnings = report.warnings;
 
     let config = load_effective_config(&case_dir.join("config.json"), overrides)?;
+    timings.load_seconds = load_start.elapsed().as_secs_f64();
 
     // Resolve the boundary-derived state requirements once; carried onto the
     // construction config below so both the layout and the boundary-load reject
@@ -954,6 +962,7 @@ pub(crate) fn build_study_setup(
         .training_scenario_source(&case_dir.join("config.json"))
         .map_err(|e| format!("scenario source error: {e}"))?;
 
+    let stochastic_start = std::time::Instant::now();
     let result = prepare_stochastic(
         system,
         case_dir,
@@ -963,17 +972,21 @@ pub(crate) fn build_study_setup(
         boundary_requirements.inflow_lag_depth(),
     )
     .map_err(|e| format!("stochastic preprocessing error: {e}"))?;
+    timings.stochastic_fit_seconds = stochastic_start.elapsed().as_secs_f64();
     let system = result.system;
     let estimation_report = result.estimation_report;
     let estimation_path = result.estimation_path;
 
+    let mut hydro_timings = HydroFitTimings::default();
     let hydro_models_result = prepare_hydro_models_from_artifacts(
         &system,
         &artifacts,
         config.exports.fpha_deviation_points,
-        None,
+        Some(&mut hydro_timings),
     )
     .map_err(|e| format!("hydro model preprocessing error: {e}"))?;
+    timings.production_fit_seconds = hydro_timings.production_fit_seconds;
+    timings.evaporation_fit_seconds = hydro_timings.evaporation_fit_seconds;
 
     let simulation_source = config
         .simulation_scenario_source(&case_dir.join("config.json"))
@@ -1046,6 +1059,7 @@ pub(crate) fn build_study_setup(
         stochastic_summary,
         hydro_models_summary,
         warnings,
+        setup_timings: timings,
     })
 }
 

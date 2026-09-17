@@ -25,10 +25,9 @@ Every other field and column is compared exactly. The two module-level mask
 constants name the excluded paths and columns, with the reason each is masked:
 
 - `_MASKED_JSON_POINTERS`: maps each JSON file to the tuple of slash-separated
-  key paths dropped before comparison. Every path is wall-clock-related except
-  the `setup` section, which is present in the CLI's `training/metadata.json`
-  and absent from Python's (the Python training path collects no setup-phase
-  timings, by design).
+  key paths dropped before comparison. Every path is wall-clock-related,
+  including the `setup` section (per-phase setup timings) that both the CLI
+  and Python now write to `training/metadata.json`.
 - `_MASKED_PARQUET_COLUMNS`: the frozen set of wall-clock column names dropped
   from every Parquet comparison.
 
@@ -70,15 +69,13 @@ _COMPARED_JSON_FILES = (
 )
 
 # Masked JSON pointer paths (slash-separated key paths) per file.
-# Every entry is wall-clock-related except `setup`, which is present in CLI
-# output and absent from Python output (the Python training path collects no
-# setup-phase timings).
+# Every entry is wall-clock-related.
 _MASKED_JSON_POINTERS: dict[str, tuple[str, ...]] = {
     "training/metadata.json": (
         "started_at",  # wall-clock
         "completed_at",  # wall-clock
         "duration_seconds",  # wall-clock
-        "setup",  # present in CLI, absent in Python
+        "setup",  # wall-clock (setup-phase timings)
         "solve_stats/forward_solve_seconds",  # cumulative wall-clock
         "solve_stats/backward_solve_seconds",  # cumulative wall-clock
     ),

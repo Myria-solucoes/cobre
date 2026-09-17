@@ -313,6 +313,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previously described a build that did not match what the release workflow
   wrote or what the wheel contained.
 
+- **`training/metadata.json` written by `cobre.run.run` and `Study.train` now carries the
+  `setup` section (per-phase setup timings) that `cobre run` already wrote.** The Python
+  path times case load, stochastic fit and production-model fit the same way the CLI
+  does; `broadcast_seconds` is zero for the single-process path. The two entry points now
+  write the same set of top-level keys.
+
+- **The package manifests' homepage and documentation URLs point at the unified
+  documentation site.** The workspace `Cargo.toml`, the `cobre-python` crate manifest and
+  its `pyproject.toml` named a retired site.
+
 ## [0.15.0] - 2026-08-24
 
 ### Added
