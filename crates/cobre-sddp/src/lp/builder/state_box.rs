@@ -1,10 +1,9 @@
 //! The admissible box per outgoing state dimension: the tightest interval the LP
-//! that consumes the value enforces (SPEC §3.1). Storage and transit buckets copy
+//! that consumes the value enforces. Storage and transit buckets copy
 //! the outgoing column's own template bounds; inflow lags stay unbounded. The
 //! commitment-hold family is the one hand-written special case: its carrier
 //! column is free `(-∞, ∞)`, so the box comes from the delivery stage's resolved
-//! generation bound instead, mirroring `fill_anticipated_columns`'s own lookup
-//! (ADR-002, ADR-012).
+//! generation bound instead, mirroring `fill_anticipated_columns`'s own lookup.
 
 use std::ops::Range;
 
@@ -92,7 +91,7 @@ fn fill_identity_box(
 /// `(-∞, ∞)`, so the box is the held physical delivery target's resolved
 /// generation bound instead — read via `thermal_block_base`, never
 /// `template`'s own column bounds, mirroring `fill_anticipated_columns`'s
-/// lookup (ADR-002, ADR-012). Every REACHABLE slot resolves its own target —
+/// lookup. Every REACHABLE slot resolves its own target —
 /// the fresh deposit this stage AND every already-decided, not-yet-matured
 /// in-flight slot alike, since the ring holds a carried value at every reachable
 /// slot, not only the one just latched. Padding (a plant's own depth shorter

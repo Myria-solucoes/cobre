@@ -105,7 +105,7 @@ pub(crate) fn postprocess_templates(
     }
 
     // Commitment-hold resolution context the box builder's one hand-written
-    // special case needs (ADR-002, ADR-012) — resolved once here and threaded
+    // special case needs — resolved once here and threaded
     // through every stage's `build_state_box` call, mirroring the same
     // `resolve_post_study_artifacts` inputs `build_stage_templates` uses. Runs
     // BEFORE column scaling below: the storage/transit-bucket identity families
