@@ -19,7 +19,7 @@ use crate::setup::template_postprocess::{
 };
 
 use super::layout::{ResolvedTables, StageLayout, TemplateBuildCtx};
-use super::{GenericConstraintRowEntry, M3S_TO_HM3, columns, entries, rows, scaling};
+use super::{GenericConstraintRowEntry, M3S_TO_HM3, StateBox, columns, entries, rows, scaling};
 use crate::indexer::{
     Boundary, EvaporationIndices, HydroCellIndex, HydroSys, StateSpace, StorageBoundaryGrid,
     ThermalSys,
@@ -36,6 +36,9 @@ use crate::setup::resolve_state_layout;
 pub struct StageTemplates {
     /// One structural LP template per study stage, in stage order.
     pub templates: Vec<StageTemplate>,
+    /// Per-stage admissible box for every outgoing state dimension, populated by
+    /// `postprocess_templates` after scaling. Length equals `templates.len()`.
+    pub(crate) state_boxes: Vec<StateBox>,
     /// Row index of the first water-balance constraint in each stage's LP (the
     /// noise-injection `base_row`). Length equals `templates.len()`.
     pub base_rows: Vec<usize>,
@@ -159,6 +162,7 @@ impl StageTemplates {
     pub(crate) fn empty(n_hydros: usize, cost_scale_factor: f64) -> Self {
         Self {
             templates: Vec::new(),
+            state_boxes: Vec::new(),
             base_rows: Vec::new(),
             noise_scale: Vec::new(),
             zeta_per_stage: Vec::new(),
@@ -1303,6 +1307,7 @@ fn assemble_stage_templates_output(
 
     StageTemplates {
         templates,
+        state_boxes: Vec::new(),
         base_rows,
         noise_scale,
         zeta_per_stage,

@@ -49,6 +49,7 @@ mod layout;
 mod patch;
 mod rows;
 mod scaling;
+pub(crate) mod state_box;
 mod template;
 
 #[cfg(test)]
@@ -70,6 +71,7 @@ pub(crate) use scaling::{
     apply_col_scale, apply_commitment_hold_col_scale_unscale, apply_row_scale, compute_col_scale,
     compute_row_scale,
 };
+pub(crate) use state_box::{StateBox, build_state_box};
 pub(crate) use template::models_from_normal;
 
 // ---------------------------------------------------------------------------

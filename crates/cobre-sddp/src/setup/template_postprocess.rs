@@ -1,6 +1,6 @@
 //! Template post-processing: discount factors, LP scaling, and noise pre-scaling.
 
-use cobre_core::{HorizonGraph, Stage, System};
+use cobre_core::{EntityId, HorizonGraph, Stage, System};
 
 use crate::indexer::StateSpace;
 use crate::scaling_report::ScalingReport;
@@ -155,6 +155,70 @@ pub(crate) fn postprocess_templates(
                     tmpl.row_scale[base_row + h];
             }
         }
+    }
+
+    // Commitment-hold resolution context the box builder's one hand-written
+    // special case needs (ADR-002, ADR-012) — resolved once here and threaded
+    // through every stage's `build_state_box` call, mirroring the same
+    // `resolve_post_study_artifacts` inputs `build_stage_templates` uses.
+    let bounds = system.bounds();
+    let mut anticipated_thermal_indices: Vec<usize> = Vec::new();
+    let mut anticipated_windows: Vec<(Option<i32>, Option<i32>)> = Vec::new();
+    for (t_idx, thermal) in system.thermals().iter().enumerate() {
+        if thermal.anticipated_config.is_some() {
+            anticipated_thermal_indices.push(t_idx);
+            anticipated_windows.push((thermal.entry_stage_id, thermal.exit_stage_id));
+        }
+    }
+    let anticipated_thermal_ids: Vec<EntityId> = anticipated_thermal_indices
+        .iter()
+        .map(|&idx| system.thermals()[idx].id)
+        .collect();
+    let last_real_cumulative = stage_templates
+        .cumulative_discount_factors()
+        .last()
+        .copied()
+        .unwrap_or(1.0);
+    let last_real_per_stage = stage_templates
+        .discount_factors()
+        .last()
+        .copied()
+        .unwrap_or(1.0);
+    let post_study_resolved = super::resolve_post_study_artifacts(
+        system.post_study_stages(),
+        &anticipated_thermal_ids,
+        system.policy_graph(),
+        last_real_cumulative,
+        last_real_per_stage,
+    );
+    let study_stage_ids: Vec<i32> = system
+        .stages()
+        .iter()
+        .filter(|s| s.id >= 0)
+        .map(|s| s.id)
+        .collect();
+    let n_post = post_study_resolved.total_hours.len();
+    let next_delivery_id = study_stage_ids.last().map_or(0, |&last| last + 1);
+    let end_delivery_id =
+        next_delivery_id.saturating_add(i32::try_from(n_post).unwrap_or(i32::MAX));
+    let delivery_stage_ids: Vec<i32> = study_stage_ids
+        .iter()
+        .copied()
+        .chain(next_delivery_id..end_delivery_id)
+        .collect();
+
+    for stage_idx in 0..stage_templates.templates.len() {
+        let state_box = lp_builder::build_state_box(
+            &stage_templates.templates[stage_idx],
+            state_layout,
+            stage_idx,
+            bounds,
+            &anticipated_thermal_indices,
+            &anticipated_windows,
+            &delivery_stage_ids,
+            &post_study_resolved,
+        );
+        stage_templates.state_boxes.push(state_box);
     }
 
     scaling_report
