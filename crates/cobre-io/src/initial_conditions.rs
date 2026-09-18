@@ -72,12 +72,15 @@
 //!    horizon: the leading in-study stages and, when the plant's lead reaches
 //!    past the horizon, the post-horizon stages it decides before the study. A
 //!    window may not cover a stage the study itself decides or one past the
-//!    plant's decision reach. Every `value_mw` lies within the plant's
-//!    `[min_generation_mw, max_generation_mw]` bounds and, if the plant has a
-//!    commissioning window, matures inside it. All are enforced by the semantic
-//!    validator (Layer 5a); the committed values are sunk cost and do not enter
-//!    the study objective. See [`AnticipatedCommitmentHistory`] in `cobre-core`
-//!    for the full contract.
+//!    plant's decision reach. Every in-study `value_mw` lies within that
+//!    delivery stage's resolved generation bounds (the same bounds the
+//!    anticipated-commitment decision column reads); a purely post-horizon
+//!    `value_mw` lies within the plant's static
+//!    `[min_generation_mw, max_generation_mw]` bounds instead. Either way, if
+//!    the plant has a commissioning window, the value must mature inside it.
+//!    All are enforced by the semantic validator (Layer 5a); the committed
+//!    values are sunk cost and do not enter the study objective. See
+//!    [`AnticipatedCommitmentHistory`] in `cobre-core` for the full contract.
 //! 10. Every `start_date` and `end_date` in `past_defluences` parses as ISO 8601
 //!     (`YYYY-MM-DD`), and `end_date > start_date`.
 //! 11. Every `value_m3s` in `past_defluences` is finite and non-negative.
@@ -213,9 +216,11 @@ struct RawRecentObservation {
 /// study horizon (leading in-study stages, or post-horizon stages the plant
 /// decides ahead of the study), never a stage the study itself decides
 /// (validated semantically). The values are sunk cost: they do not enter the
-/// study objective. Each `value_mw` must lie within the plant's
-/// `[min_generation_mw, max_generation_mw]` bounds and, if the plant has a
-/// commissioning window, mature inside it (both validated semantically).
+/// study objective. Each in-study `value_mw` must lie within that delivery
+/// stage's resolved generation bounds; a purely post-horizon `value_mw` must
+/// lie within the plant's static `[min_generation_mw, max_generation_mw]`
+/// bounds instead. Either way, if the plant has a commissioning window, the
+/// value must mature inside it (both validated semantically).
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

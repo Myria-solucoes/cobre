@@ -52,6 +52,7 @@ use cobre_io::config::{
     SimulationConfig as IoSimulationConfig, SimulationSelection, StoppingMode, StoppingRuleConfig,
     TrainingConfig, TrainingSelection, TrainingSolverConfig, UpperBoundEvaluationConfig,
 };
+use cobre_sddp::test_support::oracle_initial_state;
 use cobre_solver::ActiveSolver;
 
 use common::builders::{
@@ -350,6 +351,57 @@ fn commitment_hair_above_cap_trains() {
     let seed_mw = CAP_MW * (1.0 + 1e-12);
     let system = build_commitment_system(3, 2, 0.0, CAP_MW, &[(0, seed_mw)], None);
     assert_trains_to_completion(system, &build_config(TRAIN_ITERATIONS));
+}
+
+/// A genuine over-cap seed — 50% past the cap, orders of magnitude beyond
+/// `envelope_tolerance` — is projected onto `[floor_mw, cap_mw]` by
+/// `build_initial_state`'s seed-time clamp before training ever starts (the
+/// retired runtime verdict this ticket moves off the solve path entirely, not
+/// the sub-tolerance hair `commitment_hair_above_cap_trains` exercises).
+#[test]
+fn anticipated_commitment_over_cap_seed_is_clamped() {
+    const FLOOR_MW: f64 = 0.0;
+    const CAP_MW: f64 = 100.0;
+    let seed_mw = CAP_MW * 1.5;
+    let system = build_commitment_system(3, 2, FLOOR_MW, CAP_MW, &[(0, seed_mw)], None);
+    let config = build_config(TRAIN_ITERATIONS);
+
+    let mut setup = common::build_setup_in_code(system, &config);
+    let commit_out = setup.stage_state().commit_out.clone();
+    let initial_state = oracle_initial_state(&setup);
+
+    for j in commit_out.clone() {
+        assert!(
+            (FLOOR_MW - 1e-6..=CAP_MW + 1e-6).contains(&initial_state[j]),
+            "commit_out[{j}] = {} must be clamped into [{FLOOR_MW}, {CAP_MW}] by \
+             build_initial_state's seed-time projection, not left at the raw \
+             over-cap seed {seed_mw}",
+            initial_state[j]
+        );
+    }
+    assert!(
+        (initial_state[commit_out.start] - seed_mw).abs() > 1.0,
+        "fixture sanity: the seed must actually be moved by the clamp, else the \
+         box check above is vacuous"
+    );
+
+    let comm = common::StubComm;
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
+    let outcome = setup
+        .train(&mut solver, &comm, N_THREADS, ActiveSolver::new, None, None)
+        .expect("train must not return Err");
+
+    assert!(
+        outcome.error.is_none(),
+        "a genuine over-cap commitment seed is clamped at setup time and must train \
+         to completion — the retired runtime verdict must not resurface. Got: {:?}",
+        outcome.error
+    );
+    assert!(
+        outcome.result.final_lb.is_finite(),
+        "a completed training run must report a finite final_lb, got {}",
+        outcome.result.final_lb
+    );
 }
 
 #[test]

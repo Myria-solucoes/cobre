@@ -12,14 +12,16 @@
 //!   `<family>_block_base` for every `block_index`; the empty-overlay path is
 //!   never special-cased.
 //! - **Base** (`<family>_block_base`) — the block-eligible columns at
-//!   `(entity, stage)` granularity, ignoring the overlay. Reserved for three
+//!   `(entity, stage)` granularity, ignoring the overlay. Reserved for four
 //!   sanctioned caller categories: the dictionary report path
 //!   (`write_bounds_parquet`'s null-`block_id` base row, all five families),
 //!   the anticipated-commitment decision column
-//!   (`fill_anticipated_columns`, thermal only), and the admissible state-box
+//!   (`fill_anticipated_columns`, thermal only), the admissible state-box
 //!   machinery (the box builder and the initial-seed canonicalization, thermal
-//!   only). Any other caller is a design question, not an implementation
-//!   detail.
+//!   only), and the load-time over-commitment validator
+//!   (`check_committed_value_bounds`, thermal only, reading the delivery
+//!   stage's commitment bound). Any other caller is a design question, not an
+//!   implementation detail.
 //!
 //! Most entity tables share a uniform flat entity/stage layout; [`ResolvedBounds`]
 //! documents the exact stride for each family, including thermal's extended one.
@@ -1073,12 +1075,14 @@ impl ResolvedBounds {
     /// stage_index)`, ignoring the per-block overlay. This is **not** the value
     /// that applies at a block — see
     /// [`thermal_bounds_at_block`](Self::thermal_bounds_at_block) for the
-    /// block-resolved reader. `*_block_base` accessors exist for three
+    /// block-resolved reader. `*_block_base` accessors exist for four
     /// sanctioned caller categories: the dictionary report path
     /// (`write_bounds_parquet`'s null-`block_id` base row), the
     /// anticipated-commitment decision column (`fill_anticipated_columns`,
-    /// reading the delivery stage's bounds), and the admissible state-box
+    /// reading the delivery stage's bounds), the admissible state-box
     /// machinery (the box builder and the initial-seed canonicalization,
+    /// reading the delivery stage's commitment bound), and the
+    /// load-time over-commitment validator (`check_committed_value_bounds`,
     /// reading the delivery stage's commitment bound); this accessor serves
     /// them. Any other caller is a design question, not an implementation
     /// detail. `stage_index` may land in the padded delivery-stage region.
