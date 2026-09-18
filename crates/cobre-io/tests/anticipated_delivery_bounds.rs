@@ -4,8 +4,7 @@
 //! stage is checked against that stage's RESOLVED box (the per-stage
 //! `thermal_bounds.parquet` override folded in), not the plant's static
 //! `[min_generation_mw, max_generation_mw]` — driven through the public
-//! `cobre_io::load_case` pipeline end to end, the moved-test replacement for
-//! the retired runtime `AnticipatedCommitmentOutOfBounds` rejection.
+//! `cobre_io::load_case` pipeline end to end.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -88,7 +87,7 @@ fn write_thermal_bounds_override(
         Field::new("block_id", DataType::Int32, true),
     ]));
     let batch = RecordBatch::try_new(
-        Arc::clone(&schema),
+        schema,
         vec![
             Arc::new(Int32Array::from(vec![thermal_id])),
             Arc::new(Int32Array::from(vec![stage_id])),

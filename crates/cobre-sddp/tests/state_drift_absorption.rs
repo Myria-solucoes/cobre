@@ -7,9 +7,10 @@
 //! the original data. Every fixture is built via `build_setup_in_code`
 //! (`tests/common/mod.rs`), which bypasses `cobre-io` the same way
 //! `anticipated_commitment_drifted_over_cap_is_absorbed`
-//! (`tests/anticipated_scenarios.rs`) does — these are within-drift seeds
-//! injected in-code, not genuine over-commitments `cobre-io` would reject at
-//! load time.
+//! (`tests/anticipated_scenarios.rs`) does. Most are within-drift seeds
+//! `cobre-io` would accept; `anticipated_commitment_over_cap_seed_is_clamped`
+//! injects a genuine over-commitment in-code (one `cobre-io` would reject at
+//! load time) to prove the setup-time seed clamp absorbs it too.
 //!
 //! Each test asserts a positive completion signal — `Ok` with a finite
 //! `final_lb`, or a finite simulated cost — never merely the absence of a
@@ -355,9 +356,9 @@ fn commitment_hair_above_cap_trains() {
 
 /// A genuine over-cap seed — 50% past the cap, orders of magnitude beyond
 /// `envelope_tolerance` — is projected onto `[floor_mw, cap_mw]` by
-/// `build_initial_state`'s seed-time clamp before training ever starts (the
-/// retired runtime verdict this ticket moves off the solve path entirely, not
-/// the sub-tolerance hair `commitment_hair_above_cap_trains` exercises).
+/// `build_initial_state`'s seed-time clamp before training ever starts, so it
+/// trains rather than aborting — a genuine over-commitment, unlike the
+/// sub-tolerance hair `commitment_hair_above_cap_trains` exercises.
 #[test]
 fn anticipated_commitment_over_cap_seed_is_clamped() {
     const FLOOR_MW: f64 = 0.0;

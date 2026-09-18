@@ -93,13 +93,13 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
     let extended_axis = build_extended_delivery_axis(data);
 
     for thermal in &data.thermals {
-        let Some(ref cfg) = thermal.anticipated_config else {
+        let Some(cfg) = thermal.anticipated_config else {
             continue;
         };
         let thermal_id = thermal.id.0;
 
         let classes = classify_deliveries(
-            *cfg,
+            cfg,
             extended_axis.as_ref(),
             &study_durations,
             n_stages,
@@ -114,7 +114,7 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
         let reaches_post_study =
             !classes.carried.is_empty() || !classes.fixed_post_study.is_empty();
 
-        if let AnticipatedConfig::LeadTime(delta_hours) = *cfg {
+        if let AnticipatedConfig::LeadTime(delta_hours) = cfg {
             let total_horizon_hours: f64 = study_durations.iter().sum();
             if delta_hours > total_horizon_hours && !reaches_post_study {
                 let entity_str = format!("thermals[id={thermal_id}].anticipated_config.lead_time");
@@ -180,7 +180,7 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
     let anticipated_thermal_ids: HashSet<EntityId> = collect_anticipated_thermal_ids(data);
 
     for (thermal_pos, thermal) in data.thermals.iter().enumerate() {
-        let Some(ref cfg) = thermal.anticipated_config else {
+        let Some(cfg) = thermal.anticipated_config else {
             continue;
         };
         let thermal_id = thermal.id;
@@ -210,7 +210,7 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
                 let Some(bounds) = bounds.as_ref() else {
                     continue;
                 };
-                let k_i = lead_delivery_stage_count(*cfg, &study_durations, n_stages);
+                let k_i = lead_delivery_stage_count(cfg, &study_durations, n_stages);
                 if check_commitment_coverage(
                     thermal_id,
                     records,
