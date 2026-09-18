@@ -23,9 +23,8 @@ use crate::lp_builder::GenericConstraintRowEntry;
 use crate::lp_builder::StageGeometry;
 use crate::noise::DownstreamAccumState;
 use crate::noise::LagAccumState;
-use crate::noise::accumulate_and_shift_lag_state;
 use crate::stage_solve::StageInputs;
-use crate::stage_solve::debug_assert_bucket_copy_gap_intact;
+use crate::stage_solve::assemble_outgoing_state;
 use crate::stage_solve::fill_unscaled;
 use crate::stage_solve::fill_unscaled_dual;
 use crate::stage_solve::run_stage_solve;
@@ -438,8 +437,7 @@ pub(crate) fn solve_simulation_stage<S: SolverInterface>(
         training_ctx,
         t,
         &prep_params,
-    )
-    .map_err(|e| SimulationError::SolvePrep(e.to_string()))?;
+    );
     // stage_id (the commissioning key the dormancy predicate compares NCS windows
     // against), NOT the stage index `t`: they differ when negative-id placeholder
     // stages are filtered out.
@@ -564,10 +562,6 @@ pub(crate) fn solve_simulation_stage<S: SolverInterface>(
         .lag_matrix_buf
         .extend_from_slice(&ws.current_state[lag_start..lag_start + lag_len]);
 
-    ws.current_state.clear();
-    ws.current_state
-        .extend_from_slice(&ws.scratch.unscaled_primal[..state.n_state]);
-
     let stage_lag = ctx.stage_lag(t);
     let downstream_par_order = ws
         .scratch
@@ -578,12 +572,13 @@ pub(crate) fn solve_simulation_stage<S: SolverInterface>(
     // Pass unscaled_primal as a separate borrow so the borrow checker sees it is
     // disjoint from the &mut ws.scratch.lag_* fields passed alongside it.
     let unscaled_primal_ref: &[f64] = &ws.scratch.unscaled_primal;
-    accumulate_and_shift_lag_state(
+    assemble_outgoing_state(
         &mut ws.current_state,
-        &ws.scratch.lag_matrix_buf,
         unscaled_primal_ref,
+        &ws.scratch.lag_matrix_buf,
         state,
-        &stage_lag,
+        ctx.state_box(t),
+        stage_lag,
         &mut LagAccumState {
             accumulator: &mut ws.scratch.lag_accumulator,
             weight_accum: &mut ws.scratch.lag_weight_accum,
@@ -595,8 +590,8 @@ pub(crate) fn solve_simulation_stage<S: SolverInterface>(
             n_completed: &mut ws.scratch.downstream_n_completed,
             par_order: downstream_par_order,
         },
+        &mut ws.drift_tally,
     );
-    debug_assert_bucket_copy_gap_intact(&ws.current_state, unscaled_primal_ref, state);
 
     Ok((immediate_cost, result))
 }

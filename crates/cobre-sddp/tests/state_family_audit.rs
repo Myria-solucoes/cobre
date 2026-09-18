@@ -311,8 +311,7 @@ mod inflow_lag_audit {
             StageIdx(TERMINAL_STAGE),
             pinned_state,
             &raw_noise,
-        )
-        .expect("StageSolvePrep::run must not error on the inflow-lag audit fixture");
+        );
 
         solve_stage_for_probe(
             ws,

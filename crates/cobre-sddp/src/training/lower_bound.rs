@@ -303,7 +303,7 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
             training_ctx,
             StageIdx(0),
             &prep_params,
-        )?;
+        );
 
         let view = solver.solve(None).map_err(|e| match e {
             SolverError::Infeasible => SddpError::Infeasible {
@@ -522,7 +522,7 @@ mod tests {
         horizon_mode::HorizonMode,
         indexer::{CutStateProjection, StateSpace, StudyDimensions},
         inflow_method::InflowNonNegativityMethod,
-        lp_builder::PatchBuffer,
+        lp_builder::{PatchBuffer, StateBox},
         risk_measure::RiskMeasure,
         setup::node_graph::StageIdx,
         setup::{
@@ -958,6 +958,17 @@ mod tests {
         FutureCostFunction::new(n_stages, n_state, 2, 100, &vec![0; n_stages])
     }
 
+    /// One unbounded box per stage — the pin-time box-membership assert stays
+    /// vacuous regardless of which stage `evaluate_lower_bound` indexes.
+    fn permissive_state_boxes(n_stages: usize, n_state: usize) -> Vec<StateBox> {
+        (0..n_stages)
+            .map(|_| StateBox {
+                lower: vec![f64::NEG_INFINITY; n_state],
+                upper: vec![f64::INFINITY; n_state],
+            })
+            .collect()
+    }
+
     /// Owned backing data for the "simple" LB unit tests' `StageContext`/
     /// `TrainingContext` pair, mirroring how `StudySetup` owns `StageData` and
     /// lends `stage_ctx()`/`training_ctx()`. Every simple test shares this shape
@@ -966,6 +977,7 @@ mod tests {
     /// and initial state differ per test.
     struct SimpleLbFixture {
         templates: Vec<StageTemplate>,
+        state_boxes: Vec<StateBox>,
         base_rows: Vec<usize>,
         noise_scale: Vec<f64>,
         n_hydros: usize,
@@ -995,6 +1007,7 @@ mod tests {
             let stochastic = wrap_opening_tree(opening_tree);
             let node_graph = test_support::chain_node_graph(&stochastic);
             Self {
+                state_boxes: permissive_state_boxes(1, state.n_state),
                 templates: vec![template],
                 base_rows: vec![base_row],
                 noise_scale,
@@ -1012,6 +1025,7 @@ mod tests {
 
         fn ctx(&self) -> StageContext<'_> {
             StageContext {
+                state_boxes: &self.state_boxes,
                 templates: &self.templates,
                 base_rows: &self.base_rows,
                 geometry_per_stage: &[],
@@ -2013,8 +2027,10 @@ mod tests {
         let ncs_stochastic_dense_col: Vec<usize> = (0..n_ncs).collect();
         let ncs_stochastic_windows: Vec<(Option<i32>, Option<i32>)> = vec![(None, None); n_ncs];
         let ncs_col_starts = vec![0_usize];
+        let state_boxes = permissive_state_boxes(1, state.n_state);
 
         let ctx = StageContext {
+            state_boxes: &state_boxes,
             templates: &templates,
             base_rows: &base_rows,
             geometry_per_stage: &[],
@@ -2815,8 +2831,10 @@ mod tests {
         let opening_tree = filling_opening_tree(1);
         let rm = RiskMeasure::Expectation;
         let stochastic = wrap_opening_tree(opening_tree);
+        let state_boxes = permissive_state_boxes(templates.templates.len(), state.n_state);
 
         let ctx = StageContext {
+            state_boxes: &state_boxes,
             templates: &templates.templates,
             base_rows: &templates.base_rows,
             geometry_per_stage: &templates.geometry_per_stage,
@@ -2925,8 +2943,10 @@ mod tests {
         let comm = LocalComm;
         let mut solver = MockSolver::with_objectives(vec![0.0]);
         let stochastic = wrap_opening_tree(opening_tree);
+        let state_boxes = permissive_state_boxes(1, state.n_state);
 
         let ctx = StageContext {
+            state_boxes: &state_boxes,
             templates: &templates,
             base_rows: &base_rows,
             geometry_per_stage: &[],

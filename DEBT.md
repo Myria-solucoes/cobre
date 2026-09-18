@@ -18,6 +18,17 @@ paid:      the ticket that paid it off (written only on retirement)
 
 ## Open
 
+### DEBT-002
+what:      the stage-0 initial-state seed clamps (`canonicalize_initial_state` for storage/transit and the commitment-hold delivery-bound clamp in `build_initial_state`, crates/cobre-sddp/src/setup/mod.rs) do not record a `DriftTally` entry per clamped dimension, unlike the read-back seam `assemble_outgoing_state` which tallies every clamped outgoing-state dimension by family.
+why-now:   deliberate — `DriftTally` is a training/simulation workspace accumulator (crates/cobre-sddp/src/workspace) that does not exist at setup time; threading one from setup into the training/simulation tally requires new plumbing across the setup→training boundary (a tally field on `StudySetup`, a merge at session start) that exceeds this change's authorized single-file scope.
+quadrant:  deliberate x prudent
+interest:  a run whose initial seed is silently clamped (a sub-tolerance input overshoot, or a genuine but load-unvalidated over-commitment) leaves no drift breadcrumb in the tally the seam populates, so operators lose the one signal that a seed was moved. Does not compound; purely an observability gap, never a correctness one (the clamp itself is applied).
+payoff:    give setup a `DriftTally` (or a lightweight seed-drift record), tally each clamped seed dimension by family exactly as `assemble_outgoing_state` does, carry it onto `StudySetup`, and merge it into the session's tally so the seed clamps surface alongside the seam's.
+trigger:   drift telemetry is surfaced to operators/reports, or a seed-drift diagnostic is requested.
+owner:     cobre-sddp state-canonicalization plan owner
+blast:     crates/cobre-sddp/src/setup/mod.rs (`canonicalize_initial_state`, `build_initial_state`); crates/cobre-sddp/src/workspace (`DriftTally`); `StudySetup` and the session tally-merge site.
+origin:    plans/state-canonicalization, ticket-007-initial-seed-canonicalization
+
 ## Paid
 
 ### DEBT-001

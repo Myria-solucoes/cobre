@@ -281,7 +281,7 @@ pub(crate) fn process_stage_backward_by_node<S: SolverInterface + Send>(
                                 tree_view.opening(s.0, local_omega),
                             )
                         };
-                        patch_opening_bounds(ws, ctx, training_ctx, raw_noise, x_hat, s)?;
+                        patch_opening_bounds(ws, ctx, training_ctx, raw_noise, x_hat, s);
 
                         let mut state_duals =
                             std::mem::take(&mut ws.backward_accum.state_duals_buf);

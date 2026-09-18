@@ -36,11 +36,6 @@ pub(crate) fn load_backward_lp<S: SolverInterface + Send>(
 ///
 /// The LP structure is already loaded by [`load_backward_lp`]; this delegates to
 /// [`StageSolvePrep::run`], pinning `x_hat` as the incoming state.
-///
-/// # Errors
-///
-/// Propagates [`SddpError::AnticipatedCommitmentOutOfBounds`] when `x_hat` carries a
-/// commitment outside its delivery generation bound by more than solver drift.
 pub(crate) fn patch_opening_bounds<S: SolverInterface + Send>(
     ws: &mut SolverWorkspace<S>,
     ctx: &StageContext<'_>,
@@ -48,7 +43,7 @@ pub(crate) fn patch_opening_bounds<S: SolverInterface + Send>(
     raw_noise: &[f64],
     x_hat: &[f64],
     s: StageIdx,
-) -> Result<(), SddpError> {
+) {
     let prep_params = StageSolvePrepParams {
         state_source: StateSource(x_hat),
         load_noise: LoadNoise::Present,
@@ -63,7 +58,7 @@ pub(crate) fn patch_opening_bounds<S: SolverInterface + Send>(
         training_ctx,
         s,
         &prep_params,
-    )
+    );
 }
 
 /// Assemble the `[hydro | load-bus | NCS]` opening-noise vector for an

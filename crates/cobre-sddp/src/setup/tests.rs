@@ -3548,7 +3548,7 @@ fn system_with_anticipated_thermals(
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             min_generation_mw: 0.0,
-            max_generation_mw: 100.0,
+            max_generation_mw: 500.0,
             cost_per_mwh: 50.0,
             anticipated_config: Some(AnticipatedConfig::LeadStages(k)),
             entry_stage_id: None,
@@ -3710,7 +3710,7 @@ fn system_with_anticipated_thermals(
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {
                 min_generation_mw: 0.0,
-                max_generation_mw: 100.0,
+                max_generation_mw: 500.0,
             },
             line_block: LineBlockBounds {
                 direct_mw: 0.0,
@@ -3805,7 +3805,7 @@ fn system_with_two_anticipated_thermals_staggered_dates(
             operational_start_date: later,
             bus_id: EntityId(1),
             min_generation_mw: 0.0,
-            max_generation_mw: 100.0,
+            max_generation_mw: 500.0,
             cost_per_mwh: 50.0,
             anticipated_config: Some(AnticipatedConfig::LeadStages(2)),
             entry_stage_id: None,
@@ -3817,7 +3817,7 @@ fn system_with_two_anticipated_thermals_staggered_dates(
             operational_start_date: earlier,
             bus_id: EntityId(1),
             min_generation_mw: 0.0,
-            max_generation_mw: 100.0,
+            max_generation_mw: 500.0,
             cost_per_mwh: 50.0,
             anticipated_config: Some(AnticipatedConfig::LeadStages(3)),
             entry_stage_id: None,
@@ -3976,7 +3976,7 @@ fn system_with_two_anticipated_thermals_staggered_dates(
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {
                 min_generation_mw: 0.0,
-                max_generation_mw: 100.0,
+                max_generation_mw: 500.0,
             },
             line_block: LineBlockBounds {
                 direct_mw: 0.0,
@@ -6580,7 +6580,7 @@ fn minimal_system_with_anticipated_and_commitments(
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(1),
         min_generation_mw: 0.0,
-        max_generation_mw: 100.0,
+        max_generation_mw: 500.0,
         cost_per_mwh: 50.0,
         anticipated_config: Some(anticipated_config),
         entry_stage_id: None,
@@ -6748,7 +6748,7 @@ fn minimal_system_with_anticipated_and_commitments(
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {
                 min_generation_mw: 0.0,
-                max_generation_mw: 100.0,
+                max_generation_mw: 500.0,
             },
             line_block: LineBlockBounds {
                 direct_mw: 0.0,

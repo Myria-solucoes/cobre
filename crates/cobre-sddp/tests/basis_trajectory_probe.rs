@@ -307,6 +307,7 @@ fn classify_stage_rows_reconciles_on_a_hand_built_geometry() {
     );
 
     let ctx = StageContext {
+        state_boxes: &[],
         geometry_per_stage: std::slice::from_ref(&geom),
         templates: &[],
         base_rows: &[0],
@@ -804,8 +805,7 @@ fn lag_fold_check_stage(
                 StageIdx(stage),
                 x_hat,
                 raw_noise,
-            )
-            .expect("StageSolvePrep::run must not error on cobre_rodada");
+            );
 
             let stored_basis = (omega_position == 0).then_some(forward_basis);
             let view = solve_stage_for_probe(
@@ -1108,8 +1108,7 @@ fn run_lag_fold_ab_stage(
                     StageIdx(stage),
                     x_hat,
                     raw_noise,
-                )
-                .expect("StageSolvePrep::run must not error on cobre_rodada");
+                );
 
                 let stored_basis = (omega_position == 0).then_some(forward_basis);
                 let view = solve_stage_for_probe(

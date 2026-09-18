@@ -463,8 +463,7 @@ fn terminal_theta(
         StageIdx(terminal_stage),
         pinned_state,
         &[],
-    )
-    .expect("StageSolvePrep::run must not error on the minimal fixture");
+    );
 
     let view = solve_stage_for_probe(ws, &ctx, pool, None, StageIdx(terminal_stage), 0, node_id)
         .expect("terminal stage solve must not error");

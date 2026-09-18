@@ -3306,8 +3306,7 @@ mod water_arc_and_post_study_anticipated_coexist_on_extended_layout {
             StageIdx(terminal_stage),
             pinned_state,
             &raw_noise,
-        )
-        .expect("StageSolvePrep::run must not error on the combined-deck fixture");
+        );
 
         let view =
             solve_stage_for_probe(ws, &ctx, pool, None, StageIdx(terminal_stage), 0, node_id)

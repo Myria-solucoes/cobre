@@ -236,6 +236,7 @@ mod tests {
         StageContext {
             geometry_per_stage: &[],
             templates,
+            state_boxes: &[],
             base_rows: &[],
             noise_scale: &[],
             n_hydros: 0,

@@ -102,7 +102,7 @@ use crate::{
     indexer::{AnticipatedLocal, CutStateProjection, HydroCellIndex, StateSpace, StudyDimensions},
     inflow_method::InflowNonNegativityMethod,
     lead_time::{AnticipatedResolution, DeliveryAxis, LeadTime, PointResolution, SpreadResolution},
-    lp_builder::{M3S_TO_HM3, build_stage_templates},
+    lp_builder::{M3S_TO_HM3, StateBox, build_stage_templates},
     risk_measure::{RiskMeasure, uniform_effective_measure},
     simulation::EntityCounts,
     simulation::extraction::TransitSeedArc,
@@ -567,6 +567,9 @@ impl StudySetup {
             system,
             &transit_bucket_topology,
         );
+        if let Some(stage0_box) = stage_templates.state_boxes.first() {
+            canonicalize_initial_state(&mut initial_state, &state_layout, stage0_box);
+        }
 
         let n_stages = stage_templates.templates.len();
         let max_iterations = max_iterations_from_rules(&stopping_rule_set);
@@ -2572,6 +2575,29 @@ fn study_stages_slice(system: &System) -> &[Stage] {
 /// pre-ordered by canonical hydro position at its single derivation site
 /// ([`derive_inflow_seeds`]), so `pos` here needs no id lookup. Storage-only
 /// when `max_par_order == 0`.
+/// Project the stage-0 initial (incoming) state onto the stage-0 admissible box
+/// for the box-stable families — storage (and its `PreFilling` seed) and
+/// travel-time buckets — the setup-time analog of the read-back seam's clamp on
+/// the OUTGOING state. Inflow lags are unbounded, so the box leaves them
+/// untouched. The commitment-hold ring is deliberately NOT clamped here: the
+/// stage-0 box is anchored on the ring's OUTGOING delivery window, so its
+/// residue-0 slot bounds a later delivery than the incoming seed carried there —
+/// that family is projected onto its own delivery-stage bound at seed time in
+/// [`build_initial_state`] instead.
+// DEBT(initial-seed-drift-untallied): the read-back seam records a `DriftTally`
+// per clamped dimension; these setup-time seed clamps do not. `DriftTally` is a
+// training/simulation workspace accumulator that does not exist at setup, and
+// threading one across the setup→training boundary is out of this change's scope.
+fn canonicalize_initial_state(state: &mut [f64], layout: &StateSpace, stage0_box: &StateBox) {
+    for j in layout
+        .storage
+        .clone()
+        .chain(layout.transit_buckets_out.clone())
+    {
+        state[j] = state[j].clamp(stage0_box.lower[j], stage0_box.upper[j]);
+    }
+}
+
 fn build_initial_state(
     system: &System,
     study_dims: &StudyDimensions,
@@ -2650,7 +2676,19 @@ fn build_initial_state(
                     if slot < k_i {
                         let off = layout.commit_out.start
                             + layout.commitment_hold_in_study_offset(local_idx, slot);
-                        state[off] = history.value_mw;
+                        // Project the seed onto its delivery stage's generation
+                        // bound — the setup-time analog of the read-back seam's
+                        // clamp — so a sub-tolerance input overshoot cannot drive
+                        // the no-slack fishing equality at stage `slot` infeasible.
+                        // The delivery-stage bound, NOT the stage-0 state box the
+                        // storage/bucket families clamp against: that box is
+                        // anchored on the ring's OUTGOING delivery window, so its
+                        // residue-0 slot bounds a later delivery than the seed held
+                        // here.
+                        let cap = system.bounds().thermal_block_base(global_idx, slot);
+                        state[off] = history
+                            .value_mw
+                            .clamp(cap.min_generation_mw, cap.max_generation_mw);
                     } else {
                         debug_assert!(
                             false,

@@ -45,7 +45,9 @@ use cobre_core::{
 };
 use cobre_sddp::indexer::CutStateProjection;
 use cobre_sddp::setup::{NodeId, StageIdx};
-use cobre_sddp::test_support::{patch_backward_opening_for_probe, solve_stage_for_probe};
+use cobre_sddp::test_support::{
+    patch_backward_opening_for_counterfactual_probe, solve_stage_for_probe,
+};
 use cobre_sddp::workspace::SolverWorkspace;
 use cobre_sddp::{
     BoundaryLoadRequest, CutPool, StudySetup, build_cut_row_batch_into, inject_boundary_cuts,
@@ -450,15 +452,14 @@ fn terminal_theta(
 
     ws.solver.reset_solver_state();
     ws.solver.load_model(template);
-    patch_backward_opening_for_probe(
+    patch_backward_opening_for_counterfactual_probe(
         ws,
         &ctx,
         &training_ctx,
         StageIdx(terminal_stage),
         pinned_state,
         &[],
-    )
-    .expect("StageSolvePrep::run must not error on the minimal fixture");
+    );
 
     let view = solve_stage_for_probe(ws, &ctx, pool, None, StageIdx(terminal_stage), 0, node_id)
         .expect("terminal stage solve must not error");

@@ -17,7 +17,6 @@ use cobre_comm::BackendError;
 use cobre_io::LoadError;
 use cobre_io::OutputError;
 use cobre_sddp::SddpError;
-use cobre_sddp::SddpError::AnticipatedCommitmentOutOfBounds;
 use cobre_sddp::SddpError::BasisShapeMismatch;
 use cobre_sddp::SddpError::Communication;
 use cobre_sddp::SddpError::Infeasible;
@@ -250,9 +249,6 @@ impl From<cobre_sddp::SddpError> for CliError {
             },
             ref shape_mismatch @ BasisShapeMismatch { .. } => Self::Internal {
                 message: shape_mismatch.to_string(),
-            },
-            ref over_commitment @ AnticipatedCommitmentOutOfBounds { .. } => Self::Internal {
-                message: over_commitment.to_string(),
             },
         }
     }

@@ -1338,6 +1338,7 @@ mod by_node_scratch {
         forward::EnumeratedForwardScratch,
         horizon_mode::HorizonMode,
         inflow_method::InflowNonNegativityMethod,
+        lp_builder::StateBox,
         risk_measure::RiskMeasure,
         setup::Traversal,
         test_support::{
@@ -1469,6 +1470,16 @@ mod by_node_scratch {
             iterations: 0,
             solve_time_seconds: 0.0,
         }
+    }
+
+    fn permissive_state_boxes(n_state: usize, n_stages: usize) -> Vec<StateBox> {
+        vec![
+            StateBox {
+                lower: vec![f64::NEG_INFINITY; n_state],
+                upper: vec![f64::INFINITY; n_state],
+            };
+            n_stages
+        ]
     }
 
     fn empty_cut_batches(n_stages: usize) -> Vec<RowBatch> {
@@ -1683,7 +1694,9 @@ mod by_node_scratch {
         let mut basis_store = BasisStore::new(exchange.local_count(), n_stages);
         let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
         let mut cut_batches = empty_cut_batches(n_stages);
+        let state_boxes = permissive_state_boxes(n_state, n_stages);
         let ctx = StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -1824,7 +1837,9 @@ mod by_node_scratch {
         let mut basis_store = BasisStore::new(exchange.local_count(), n_stages);
         let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
         let mut cut_batches = empty_cut_batches(n_stages);
+        let state_boxes = permissive_state_boxes(n_state, n_stages);
         let ctx = StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,

@@ -10877,8 +10877,7 @@ mod water_terminal_fcf_valuation {
             StageIdx(terminal_stage),
             pinned_state,
             &raw_noise,
-        )
-        .expect("StageSolvePrep::run must not error on the d45 fixture");
+        );
 
         let view =
             solve_stage_for_probe(ws, &ctx, pool, None, StageIdx(terminal_stage), 0, node_id)

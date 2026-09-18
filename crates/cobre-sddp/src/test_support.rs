@@ -58,21 +58,27 @@ use crate::lead_time::AnticipatedResolution;
 use crate::lp_builder::{
     PatchBuffer, ResolvedTables, StageGeometry, StageLayout, TemplateBuildCtx,
 };
+use crate::noise::{DownstreamAccumState, LagAccumState};
 use crate::policy::policy_load::{
     FullFcf, PolicyLoadProof, PolicyStageManifest, validate_policy_load,
 };
 use crate::resolved_parameters::ResolvedParameters;
+use crate::risk_measure::BackwardOutcome;
 use crate::setup::PostStudyResolved;
 use crate::setup::node_graph::{
     NodeGraph, NodeId, NodePos, OpeningSource, StageIdx, build_node_graph,
     enumerated_node_visit_counts, enumerated_scenario_count,
 };
-use crate::solve::stage_solve::{StageInputs, run_stage_solve};
+use crate::solve::stage_solve::{StageInputs, assemble_outgoing_state, run_stage_solve};
+use crate::solver_stats::SolverStatsDelta;
+use crate::training::backward::{extract_state_duals_only, write_opening_outcome};
 use crate::training::stage_solve_prep::{
     InflowNoise, LoadNoise, StageSolvePrep, StageSolvePrepParams, StateSource,
 };
 use crate::trajectory::TrajectoryRecord;
-use crate::workspace::{CapturedBasis, ScratchBuffers, SolverWorkspace, WorkspaceSizing};
+use crate::workspace::{
+    CapturedBasis, DriftTally, ScratchBuffers, SolverWorkspace, WorkspaceSizing,
+};
 use cobre_core::scenario::{ExternalLoadRow, ExternalScenarioRow};
 use cobre_solver::{
     ActiveSolver, Basis, BasisStatus, RowBatch, SolutionView, SolverError, SolverInterface,
@@ -985,12 +991,7 @@ pub fn anticipated_slot_over(thermal_id: i32, ring_slot: u32, start: i32, end: i
 /// verbatim to `StageSolvePrep::run` with the backward-opening variation
 /// point (`LoadNoise::Present`, `InflowNoise::Transform`) — no probe-side
 /// reimplementation of the patch pipeline (lag-folded water-balance RHS, NCS
-/// availability, commitment reconciliation).
-///
-/// # Errors
-///
-/// Propagates [`SddpError::AnticipatedCommitmentOutOfBounds`] exactly as
-/// `StageSolvePrep::run` does.
+/// availability).
 pub fn patch_backward_opening_for_probe<S: SolverInterface + Send>(
     ws: &mut SolverWorkspace<S>,
     ctx: &StageContext<'_>,
@@ -998,7 +999,7 @@ pub fn patch_backward_opening_for_probe<S: SolverInterface + Send>(
     stage: StageIdx,
     pinned_state: &[f64],
     raw_noise: &[f64],
-) -> Result<(), SddpError> {
+) {
     let prep_params = StageSolvePrepParams {
         state_source: StateSource(pinned_state),
         load_noise: LoadNoise::Present,
@@ -1013,7 +1014,37 @@ pub fn patch_backward_opening_for_probe<S: SolverInterface + Send>(
         training_ctx,
         stage,
         &prep_params,
-    )
+    );
+}
+
+/// Variant of [`patch_backward_opening_for_probe`] for a deliberate
+/// counterfactual pin that lies outside its producer's admissible box on
+/// purpose (an LP-sensitivity probe measuring the response to a value the
+/// seam would never itself produce): same pipeline, but skips the pin-time
+/// box-membership assert the production path always runs.
+pub fn patch_backward_opening_for_counterfactual_probe<S: SolverInterface + Send>(
+    ws: &mut SolverWorkspace<S>,
+    ctx: &StageContext<'_>,
+    training_ctx: &TrainingContext<'_>,
+    stage: StageIdx,
+    pinned_state: &[f64],
+    raw_noise: &[f64],
+) {
+    let prep_params = StageSolvePrepParams {
+        state_source: StateSource(pinned_state),
+        load_noise: LoadNoise::Present,
+        inflow_noise: InflowNoise::Transform,
+        raw_noise,
+    };
+    StageSolvePrep::run_ignoring_producer_box(
+        &mut ws.solver,
+        &mut ws.patch_buf,
+        &mut ws.scratch,
+        ctx,
+        training_ctx,
+        stage,
+        &prep_params,
+    );
 }
 
 /// Run one stage-LP solve exactly as production's shared `run_stage_solve`
@@ -1048,6 +1079,170 @@ pub fn solve_stage_for_probe<'ws, S: SolverInterface>(
         node_id,
     };
     run_stage_solve(ws, &inputs)
+}
+
+/// The three observations [`write_backward_opening_outcome_for_probe`] returns.
+pub struct CanonicalCutProbe {
+    /// The cut `write_opening_outcome` wrote for opening 0 (coefficients +
+    /// intercept + objective), read back — never recomputed.
+    pub outcome: BackwardOutcome,
+    /// The producer-stage outgoing state after `assemble_outgoing_state`'s
+    /// clamp: the value the read-back seam canonicalizes the raw input to.
+    pub canonical_x_hat: Vec<f64>,
+    /// The state the successor LP was actually pinned at, recovered from the
+    /// solved primal of the pinned incoming-state columns
+    /// (`state_to_lp_incoming_column`, `lb == ub`) and unscaled by `col_scale`.
+    /// Its data path — set-bounds, solve, read primal — is independent of the
+    /// `x_hat` handed to `write_opening_outcome`, so the returned cut and pin
+    /// can be cross-checked rather than tautologically re-derived.
+    pub pinned_x_hat: Vec<f64>,
+}
+
+/// Drive the real read-back canonicalization and the real backward
+/// cut-intercept write for one opening.
+///
+/// The caller supplies a RAW producer-stage state (`raw_producer_state`,
+/// possibly outside the producer's admissible box); production does the
+/// clamping — [`assemble_outgoing_state`] canonicalizes it exactly as the
+/// forward/simulation read-back seam does. That canonical value is the single
+/// `x_hat` threaded into BOTH the pin ([`patch_backward_opening_for_probe`] →
+/// `StageSolvePrep::run` → `set_col_bounds`) and the intercept
+/// ([`write_opening_outcome`]), mirroring the backward opening loop. The state
+/// the LP was pinned at is recovered separately from the solved primal — an
+/// independent data path — so [`CanonicalCutProbe::pinned_x_hat`] cross-checks
+/// the pin against the cut instead of re-deriving the intercept's own formula.
+///
+/// # Panics
+///
+/// Panics if `stage.0 == 0` (the backward never solves stage 0, so no producer
+/// box exists) or if `raw_producer_state.len() != StateSpace::n_state`.
+///
+/// # Errors
+///
+/// Propagates [`SddpError`] from the stage solve.
+#[allow(clippy::too_many_arguments)]
+pub fn write_backward_opening_outcome_for_probe<S: SolverInterface + Send>(
+    ws: &mut SolverWorkspace<S>,
+    ctx: &StageContext<'_>,
+    training_ctx: &TrainingContext<'_>,
+    cut_pool: &CutPool,
+    cut_state: &CutStateProjection,
+    stage: StageIdx,
+    node_id: NodeId,
+    raw_producer_state: &[f64],
+    raw_noise: &[f64],
+) -> Result<CanonicalCutProbe, SddpError> {
+    assert!(
+        stage.0 > 0,
+        "write_backward_opening_outcome_for_probe: stage must be >= 1"
+    );
+    let layout = training_ctx.state;
+    assert_eq!(
+        raw_producer_state.len(),
+        layout.n_state,
+        "raw_producer_state must have one entry per state dimension"
+    );
+    let producer_stage = StageIdx(stage.0 - 1);
+
+    let mut unscaled_primal =
+        vec![0.0_f64; ctx.template(producer_stage).num_cols.max(layout.n_state)];
+    unscaled_primal[..layout.n_state].copy_from_slice(raw_producer_state);
+
+    let mut canonical_state: Vec<f64> = Vec::new();
+    let mut lag_accumulator = vec![0.0_f64; layout.hydro_count.max(1)];
+    let mut lag_weight_accum = vec![0.0_f64; layout.hydro_count.max(1)];
+    let incoming_lags = vec![0.0_f64; layout.hydro_count * layout.max_par_order];
+    let ds_par_order = ctx.downstream_par_order;
+    let mut ds_accumulator = vec![
+        0.0_f64;
+        if ds_par_order > 0 {
+            layout.hydro_count
+        } else {
+            0
+        }
+    ];
+    let mut ds_weight_accum = 0.0_f64;
+    let mut ds_completed_lags = vec![0.0_f64; ds_par_order * layout.hydro_count];
+    let mut ds_n_completed = 0_usize;
+    let mut drift = DriftTally::default();
+    assemble_outgoing_state(
+        &mut canonical_state,
+        &unscaled_primal,
+        &incoming_lags,
+        layout,
+        ctx.state_box(producer_stage),
+        ctx.stage_lag(producer_stage),
+        &mut LagAccumState {
+            accumulator: &mut lag_accumulator,
+            weight_accum: &mut lag_weight_accum,
+        },
+        &mut DownstreamAccumState {
+            accumulator: &mut ds_accumulator,
+            weight_accum: &mut ds_weight_accum,
+            completed_lags: &mut ds_completed_lags,
+            n_completed: &mut ds_n_completed,
+            par_order: ds_par_order,
+        },
+        &mut drift,
+    );
+    let canonical_x_hat = canonical_state[..layout.n_state].to_vec();
+
+    let template = ctx.template(stage);
+    ws.solver.reset_solver_state();
+    ws.solver.load_model(template);
+    patch_backward_opening_for_probe(ws, ctx, training_ctx, stage, &canonical_x_hat, raw_noise);
+
+    let mut stats_before = SolverStatistics::default();
+    ws.solver.statistics_into(&mut stats_before);
+    let mut state_duals = std::mem::take(&mut ws.backward_accum.state_duals_buf);
+    let view = solve_stage_for_probe(ws, ctx, cut_pool, None, stage, 0, node_id)?;
+
+    let col_scale = &template.col_scale;
+    let objective = extract_state_duals_only(&view, cut_state, col_scale, &mut state_duals);
+    let pinned_x_hat: Vec<f64> = (0..layout.n_state)
+        .map(|j| {
+            let col = layout.state_to_lp_incoming_column(StateDim::new(j)).get();
+            view.primal[col] * col_scale.get(col).copied().unwrap_or(1.0)
+        })
+        .collect();
+    let _ = view;
+    ws.backward_accum.state_duals_buf = state_duals;
+
+    let mut stats_after = SolverStatistics::default();
+    ws.solver.statistics_into(&mut stats_after);
+
+    let n_slots = cut_state.n_slots();
+    if ws.backward_accum.outcomes.is_empty() {
+        ws.backward_accum.outcomes.push(BackwardOutcome {
+            intercept: 0.0,
+            coefficients: vec![0.0; n_slots],
+            objective_value: 0.0,
+        });
+    }
+    ws.backward_accum.outcomes[0]
+        .coefficients
+        .resize(n_slots, 0.0);
+    if ws.backward_accum.per_opening_stats.is_empty() {
+        ws.backward_accum
+            .per_opening_stats
+            .push(SolverStatsDelta::default());
+    }
+
+    write_opening_outcome(
+        ws,
+        cut_state,
+        0,
+        objective,
+        &canonical_x_hat,
+        &stats_before,
+        &stats_after,
+    );
+
+    Ok(CanonicalCutProbe {
+        outcome: ws.backward_accum.outcomes[0].clone(),
+        canonical_x_hat,
+        pinned_x_hat,
+    })
 }
 
 /// Trial-point states in the flat shape the passes index, `records[m * n_stages + stage]`.
@@ -1947,8 +2142,8 @@ fn oracle_raw_noise(setup: &StudySetup, node_pos: NodePos) -> Vec<f64> {
 ///
 /// # Panics
 ///
-/// Panics if `StageSolvePrep::run` returns an error (unreachable for the oracle
-/// fixtures: no anticipated commitments, no stochastic NCS).
+/// Panics if `node_pos` (or its resolved stage) is out of range, or if the
+/// template is absent after [`StageSolvePrep::run`].
 #[allow(clippy::expect_used)]
 #[must_use]
 pub fn capture_patched_node_template(setup: &StudySetup, node_pos: NodePos) -> StageTemplate {
@@ -2003,8 +2198,7 @@ pub fn capture_patched_node_template(setup: &StudySetup, node_pos: NodePos) -> S
         &training_ctx,
         stage,
         &params,
-    )
-    .expect("capture_patched_node_template: StageSolvePrep::run must succeed");
+    );
 
     solver
         .template

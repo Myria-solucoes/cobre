@@ -862,6 +862,7 @@ mod lb_conformance {
         let stochastic = wrap_opening_tree(opening_tree);
 
         let ctx = StageContext {
+            state_boxes: &[],
             templates: &templates,
             base_rows: &base_rows,
             geometry_per_stage: &[],

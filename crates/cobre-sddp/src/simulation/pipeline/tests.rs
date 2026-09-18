@@ -19,7 +19,7 @@ use crate::{
     energy_conversion::EnergyConversionSet,
     horizon_mode::HorizonMode,
     inflow_method::InflowNonNegativityMethod,
-    lp_builder::PatchBuffer,
+    lp_builder::{PatchBuffer, StateBox},
     setup::node_graph::Traversal,
     simulation::{
         config::SimulationConfig,
@@ -29,8 +29,21 @@ use crate::{
     },
     solve::solver_phase::Phase,
     test_support,
-    workspace::{BackwardAccumulators, CapturedBasis, ScratchBuffers, SolverWorkspace},
+    workspace::{BackwardAccumulators, CapturedBasis, DriftTally, ScratchBuffers, SolverWorkspace},
 };
+
+/// A fully-permissive `(-inf, inf)` box per stage, for fixtures driving
+/// `run_simulate`/`run_simulate_with_profile` through the seam without
+/// exercising the clamp.
+fn permissive_state_boxes(n_state: usize, n_stages: usize) -> Vec<StateBox> {
+    vec![
+        StateBox {
+            lower: vec![f64::NEG_INFINITY; n_state],
+            upper: vec![f64::INFINITY; n_state],
+        };
+        n_stages
+    ]
+}
 
 // A params struct would churn every call site; the wide arity is deliberate.
 #[allow(clippy::too_many_arguments)]
@@ -514,6 +527,7 @@ fn single_workspace_with_load_buses(
         solver: ProfiledSolver::new(solver),
         patch_buf: PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0, 0),
         current_state: Vec::with_capacity(1),
+        drift_tally: DriftTally::default(),
         scratch: ScratchBuffers {
             noise_buf: Vec::new(),
             inflow_m3s_buf: Vec::new(),
@@ -563,6 +577,7 @@ fn single_workspace(solver: MockSolver) -> Vec<SolverWorkspace<MockSolver>> {
         solver: ProfiledSolver::new(solver),
         patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0), // N=1, L=0
         current_state: Vec::with_capacity(1),
+        drift_tally: DriftTally::default(),
         scratch: ScratchBuffers {
             noise_buf: Vec::new(),
             inflow_m3s_buf: Vec::new(),
@@ -814,9 +829,11 @@ fn simulation_load_patches_applied() {
 
     let hprod = hydro_productivities_1hydro(n_stages);
     let ec = zero_energy_conversion(1, n_stages);
+    let state_boxes = permissive_state_boxes(state.n_state, templates.len());
     run_simulate(
         &mut workspaces,
         &StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -986,9 +1003,11 @@ fn simulation_no_load_buses_unchanged() {
     let ec = zero_energy_conversion(1, n_stages);
     let mut workspaces = single_workspace(solver);
 
+    let state_boxes = permissive_state_boxes(state.n_state, templates.len());
     run_simulate(
         &mut workspaces,
         &StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -1129,9 +1148,11 @@ fn simulation_state_set_profile_reaches_current_profile_after_run() {
             steepest_edge_devex_fallback_threshold: None,
         }));
 
+    let state_boxes = permissive_state_boxes(state.n_state, templates.len());
     run_simulate_with_profile(
         &mut workspaces,
         &StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -1284,9 +1305,11 @@ fn simulation_inflow_extraction_unaffected() {
 
     let hprod = hydro_productivities_1hydro(n_stages);
     let ec = zero_energy_conversion(1, n_stages);
+    let state_boxes = permissive_state_boxes(state.n_state, templates.len());
     run_simulate(
         &mut workspaces,
         &StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -1580,6 +1603,7 @@ fn single_workspace_with_hydros(
         solver: ProfiledSolver::new(solver),
         patch_buf: PatchBuffer::new(hydro_count, 0, 0, 0, 0, 0, 0),
         current_state: Vec::with_capacity(hydro_count),
+        drift_tally: DriftTally::default(),
         scratch: ScratchBuffers {
             noise_buf: Vec::new(),
             inflow_m3s_buf: Vec::new(),
@@ -1667,9 +1691,11 @@ fn simulation_truncation_clamps_negative_inflow_noise() {
     let hprod = hydro_productivities_1hydro(n_stages);
     let ec = zero_energy_conversion(1, n_stages);
     let mut workspaces = single_workspace_with_hydros(solver, 1);
+    let state_boxes = permissive_state_boxes(state.n_state, templates.len());
     run_simulate(
         &mut workspaces,
         &StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -1806,9 +1832,11 @@ fn simulation_none_method_produces_raw_negative_noise() {
     let hprod = hydro_productivities_1hydro(n_stages);
     let ec = zero_energy_conversion(1, n_stages);
     let mut workspaces = single_workspace_with_hydros(solver, 1);
+    let state_boxes = permissive_state_boxes(state.n_state, templates.len());
     run_simulate(
         &mut workspaces,
         &StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -1934,7 +1962,7 @@ mod dcs_simulation {
     use crate::setup::NodePos;
 
     use crate::inflow_method::InflowNonNegativityMethod;
-    use crate::lp_builder::{PatchBuffer, StageGeometry};
+    use crate::lp_builder::{PatchBuffer, StageGeometry, StateBox};
     use crate::setup::NodeId;
     use crate::setup::node_graph::StageIdx;
     use crate::simulation::types::{SimulationCostResult, SimulationStageResult};
@@ -2127,9 +2155,14 @@ mod dcs_simulation {
         ws.scratch.inflow_m3s_buf.clear();
         ws.scratch.inflow_m3s_buf.push(0.0);
 
+        let state_boxes = vec![StateBox {
+            lower: vec![f64::NEG_INFINITY; state.n_state],
+            upper: vec![f64::INFINITY; state.n_state],
+        }];
         let ctx = StageContext {
             geometry_per_stage: &geometry_per_stage,
             templates: &templates,
+            state_boxes: &state_boxes,
             base_rows: &base_rows,
             noise_scale: &[1.0],
             n_hydros: 1,
@@ -2365,7 +2398,7 @@ mod anticipated_ring_matches_forward_propagation {
     use crate::horizon_mode::HorizonMode;
     use crate::indexer::StateSpace;
     use crate::inflow_method::InflowNonNegativityMethod;
-    use crate::lp_builder::PatchBuffer;
+    use crate::lp_builder::{PatchBuffer, StateBox};
     use crate::setup::NodeId;
     use crate::setup::NodePos;
     use crate::setup::node_graph::StageIdx;
@@ -2700,9 +2733,17 @@ mod anticipated_ring_matches_forward_propagation {
         let fcf = FutureCostFunction::new(N_STAGES, state.n_state, 1, 1, &[0, 0, 0]);
         let cut_state_layouts = test_support::all_enabled_cut_state_layouts(&state, N_STAGES);
 
+        let state_boxes = vec![
+            StateBox {
+                lower: vec![f64::NEG_INFINITY; state.n_state],
+                upper: vec![f64::INFINITY; state.n_state],
+            };
+            N_STAGES
+        ];
         let ctx = StageContext {
             geometry_per_stage: &[],
             templates: &templates,
+            state_boxes: &state_boxes,
             base_rows: &base_rows,
             noise_scale: &[],
             n_hydros: 0,

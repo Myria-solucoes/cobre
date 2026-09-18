@@ -5,6 +5,7 @@
 //! apply that skips slot-identity reconciliation because the terminal
 //! template's shape never changes after priming).
 
+use cobre_core::temporal::StageLagTransition;
 use cobre_solver::{SolutionView, SolverError, SolverInterface};
 
 use crate::{
@@ -13,8 +14,10 @@ use crate::{
     cut::pool::CutPool,
     error::SddpError,
     indexer::StateSpace,
+    lp_builder::StateBox,
+    noise::{DownstreamAccumState, LagAccumState, accumulate_and_shift_lag_state},
     setup::{NodeId, StageIdx},
-    workspace::{CapturedBasis, SolverWorkspace},
+    workspace::{CapturedBasis, DriftTally, SolverWorkspace, drift_tally::StateFamilyKind},
 };
 
 /// Read-only inputs for one LP solve at stage `t`, scenario `m`.
@@ -248,6 +251,68 @@ pub(crate) fn fill_unscaled_dual(out: &mut Vec<f64>, scaled: &[f64], row_scale: 
     }
 }
 
+/// Canonicalize the outgoing state vector: copy the LP primal's state
+/// columns, run the lag accumulation/shift, verify the bucket/commitment-hold
+/// copy-gap invariant, then clamp every dimension onto its admissible box.
+/// The clamp is the identity for an in-box value — a solve whose state stays
+/// in box is byte-for-byte unaffected by it — and tallies any dimension it
+/// moves, by family, into `tally`. Every consumer of the outgoing state (the
+/// trajectory, the backward pass's `x_hat`, the cut intercept, the simulation
+/// output) reads this same canonical vector; there is no second
+/// canonicalization point at LP pin time.
+// Rationale (too_many_arguments): every argument is a caller-owned buffer or
+// borrow threaded straight through to `accumulate_and_shift_lag_state` (which
+// already takes the same shape) plus the box and tally this seam adds; a
+// bundle would just wrap them for one call site.
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::float_cmp)]
+pub(crate) fn assemble_outgoing_state(
+    current_state: &mut Vec<f64>,
+    unscaled_primal: &[f64],
+    lag_matrix_buf: &[f64],
+    layout: &StateSpace,
+    state_box: &StateBox,
+    stage_lag: StageLagTransition,
+    lag: &mut LagAccumState<'_>,
+    ds: &mut DownstreamAccumState<'_>,
+    tally: &mut DriftTally,
+) {
+    current_state.clear();
+    current_state.extend_from_slice(&unscaled_primal[..layout.n_state]);
+    accumulate_and_shift_lag_state(
+        current_state,
+        lag_matrix_buf,
+        unscaled_primal,
+        layout,
+        &stage_lag,
+        lag,
+        ds,
+    );
+    debug_assert_bucket_copy_gap_intact(current_state.as_slice(), unscaled_primal, layout);
+
+    for (j, value) in current_state.iter_mut().take(layout.n_state).enumerate() {
+        let clamped = value.clamp(state_box.lower[j], state_box.upper[j]);
+        if clamped == *value {
+            continue;
+        }
+        let drift_abs = (*value - clamped).abs();
+        *value = clamped;
+        let family = if layout.storage.contains(&j) {
+            StateFamilyKind::Storage
+        } else if layout.transit_buckets_out.contains(&j) {
+            StateFamilyKind::TransitBuckets
+        } else {
+            debug_assert!(
+                layout.commit_out.contains(&j),
+                "a clamped state dimension must be storage, transit-bucket, or \
+                 commitment-hold — inflow lags are unbounded and never clamp"
+            );
+            StateFamilyKind::CommitmentHold
+        };
+        tally.record(family, drift_abs, clamped);
+    }
+}
+
 /// Assert the bucket and commitment-hold state rode the state-assembly plain
 /// copy untouched.
 ///
@@ -256,13 +321,14 @@ pub(crate) fn fill_unscaled_dual(out: &mut Vec<f64>, scaled: &[f64], row_scale: 
 /// `transit_buckets_out` and `commit_out` sit in the shift-gap that overwrite
 /// never reaches, because both outgoing columns equal their state-vector
 /// index (the `storage` identity convention). Call after the lag overwrite,
-/// before the caller moves `unscaled_primal` back into scratch.
+/// before the clamp — the clamp legitimately moves bucket/commitment-hold
+/// values off the primal, which would trip this assert if it ran after.
 // Rationale: this checks a verbatim copy invariant (`extend_from_slice`), not
 // a numerical result, so exact equality is the correct comparison — a
 // tolerance would mask the one bug this guards against (an overwrite landing
 // on the bucket/commitment-hold range).
 #[allow(clippy::float_cmp)]
-pub(crate) fn debug_assert_bucket_copy_gap_intact(
+fn debug_assert_bucket_copy_gap_intact(
     assembled_state: &[f64],
     unscaled_primal: &[f64],
     layout: &StateSpace,
@@ -285,18 +351,22 @@ pub(crate) fn debug_assert_bucket_copy_gap_intact(
 
 #[cfg(test)]
 mod tests {
+    use cobre_core::temporal::StageLagTransition;
     use cobre_solver::BasisStatus::{Basic as B, Lower as L};
     use cobre_solver::{ActiveSolver, SolverError, SolverInterface, StageTemplate};
 
-    use super::{StageInputs, run_stage_solve, run_stage_solve_terminal_static};
+    use super::{
+        StageInputs, assemble_outgoing_state, run_stage_solve, run_stage_solve_terminal_static,
+    };
     use crate::{
         SddpError,
         context::StageContext,
         cut::pool::CutPool,
-        lp_builder::PatchBuffer,
+        lp_builder::{PatchBuffer, StateBox},
+        noise::{DownstreamAccumState, LagAccumState, accumulate_and_shift_lag_state},
         setup::{NodeId, StageIdx},
         test_support::state_layout_with_transit_buckets,
-        workspace::{CapturedBasis, SolverWorkspace, WorkspaceSizing},
+        workspace::{CapturedBasis, DriftTally, SolverWorkspace, WorkspaceSizing},
     };
 
     // -----------------------------------------------------------------------
@@ -375,6 +445,7 @@ mod tests {
         StageContext {
             geometry_per_stage: &[],
             templates,
+            state_boxes: &[],
             base_rows: &[],
             noise_scale: &[],
             n_hydros: 0,
@@ -923,5 +994,164 @@ mod tests {
         let mut assembled = primal.clone();
         assembled[0] = 999.0; // simulate an accidental overwrite of the commitment-hold slot
         super::debug_assert_bucket_copy_gap_intact(&assembled, &primal, &layout);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 8: assemble_outgoing_state — the canonicalization seam
+    // -----------------------------------------------------------------------
+
+    /// `N=1, L=1, B=1, A=1, K_max=1` layout: `n_state = 4`
+    /// (storage, lag0, `bucket_out`, `commit_out`), mirroring the
+    /// `transit_bucket_copy_gap` fixture shape.
+    fn seam_layout() -> crate::indexer::StateSpace {
+        state_layout_with_transit_buckets(1, 1, 1, vec![(0, 0)], 1, 1, vec![1])
+    }
+
+    fn identity_stage_lag() -> StageLagTransition {
+        StageLagTransition {
+            accumulate_weight: 1.0,
+            spillover_weight: 0.0,
+            finalize_period: true,
+            accumulate_downstream: false,
+            downstream_accumulate_weight: 0.0,
+            downstream_spillover_weight: 0.0,
+            downstream_finalize: false,
+            rebuild_from_downstream: false,
+        }
+    }
+
+    /// `unscaled_primal` for `seam_layout`'s 9-column LP: `[storage, lag0,
+    /// bucket_out, commit_out, z_inflow, storage_in, bucket_in, commit_in,
+    /// theta]`.
+    fn seam_primal(storage: f64, bucket: f64, commit: f64) -> Vec<f64> {
+        vec![storage, 0.0, bucket, commit, 5.0, 0.0, 0.0, 0.0, 0.0]
+    }
+
+    #[test]
+    fn assemble_outgoing_state_in_box_is_byte_identical_and_tallies_nothing() {
+        let layout = seam_layout();
+        let unscaled_primal = seam_primal(10.0, 30.0, 20.0);
+        let lag_matrix_buf = vec![2.0_f64];
+        let stage_lag = identity_stage_lag();
+        let state_box = StateBox {
+            lower: vec![0.0, f64::NEG_INFINITY, 0.0, 0.0],
+            upper: vec![100.0, f64::INFINITY, 100.0, 50.0],
+        };
+
+        // Reference: the pre-seam copy + lag accumulation, with no clamp step.
+        let mut expected = Vec::new();
+        expected.clear();
+        expected.extend_from_slice(&unscaled_primal[..layout.n_state]);
+        let mut exp_lag_accumulator = vec![0.0_f64; 1];
+        let mut exp_lag_weight_accum = vec![0.0_f64; 1];
+        let mut exp_ds_accum: Vec<f64> = vec![];
+        let mut exp_ds_weight = 0.0_f64;
+        let mut exp_ds_completed: Vec<f64> = vec![];
+        let mut exp_ds_n_completed = 0_usize;
+        accumulate_and_shift_lag_state(
+            &mut expected,
+            &lag_matrix_buf,
+            &unscaled_primal,
+            &layout,
+            &stage_lag,
+            &mut LagAccumState {
+                accumulator: &mut exp_lag_accumulator,
+                weight_accum: &mut exp_lag_weight_accum,
+            },
+            &mut DownstreamAccumState {
+                accumulator: &mut exp_ds_accum,
+                weight_accum: &mut exp_ds_weight,
+                completed_lags: &mut exp_ds_completed,
+                n_completed: &mut exp_ds_n_completed,
+                par_order: 0,
+            },
+        );
+
+        let mut current_state = Vec::new();
+        let mut lag_accumulator = vec![0.0_f64; 1];
+        let mut lag_weight_accum = vec![0.0_f64; 1];
+        let mut ds_accum: Vec<f64> = vec![];
+        let mut ds_weight = 0.0_f64;
+        let mut ds_completed: Vec<f64> = vec![];
+        let mut ds_n_completed = 0_usize;
+        let mut tally = DriftTally::default();
+        assemble_outgoing_state(
+            &mut current_state,
+            &unscaled_primal,
+            &lag_matrix_buf,
+            &layout,
+            &state_box,
+            stage_lag,
+            &mut LagAccumState {
+                accumulator: &mut lag_accumulator,
+                weight_accum: &mut lag_weight_accum,
+            },
+            &mut DownstreamAccumState {
+                accumulator: &mut ds_accum,
+                weight_accum: &mut ds_weight,
+                completed_lags: &mut ds_completed,
+                n_completed: &mut ds_n_completed,
+                par_order: 0,
+            },
+            &mut tally,
+        );
+
+        assert_eq!(
+            current_state, expected,
+            "an in-box clamp must be byte-identical to the pre-clamp assembled state"
+        );
+        for family in [tally.storage, tally.transit_buckets, tally.commitment_hold] {
+            assert_eq!(family.clamped_count, 0);
+        }
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn assemble_outgoing_state_clamps_and_tallies_out_of_box() {
+        let layout = seam_layout();
+        let commit_j = layout.commit_out.start;
+        let mut unscaled_primal = seam_primal(10.0, 30.0, 20.0);
+        unscaled_primal[commit_j] = -0.5; // 0.5 below the box lower of 0.0
+        let lag_matrix_buf = vec![2.0_f64];
+        let stage_lag = identity_stage_lag();
+        let state_box = StateBox {
+            lower: vec![0.0, f64::NEG_INFINITY, 0.0, 0.0],
+            upper: vec![100.0, f64::INFINITY, 100.0, 50.0],
+        };
+
+        let mut current_state = Vec::new();
+        let mut lag_accumulator = vec![0.0_f64; 1];
+        let mut lag_weight_accum = vec![0.0_f64; 1];
+        let mut ds_accum: Vec<f64> = vec![];
+        let mut ds_weight = 0.0_f64;
+        let mut ds_completed: Vec<f64> = vec![];
+        let mut ds_n_completed = 0_usize;
+        let mut tally = DriftTally::default();
+        assemble_outgoing_state(
+            &mut current_state,
+            &unscaled_primal,
+            &lag_matrix_buf,
+            &layout,
+            &state_box,
+            stage_lag,
+            &mut LagAccumState {
+                accumulator: &mut lag_accumulator,
+                weight_accum: &mut lag_weight_accum,
+            },
+            &mut DownstreamAccumState {
+                accumulator: &mut ds_accum,
+                weight_accum: &mut ds_weight,
+                completed_lags: &mut ds_completed,
+                n_completed: &mut ds_n_completed,
+                par_order: 0,
+            },
+            &mut tally,
+        );
+
+        assert_eq!(current_state[commit_j], 0.0, "must equal the clamped bound");
+        assert_eq!(tally.commitment_hold.clamped_count, 1);
+        assert_eq!(tally.commitment_hold.max_abs, 0.5);
+        assert_eq!(tally.storage.clamped_count, 0);
+        assert_eq!(tally.transit_buckets.clamped_count, 0);
     }
 }

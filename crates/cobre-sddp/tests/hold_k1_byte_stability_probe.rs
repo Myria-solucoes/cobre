@@ -178,7 +178,6 @@ const LEAD_GE2_REBASELINE: &[&str] = &[
     "anticipated_commissioning_warm_start_zero_basis_rejections",
     "anticipated_commitment_at_cap_survives_ring_carry",
     "anticipated_commitment_drifted_over_cap_is_absorbed",
-    "anticipated_commitment_over_cap_seed_is_refused",
     // tests/lp_builder.rs
     "anticipated_k2_manifest_has_thermal_state_slots",
     // tests/commitment_hold_wiring_probe.rs

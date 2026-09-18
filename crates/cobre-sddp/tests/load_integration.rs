@@ -37,6 +37,7 @@ use cobre_sddp::{
     horizon_mode::HorizonMode,
     indexer::{CutStateProjection, StateSpace, StudyDimensions},
     inflow_method::InflowNonNegativityMethod,
+    lp_builder::StateBox,
     risk_measure::RiskMeasure,
     train,
 };
@@ -334,6 +335,18 @@ fn iteration_limit(limit: u64) -> StoppingRuleSet {
     }
 }
 
+/// A fully-permissive `(-inf, inf)` box per stage, for fixtures driving
+/// `train` through the seam without exercising the clamp.
+fn permissive_state_boxes(n_state: usize, n_stages: usize) -> Vec<StateBox> {
+    vec![
+        StateBox {
+            lower: vec![f64::NEG_INFINITY; n_state],
+            upper: vec![f64::INFINITY; n_state],
+        };
+        n_stages
+    ]
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -416,7 +429,9 @@ fn test_stochastic_load_training_completes() {
     let load_bus_indices = vec![0usize];
     let block_counts_per_stage = vec![1usize; n_stages];
 
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let stage_ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -530,7 +545,9 @@ fn test_deterministic_load_training_matches_baseline() {
 
     let block_counts_per_stage = vec![1usize; n_stages];
 
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let stage_ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -673,7 +690,9 @@ fn test_stochastic_load_seed_determinism() {
         let load_bus_indices = vec![0usize];
         let block_counts_per_stage = vec![1usize; n_stages];
 
+        let state_boxes = permissive_state_boxes(state.n_state, n_stages);
         let stage_ctx = StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,

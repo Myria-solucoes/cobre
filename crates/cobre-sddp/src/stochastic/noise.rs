@@ -1030,6 +1030,7 @@ mod tests {
         let inflow_method = InflowNonNegativityMethod::None;
         let horizon = HorizonMode::Finite { num_stages: 1 };
         let ctx = StageContext {
+            state_boxes: &[],
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -1115,6 +1116,7 @@ mod tests {
         let inflow_method = InflowNonNegativityMethod::Truncation;
         let horizon = HorizonMode::Finite { num_stages: 1 };
         let ctx = StageContext {
+            state_boxes: &[],
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -1200,6 +1202,7 @@ mod tests {
         let inflow_method = InflowNonNegativityMethod::Truncation;
         let horizon = HorizonMode::Finite { num_stages: 1 };
         let ctx = StageContext {
+            state_boxes: &[],
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,

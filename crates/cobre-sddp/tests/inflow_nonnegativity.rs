@@ -49,7 +49,7 @@ use cobre_sddp::{
     hydro_models::PrepareHydroModelsResult,
     indexer::{CutStateProjection, StateSpace, StudyDimensions},
     inflow_method::InflowNonNegativityMethod,
-    lp_builder::{PatchBuffer, StageGeometry, build_stage_templates_resolving_layout},
+    lp_builder::{PatchBuffer, StageGeometry, StateBox, build_stage_templates_resolving_layout},
     risk_measure::RiskMeasure,
     setup::node_graph::Traversal,
     simulate,
@@ -478,8 +478,25 @@ fn build_fixture_with_method(inflow_method: InflowNonNegativityMethod) -> Fixtur
 // Shared test helpers
 // ===========================================================================
 
-fn base_stage_context<'a>(fx: &'a Fixture, block_counts: &'a [usize]) -> StageContext<'a> {
+/// A fully-permissive `(-inf, inf)` box per stage, for fixtures driving
+/// `train`/`simulate` through the seam without exercising the clamp.
+fn permissive_state_boxes(n_state: usize, n_stages: usize) -> Vec<StateBox> {
+    vec![
+        StateBox {
+            lower: vec![f64::NEG_INFINITY; n_state],
+            upper: vec![f64::INFINITY; n_state],
+        };
+        n_stages
+    ]
+}
+
+fn base_stage_context<'a>(
+    fx: &'a Fixture,
+    block_counts: &'a [usize],
+    state_boxes: &'a [StateBox],
+) -> StageContext<'a> {
     StageContext {
+        state_boxes,
         geometry_per_stage: &[],
         templates: &fx.stage_templates.templates,
         base_rows: &fx.stage_templates.base_rows,
@@ -523,7 +540,8 @@ fn train_fixture(
         .collect();
     let max_blocks = block_counts.iter().copied().max().unwrap_or(1);
 
-    let stage_ctx = base_stage_context(fx, &block_counts);
+    let state_boxes = permissive_state_boxes(fx.state.n_state, n_stages);
+    let stage_ctx = base_stage_context(fx, &block_counts, &state_boxes);
     train(
         &mut solver,
         TrainingConfig {
@@ -633,9 +651,10 @@ fn simulate_fixture(
         N_STAGES,
     );
 
+    let state_boxes_sim = permissive_state_boxes(fx.state.n_state, N_STAGES);
     simulate(
         &mut sim_workspaces,
-        &base_stage_context(fx, &block_counts_sim),
+        &base_stage_context(fx, &block_counts_sim, &state_boxes_sim),
         fcf,
         &TrainingContext {
             node_graph: &cobre_sddp::test_support::chain_node_graph(&fx.stochastic),

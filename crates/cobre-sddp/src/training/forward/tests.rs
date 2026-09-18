@@ -35,12 +35,12 @@ use crate::{
     horizon_mode::HorizonMode,
     indexer::StateSpace,
     inflow_method::InflowNonNegativityMethod,
-    lp_builder::PatchBuffer,
+    lp_builder::{PatchBuffer, StateBox},
     risk_measure::RiskMeasure,
     setup::{NodeId, NodePos},
     test_support,
     trajectory::TrajectoryRecord,
-    workspace::{BackwardAccumulators, BasisStore, ScratchBuffers, SolverWorkspace},
+    workspace::{BackwardAccumulators, BasisStore, DriftTally, ScratchBuffers, SolverWorkspace},
 };
 
 // ── Mock solver ──────────────────────────────────────────────────────────
@@ -219,6 +219,18 @@ fn empty_records(n: usize) -> Vec<TrajectoryRecord> {
             state: Vec::new(),
         })
         .collect()
+}
+
+/// A fully-permissive `(-inf, inf)` box per stage, for fixtures driving
+/// `run_forward_pass` through the seam without exercising the clamp.
+fn permissive_state_boxes(n_state: usize, n_stages: usize) -> Vec<StateBox> {
+    vec![
+        StateBox {
+            lower: vec![f64::NEG_INFINITY; n_state],
+            upper: vec![f64::INFINITY; n_state],
+        };
+        n_stages
+    ]
 }
 
 /// Build a minimal `StochasticContext` for a single-hydro, 3-stage system.
@@ -553,6 +565,7 @@ fn single_workspace(solver: MockSolver, state: &StateSpace) -> SolverWorkspace<M
         solver: ProfiledSolver::new(solver),
         patch_buf: PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0, 0),
         current_state: Vec::with_capacity(state.n_state),
+        drift_tally: DriftTally::default(),
         scratch: ScratchBuffers {
             noise_buf: Vec::with_capacity(state.hydro_count),
             inflow_m3s_buf: Vec::with_capacity(state.hydro_count),
@@ -675,7 +688,9 @@ fn ac_two_scenarios_three_stages_fixed_solution() {
     let mut basis_store =
         BasisStore::new(config.loop_config.forward_passes as usize, templates.len());
 
+    let state_boxes = permissive_state_boxes(state.n_state, templates.len());
     let ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -808,7 +823,9 @@ fn ac_infeasible_at_stage_1_scenario_0_returns_infeasible_error() {
     let mut basis_store =
         BasisStore::new(config.loop_config.forward_passes as usize, templates.len());
 
+    let state_boxes = permissive_state_boxes(state.n_state, templates.len());
     let ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -945,7 +962,9 @@ fn cost_statistics_accumulated_correctly() {
     let mut basis_store =
         BasisStore::new(config.loop_config.forward_passes as usize, templates.len());
 
+    let state_boxes = permissive_state_boxes(state.n_state, templates.len());
     let ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -1554,7 +1573,9 @@ fn run_one_iteration(
     let stochastic = make_stochastic_context_1_hydro_3_stages();
     let stages = make_stages_3();
 
+    let state_boxes = permissive_state_boxes(state.n_state, templates.len());
     let ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -1714,7 +1735,9 @@ fn test_forward_pass_parallel_cost_agreement() {
     let initial_state = vec![0.0_f64; state.n_state];
     let n_scenarios = 10;
 
+    let state_boxes = permissive_state_boxes(state.n_state, templates.len());
     let ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -1878,7 +1901,9 @@ fn test_forward_pass_work_distribution() {
     let mut records = empty_records(n_scenarios * num_stages);
     let mut basis_store = BasisStore::new(n_scenarios, num_stages);
 
+    let state_boxes = permissive_state_boxes(state.n_state, templates.len());
     let ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -2173,7 +2198,9 @@ fn run_single_stage_forward(
     let mut basis_store = BasisStore::new(1, 1);
     let noise_scale = vec![noise_scale_val];
 
+    let state_boxes = permissive_state_boxes(state.n_state, templates.len());
     let ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -2382,7 +2409,9 @@ fn none_method_unchanged_with_truncation_code_present() {
     let mut basis_store =
         BasisStore::new(config.loop_config.forward_passes as usize, templates.len());
 
+    let state_boxes = permissive_state_boxes(state.n_state, templates.len());
     let ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -2639,7 +2668,9 @@ fn test_forward_pass_parallel_infeasibility() {
     let mut records = empty_records(n_scenarios * num_stages);
     let mut basis_store = BasisStore::new(n_scenarios, num_stages);
 
+    let state_boxes = permissive_state_boxes(state.n_state, templates.len());
     let ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -2759,6 +2790,7 @@ fn forward_pass_load_noise_positive_realization() {
         ))),
         patch_buf,
         current_state: Vec::with_capacity(state.n_state),
+        drift_tally: DriftTally::default(),
         scratch: ScratchBuffers {
             noise_buf: Vec::with_capacity(1),
             inflow_m3s_buf: Vec::with_capacity(1),
@@ -2807,7 +2839,9 @@ fn forward_pass_load_noise_positive_realization() {
     let load_bus_indices = vec![0usize];
     let block_counts_per_stage = vec![1usize];
 
+    let state_boxes = permissive_state_boxes(state.n_state, templates.len());
     let ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -2922,6 +2956,7 @@ fn forward_pass_load_noise_clamped_to_zero() {
         ))),
         patch_buf,
         current_state: Vec::with_capacity(state.n_state),
+        drift_tally: DriftTally::default(),
         scratch: ScratchBuffers {
             noise_buf: Vec::with_capacity(1),
             inflow_m3s_buf: Vec::with_capacity(1),
@@ -2970,7 +3005,9 @@ fn forward_pass_load_noise_clamped_to_zero() {
     let load_bus_indices = vec![0usize];
     let block_counts_per_stage = vec![1usize];
 
+    let state_boxes = permissive_state_boxes(state.n_state, templates.len());
     let ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -3078,7 +3115,9 @@ fn forward_pass_no_load_buses_unchanged() {
     let horizon = HorizonMode::Finite { num_stages: 3 };
     let mut basis_store = BasisStore::new(1, 3);
 
+    let state_boxes = permissive_state_boxes(state.n_state, templates.len());
     let ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -3512,7 +3551,7 @@ mod dcs_forward {
 
     use crate::DEFAULT_COST_SCALE_FACTOR;
     use crate::inflow_method::InflowNonNegativityMethod;
-    use crate::lp_builder::PatchBuffer;
+    use crate::lp_builder::{PatchBuffer, StateBox};
     use crate::setup::{NodeId, NodePos, StageIdx};
     use crate::test_support;
     use crate::trajectory::TrajectoryRecord;
@@ -3710,9 +3749,17 @@ mod dcs_forward {
         // dominating-frozen-cut test distinguish theta=4 (correct) from
         // theta=10 (a wrong frozen load).
         let discount_factors = [0.0_f64, 0.0];
+        let state_boxes = vec![
+            StateBox {
+                lower: vec![f64::NEG_INFINITY; state.n_state],
+                upper: vec![f64::INFINITY; state.n_state],
+            };
+            2
+        ];
         let ctx = StageContext {
             geometry_per_stage: &[],
             templates: &templates,
+            state_boxes: &state_boxes,
             base_rows: &base_rows,
             noise_scale: &[],
             n_hydros: 0,
@@ -3953,7 +4000,7 @@ mod transit_bucket_copy_gap {
     use crate::cut::FutureCostFunction;
     use crate::horizon_mode::HorizonMode;
     use crate::inflow_method::InflowNonNegativityMethod;
-    use crate::lp_builder::{PatchBuffer, StageGeometry};
+    use crate::lp_builder::{PatchBuffer, StageGeometry, StateBox};
     use crate::setup::{NodeId, NodePos, StageIdx};
     use crate::test_support;
     use crate::trajectory::TrajectoryRecord;
@@ -4063,10 +4110,15 @@ mod transit_bucket_copy_gap {
             .extend_from_slice(&[10.0, 20.0, 30.0, 40.0]);
 
         let geometry_per_stage = vec![StageGeometry::default()];
+        let state_boxes = vec![StateBox {
+            lower: vec![f64::NEG_INFINITY; state.n_state],
+            upper: vec![f64::INFINITY; state.n_state],
+        }];
 
         let ctx = StageContext {
             geometry_per_stage: &geometry_per_stage,
             templates: &templates,
+            state_boxes: &state_boxes,
             base_rows: &base_rows,
             noise_scale: &[],
             n_hydros: 0,

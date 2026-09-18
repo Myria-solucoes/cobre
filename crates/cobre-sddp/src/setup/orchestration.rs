@@ -146,6 +146,7 @@ impl StudySetup {
 
         let stage_ctx = StageContext {
             templates: &self.stage_data.stage_templates.templates,
+            state_boxes: &self.stage_data.stage_templates.state_boxes,
             base_rows: &self.stage_data.stage_templates.base_rows,
             geometry_per_stage: &self.stage_data.stage_templates.geometry_per_stage,
             noise_scale: &self.stage_data.stage_templates.noise_scale,

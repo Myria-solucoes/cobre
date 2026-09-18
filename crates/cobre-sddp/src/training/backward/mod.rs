@@ -85,6 +85,12 @@ pub(crate) use replicated::{ReplicatedScratch, run_backward_node_replicated};
 #[cfg(test)]
 pub(crate) use lp_setup::{load_backward_lp, patch_opening_bounds, resolve_backward_basis};
 
+/// `any(test, feature = "test-support")`, not the bare `#[cfg(test)]` above:
+/// an external `tests/` binary drives this through `test_support` under
+/// `--features test-support`, which never sets `cfg(test)` on this library.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use outcome_aggregation::write_opening_outcome;
+
 /// Per-`(rank, worker_id, opening)` solver delta collected during a single
 /// backward stage, as returned inside [`BackwardResult::stage_stats`].
 ///

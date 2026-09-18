@@ -15,6 +15,7 @@
 //!   passed by reference to keep hot-path argument counts down.
 
 pub mod context;
+pub(crate) mod drift_tally;
 // Rationale: renaming this submodule off its parent's name would break the
 // `workspace::workspace::{...}` re-export path for no behavioural gain.
 #[allow(clippy::module_inception)]
@@ -24,6 +25,7 @@ pub mod workspace;
 // modules, so the re-export reads as unused in the non-test build; scoping the
 // allow to `cfg(not(test))` keeps the warning live should a non-test caller land.
 pub use context::{StageContext, TrainingContext};
+pub(crate) use drift_tally::DriftTally;
 pub use workspace::{
     BASIS_BROADCAST_FORMAT_TAG, BasisStore, BasisStoreSliceMut, CapturedBasis, ScratchBuffers,
     SolverWorkspace, WorkspacePool, WorkspaceSizing,

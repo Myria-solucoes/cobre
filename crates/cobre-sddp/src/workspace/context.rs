@@ -10,7 +10,7 @@ use crate::{
     horizon_mode::HorizonMode,
     indexer::{CutStateProjection, StateSpace, StudyDimensions},
     inflow_method::InflowNonNegativityMethod,
-    lp_builder::StageGeometry,
+    lp_builder::{StageGeometry, StateBox},
     setup::node_graph::{NodeGraph, StageIdx},
 };
 
@@ -23,6 +23,9 @@ use crate::{
 pub struct StageContext<'a> {
     /// Stage LP templates.
     pub templates: &'a [StageTemplate],
+    /// Per-stage admissible box for the outgoing state vector, consumed by
+    /// the read-back canonicalization seam.
+    pub state_boxes: &'a [StateBox],
     /// Row index of the first water-balance row in each stage template.
     pub base_rows: &'a [usize],
     /// Per-stage equipment geometry: `geometry_per_stage[t]` holds stage `t`'s
@@ -128,6 +131,13 @@ impl StageContext<'_> {
     #[must_use]
     pub fn template(&self, t: StageIdx) -> &StageTemplate {
         &self.templates[t.0]
+    }
+
+    /// Stage `t`'s admissible box for the outgoing state vector.
+    #[inline]
+    #[must_use]
+    pub fn state_box(&self, t: StageIdx) -> &StateBox {
+        &self.state_boxes[t.0]
     }
 
     /// Row index of the first water-balance row at stage `t`.

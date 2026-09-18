@@ -2198,6 +2198,7 @@ mod tests {
         horizon_mode::HorizonMode,
         indexer::StateSpace,
         inflow_method::InflowNonNegativityMethod,
+        lp_builder::StateBox,
         risk_measure::{BackwardOutcome, RiskMeasure},
         setup::node_graph::{NodeOpenings, NodeRuntime, NodeSuccessor, OpeningSource},
         solver_stats::WORKER_STATS_ENTRY_STRIDE,
@@ -2207,7 +2208,8 @@ mod tests {
         },
         trajectory::TrajectoryRecord,
         workspace::{
-            BackwardAccumulators, BasisStore, CapturedBasis, ScratchBuffers, SolverWorkspace,
+            BackwardAccumulators, BasisStore, CapturedBasis, DriftTally, ScratchBuffers,
+            SolverWorkspace,
         },
     };
 
@@ -2404,6 +2406,17 @@ mod tests {
         }
     }
 
+    /// One unbounded box per stage — the pin-time box-membership assert stays
+    /// vacuous regardless of which stage index `StageSolvePrep::run` indexes.
+    fn permissive_state_boxes(n_stages: usize, n_state: usize) -> Vec<StateBox> {
+        (0..n_stages)
+            .map(|_| StateBox {
+                lower: vec![f64::NEG_INFINITY; n_state],
+                upper: vec![f64::INFINITY; n_state],
+            })
+            .collect()
+    }
+
     fn single_workspace(solver: MockSolver, n_state: usize) -> Vec<SolverWorkspace<MockSolver>> {
         use crate::lp_builder::PatchBuffer;
         vec![SolverWorkspace {
@@ -2412,6 +2425,7 @@ mod tests {
             solver: ProfiledSolver::new(solver),
             patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(n_state),
+            drift_tally: DriftTally::default(),
             scratch: ScratchBuffers {
                 noise_buf: Vec::new(),
                 inflow_m3s_buf: Vec::new(),
@@ -2708,7 +2722,9 @@ mod tests {
         let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
         let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
         let mut cut_batches = empty_cut_batches(n_stages);
+        let state_boxes = permissive_state_boxes(n_stages, n_state);
         let ctx = StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -2887,7 +2903,9 @@ mod tests {
         let mut basis_store = empty_basis_store(exchange.local_count(), node_graph.nodes.len());
         let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
         let mut cut_batches = empty_cut_batches(n_stages);
+        let state_boxes = permissive_state_boxes(n_stages, n_state);
         let ctx = StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates,
             base_rows,
@@ -3298,7 +3316,9 @@ mod tests {
         let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
         // Cut-batch scratch is pool-indexed (backward writes `cut_batches[successor_pool_id]`).
         let mut cut_batches = empty_cut_batches(node_graph.n_pools);
+        let state_boxes = permissive_state_boxes(n_stages, n_state);
         let ctx = StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates,
             base_rows,
@@ -3538,7 +3558,9 @@ mod tests {
         let mut basis_store = empty_basis_store(1, node_graph.nodes.len());
         let mut csb = CutSyncBuffers::with_distribution(n_state, 64, comm.size(), comm.size());
         let mut cut_batches = empty_cut_batches(node_graph.n_pools);
+        let state_boxes = permissive_state_boxes(n_stages, n_state);
         let ctx = StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -4057,7 +4079,9 @@ mod tests {
         let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
         let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
         let mut cut_batches = empty_cut_batches(n_stages);
+        let state_boxes = permissive_state_boxes(n_stages, n_state);
         let ctx = StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -4207,7 +4231,9 @@ mod tests {
         let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
         let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
         let mut cut_batches = empty_cut_batches(n_stages);
+        let state_boxes = permissive_state_boxes(n_stages, n_state);
         let ctx = StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -4846,6 +4872,7 @@ mod tests {
 
         let stage_ctx = StageContext {
             templates: &setup.stage_data.stage_templates.templates,
+            state_boxes: &setup.stage_data.stage_templates.state_boxes,
             base_rows: &setup.stage_data.stage_templates.base_rows,
             geometry_per_stage: &setup.stage_data.stage_templates.geometry_per_stage,
             noise_scale: &setup.stage_data.stage_templates.noise_scale,

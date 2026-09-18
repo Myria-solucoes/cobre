@@ -30,10 +30,13 @@ use crate::{
     dcs::{DcsParams, DcsSolveContext, build_initial_resident_set, lazy_solve_preloaded},
     error::SddpError,
     indexer::CutStateProjection,
-    noise::{AccumSnapshot, DownstreamAccumState, LagAccumState, accumulate_and_shift_lag_state},
+    noise::{AccumSnapshot, DownstreamAccumState, LagAccumState},
     setup::node_graph::{EnumeratedPlan, NodeGraph, NodeId, NodePos, StageIdx, TypedVec},
     solver_stats::SolverStatsDelta,
-    stage_solve::{StageInputs, fill_unscaled, run_stage_solve, run_stage_solve_terminal_static},
+    stage_solve::{
+        StageInputs, assemble_outgoing_state, fill_unscaled, run_stage_solve,
+        run_stage_solve_terminal_static,
+    },
     training::{
         backward::extract_state_duals_only,
         stage_solve_prep::{
@@ -316,7 +319,7 @@ fn solve_forward_node<S: SolverInterface + Send>(
         training_ctx,
         t,
         &prep_params,
-    )?;
+    );
     if horizon.is_terminal(t.next().0) && !params.terminal_has_boundary_cuts {
         ws.solver.set_col_bounds(&[state.theta], &[0.0], &[0.0]);
     }
@@ -394,9 +397,6 @@ fn solve_forward_node<S: SolverInterface + Send>(
         .lag_matrix_buf
         .extend_from_slice(&ws.current_state[lag_start..lag_start + lag_len]);
 
-    ws.current_state.clear();
-    ws.current_state
-        .extend_from_slice(&unscaled_primal[..state.n_state]);
     let stage_lag = ctx.stage_lag(t);
     let downstream_par_order = ws
         .scratch
@@ -404,12 +404,13 @@ fn solve_forward_node<S: SolverInterface + Send>(
         .len()
         .checked_div(ws.scratch.lag_accumulator.len())
         .unwrap_or(0);
-    accumulate_and_shift_lag_state(
+    assemble_outgoing_state(
         &mut ws.current_state,
-        &ws.scratch.lag_matrix_buf,
         &unscaled_primal,
+        &ws.scratch.lag_matrix_buf,
         state,
-        &stage_lag,
+        ctx.state_box(t),
+        stage_lag,
         &mut LagAccumState {
             accumulator: &mut ws.scratch.lag_accumulator,
             weight_accum: &mut ws.scratch.lag_weight_accum,
@@ -421,6 +422,7 @@ fn solve_forward_node<S: SolverInterface + Send>(
             n_completed: &mut ws.scratch.downstream_n_completed,
             par_order: downstream_par_order,
         },
+        &mut ws.drift_tally,
     );
     ws.scratch.unscaled_primal = unscaled_primal;
 

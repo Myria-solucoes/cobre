@@ -26,7 +26,7 @@ use crate::{
     horizon_mode::HorizonMode,
     indexer::StudyDimensions,
     inflow_method::InflowNonNegativityMethod,
-    lp_builder::PatchBuffer,
+    lp_builder::{PatchBuffer, StateBox},
     noise::{
         NcsNoiseOffsets, build_dense_ncs_col_indices, gather_dense_ncs_bounds,
         transform_inflow_noise, transform_ncs_noise,
@@ -200,6 +200,14 @@ fn minimal_forward_template() -> StageTemplate {
     }
 }
 
+/// Every dimension unbounded — the pin-time box-membership assert is vacuous.
+fn unbounded_state_box(n_state: usize) -> StateBox {
+    StateBox {
+        lower: vec![f64::NEG_INFINITY; n_state],
+        upper: vec![f64::INFINITY; n_state],
+    }
+}
+
 fn minimal_sizing() -> WorkspaceSizing {
     WorkspaceSizing {
         hydro_count: 1,
@@ -277,7 +285,9 @@ fn run_matches_open_coded_forward_block_for_minimal_fixture() {
     let template = minimal_forward_template();
     let templates = vec![template.clone()];
     let base_rows = vec![0_usize];
+    let state_boxes = vec![unbounded_state_box(state.n_state)];
     let ctx = StageContext {
+        state_boxes: &state_boxes,
         templates: &templates,
         base_rows: &base_rows,
         geometry_per_stage: &[],
@@ -344,7 +354,7 @@ fn run_matches_open_coded_forward_block_for_minimal_fixture() {
         &training_ctx,
         &mut reference_scratch,
     );
-    reference_patch_buf.fill_col_state_patches(&state, &current_state, &template.col_scale);
+    reference_patch_buf.fill_col_state_patches(&state, &current_state, &template.col_scale, None);
     reference_patch_buf.fill_forward_patches(
         &state,
         &current_state,
@@ -388,8 +398,7 @@ fn run_matches_open_coded_forward_block_for_minimal_fixture() {
         &training_ctx,
         StageIdx(0),
         &params,
-    )
-    .expect("fixture commitments are in bounds; reconciliation must not reject");
+    );
 
     assert_eq!(
         owner_solver.col_bounds_calls, reference_solver.col_bounds_calls,
@@ -548,7 +557,9 @@ fn run_wires_ncs_patch_matching_pre_collapse_inline_pattern() {
     let ncs_stochastic_dense_col = vec![0_usize];
     let ncs_stochastic_windows: Vec<(Option<i32>, Option<i32>)> = vec![(None, None)];
     let ncs_col_starts = vec![0_usize];
+    let state_boxes = vec![unbounded_state_box(state.n_state)];
     let ctx = StageContext {
+        state_boxes: &state_boxes,
         templates: &templates,
         base_rows: &[0],
         geometry_per_stage: &[],
@@ -676,8 +687,7 @@ fn run_wires_ncs_patch_matching_pre_collapse_inline_pattern() {
         &training_ctx,
         StageIdx(0),
         &params,
-    )
-    .expect("fixture commitments are in bounds; reconciliation must not reject");
+    );
 
     assert_eq!(
         owner_solver.col_bounds_calls.last(),
@@ -707,7 +717,9 @@ fn run_skips_load_and_inflow_transform_under_absent_and_prebuilt() {
     let template = minimal_forward_template();
     let templates = vec![template];
     let base_rows = vec![0_usize];
+    let state_boxes = vec![unbounded_state_box(state.n_state)];
     let ctx = StageContext {
+        state_boxes: &state_boxes,
         templates: &templates,
         base_rows: &base_rows,
         geometry_per_stage: &[],
@@ -782,8 +794,7 @@ fn run_skips_load_and_inflow_transform_under_absent_and_prebuilt() {
         &training_ctx,
         StageIdx(0),
         &params,
-    )
-    .expect("fixture commitments are in bounds; reconciliation must not reject");
+    );
 
     assert_eq!(
         scratch.noise_buf,

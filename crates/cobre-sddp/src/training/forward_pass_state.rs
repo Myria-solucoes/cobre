@@ -1090,10 +1090,12 @@ mod tests {
         horizon_mode::HorizonMode,
         indexer::{StateSpace, StudyDimensions},
         inflow_method::InflowNonNegativityMethod,
-        lp_builder::PatchBuffer,
+        lp_builder::{PatchBuffer, StateBox},
         test_support::{state_layout, study_dims},
         trajectory::TrajectoryRecord,
-        workspace::{BackwardAccumulators, BasisStore, ScratchBuffers, SolverWorkspace},
+        workspace::{
+            BackwardAccumulators, BasisStore, DriftTally, ScratchBuffers, SolverWorkspace,
+        },
     };
 
     // ── Minimal mock solver ────────────────────────────────────────────────
@@ -1167,6 +1169,18 @@ mod tests {
 
     // ── Fixture helpers ────────────────────────────────────────────────────
 
+    /// A fully-permissive `(-inf, inf)` box per stage, for fixtures driving
+    /// `run_forward_stage` through the seam without exercising the clamp.
+    fn permissive_state_boxes(n_state: usize, n_stages: usize) -> Vec<StateBox> {
+        vec![
+            StateBox {
+                lower: vec![f64::NEG_INFINITY; n_state],
+                upper: vec![f64::INFINITY; n_state],
+            };
+            n_stages
+        ]
+    }
+
     fn minimal_template_1_0() -> StageTemplate {
         StageTemplate {
             num_cols: 4,
@@ -1208,6 +1222,7 @@ mod tests {
             solver: ProfiledSolver::new(solver),
             patch_buf: PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(state.n_state),
+            drift_tally: DriftTally::default(),
             scratch: ScratchBuffers {
                 noise_buf: Vec::with_capacity(state.hydro_count),
                 inflow_m3s_buf: Vec::with_capacity(state.hydro_count),
@@ -1483,7 +1498,9 @@ mod tests {
     #[test]
     fn forward_pass_state_run_produces_expected_scenario_count() {
         let mut fx = ForwardFixture::new();
+        let state_boxes = permissive_state_boxes(fx.state.n_state, fx.n_stages);
         let ctx = StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &fx.templates,
             base_rows: &fx.base_rows,
@@ -1562,7 +1579,9 @@ mod tests {
     #[test]
     fn forward_pass_state_set_profile_reaches_current_profile_after_run() {
         let mut fx = ForwardFixture::new();
+        let state_boxes = permissive_state_boxes(fx.state.n_state, fx.n_stages);
         let ctx = StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &fx.templates,
             base_rows: &fx.base_rows,
@@ -1658,7 +1677,9 @@ mod tests {
     #[test]
     fn run_forward_worker_produces_expected_trajectory_costs() {
         let fx = ForwardFixture::new();
+        let state_boxes = permissive_state_boxes(fx.state.n_state, fx.n_stages);
         let ctx = StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &fx.templates,
             base_rows: &fx.base_rows,
@@ -1803,7 +1824,9 @@ mod tests {
     #[test]
     fn forward_pass_state_run_preserves_worker_stage_stats_shape() {
         let mut fx = ForwardFixture::new();
+        let state_boxes = permissive_state_boxes(fx.state.n_state, fx.n_stages);
         let ctx = StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &fx.templates,
             base_rows: &fx.base_rows,
@@ -1939,7 +1962,9 @@ mod tests {
     #[test]
     fn forward_pass_state_run_reuses_scenario_costs_allocation() {
         let mut fx = ForwardFixture::new();
+        let state_boxes = permissive_state_boxes(fx.state.n_state, fx.n_stages);
         let ctx = StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &fx.templates,
             base_rows: &fx.base_rows,
@@ -2239,7 +2264,9 @@ mod tests {
         let fcf = FutureCostFunction::new(1, state.n_state, 1, 10, &[0_u32]);
         let horizon = HorizonMode::Finite { num_stages: 1 };
 
+        let state_boxes = permissive_state_boxes(state.n_state, 1);
         let ctx = StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -2550,7 +2577,9 @@ mod tests {
         );
         let horizon = HorizonMode::Finite { num_stages: 2 };
         let noise_scale = vec![0.0_f64; 2 * state.hydro_count];
+        let state_boxes = permissive_state_boxes(state.n_state, 2);
         let ctx = StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,

@@ -73,8 +73,7 @@ pub(crate) fn outcome_stride(n_state: usize) -> usize {
 /// # Errors
 ///
 /// Propagates `SddpError::Infeasible`/`SddpError::Solver` from the slice's
-/// solves, `SddpError::AnticipatedCommitmentOutOfBounds` from the bound patch,
-/// and `SddpError::Validation` from an `External` child's noise assembly.
+/// solves and `SddpError::Validation` from an `External` child's noise assembly.
 // RATIONALE: the per-slice solve inputs (workspace, stage/training contexts,
 // successor+child specs, trial state, slice bounds, output buffer) are threaded
 // positionally across all three backward variants; bundling them into a struct
@@ -117,7 +116,7 @@ pub(crate) fn solve_replicated_outcome_slice<S: SolverInterface + Send>(
             child.successor_node_id,
             &mut buf,
         )?;
-        patch_opening_bounds(ws, ctx, training_ctx, &buf, x_hat, s)?;
+        patch_opening_bounds(ws, ctx, training_ctx, &buf, x_hat, s);
         let inputs = StageInputs {
             stage_context: ctx,
             pool: child.successor_pool,
@@ -140,7 +139,7 @@ pub(crate) fn solve_replicated_outcome_slice<S: SolverInterface + Send>(
     } else {
         for local_omega in local_start..local_end {
             let raw_noise = tree_view.opening(s.0, local_omega);
-            patch_opening_bounds(ws, ctx, training_ctx, raw_noise, x_hat, s)?;
+            patch_opening_bounds(ws, ctx, training_ctx, raw_noise, x_hat, s);
             let inputs = StageInputs {
                 stage_context: ctx,
                 pool: child.successor_pool,

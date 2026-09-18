@@ -19,6 +19,7 @@ use crate::risk_measure::{BackwardOutcome, RiskMeasureScratch};
 use crate::setup::{NodeId, NodePos};
 use crate::solve::partition;
 use crate::solver_stats::SolverStatsDelta;
+use crate::workspace::DriftTally;
 
 // ---------------------------------------------------------------------------
 // CapturedBasis
@@ -725,6 +726,11 @@ pub struct SolverWorkspace<S: SolverInterface> {
     pub patch_buf: PatchBuffer,
     /// Scratch buffer for the current state vector.
     pub current_state: Vec<f64>,
+    /// Per-family clamp drift recorded by the outgoing-state read-back seam.
+    // Rationale (dead_code): written at construction only until the read-back
+    // seam records into it and the reduction reads it.
+    #[allow(dead_code)]
+    pub(crate) drift_tally: DriftTally,
     /// Pre-allocated scratch buffers for noise transformation and simulation.
     pub(crate) scratch: ScratchBuffers,
     /// Pre-allocated destination basis for [`reconstruct_basis`], filled in-place
@@ -772,6 +778,7 @@ impl<S: SolverInterface> SolverWorkspace<S> {
             solver: ProfiledSolver::new(solver),
             patch_buf,
             current_state: Vec::with_capacity(n_state),
+            drift_tally: DriftTally::default(),
             scratch: ScratchBuffers::new(sizing),
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::new(

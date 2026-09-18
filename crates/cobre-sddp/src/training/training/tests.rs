@@ -42,6 +42,7 @@ use crate::{
     error::SddpError,
     horizon_mode::HorizonMode,
     inflow_method::InflowNonNegativityMethod,
+    lp_builder::StateBox,
     risk_measure::RiskMeasure,
     setup::NodeId,
     solver_stats::{SolverStatsDelta, SolverStatsLogEntry},
@@ -411,6 +412,18 @@ fn make_fcf(
     )
 }
 
+/// A fully-permissive `(-inf, inf)` box per stage, for fixtures driving
+/// `train` through the seam without exercising the clamp.
+fn permissive_state_boxes(n_state: usize, n_stages: usize) -> Vec<StateBox> {
+    vec![
+        StateBox {
+            lower: vec![f64::NEG_INFINITY; n_state],
+            upper: vec![f64::INFINITY; n_state],
+        };
+        n_stages
+    ]
+}
+
 fn iteration_limit_rules(limit: u64) -> StoppingRuleSet {
     StoppingRuleSet {
         rules: vec![StoppingRule::IterationLimit { limit }],
@@ -460,7 +473,9 @@ fn ac_train_completes_with_iteration_limit() {
     let mut solver = MockSolver::with_fixed(100.0);
     let comm = StubComm;
 
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let stage_ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -565,7 +580,9 @@ fn ac_train_returns_partial_on_infeasible() {
     let mut solver = MockSolver::infeasible();
     let comm = StubComm;
 
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let stage_ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -683,7 +700,9 @@ fn ac_train_emits_correct_event_sequence() {
     let mut solver = MockSolver::with_fixed(100.0);
     let comm = StubComm;
 
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let stage_ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -887,7 +906,9 @@ fn ac_worker_timing_per_worker_event_count_and_setup_invariant() {
     let mut solver = MockSolver::with_fixed(100.0);
     let comm = StubComm;
 
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let stage_ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -1062,7 +1083,9 @@ fn ac_train_result_fields_populated() {
     let mut solver = MockSolver::with_fixed(100.0);
     let comm = StubComm;
 
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let stage_ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -1167,7 +1190,9 @@ fn ac_train_with_no_event_sender() {
     let mut solver = MockSolver::with_fixed(100.0);
     let comm = StubComm;
 
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let stage_ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -1269,7 +1294,9 @@ fn ac_total_time_ms_is_non_negative() {
     let mut solver = MockSolver::with_fixed(100.0);
     let comm = StubComm;
 
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let stage_ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -1379,7 +1406,9 @@ fn cut_selection_none_skips_step() {
     let mut solver = MockSolver::with_fixed(100.0);
     let comm = StubComm;
 
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let stage_ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -1498,7 +1527,9 @@ fn cut_selection_level1_runs_at_frequency() {
     let mut solver = MockSolver::with_fixed(100.0);
     let comm = StubComm;
 
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let stage_ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -1626,7 +1657,9 @@ fn cut_selection_stage0_exempt_preserves_cuts() {
     let mut solver = MockSolver::with_fixed(100.0);
     let comm = StubComm;
 
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let stage_ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -1764,7 +1797,9 @@ fn existing_train_tests_pass_with_none() {
     let mut solver = MockSolver::with_fixed(100.0);
     let comm = StubComm;
 
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let stage_ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -1875,7 +1910,9 @@ fn ac_train_partial_result_on_mid_iteration_failure() {
     let mut solver = MockSolver::infeasible();
     let comm = StubComm;
 
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let stage_ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -1999,7 +2036,9 @@ fn start_iteration_resumes_from_offset() {
     let mut solver = MockSolver::with_fixed(100.0);
     let comm = StubComm;
 
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let stage_ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -2106,7 +2145,9 @@ fn start_iteration_at_or_beyond_max_runs_zero_iterations() {
     let mut solver = MockSolver::with_fixed(100.0);
     let comm = StubComm;
 
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let stage_ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -2867,7 +2908,9 @@ fn template_freeze_event_emitted() {
     let mut solver = MockSolver::with_fixed(100.0);
     let comm = StubComm;
 
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let stage_ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,

@@ -790,7 +790,7 @@ mod determinism {
         horizon_mode::HorizonMode,
         indexer::{CutStateProjection, StateSpace, StudyDimensions},
         inflow_method::InflowNonNegativityMethod,
-        lp_builder::PatchBuffer,
+        lp_builder::{PatchBuffer, StateBox},
         risk_measure::RiskMeasure,
         setup::node_graph::Traversal,
         simulate,
@@ -1215,6 +1215,16 @@ mod determinism {
         }
     }
 
+    fn permissive_state_boxes(n_state: usize, n_stages: usize) -> Vec<StateBox> {
+        vec![
+            StateBox {
+                lower: vec![f64::NEG_INFINITY; n_state],
+                upper: vec![f64::INFINITY; n_state],
+            };
+            n_stages
+        ]
+    }
+
     // ===========================================================================
     // Helper: run training with a given number of forward-pass workspaces
     // ===========================================================================
@@ -1267,6 +1277,7 @@ mod determinism {
             .build()
             .unwrap();
 
+        let state_boxes = permissive_state_boxes(fx.state.n_state, fx.n_stages);
         let stage_ctx = StageContext {
             geometry_per_stage: &[],
             templates: &fx.templates,
@@ -1277,6 +1288,7 @@ mod determinism {
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
+            state_boxes: &state_boxes,
             block_counts_per_stage: &[1usize; 5],
             ncs_col_starts: &[],
             n_ncs: 0,
@@ -1403,6 +1415,7 @@ mod determinism {
             .build()
             .unwrap();
 
+        let state_boxes = permissive_state_boxes(fx.state.n_state, fx.n_stages);
         let cost_buffer = pool
             .install(|| {
                 simulate(
@@ -1417,6 +1430,7 @@ mod determinism {
                         n_load_buses: 0,
                         load_balance_row_starts: &[],
                         load_bus_indices: &[],
+                        state_boxes: &state_boxes,
                         block_counts_per_stage: &[],
                         ncs_col_starts: &[],
                         n_ncs: 0,

@@ -24,7 +24,7 @@ use crate::setup::PostStudyResolved;
 // canonicalization seam this box feeds once that consumer lands.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
-pub(crate) struct StateBox {
+pub struct StateBox {
     /// Per-dimension lower bound.
     pub lower: Vec<f64>,
     /// Per-dimension upper bound.
