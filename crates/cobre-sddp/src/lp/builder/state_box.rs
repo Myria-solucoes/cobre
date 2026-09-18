@@ -156,8 +156,7 @@ fn fill_commitment_hold_box(
                 continue;
             }
             let is_deposit = point.decider.get(m).copied().flatten() == Some(stage_idx);
-            let is_interior = !is_deposit && point.is_ready_at(m, stage_idx);
-            if !is_deposit && !is_interior {
+            if !is_deposit && !point.is_ready_at(m, stage_idx) {
                 continue;
             }
             if !is_anticipated_decision_active_for_delivery(

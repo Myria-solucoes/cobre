@@ -64,13 +64,14 @@ pub(crate) fn postprocess_templates(
     state_layout: &StateSpace,
     cost_scale_factor: f64,
 ) -> ScalingReport {
+    let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
+
     // The setter derives cumulative factors in the same call, so the two slices
     // cannot drift.
-    {
-        let pg = system.policy_graph();
-        let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
-        stage_templates.set_discount_factors(compute_per_stage_discount_factors(&study_stages, pg));
-    }
+    stage_templates.set_discount_factors(compute_per_stage_discount_factors(
+        &study_stages,
+        system.policy_graph(),
+    ));
 
     debug_assert_eq!(
         stage_templates.cumulative_discount_factors().len(),
@@ -101,6 +102,70 @@ pub(crate) fn postprocess_templates(
         for (s_idx, tmpl) in stage_templates.templates.iter_mut().enumerate() {
             tmpl.objective[theta_cols[s_idx]] *= discount_factors[s_idx];
         }
+    }
+
+    // Commitment-hold resolution context the box builder's one hand-written
+    // special case needs (ADR-002, ADR-012) — resolved once here and threaded
+    // through every stage's `build_state_box` call, mirroring the same
+    // `resolve_post_study_artifacts` inputs `build_stage_templates` uses. Runs
+    // BEFORE column scaling below: the storage/transit-bucket identity families
+    // read `template.col_lower`/`col_upper` verbatim, which must still be the
+    // PHYSICAL bounds `apply_col_scale` has not yet divided in place — the same
+    // physical units as the unscaled trial state (`fill_unscaled` in
+    // `training/forward/stage_solve.rs`) and the raw commitment-hold bound.
+    let bounds = system.bounds();
+    let mut anticipated_thermal_indices: Vec<usize> = Vec::new();
+    let mut anticipated_windows: Vec<(Option<i32>, Option<i32>)> = Vec::new();
+    for (t_idx, thermal) in system.thermals().iter().enumerate() {
+        if thermal.anticipated_config.is_some() {
+            anticipated_thermal_indices.push(t_idx);
+            anticipated_windows.push((thermal.entry_stage_id, thermal.exit_stage_id));
+        }
+    }
+    let anticipated_thermal_ids: Vec<EntityId> = anticipated_thermal_indices
+        .iter()
+        .map(|&idx| system.thermals()[idx].id)
+        .collect();
+    let last_real_cumulative = stage_templates
+        .cumulative_discount_factors()
+        .last()
+        .copied()
+        .unwrap_or(1.0);
+    let last_real_per_stage = stage_templates
+        .discount_factors()
+        .last()
+        .copied()
+        .unwrap_or(1.0);
+    let post_study_resolved = super::resolve_post_study_artifacts(
+        system.post_study_stages(),
+        &anticipated_thermal_ids,
+        system.policy_graph(),
+        last_real_cumulative,
+        last_real_per_stage,
+    );
+    let study_stage_ids: Vec<i32> = study_stages.iter().map(|s| s.id).collect();
+    let n_post = post_study_resolved.total_hours.len();
+    let next_delivery_id = study_stage_ids.last().map_or(0, |&last| last + 1);
+    let end_delivery_id =
+        next_delivery_id.saturating_add(i32::try_from(n_post).unwrap_or(i32::MAX));
+    let delivery_stage_ids: Vec<i32> = study_stage_ids
+        .iter()
+        .copied()
+        .chain(next_delivery_id..end_delivery_id)
+        .collect();
+
+    for stage_idx in 0..stage_templates.templates.len() {
+        let state_box = lp_builder::build_state_box(
+            &stage_templates.templates[stage_idx],
+            state_layout,
+            stage_idx,
+            bounds,
+            &anticipated_thermal_indices,
+            &anticipated_windows,
+            &delivery_stage_ids,
+            &post_study_resolved,
+        );
+        stage_templates.state_boxes.push(state_box);
     }
 
     // Column scaling then row scaling (D_r * A * D_c). Scale factors are stored on
@@ -157,70 +222,6 @@ pub(crate) fn postprocess_templates(
         }
     }
 
-    // Commitment-hold resolution context the box builder's one hand-written
-    // special case needs (ADR-002, ADR-012) — resolved once here and threaded
-    // through every stage's `build_state_box` call, mirroring the same
-    // `resolve_post_study_artifacts` inputs `build_stage_templates` uses.
-    let bounds = system.bounds();
-    let mut anticipated_thermal_indices: Vec<usize> = Vec::new();
-    let mut anticipated_windows: Vec<(Option<i32>, Option<i32>)> = Vec::new();
-    for (t_idx, thermal) in system.thermals().iter().enumerate() {
-        if thermal.anticipated_config.is_some() {
-            anticipated_thermal_indices.push(t_idx);
-            anticipated_windows.push((thermal.entry_stage_id, thermal.exit_stage_id));
-        }
-    }
-    let anticipated_thermal_ids: Vec<EntityId> = anticipated_thermal_indices
-        .iter()
-        .map(|&idx| system.thermals()[idx].id)
-        .collect();
-    let last_real_cumulative = stage_templates
-        .cumulative_discount_factors()
-        .last()
-        .copied()
-        .unwrap_or(1.0);
-    let last_real_per_stage = stage_templates
-        .discount_factors()
-        .last()
-        .copied()
-        .unwrap_or(1.0);
-    let post_study_resolved = super::resolve_post_study_artifacts(
-        system.post_study_stages(),
-        &anticipated_thermal_ids,
-        system.policy_graph(),
-        last_real_cumulative,
-        last_real_per_stage,
-    );
-    let study_stage_ids: Vec<i32> = system
-        .stages()
-        .iter()
-        .filter(|s| s.id >= 0)
-        .map(|s| s.id)
-        .collect();
-    let n_post = post_study_resolved.total_hours.len();
-    let next_delivery_id = study_stage_ids.last().map_or(0, |&last| last + 1);
-    let end_delivery_id =
-        next_delivery_id.saturating_add(i32::try_from(n_post).unwrap_or(i32::MAX));
-    let delivery_stage_ids: Vec<i32> = study_stage_ids
-        .iter()
-        .copied()
-        .chain(next_delivery_id..end_delivery_id)
-        .collect();
-
-    for stage_idx in 0..stage_templates.templates.len() {
-        let state_box = lp_builder::build_state_box(
-            &stage_templates.templates[stage_idx],
-            state_layout,
-            stage_idx,
-            bounds,
-            &anticipated_thermal_indices,
-            &anticipated_windows,
-            &delivery_stage_ids,
-            &post_study_resolved,
-        );
-        stage_templates.state_boxes.push(state_box);
-    }
-
     scaling_report
 }
 
@@ -232,13 +233,20 @@ pub(crate) fn postprocess_templates(
     clippy::float_cmp
 )]
 mod tests {
-    use super::{compute_cumulative_discount_factors, compute_per_stage_discount_factors};
+    use super::{
+        compute_cumulative_discount_factors, compute_per_stage_discount_factors,
+        postprocess_templates,
+    };
+    use crate::indexer::StateSpace;
+    use crate::lp_builder::{StageGeometry, StageTemplates};
+    use crate::test_support::state_layout_full;
     use chrono::NaiveDate;
-    use cobre_core::HorizonGraph;
     use cobre_core::temporal::{
         BlockMode, NoiseMethod, PolicyGraphType, ScenarioSourceConfig, Stage, StageRiskConfig,
         StageStateConfig,
     };
+    use cobre_core::{HorizonGraph, ResolvedBounds, SystemBuilder};
+    use cobre_solver::StageTemplate;
     use std::collections::BTreeMap;
 
     fn one_year_stage(id: i32) -> Stage {
@@ -354,5 +362,72 @@ mod tests {
                 "cumulative[{i}] must be 1.0 when per-stage factor is 1.0"
             );
         }
+    }
+
+    /// A minimal 4-column template (`storage`, then 3 filler columns padding
+    /// out to `theta`'s index — `apply_commitment_hold_col_scale_unscale`
+    /// requires `col_scale` to cover every state column through `theta`)
+    /// whose storage column carries two matrix entries of different
+    /// magnitude (`1.0`, `4.0`), forcing `compute_col_scale` to a non-unit
+    /// factor (`1/sqrt(4*1) = 0.5`).
+    fn scaled_storage_template(physical_upper: f64) -> StageTemplate {
+        StageTemplate {
+            num_cols: 4,
+            num_rows: 2,
+            num_nz: 2,
+            col_starts: vec![0, 2, 2, 2, 2],
+            row_indices: vec![0, 1],
+            values: vec![1.0, 4.0],
+            col_lower: vec![0.0, f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY],
+            col_upper: vec![physical_upper, f64::INFINITY, f64::INFINITY, f64::INFINITY],
+            objective: vec![0.0; 4],
+            row_lower: vec![0.0, 0.0],
+            row_upper: vec![0.0, 0.0],
+            n_state: 1,
+            n_transfer: 0,
+            n_dual_relevant: 0,
+            n_hydro: 0,
+            max_par_order: 0,
+            col_scale: Vec::new(),
+            row_scale: Vec::new(),
+        }
+    }
+
+    /// Regression: `state_boxes`'s storage bound must be the PHYSICAL
+    /// `col_upper` the template started with, never `col_upper / col_scale` —
+    /// `build_state_box` must read the identity families before
+    /// `apply_col_scale` divides them in place.
+    #[test]
+    fn postprocess_templates_storage_box_is_physical_not_scaled() {
+        const PHYSICAL_UPPER: f64 = 200.0;
+
+        let mut stage_templates = StageTemplates::empty(0, 1.0);
+        stage_templates
+            .templates
+            .push(scaled_storage_template(PHYSICAL_UPPER));
+        stage_templates.base_rows.push(0);
+        stage_templates
+            .geometry_per_stage
+            .push(StageGeometry::default());
+
+        let state_layout: StateSpace = state_layout_full(1, 0, 0, 0, Vec::new());
+        let system = SystemBuilder::new()
+            .stages(vec![one_year_stage(0)])
+            .bounds(ResolvedBounds::empty())
+            .build()
+            .expect("minimal system must build");
+
+        postprocess_templates(&mut stage_templates, &system, &state_layout, 1.0);
+
+        assert_ne!(
+            stage_templates.templates[0].col_scale[0], 1.0,
+            "storage's col_scale must be != 1.0 for this regression to be meaningful"
+        );
+        let storage_j = state_layout.storage.start;
+        assert_eq!(
+            stage_templates.state_boxes[0].upper[storage_j], PHYSICAL_UPPER,
+            "the storage box's upper bound must be the physical max_storage, \
+             not col_upper / col_scale"
+        );
     }
 }

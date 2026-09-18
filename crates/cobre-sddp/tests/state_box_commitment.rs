@@ -12,9 +12,11 @@
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::doc_markdown,
-    clippy::needless_update,
     clippy::too_many_lines
 )]
+// `..Default::default()` in the make_* Spec calls is the intentional future-field
+// seam from `common::builders` — a no-op today, not dead code.
+#![allow(clippy::needless_update)]
 
 mod common;
 
