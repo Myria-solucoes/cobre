@@ -27,7 +27,7 @@ payoff:    give setup a `DriftTally` (or a lightweight seed-drift record), tally
 trigger:   drift telemetry is surfaced to operators/reports, or a seed-drift diagnostic is requested.
 owner:     cobre-sddp state-canonicalization plan owner
 blast:     crates/cobre-sddp/src/setup/mod.rs (`canonicalize_initial_state`, `build_initial_state`); crates/cobre-sddp/src/workspace (`DriftTally`); `StudySetup` and the session tally-merge site.
-origin:    plans/state-canonicalization, ticket-007-initial-seed-canonicalization
+origin:    plans/state-canonicalization, epic-02-canonical-readback-seam, ticket-007-retire-runtime-verdict
 
 ## Paid
 

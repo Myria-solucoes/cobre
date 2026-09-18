@@ -727,8 +727,8 @@ pub struct SolverWorkspace<S: SolverInterface> {
     /// Scratch buffer for the current state vector.
     pub current_state: Vec<f64>,
     /// Per-family clamp drift recorded by the outgoing-state read-back seam.
-    // Rationale (dead_code): written at construction only until the read-back
-    // seam records into it and the reduction reads it.
+    // Rationale (dead_code): recorded into by the read-back seam, but not read
+    // until the end-of-run reduction consumes it.
     #[allow(dead_code)]
     pub(crate) drift_tally: DriftTally,
     /// Pre-allocated scratch buffers for noise transformation and simulation.

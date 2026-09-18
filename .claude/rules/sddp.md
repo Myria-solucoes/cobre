@@ -2241,43 +2241,39 @@ and it is accurate only to the backend's `primal_feasibility_tolerance` (`1e-9`
 on HiGHS and CLP) — never to 1 ULP. A commitment at its cap therefore arrives a
 hair outside it, and the fishing equality's no-slack pin turns that hair into
 `SddpError::Infeasible`: a false infeasibility over a physically meaningless
-quantity that aborts training outright.
+quantity that would abort training outright if the state were pinned raw.
 
-`StageSolvePrep::run` therefore reconciles every pinned commitment against the
-delivery generation column's **enforced** bound (`col_upper * col_scale`, the
-round-tripped value the solver applies — not the template's raw `max_gen`),
-relaxing the column just far enough to admit drift within `drift_margin`. Drift
-beyond that margin is `SddpError::AnticipatedCommitmentOutOfBounds`, never
-absorbed: the margin is the discrimination line between solver noise and a
-modelling error, and a guard that relaxes for ANY overshoot silently admits a
-plant generating past its cap.
+That sub-tolerance drift is absorbed at the outgoing-state read-back seam, not
+judged on the solve path: `assemble_outgoing_state` projects every outgoing state
+onto its admissible box before the value is pinned, solved against, or dotted
+into a cut, so the commitment reaches the delivery stage already inside its
+bound, and the drift is tallied by family (`workspace/drift_tally.rs`) rather
+than rejected. The `commit_out ∪ commit_in` carry is additionally made bit-exact
+by `apply_commitment_hold_col_scale_unscale` (`col_scale = 1.0`), removing the
+ring-carry drift at its source; the basis-factorization drift at the deposit row
+is what the seam absorbs, since exactness there is the solver's to give and it
+does not give it. A *genuine* over-commitment — past the delivery bound by more
+than solver noise — is no longer a runtime verdict; validating it moves to
+`cobre-io` load time, before the study runs (that validator is forthcoming, so
+until it lands the seam absorbs genuine and sub-tolerance overshoot alike).
 
-Two forbidden alternatives, both of which have shipped:
+The read-back seam must absorb drift for ALL solve sites uniformly — forward,
+backward, lower bound, and simulation each canonicalize through
+`assemble_outgoing_state`; a per-site opt-out is what once let solve sites
+silently diverge. Absorption must never be conflated with hiding a genuine
+over-commitment: the clamp is applied unconditionally, but the load-time
+validator (forthcoming) is what distinguishes solver noise from a modelling
+error — the seam does not.
 
-- **Deleting the reconciliation on the premise that unscaling makes it
-  redundant.** `apply_commitment_hold_col_scale_unscale` (`col_scale = 1.0` on
-  `commit_out ∪ commit_in`) removes the ring _carry_ drift and
-  is retained — the carry is bit-exact and the decision column's own value is
-  bit-exact at its bound. It cannot remove the drift the basis factorization
-  introduces at the deposit row, because exactness there is the solver's to give
-  and it does not give it. No amount of unscaling closes this.
-- **Making the reconciliation an opt-in hook.** It is not a variation point and
-  takes no parameter: `run` derives its own gate, so all four solve sites (forward,
-  backward, lower bound, simulation) get it and none can opt out. An
-  `Option<..Ctx>` hook threaded per call site is what let all four silently lose it
-  in one commit.
-
-Read: `lp/builder/commitment_reconcile.rs` (`reconcile_commitment`,
-`fill_bound_relaxations`, `drift_margin`), `training/stage_solve_prep.rs`
-(`StageSolvePrep::reconcile_commitments`), `lp/builder/scaling.rs`
+Read: `solve/stage_solve.rs` (`assemble_outgoing_state`, the read-back seam),
+`workspace/drift_tally.rs`, `lp/builder/scaling.rs`
 (`apply_commitment_hold_col_scale_unscale`). Pinned by
 `anticipated_commitment_drifted_over_cap_is_absorbed` (a seed a hair past the cap
-trains; it returns `Infeasible` the moment the reconciliation is disabled) and
-`anticipated_commitment_over_cap_seed_is_refused` (a genuine over-commitment is
-named, not absorbed). `anticipated_commitment_at_cap_survives_ring_carry` does
-NOT pin this contract and must never be mistaken for it: a seed exactly at the cap
-carries zero drift, never reaches the reconciliation, and stays green with the
-guard deleted — an at-cap-only suite is what let this regression ship.
+trains to completion rather than aborting). `anticipated_commitment_at_cap_survives_ring_carry`
+does NOT pin this contract: a seed exactly at the cap carries zero drift and
+never exercises the absorption. The authoritative statement of the load-time
+over-commitment contract is finalized once the `cobre-io` validator lands; until
+then this section states the absorb-at-seam invariant only.
 
 ### Post-study delivery without a boundary carries zero value, never a reject
 

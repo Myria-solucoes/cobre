@@ -12,12 +12,14 @@
 //!   `<family>_block_base` for every `block_index`; the empty-overlay path is
 //!   never special-cased.
 //! - **Base** (`<family>_block_base`) — the block-eligible columns at
-//!   `(entity, stage)` granularity, ignoring the overlay. Reserved for exactly
-//!   two sanctioned callers: the dictionary report path
-//!   (`write_bounds_parquet`'s null-`block_id` base row, all five families)
-//!   and the anticipated-commitment decision column
-//!   (`fill_anticipated_columns`, thermal only). Any other caller is a design
-//!   question, not an implementation detail.
+//!   `(entity, stage)` granularity, ignoring the overlay. Reserved for three
+//!   sanctioned caller categories: the dictionary report path
+//!   (`write_bounds_parquet`'s null-`block_id` base row, all five families),
+//!   the anticipated-commitment decision column
+//!   (`fill_anticipated_columns`, thermal only), and the admissible state-box
+//!   machinery (the box builder and the initial-seed canonicalization, thermal
+//!   only). Any other caller is a design question, not an implementation
+//!   detail.
 //!
 //! Most entity tables share a uniform flat entity/stage layout; [`ResolvedBounds`]
 //! documents the exact stride for each family, including thermal's extended one.
@@ -1071,13 +1073,15 @@ impl ResolvedBounds {
     /// stage_index)`, ignoring the per-block overlay. This is **not** the value
     /// that applies at a block — see
     /// [`thermal_bounds_at_block`](Self::thermal_bounds_at_block) for the
-    /// block-resolved reader. `*_block_base` accessors exist for exactly two
+    /// block-resolved reader. `*_block_base` accessors exist for three
     /// sanctioned caller categories: the dictionary report path
-    /// (`write_bounds_parquet`'s null-`block_id` base row) and the
+    /// (`write_bounds_parquet`'s null-`block_id` base row), the
     /// anticipated-commitment decision column (`fill_anticipated_columns`,
-    /// reading the delivery stage's bounds); this accessor serves both. Any
-    /// other caller is a design question, not an implementation detail.
-    /// `stage_index` may land in the padded delivery-stage region.
+    /// reading the delivery stage's bounds), and the admissible state-box
+    /// machinery (the box builder and the initial-seed canonicalization,
+    /// reading the delivery stage's commitment bound); this accessor serves
+    /// them. Any other caller is a design question, not an implementation
+    /// detail. `stage_index` may land in the padded delivery-stage region.
     #[inline]
     #[must_use]
     pub fn thermal_block_base(

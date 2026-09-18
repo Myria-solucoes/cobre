@@ -1120,6 +1120,10 @@ pub struct CanonicalCutProbe {
 /// # Errors
 ///
 /// Propagates [`SddpError`] from the stage solve.
+// Rationale (too_many_arguments): a test-only probe that threads the same
+// borrows the production backward opening loop passes individually (workspace,
+// contexts, pool, cut-state, stage/node ids, trial state, noise); grouping them
+// into a struct would diverge from the call shape it mirrors.
 #[allow(clippy::too_many_arguments)]
 pub fn write_backward_opening_outcome_for_probe<S: SolverInterface + Send>(
     ws: &mut SolverWorkspace<S>,

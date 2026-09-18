@@ -118,6 +118,26 @@ fn zero_hydro_penalties() -> HydroPenalties {
     }
 }
 
+fn zero_penalties(n_hydros: usize, n_stages: usize) -> ResolvedPenalties {
+    ResolvedPenalties::new(
+        &PenaltiesCountsSpec {
+            n_hydros,
+            n_buses: 1,
+            n_lines: 0,
+            n_ncs: 0,
+            n_stages,
+        },
+        &PenaltiesDefaults {
+            hydro: zero_hydro_penalties(),
+            bus: BusStagePenalties { excess_cost: 0.0 },
+            line: LineStagePenalties { exchange_cost: 0.0 },
+            ncs: NcsStagePenalties {
+                curtailment_cost: 0.0,
+            },
+        },
+    )
+}
+
 fn build_config(iteration_limit: u32) -> Config {
     Config {
         schema: None,
@@ -290,23 +310,7 @@ fn build_commitment_system(
         };
     }
 
-    let penalties = ResolvedPenalties::new(
-        &PenaltiesCountsSpec {
-            n_hydros: 0,
-            n_buses: 1,
-            n_lines: 0,
-            n_ncs: 0,
-            n_stages,
-        },
-        &PenaltiesDefaults {
-            hydro: zero_hydro_penalties(),
-            bus: BusStagePenalties { excess_cost: 0.0 },
-            line: LineStagePenalties { exchange_cost: 0.0 },
-            ncs: NcsStagePenalties {
-                curtailment_cost: 0.0,
-            },
-        },
-    );
+    let penalties = zero_penalties(0, n_stages);
 
     let past_anticipated_commitments =
         commitment_seed_windows(ant_id, anchor, DAYS_PER_STAGE, seeds);
@@ -467,23 +471,7 @@ fn build_transit_bucket_system(n_stages: usize, travel_time_hours: f64, seed_m3s
         },
     );
 
-    let penalties = ResolvedPenalties::new(
-        &PenaltiesCountsSpec {
-            n_hydros: 2,
-            n_buses: 1,
-            n_lines: 0,
-            n_ncs: 0,
-            n_stages,
-        },
-        &PenaltiesDefaults {
-            hydro: zero_hydro_penalties(),
-            bus: BusStagePenalties { excess_cost: 0.0 },
-            line: LineStagePenalties { exchange_cost: 0.0 },
-            ncs: NcsStagePenalties {
-                curtailment_cost: 0.0,
-            },
-        },
-    );
+    let penalties = zero_penalties(2, n_stages);
 
     let past_defluences = vec![HydroPastDefluence {
         hydro_id: upstream_id,
@@ -628,23 +616,7 @@ fn build_storage_system(n_stages: usize, cap_hm3: f64, seed_hm3: f64) -> System 
         },
     );
 
-    let penalties = ResolvedPenalties::new(
-        &PenaltiesCountsSpec {
-            n_hydros: 1,
-            n_buses: 1,
-            n_lines: 0,
-            n_ncs: 0,
-            n_stages,
-        },
-        &PenaltiesDefaults {
-            hydro: zero_hydro_penalties(),
-            bus: BusStagePenalties { excess_cost: 0.0 },
-            line: LineStagePenalties { exchange_cost: 0.0 },
-            ncs: NcsStagePenalties {
-                curtailment_cost: 0.0,
-            },
-        },
-    );
+    let penalties = zero_penalties(1, n_stages);
 
     SystemBuilder::new()
         .buses(vec![bus])

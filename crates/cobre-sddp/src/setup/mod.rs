@@ -2566,15 +2566,6 @@ fn study_stages_slice(system: &System) -> &[Stage] {
     }
 }
 
-/// Build the initial state vector from the system's initial conditions.
-///
-/// Layout `[storage(0..N), lags(N..N*(1+L))]` (N hydros, L = max PAR order),
-/// storage indexed by each hydro's position in `system.hydros()`'s canonical
-/// order. Lag slots come from `derived_lag_values` (entity-major,
-/// `derived_lag_values[pos * L + lag]`, lag 0 = most recent) — already
-/// pre-ordered by canonical hydro position at its single derivation site
-/// ([`derive_inflow_seeds`]), so `pos` here needs no id lookup. Storage-only
-/// when `max_par_order == 0`.
 /// Project the stage-0 initial (incoming) state onto the stage-0 admissible box
 /// for the box-stable families — storage (and its `PreFilling` seed) and
 /// travel-time buckets — the setup-time analog of the read-back seam's clamp on
@@ -2598,6 +2589,15 @@ fn canonicalize_initial_state(state: &mut [f64], layout: &StateSpace, stage0_box
     }
 }
 
+/// Build the initial state vector from the system's initial conditions.
+///
+/// Layout `[storage(0..N), lags(N..N*(1+L))]` (N hydros, L = max PAR order),
+/// storage indexed by each hydro's position in `system.hydros()`'s canonical
+/// order. Lag slots come from `derived_lag_values` (entity-major,
+/// `derived_lag_values[pos * L + lag]`, lag 0 = most recent) — already
+/// pre-ordered by canonical hydro position at its single derivation site
+/// ([`derive_inflow_seeds`]), so `pos` here needs no id lookup. Storage-only
+/// when `max_par_order == 0`.
 fn build_initial_state(
     system: &System,
     study_dims: &StudyDimensions,

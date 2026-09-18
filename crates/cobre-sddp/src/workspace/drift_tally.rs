@@ -5,9 +5,9 @@
 //! no float sum/mean — which is what keeps the cross-rank reduction
 //! order-invariant and bit-reproducible with no compensated summation.
 
-// Rationale (dead_code): `record`/`merge` have no caller yet outside this
-// module's own unit tests — the outgoing-state read-back seam and the
-// parallel reduction are the first production callers.
+// Rationale (dead_code): `record` is wired into the outgoing-state read-back
+// seam; `merge`/`reset` and the reducing getters have no production caller
+// until the end-of-run cross-rank reduction lands.
 #![cfg_attr(not(test), allow(dead_code))]
 
 /// Per-family drift. `max_abs`/`max_rel` reduce by [`f64::max`],

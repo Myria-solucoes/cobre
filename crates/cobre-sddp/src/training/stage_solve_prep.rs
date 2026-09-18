@@ -127,6 +127,10 @@ impl StageSolvePrep {
         );
     }
 
+    // Rationale (too_many_arguments): solver, patch_buf, and scratch are three
+    // disjoint mutable borrows of the workspace that must stay separate
+    // parameters — a bundling struct would reborrow the whole workspace and
+    // defeat the split; ctx/training_ctx/params are distinct immutable contexts.
     #[allow(clippy::too_many_arguments)]
     fn run_with_producer_box<S>(
         solver: &mut S,
@@ -214,8 +218,7 @@ impl StageSolvePrep {
             &patch_buf.upper[..pc],
         );
 
-        let n_stochastic_ncs = training_ctx.stochastic.n_stochastic_ncs();
-        if n_stochastic_ncs > 0 {
+        if training_ctx.stochastic.n_stochastic_ncs() > 0 {
             transform_ncs_noise(
                 params.raw_noise,
                 &NcsNoiseOffsets {

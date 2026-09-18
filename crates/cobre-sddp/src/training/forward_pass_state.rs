@@ -507,9 +507,6 @@ impl ForwardPassState {
                 ws.solver.current_profile() == &forward_profile,
                 "solver profile must equal the profile passed to set_profile"
             );
-        }
-
-        for ws in inputs.workspaces.iter_mut() {
             ws.worker_timing_buf = WorkerPhaseTimings::default();
         }
 
@@ -599,8 +596,6 @@ impl ForwardPassState {
         let forward_profile = self.profile;
         for ws in inputs.workspaces.iter_mut() {
             ws.solver.set_profile(&forward_profile);
-        }
-        for ws in inputs.workspaces.iter_mut() {
             ws.worker_timing_buf = WorkerPhaseTimings::default();
         }
 

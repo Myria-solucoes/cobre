@@ -487,13 +487,11 @@ where
 
         self.run_cut_management(iteration)?;
 
-        let node_graph = self.training_ctx.node_graph;
-        let num_stages = self.ranks.num_stages;
         grow_pools_for_next_iteration(
             self.fcf,
             u64::from(self.config.loop_config.forward_passes),
-            node_graph,
-            num_stages,
+            self.training_ctx.node_graph,
+            self.ranks.num_stages,
         );
         // Growth-only: a pool `grow_pools_for_next_iteration` just grew may now
         // exceed what the DCS scratch covers; re-reserve before the next

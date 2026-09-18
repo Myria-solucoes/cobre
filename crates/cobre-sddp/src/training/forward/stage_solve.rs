@@ -23,7 +23,7 @@ use super::{StageKey, write_capture_metadata};
 
 /// Execute the stage-level LP solve for one (scenario, stage) pair.
 ///
-/// Returns the stage cost on success, or propagates the solver error.
+/// Returns the stage cost on success.
 ///
 /// # Errors
 ///

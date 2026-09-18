@@ -282,6 +282,7 @@ fn solve_forward_node<S: SolverInterface + Send>(
     let state = training_ctx.state;
     let horizon = training_ctx.horizon;
     let pool = &params.fcf.pools[pool_id];
+    let is_terminal = horizon.is_terminal(t.next().0);
     // Fuse the leaf's forward slice only with its CUT-GENERATING PARENT's
     // cut-state projection, never the leaf's own pool — the parent-pool
     // fusion-projection contract (sddp.md). Disabled under DCS: the forward's
@@ -320,7 +321,7 @@ fn solve_forward_node<S: SolverInterface + Send>(
         t,
         &prep_params,
     );
-    if horizon.is_terminal(t.next().0) && !params.terminal_has_boundary_cuts {
+    if is_terminal && !params.terminal_has_boundary_cuts {
         ws.solver.set_col_bounds(&[state.theta], &[0.0], &[0.0]);
     }
 
@@ -369,7 +370,7 @@ fn solve_forward_node<S: SolverInterface + Send>(
             iteration: Some(params.iteration),
             node_id,
         };
-        let view = if horizon.is_terminal(t.next().0) {
+        let view = if is_terminal {
             run_stage_solve_terminal_static(ws, &inputs)?
         } else {
             run_stage_solve(ws, &inputs)?
@@ -384,7 +385,7 @@ fn solve_forward_node<S: SolverInterface + Send>(
     // Terminal boundary θ prices the post-horizon value-to-go: KEEP it in the cost
     // (subtracting it, the interior form, drops it from the UB only — understating
     // it below the LB). sddp.md "Terminal boundary FCF in the reported total cost".
-    let stage_cost = if horizon.is_terminal(t.next().0) && params.terminal_has_boundary_cuts {
+    let stage_cost = if is_terminal && params.terminal_has_boundary_cuts {
         view_objective * ctx.cost_scale_factor
     } else {
         (view_objective - d_t * unscaled_primal[state.theta]) * ctx.cost_scale_factor
