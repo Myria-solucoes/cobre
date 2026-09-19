@@ -87,6 +87,7 @@ use cobre_sddp::SimulationWeighting;
 use cobre_sddp::TrainingResult;
 use cobre_sddp::ValidatedBoundaryCuts;
 use cobre_sddp::aggregate_simulation;
+use cobre_sddp::aggregate_solver_stats_log;
 use cobre_sddp::build_basis_cache_from_checkpoint;
 use cobre_sddp::build_deviation_summary;
 use cobre_sddp::build_evaporation_model_rows;
@@ -103,6 +104,7 @@ use cobre_sddp::orchestration::export_stochastic_artifacts;
 use cobre_sddp::orchestration::write_checkpoint;
 use cobre_sddp::rescale_checkpoint_cuts_for_load;
 use cobre_sddp::resolve_boundary_state_requirements;
+use cobre_sddp::setup::RunPhasePlan;
 use cobre_sddp::solver_stats_log_to_rows;
 use cobre_sddp::study_horizon_end;
 use cobre_sddp::validate_policy_load;
@@ -246,41 +248,6 @@ where
     Ok(pool.install(|| f(n)))
 }
 
-/// Fold the per-phase training solver-stats log into category totals, mirroring
-/// the CLI's `aggregate_solver_stats` shape. Solve times are ms→s.
-///
-/// `total_lp_solves` is intentionally NOT derived here: the CLI sources it from
-/// the per-iteration convergence records (`IterationRecord.lp_solves`), and the
-/// two sums can diverge for multi-stage cases — the caller must compute it from
-/// the convergence records to stay bit-for-bit identical to the CLI.
-fn aggregate_training_solve_stats(
-    stats_log: &[cobre_sddp::SolverStatsLogEntry],
-) -> (u64, u64, u64, f64, f64) {
-    let mut first_try = 0u64;
-    let mut retried = 0u64;
-    let mut failed = 0u64;
-    let mut forward_solve_ms = 0.0_f64;
-    let mut backward_solve_ms = 0.0_f64;
-    for entry in stats_log {
-        let delta = &entry.delta;
-        first_try += delta.first_try_successes;
-        retried += delta.lp_successes.saturating_sub(delta.first_try_successes);
-        failed += delta.lp_failures;
-        match entry.phase {
-            "forward" => forward_solve_ms += delta.solve_time_ms,
-            "backward" => backward_solve_ms += delta.solve_time_ms,
-            _ => {}
-        }
-    }
-    (
-        first_try,
-        retried,
-        failed,
-        forward_solve_ms / 1000.0,
-        backward_solve_ms / 1000.0,
-    )
-}
-
 /// Result of the training phase within `run_via_study`.
 pub(crate) struct TrainingPhaseResult {
     pub result: TrainingResult,
@@ -307,14 +274,14 @@ fn build_training_phase_result(
     let mut training_output = setup.build_training_output(&training_result, events);
 
     // `total_lp_solves` is sourced from the per-iteration convergence records to
-    // mirror the CLI exactly (see `aggregate_training_solve_stats`).
+    // mirror the CLI exactly (see `aggregate_solver_stats_log`).
     let total_lp_solves: u64 = training_output
         .convergence_records
         .iter()
         .map(|r| u64::from(r.lp_solves))
         .sum();
     let (first_try, retried, failed, forward_solve_seconds, backward_solve_seconds) =
-        aggregate_training_solve_stats(&training_result.solver_stats_log);
+        aggregate_solver_stats_log(&training_result.solver_stats_log, None);
     training_output.training_solve_stats = MetadataTrainingSolveStats {
         total_lp_solves: Some(total_lp_solves),
         first_try: Some(first_try),
@@ -991,7 +958,8 @@ pub(crate) fn build_study_setup(
     let simulation_source = config
         .simulation_scenario_source(&case_dir.join("config.json"))
         .map_err(|e| format!("scenario source error: {e}"))?;
-    let mut construction = StudyParams::from_config(&config).map_err(|e| e.to_string())?;
+    let mut construction =
+        StudyParams::from_config(&config, Vec::new()).map_err(|e| e.to_string())?;
     construction.boundary = boundary_requirements;
     construction.scalar_parameters = artifacts.scalar_parameters;
     // export_states is captured by StudyParams::from_config from config.exports.states.
@@ -1416,53 +1384,55 @@ pub(crate) fn run_via_study(
 
     let should_simulate = study.simulation_enabled();
 
-    if study.training_enabled() {
-        let policy = study.train_native(on_iteration)?;
+    match RunPhasePlan::resolve(study.training_enabled(), should_simulate) {
+        RunPhasePlan::TrainedThenSimulated => {
+            let policy = study.train_native(on_iteration)?;
 
-        let simulation = if should_simulate {
-            Some(study.simulate_native(&policy, None)?)
-        } else {
-            None
-        };
-
-        let result = policy.training_result();
-        Ok(RunSummary {
-            converged: policy.converged,
-            iterations: result.iterations,
-            lower_bound: result.final_lb,
-            upper_bound: Some(result.final_ub),
-            gap_percent: Some(result.final_gap * 100.0),
-            total_time_ms: result.total_time_ms,
-            output_dir,
-            simulation,
-            stochastic: Some(study.stochastic_summary().clone()),
-            hydro_models: Some(study.hydro_models_summary().clone()),
-            provenance: Some(study.provenance().clone()),
-        })
-    } else if should_simulate {
-        let policy = study.load_policy_native(None)?;
-        let simulation = Some(study.simulate_native(&policy, None)?);
-
-        let result = policy.training_result();
-        Ok(RunSummary {
-            converged: false,
-            iterations: 0,
-            lower_bound: result.final_lb,
-            upper_bound: if result.final_ub.is_finite() {
-                Some(result.final_ub)
+            let simulation = if should_simulate {
+                Some(study.simulate_native(&policy, None)?)
             } else {
                 None
-            },
-            gap_percent: None,
-            total_time_ms: 0,
-            output_dir,
-            simulation,
-            stochastic: Some(study.stochastic_summary().clone()),
-            hydro_models: Some(study.hydro_models_summary().clone()),
-            provenance: Some(study.provenance().clone()),
-        })
-    } else {
-        Ok(RunSummary {
+            };
+
+            let result = policy.training_result();
+            Ok(RunSummary {
+                converged: policy.converged,
+                iterations: result.iterations,
+                lower_bound: result.final_lb,
+                upper_bound: Some(result.final_ub),
+                gap_percent: Some(result.final_gap * 100.0),
+                total_time_ms: result.total_time_ms,
+                output_dir,
+                simulation,
+                stochastic: Some(study.stochastic_summary().clone()),
+                hydro_models: Some(study.hydro_models_summary().clone()),
+                provenance: Some(study.provenance().clone()),
+            })
+        }
+        RunPhasePlan::SimulateFromPolicy => {
+            let policy = study.load_policy_native(None)?;
+            let simulation = Some(study.simulate_native(&policy, None)?);
+
+            let result = policy.training_result();
+            Ok(RunSummary {
+                converged: false,
+                iterations: 0,
+                lower_bound: result.final_lb,
+                upper_bound: if result.final_ub.is_finite() {
+                    Some(result.final_ub)
+                } else {
+                    None
+                },
+                gap_percent: None,
+                total_time_ms: 0,
+                output_dir,
+                simulation,
+                stochastic: Some(study.stochastic_summary().clone()),
+                hydro_models: Some(study.hydro_models_summary().clone()),
+                provenance: Some(study.provenance().clone()),
+            })
+        }
+        RunPhasePlan::Nothing => Ok(RunSummary {
             converged: false,
             iterations: 0,
             lower_bound: 0.0,
@@ -1474,7 +1444,7 @@ pub(crate) fn run_via_study(
             stochastic: Some(study.stochastic_summary().clone()),
             hydro_models: Some(study.hydro_models_summary().clone()),
             provenance: Some(study.provenance().clone()),
-        })
+        }),
     }
 }
 
@@ -1767,7 +1737,7 @@ mod tests {
     use std::path::Path;
 
     use cobre_sddp::setup::prepare_stochastic;
-    use cobre_sddp::{SolverStatsDelta, SolverStatsLogEntry};
+    use cobre_sddp::{SolverStatsDelta, SolverStatsLogEntry, aggregate_solver_stats_log};
 
     use cobre_core::TrainingEvent;
     use cobre_core::training_event::{WorkerPhaseTimings, WorkerTimingPhase};
@@ -1775,9 +1745,9 @@ mod tests {
     use pyo3::types::PyDict;
 
     use super::{
-        aggregate_training_solve_stats, apply_training_policy_mode, build_study_setup,
-        iteration_summary_to_dict, read_policy_checkpoint, reconstruct_policy_from_checkpoint,
-        run_in_scoped_pool, run_via_study,
+        apply_training_policy_mode, build_study_setup, iteration_summary_to_dict,
+        read_policy_checkpoint, reconstruct_policy_from_checkpoint, run_in_scoped_pool,
+        run_via_study,
     };
 
     /// `build_study_setup` is Python-free, so its happy path can be exercised
@@ -2025,12 +1995,12 @@ mod tests {
             SolverStatsLogEntry::from_raw(0, "backward", Some(0), 0, 0, 0, backward_delta),
         ];
 
-        // The helper returns the 5 phase-derived counts only. `total_lp_solves`
-        // is NOT produced here — it is sourced at the call site from the
-        // per-iteration convergence records to mirror the CLI (the per-phase
-        // stat-log `lp_solves` sum can diverge for multi-stage cases).
+        // The shared fold returns the 5 phase-derived counts only; `None` folds
+        // every entry (the single-process Python caller). `total_lp_solves` is
+        // sourced at the call site from the per-iteration convergence records
+        // to mirror the CLI (see `aggregate_solver_stats_log`'s doc).
         let (first_try, retried, failed, forward_seconds, backward_seconds) =
-            aggregate_training_solve_stats(&stats_log);
+            aggregate_solver_stats_log(&stats_log, None);
 
         // first_try = 7 + 2; retried = (9-7) + (4-2) = 4; failed = 1 + 0.
         assert_eq!(first_try, 9);

@@ -352,3 +352,120 @@ def test_validate_without_boundary_policy_is_unchanged() -> None:
     assert result["valid"] is True
     assert result["errors"] == []
     assert isinstance(result["warnings"], list)
+
+
+# ── Phase 11: scalar-parameter table gap classes ──────────────────────────────
+#
+# `StudySetup::new_with_boundary_requirements` now receives the caller-loaded
+# `constraints/generic_parameters.json` table (never an empty placeholder), so
+# a boundary-configured study whose table has a genuine gap is rejected here
+# exactly as the CLI's `cobre validate` rejects it.
+
+
+def _build_case_with_boundary_and_scalar_parameter(
+    tmp_path: pathlib.Path, entry: dict[str, object]
+) -> pathlib.Path:
+    """Copy `examples/1dtoy`, point its boundary at a freshly trained
+    self-checkpoint, and add a single scalar-parameter `entry` to
+    `constraints/generic_parameters.json`.
+    """
+    import cobre.run  # noqa: PLC0415
+
+    source_output = tmp_path / "source"
+    cobre.run.run(VALID_CASE_1DTOY, output_dir=str(source_output))
+    source_policy_dir = source_output / "policy"
+
+    target_case = tmp_path / "target"
+    shutil.copytree(VALID_CASE_1DTOY, target_case)
+
+    config_path = target_case / "config.json"
+    config = json.loads(config_path.read_text())
+    policy = config.get("policy", {})
+    policy["boundary"] = {"path": str(source_policy_dir)}
+    config["policy"] = policy
+    config_path.write_text(json.dumps(config))
+
+    constraints_dir = target_case / "constraints"
+    constraints_dir.mkdir(exist_ok=True)
+    (constraints_dir / "generic_parameters.json").write_text(
+        json.dumps({"scalar_parameters": [entry]})
+    )
+    return target_case
+
+
+def test_validate_rejects_missing_season_scalar_parameter_gap(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A `seasonal` scalar parameter with no entry for a stage's resolved
+    season (1dtoy's stages carry no `season_id`, so every stage resolves to
+    season 0) is rejected as `BoundaryReconciliationError`.
+    """
+    import cobre.io  # noqa: PLC0415
+
+    target_case = _build_case_with_boundary_and_scalar_parameter(
+        tmp_path,
+        {"id": 1, "name": "p_season_gap", "kind": "seasonal", "values": [[5, 1.0]]},
+    )
+
+    result = cobre.io.validate(str(target_case))
+    assert result["valid"] is False, f"expected a MissingSeason reject, got: {result!r}"
+    assert any("season" in err["message"] for err in result["errors"]), (
+        f"expected an error naming the missing season, got: {result['errors']!r}"
+    )
+
+
+def test_validate_rejects_per_stage_block_coverage_gap(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A `per_stage_block` scalar parameter covering only stage 0's block
+    leaves every later stage's `(stage, block)` cell uncovered and is
+    rejected. (cobre-io's parser requires at least one entry, so the gap must
+    be a partial rather than an empty `block_values`.)
+    """
+    import cobre.io  # noqa: PLC0415
+
+    target_case = _build_case_with_boundary_and_scalar_parameter(
+        tmp_path,
+        {
+            "id": 2,
+            "name": "p_block_gap",
+            "kind": "per_stage_block",
+            "block_values": [[0, 0, 1.0]],
+        },
+    )
+
+    result = cobre.io.validate(str(target_case))
+    assert result["valid"] is False, (
+        f"expected a PerStageBlockCoverage reject, got: {result!r}"
+    )
+    assert any("not covered" in err["message"] for err in result["errors"]), (
+        f"expected an error naming the uncovered cell, got: {result['errors']!r}"
+    )
+
+
+def test_validate_rejects_missing_specific_productivity(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A `computed`/`specific_productivity` scalar parameter for a hydro with
+    no productivity override and no entity-level value is rejected. 1dtoy's
+    hydro 0 declares neither.
+    """
+    import cobre.io  # noqa: PLC0415
+
+    target_case = _build_case_with_boundary_and_scalar_parameter(
+        tmp_path,
+        {
+            "id": 3,
+            "name": "p_rho_esp_gap",
+            "kind": "computed",
+            "computed_spec": {"tag": "specific_productivity", "hydro_id": 0},
+        },
+    )
+
+    result = cobre.io.validate(str(target_case))
+    assert result["valid"] is False, (
+        f"expected a MissingSpecificProductivity reject, got: {result!r}"
+    )
+    assert any("specific productivity" in err["message"] for err in result["errors"]), (
+        f"expected an error naming the missing productivity, got: {result['errors']!r}"
+    )

@@ -45,6 +45,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A negative FPHA discretization count in `hydro_production_models.json` is now
+  rejected at load with a diagnostic naming the field and hydro.** The count
+  fields — `volume_discretization_points`, `turbine_discretization_points`,
+  `spillage_discretization_points` and `max_planes_per_hydro` — are validated when
+  present: a negative value fails validation instead of being carried into
+  hyperplane fitting, where it was previously accepted. An absent count keeps its
+  default and a non-negative value is unaffected.
+
+- **A study configuring enumerated forward traversal together with dynamic cut
+  selection is now rejected at setup with a clear diagnostic.** The two are
+  incompatible: enumerated traversal seeds the cut pool on its own node-native
+  stride, while dynamic cut selection relies on the sampled-selection
+  eviction-key discipline. The combination is refused as a validation error
+  during study setup rather than silently exercising an untested cut-eviction
+  path. Every other forward-traversal and cut-selection combination is unchanged.
+
 - **BREAKING — `policy.boundary.source_stage` is removed and rejected by
   `config.json`'s deny-unknown-fields contract; the source pool is now
   chosen by calendar date instead of a stage index.** A `policy.boundary`
@@ -183,6 +199,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   catch the base `cobre.errors.CobreError` to handle every error class the
   package raises.
 
+- **BREAKING — `cobre validate --json`'s error object `kind` for a load-phase
+  failure now uses `cobre_io::LoadError`'s own vocabulary (`IoError`,
+  `ParseError`, `SchemaError`, `ConstraintError`, `PolicyIncompatible`)
+  instead of the CLI-only `CaseValidationError`, matching `cobre.io.validate`'s
+  `kind` for the identical failure.** A caller filtering on
+  `"CaseValidationError"` — for example, a duplicate bus id — must filter on
+  `"ConstraintError"` instead; there is no compatibility alias. Independently,
+  a `config.json` parse failure and an invalid `training.scenario_source` now
+  also emit the `--json` error object; both previously left stdout empty on
+  failure.
+
+- **`cobre validate --json` now emits an error object for a boundary
+  reconciliation reject, with `kind == "BoundaryReconciliationError"`.**
+  Previously a boundary reject under `--json` left stdout empty; the boundary
+  phase now shares the same phase-metadata mapping `cobre.io.validate` already
+  used for this kind, so both front ends report an identical `kind` and
+  message shape.
+
 ### Removed
 
 - **BREAKING — the `cobre report` subcommand is removed, and so is
@@ -216,6 +250,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   construct a `Study` and call `train()` without `simulate()`.
 
 ### Fixed
+
+- **`cobre validate` and `cobre.io.validate` now reject a boundary-configured
+  study whose scalar-parameter table has a genuine gap, instead of silently
+  passing.** Both entry points build the study against the loaded
+  `constraints/generic_parameters.json` table; previously they built it
+  against an empty placeholder, so a study missing a seasonal value, a
+  per-stage-block coverage cell, or a hydro's specific productivity would
+  pass validation and only fail once `cobre run` reached the solver. A
+  generic constraint referencing a scalar-parameter id the table never
+  resolved is now also rejected at construction, rather than silently
+  resolving to `0.0`. A previously-accepted empty-table boundary-configured
+  deck with a genuine gap now fails validation.
 
 - **A boundary policy load whose study horizon covers only part of the
   source's declared season cycle no longer rejects on an artifact of the

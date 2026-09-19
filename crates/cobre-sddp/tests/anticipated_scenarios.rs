@@ -2452,8 +2452,8 @@ mod d37_anticipated_commissioning_simulation {
         let hydro_models = prepare_hydro_models(&system, case_dir, false)
             .expect("prepare_hydro_models must succeed");
 
-        let setup =
-            StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup::new");
+        let setup = StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
+            .expect("StudySetup::new");
         (setup, config)
     }
 

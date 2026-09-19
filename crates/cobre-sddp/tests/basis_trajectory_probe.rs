@@ -422,8 +422,14 @@ fn fresh_setup(
         cobre_sddp::hydro_models::prepare_hydro_models(&prepared.system, case_dir, false)
             .expect("prepare_hydro_models must succeed for cobre_rodada");
 
-    StudySetup::new(&prepared.system, &config, prepared.stochastic, hydro_models)
-        .expect("StudySetup::new must build for cobre_rodada")
+    StudySetup::new(
+        &prepared.system,
+        &config,
+        prepared.stochastic,
+        hydro_models,
+        Vec::new(),
+    )
+    .expect("StudySetup::new must build for cobre_rodada")
 }
 
 struct CheckpointRun {

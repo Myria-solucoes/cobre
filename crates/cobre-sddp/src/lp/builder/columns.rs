@@ -6,11 +6,11 @@ use cobre_core::{
 use crate::hydro_models::{EvaporationModel, ResolvedProductionModel};
 use crate::indexer::{
     AnticipatedLocal, BlockIdx, Boundary, EvapLocal, FillingTargetLocal, FloorLocal, FphaCellLocal,
-    FphaLocal, HydroCell, HydroSys, LineSys, anticipated_resolution_for,
-    is_anticipated_decision_active_for_delivery,
+    FphaLocal, HydroCell, HydroSys, LineSys, is_anticipated_decision_active_for_delivery,
 };
 
 use super::EVAPORATION_FLOW_SAFETY_MARGIN;
+use super::delivery_ring::for_each_ring_residue;
 use super::layout::{StageLayout, TemplateBuildCtx};
 use crate::generic_constraints::contract_family_slot;
 
@@ -569,10 +569,9 @@ pub(super) fn fill_thermal_columns(
 /// declaration, since `post_study_stages.json` is the sole post-horizon bound
 /// surface. Both branches read delivery
 /// hours/discount from the EXTENDED `ctx.delivery_total_hours`/
-/// `ctx.delivery_cumulative_discount_factors` vectors and deposit into ring
-/// slot `ring_index(delivery_stage) mod k_max`, the ring's modular delivery-target
-/// mapping [`crate::indexer::StateSpace::commitment_hold_in_study_offset`]
-/// addresses. A missing post-study cell — a deck error the loader rejects
+/// `ctx.delivery_cumulative_discount_factors` vectors and bound the ring slot
+/// [`for_each_ring_residue`] resolves for the decision's own delivery target
+/// (`ring_index(delivery_stage) mod k_max`). A missing post-study cell — a deck error the loader rejects
 /// upstream, never reported here — degrades to the same dormant `[0, 0]`
 /// treatment an inactive plant gets.
 ///
@@ -603,24 +602,26 @@ pub(super) fn fill_anticipated_columns(
     }
 
     let mut active_count = 0_usize;
-    for local_idx in 0..n_ant {
-        let point =
-            anticipated_resolution_for(layout.state, AnticipatedLocal::new(local_idx), n_stages);
+    for_each_ring_residue(layout.state, n_stages, stage_idx, |res, point| {
         let Some(delivery_stage) = point.genuine_decisions_at(stage_idx).next() else {
-            continue;
+            return;
         };
-        let decision_col = decision_start + local_idx;
+        // The walker visits every window residue for every plant; bound only at
+        // the residue this plant's own genuine decision matures into.
+        if delivery_stage != res.target {
+            return;
+        }
+        let decision_col = decision_start + res.plant;
         debug_assert!(
             delivery_stage > stage_idx,
             "a genuine decision's delivery stage must be strictly after the decision \
              stage (K=0 self-delivery must already be excluded)"
         );
-        let slot = delivery_stage % layout.k_max;
-        let state_out_col = ring.out_col(slot, local_idx);
+        let state_out_col = ring.out_col(res.slot, res.plant);
 
         if is_anticipated_decision_active_for_delivery(
             layout.state,
-            AnticipatedLocal::new(local_idx),
+            AnticipatedLocal::new(res.plant),
             delivery_stage,
             n_delivery,
             &ctx.anticipated_windows,
@@ -631,7 +632,7 @@ pub(super) fn fill_anticipated_columns(
             bufs.col_upper[state_out_col] = f64::INFINITY;
 
             let bound = if delivery_stage < n_stages {
-                let thermal_idx = ctx.anticipated_thermal_indices[local_idx];
+                let thermal_idx = ctx.anticipated_thermal_indices[res.plant];
                 // Safe only because cobre-io's load-time validation rejects a
                 // `block_id` bound row on an anticipated thermal, so the base is the
                 // value at every block — a guarantee this type cannot see.
@@ -647,7 +648,7 @@ pub(super) fn fill_anticipated_columns(
                 Some((cap.min_generation_mw, cap.max_generation_mw, cost))
             } else {
                 ctx.post_study_resolved
-                    .anticipated_bound(AnticipatedLocal::new(local_idx), delivery_stage - n_stages)
+                    .anticipated_bound(AnticipatedLocal::new(res.plant), delivery_stage - n_stages)
                     .map(|(cost, min_mw, max_mw)| (min_mw, max_mw, cost))
             };
 
@@ -663,7 +664,7 @@ pub(super) fn fill_anticipated_columns(
                 bufs.col_upper[decision_col] = 0.0;
             }
         }
-    }
+    });
     debug_assert_eq!(
         active_count, layout.anticipated.n_anticipated_state_out_def_rows,
         "active state_out column count must match def-row count at stage {stage_idx}"

@@ -124,8 +124,8 @@ fn main() {
     let hydro_models =
         prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
 
-    let mut setup =
-        StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup must build");
+    let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
+        .expect("StudySetup must build");
 
     let comm = StubComm;
     let mut solver = HighsSolver::new().expect("HighsSolver::new must succeed");

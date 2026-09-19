@@ -43,7 +43,8 @@ fn build_d51_templates() -> (cobre_core::System, StageTemplates) {
 
     let hydro_models = prepare_hydro_models(&system, case_dir, false)
         .expect("prepare_hydro_models must succeed for d51");
-    let params = StudyParams::from_config(&config).expect("StudyParams::from_config must succeed");
+    let params = StudyParams::from_config(&config, Vec::new())
+        .expect("StudyParams::from_config must succeed");
 
     let templates = build_stage_templates_resolving_layout(
         &system,

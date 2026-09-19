@@ -1795,8 +1795,8 @@ fn test_forward_basis_reconstruct_bit_identical_d01() {
     let hydro_models =
         prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
 
-    let mut setup =
-        StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup must build");
+    let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
+        .expect("StudySetup must build");
 
     let comm = LocalStubComm;
     let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");

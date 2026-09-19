@@ -11,12 +11,27 @@ pytest's tmp_path fixture. The 1dtoy case is small enough that tests complete
 in a few seconds.
 """
 
+import json
 import pathlib
+import shutil
 
 import pytest
 
 
 VALID_CASE = "examples/1dtoy"
+
+_REPO_ROOT = pathlib.Path(__file__).parents[3]
+
+# No single deck declares both travel-time arcs and post-study stages, so the
+# two feature classes are exercised by their respective decks; together they
+# make the four families a hardcoded reader list historically omitted
+# (in_transit, transit_seed, anticipated_lanes, hydro_bus_generation) present.
+TRAVEL_TIME_CASE = (
+    _REPO_ROOT / "crates" / "cobre-sddp" / "tests" / "fixtures" / "travel_time_arc"
+)
+POST_STUDY_CASE = (
+    _REPO_ROOT / "examples" / "deterministic" / "d55-post-study-anticipated-lanes"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +200,36 @@ def test_load_convergence_dict_keys(run_output: pathlib.Path) -> None:
         assert isinstance(row, dict), f"row {i} must be a dict"
         missing = required_keys - row.keys()
         assert not missing, f"row {i} is missing keys: {missing}"
+
+
+def test_load_convergence_keys_equal_written_schema_fields(
+    run_output: pathlib.Path,
+) -> None:
+    """Every column the convergence file declares reaches the caller.
+
+    Reads the written field names from the Parquet schema itself (never a
+    frozen list) and asserts the returned dict's keys equal them, in order —
+    so no written column, `mean_rows_in_lp` included, is silently dropped.
+    """
+    import pyarrow.parquet as pq  # noqa: PLC0415
+
+    import cobre.results  # noqa: PLC0415
+
+    convergence_path = run_output / "training" / "convergence.parquet"
+    written_fields = pq.read_schema(convergence_path).names
+
+    assert "mean_rows_in_lp" in written_fields, (
+        "1dtoy after training must write mean_rows_in_lp, else this "
+        "regression does not exercise the dropped-column fix"
+    )
+
+    rows = cobre.results.load_convergence(str(run_output))
+    assert rows, "convergence list must be non-empty after a real run"
+    for i, row in enumerate(rows):
+        assert list(row.keys()) == written_fields, (
+            f"row {i} keys must equal the written schema fields "
+            f"(got {list(row.keys())}, want {written_fields})"
+        )
 
 
 def test_load_convergence_value_types(run_output: pathlib.Path) -> None:
@@ -365,3 +410,102 @@ def test_load_stochastic_reexport_identity() -> None:
 
     assert hasattr(cobre.results, "load_stochastic")
     assert cobre.results.load_stochastic is cobre._native.results.load_stochastic
+
+
+# ---------------------------------------------------------------------------
+# load_simulation family-coverage regression
+# ---------------------------------------------------------------------------
+
+
+def _run_with_simulation(src: pathlib.Path, work: pathlib.Path) -> pathlib.Path:
+    """Run ``src`` with the simulation pass enabled and return the output dir.
+
+    Deterministic decks that ship ``simulation.enabled = false`` are copied and
+    flipped on so the simulation write path is exercised (mirrors the parity
+    suite's ``_make_case_with_simulation``).
+    """
+    import cobre.run  # noqa: PLC0415
+
+    case_dir = work / "case"
+    case_dir.mkdir()
+    for item in src.iterdir():
+        dst = case_dir / item.name
+        if item.is_dir():
+            shutil.copytree(item, dst)
+        else:
+            shutil.copy2(item, dst)
+    config = json.loads((case_dir / "config.json").read_text())
+    config.setdefault("simulation", {})["enabled"] = True
+    (case_dir / "config.json").write_text(json.dumps(config))
+
+    output_dir = work / "output"
+    cobre.run.run(str(case_dir), output_dir=str(output_dir))
+    return output_dir
+
+
+def _family_dirs_with_partitions(simulation_dir: pathlib.Path) -> set[str]:
+    """Family subpaths under ``simulation/`` that hold a scenario partition.
+
+    Discovered from the on-disk ``scenario_id=NNNN`` Hive layout, independent of
+    the reader's own family list — so a reader that skips a present family fails.
+    """
+    families: set[str] = set()
+    for scenario_dir in simulation_dir.rglob("scenario_id=*"):
+        if scenario_dir.is_dir():
+            rel = scenario_dir.parent.relative_to(simulation_dir)
+            families.add(rel.as_posix())
+    return families
+
+
+@pytest.fixture(scope="module")
+def travel_time_output(tmp_path_factory: pytest.TempPathFactory) -> pathlib.Path:
+    """Run the travel-time deck once; its output has in_transit/transit_seed."""
+    assert TRAVEL_TIME_CASE.is_dir(), (
+        f"the travel-time fixture must exist at {TRAVEL_TIME_CASE}"
+    )
+    return _run_with_simulation(
+        TRAVEL_TIME_CASE, tmp_path_factory.mktemp("travel_time")
+    )
+
+
+@pytest.fixture(scope="module")
+def post_study_output(tmp_path_factory: pytest.TempPathFactory) -> pathlib.Path:
+    """Run the post-study deck once; its output has anticipated_lanes."""
+    assert POST_STUDY_CASE.is_dir(), (
+        f"the post-study case must exist at {POST_STUDY_CASE}"
+    )
+    return _run_with_simulation(POST_STUDY_CASE, tmp_path_factory.mktemp("post_study"))
+
+
+def test_load_simulation_keys_cover_every_present_family(
+    travel_time_output: pathlib.Path,
+    post_study_output: pathlib.Path,
+) -> None:
+    """The no-argument load returns a key for every present family directory.
+
+    Exercises the two feature classes whose families the reader historically
+    omitted: the travel-time deck must surface ``in_transit`` and the post-study
+    deck ``anticipated_lanes``, and on each deck no present family directory may
+    be missing from the returned mapping.
+    """
+    import cobre.results  # noqa: PLC0415
+
+    for output_dir, must_include in (
+        (travel_time_output, "in_transit"),
+        (post_study_output, "anticipated_lanes"),
+    ):
+        simulation_dir = output_dir / "simulation"
+        present = _family_dirs_with_partitions(simulation_dir)
+        assert must_include in present, (
+            f"the deck at {output_dir} must exercise '{must_include}'; "
+            f"present families: {sorted(present)}"
+        )
+
+        data = cobre.results.load_simulation(str(output_dir))
+        assert isinstance(data, dict), "no-argument load must return a dict"
+
+        missing = present - set(data.keys())
+        assert not missing, (
+            f"load_simulation omitted present family directories {sorted(missing)} "
+            f"under {simulation_dir}"
+        )

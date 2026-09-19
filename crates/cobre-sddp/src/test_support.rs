@@ -1460,7 +1460,7 @@ fn k_fan_stage(index: usize, id: i32, state_config: StageStateConfig) -> Stage {
 /// A single-hydro, single-bus [`System`] over the 3-stage K-fan calendar: hydro
 /// storage/inflow/turbine dynamics against a bus deficit fallback, so every
 /// visited node solves a genuine (non-degenerate) LP with real dual activity.
-fn k_fan_system(k: usize, reversed: bool) -> System {
+pub(crate) fn k_fan_system(k: usize, reversed: bool) -> System {
     fan_or_chain_system(3, k_fan_policy_graph(k, reversed))
 }
 
@@ -1756,7 +1756,7 @@ fn fan_or_chain_system_ext(
 /// The `sampled`-mode training [`Config`] for [`k_fan_setup`]: `forward_passes`
 /// trajectories per iteration, `max_iterations` fixed via an iteration-limit
 /// stopping rule, no `enumerated` selection anywhere.
-fn k_fan_config(forward_passes: u32, max_iterations: u32) -> Config {
+pub(crate) fn k_fan_config(forward_passes: u32, max_iterations: u32) -> Config {
     Config {
         schema: None,
         modeling: ModelingConfig {
@@ -1915,7 +1915,7 @@ pub fn single_path_enumerated_setup(max_iterations: u32) -> StudySetup {
     )
     .expect("single_path_enumerated_setup: build_stochastic_context must succeed");
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
-    StudySetup::new(&system, &config, stochastic, hydro_models)
+    StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
         .expect("single_path_enumerated_setup: StudySetup::new must succeed")
 }
 
@@ -1952,7 +1952,7 @@ fn k_fan_fixture(k: usize, reversed: bool, config: Config) -> KFanFixture {
     .expect("k_fan_fixture: build_stochastic_context must succeed");
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
 
-    let setup = StudySetup::new(&system, &config, stochastic, hydro_models)
+    let setup = StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
         .expect("k_fan_fixture: StudySetup::new must succeed");
     let enumerated = enumerated_scenario_count(&setup.node_graph)
         .expect("k_fan_fixture: enumerated_scenario_count must not overflow at this scale");
@@ -2052,7 +2052,7 @@ pub fn try_k_fan_simulation_enumerated(k: usize) -> Result<StudySetup, SddpError
     )
     .expect("try_k_fan_simulation_enumerated: build_stochastic_context must succeed");
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
-    StudySetup::new(&system, &config, stochastic, hydro_models)
+    StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
 }
 
 // ── Branching value oracle: per-node patched-template capture ─────────────────
@@ -2270,7 +2270,7 @@ pub fn oracle_chain_setup(max_iterations: u32) -> StudySetup {
     )
     .expect("oracle_chain_setup: build_stochastic_context must succeed");
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
-    StudySetup::new(&system, &config, stochastic, hydro_models)
+    StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
         .expect("oracle_chain_setup: StudySetup::new must succeed")
 }
 
@@ -2348,7 +2348,7 @@ pub fn terminal_generated_fan_setup(k: usize, max_iterations: u32) -> StudySetup
     )
     .expect("terminal_generated_fan_setup: build_stochastic_context must succeed");
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
-    StudySetup::new(&system, &config, stochastic, hydro_models)
+    StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
         .expect("terminal_generated_fan_setup: StudySetup::new must succeed")
 }
 
@@ -2577,6 +2577,7 @@ fn build_external_distinct_fan_setup(
             BoundaryStateRequirements::none,
             BoundaryStateRequirements::present,
         ),
+        Vec::new(),
     )
     .expect("build_external_distinct_fan_setup: StudySetup::new must succeed")
 }
@@ -2713,7 +2714,7 @@ pub fn external_root_fan_setup(k: usize, max_iterations: u32) -> StudySetup {
     )
     .expect("external_root_fan_setup: build_stochastic_context must succeed");
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
-    StudySetup::new(&system, &config, stochastic, hydro_models)
+    StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
         .expect("external_root_fan_setup: StudySetup::new must succeed")
 }
 
@@ -2891,7 +2892,7 @@ fn build_water_binding_external_fan(k: usize, max_iterations: u32, reversed: boo
         1,
         2,
     );
-    StudySetup::new(&system, &config, stochastic, hydro_models)
+    StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
         .expect("water_binding_external_fan_setup: StudySetup::new must succeed")
 }
 
@@ -3096,6 +3097,7 @@ fn build_non_uniform_branching_setup(
         stochastic,
         hydro_models,
         BoundaryStateRequirements::present(1),
+        Vec::new(),
     )
     .expect("non_uniform_branching_setup: StudySetup::new must succeed")
 }
@@ -3132,7 +3134,7 @@ pub fn branching_tree_setup_enumerated(max_iterations: u32) -> StudySetup {
     )
     .expect("branching_tree_setup_enumerated: build_stochastic_context must succeed");
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
-    StudySetup::new(&system, &config, stochastic, hydro_models)
+    StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
         .expect("branching_tree_setup_enumerated: StudySetup::new must succeed")
 }
 
@@ -3536,6 +3538,7 @@ pub fn dual_folding_setup(fold: LagFold, forward_passes: u32, max_iterations: u3
         stochastic,
         hydro_models,
         BoundaryStateRequirements::present(1),
+        Vec::new(),
     )
     .expect("dual_folding_setup: StudySetup::new must succeed")
 }
@@ -3701,7 +3704,7 @@ fn trunk_fan_fixture(t_trunk: usize, k: usize, config: Config) -> TrunkFanFixtur
         1,
         n_stages,
     );
-    let setup = StudySetup::new(&system, &config, stochastic, hydro_models)
+    let setup = StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
         .expect("trunk_fan_fixture: StudySetup::new must succeed");
 
     let n_nonleaf_nodes = (0..setup.node_graph.nodes.len())

@@ -48,13 +48,7 @@ use crate::run::reconcile_boundary_policy;
 // ── Error conversion ──────────────────────────────────────────────────────────
 
 fn load_error_kind(err: &LoadError) -> &'static str {
-    match err {
-        LoadError::IoError { .. } => "IoError",
-        LoadError::ParseError { .. } => "ParseError",
-        LoadError::SchemaError { .. } => "SchemaError",
-        LoadError::ConstraintError { .. } => "ConstraintError",
-        LoadError::PolicyIncompatible { .. } => "PolicyIncompatible",
-    }
+    err.kind()
 }
 
 /// Load and validate the effective config for [`validate`]'s phase 7.
@@ -251,7 +245,7 @@ pub fn validate(
         }
     };
 
-    let study_params = match StudyParams::from_config(&config) {
+    let study_params = match StudyParams::from_config(&config, Vec::new()) {
         Ok(p) => p,
         Err(ref err) => {
             let (kind, file_label) = prep_phase_metadata(PrepPhase::Config, err);
@@ -264,10 +258,8 @@ pub fn validate(
     let boundary_requirements = match resolve_boundary_state_requirements(&path, &config) {
         Ok(r) => r,
         Err(ref err) => {
-            return_error!(
-                "BoundaryReconciliationError",
-                format!("policy.boundary: {err}")
-            );
+            let (kind, file_label) = prep_phase_metadata(PrepPhase::Boundary, err);
+            return_error!(kind, format!("{file_label}: {err}"));
         }
     };
 
@@ -309,21 +301,18 @@ pub fn validate(
             prepared.stochastic,
             hydro_models,
             boundary_requirements,
+            artifacts.scalar_parameters,
         ) {
             Ok(s) => s,
             Err(ref err) => {
-                return_error!(
-                    "BoundaryReconciliationError",
-                    format!("policy.boundary: {err}")
-                );
+                let (kind, file_label) = prep_phase_metadata(PrepPhase::Boundary, err);
+                return_error!(kind, format!("{file_label}: {err}"));
             }
         };
 
         if let Err(ref err) = reconcile_boundary_policy(&setup, &prepared.system, bp, &path) {
-            return_error!(
-                "BoundaryReconciliationError",
-                format!("policy.boundary: {err}")
-            );
+            let (kind, file_label) = prep_phase_metadata(PrepPhase::Boundary, err);
+            return_error!(kind, format!("{file_label}: {err}"));
         }
     }
 

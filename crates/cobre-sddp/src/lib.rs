@@ -178,9 +178,9 @@ pub use solve::solver_phase::{BACKWARD_PROFILE, FORWARD_PROFILE, SIMULATION_PROF
 pub use solve::solver_phase::{Phase, SolverProfiles};
 // ── solver_stats ──────────────────────────────────────────────────────────────
 pub use solver_stats::{
-    SOLVER_STATS_DELTA_SCALAR_FIELDS, SolverStatsDelta, SolverStatsLogEntry, delta_to_stats_row,
-    pack_delta_scalars, pack_scenario_stats, solver_stats_log_to_rows, unpack_delta_scalars,
-    unpack_scenario_stats,
+    SOLVER_STATS_DELTA_SCALAR_FIELDS, SolverStatsDelta, SolverStatsLogEntry,
+    aggregate_solver_stats_log, delta_to_stats_row, pack_delta_scalars, pack_scenario_stats,
+    solver_stats_log_to_rows, unpack_delta_scalars, unpack_scenario_stats,
 };
 // ── stochastic_summary ────────────────────────────────────────────────────────
 pub use stochastic::stochastic_summary::{

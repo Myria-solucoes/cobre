@@ -311,6 +311,53 @@ pub fn delta_to_stats_row(
     }
 }
 
+/// Fold a solver-stats log into the five phase-derived training-summary
+/// counts: `(first_try, retried, failed, forward_solve_seconds,
+/// backward_solve_seconds)`. `rank_filter = Some(rank)` keeps only entries
+/// from that rank — the CLI's filter for backward entries, which are
+/// allgatherv-replicated across ranks before an `allreduce(Sum)`; `None`
+/// folds every entry (the single-process Python caller).
+///
+/// `total_lp_solves` is deliberately NOT derived here — it stays sourced from
+/// the per-iteration convergence records (`IterationRecord.lp_solves`), which
+/// can diverge from this log's own per-entry `lp_solves` on a multi-stage
+/// case. Pinned by `aggregate_solver_stats_log_ignores_lp_solves`.
+#[must_use]
+pub fn aggregate_solver_stats_log(
+    entries: &[SolverStatsLogEntry],
+    rank_filter: Option<u32>,
+) -> (u64, u64, u64, f64, f64) {
+    let rank_filter = rank_filter.map(|r| i32::try_from(r).unwrap_or(i32::MAX));
+    let mut first_try = 0u64;
+    let mut retried = 0u64;
+    let mut failed = 0u64;
+    let mut forward_solve_ms = 0.0_f64;
+    let mut backward_solve_ms = 0.0_f64;
+    for entry in entries {
+        if rank_filter.is_some_and(|rank| entry.rank != rank) {
+            continue;
+        }
+        let delta = &entry.delta;
+        // lower_bound solve counts are included, but its solve_time_ms is
+        // deliberately dropped by the `_ => {}` arm: no output field receives it.
+        first_try += delta.first_try_successes;
+        retried += delta.lp_successes.saturating_sub(delta.first_try_successes);
+        failed += delta.lp_failures;
+        match entry.phase {
+            "forward" => forward_solve_ms += delta.solve_time_ms,
+            "backward" => backward_solve_ms += delta.solve_time_ms,
+            _ => {}
+        }
+    }
+    (
+        first_try,
+        retried,
+        failed,
+        forward_solve_ms / 1000.0,
+        backward_solve_ms / 1000.0,
+    )
+}
+
 /// Map a per-iteration solver-stats log into Parquet rows.
 #[must_use]
 pub fn solver_stats_log_to_rows(log: &[SolverStatsLogEntry]) -> Vec<SolverStatsRow> {
@@ -1065,6 +1112,95 @@ mod tests {
         assert_eq!(rows[1].rank, Some(1));
         assert_eq!(rows[1].phase, "forward");
         assert_eq!(rows[1].lp_solves, 5);
+    }
+
+    #[test]
+    fn aggregate_solver_stats_log_folds_five_phase_counts() {
+        let forward_delta = SolverStatsDelta {
+            lp_solves: 10,
+            first_try_successes: 7,
+            lp_successes: 9,
+            lp_failures: 1,
+            solve_time_ms: 2500.0,
+            ..SolverStatsDelta::default()
+        };
+        let backward_delta = SolverStatsDelta {
+            lp_solves: 4,
+            first_try_successes: 2,
+            lp_successes: 4,
+            lp_failures: 0,
+            solve_time_ms: 1500.0,
+            ..SolverStatsDelta::default()
+        };
+        let log = vec![
+            SolverStatsLogEntry::from_raw(0, "forward", Some(0), -1, 0, -1, forward_delta),
+            SolverStatsLogEntry::from_raw(0, "backward", Some(0), 0, 0, 0, backward_delta),
+        ];
+
+        let (first_try, retried, failed, forward_seconds, backward_seconds) =
+            aggregate_solver_stats_log(&log, None);
+
+        assert_eq!(first_try, 9); // 7 + 2
+        assert_eq!(retried, 4); // (9-7) + (4-2)
+        assert_eq!(failed, 1);
+        assert_eq!(forward_seconds, 2.5);
+        assert_eq!(backward_seconds, 1.5);
+    }
+
+    #[test]
+    fn aggregate_solver_stats_log_all_ranks_identity_on_one_rank_log() {
+        // On a one-rank log, folding all ranks (None) must equal folding
+        // filtered to that one rank (Some(rank)).
+        let log = vec![
+            SolverStatsLogEntry::from_raw(0, "forward", Some(0), -1, 0, -1, make_delta(6)),
+            SolverStatsLogEntry::from_raw(0, "backward", Some(0), 0, 0, 0, make_delta(3)),
+        ];
+
+        assert_eq!(
+            aggregate_solver_stats_log(&log, None),
+            aggregate_solver_stats_log(&log, Some(0))
+        );
+    }
+
+    #[test]
+    fn aggregate_solver_stats_log_ignores_lp_solves() {
+        // total_lp_solves is sourced from the convergence records, never from
+        // this fold: varying delta.lp_solves alone must not change the result.
+        let low = SolverStatsLogEntry::from_raw(
+            0,
+            "forward",
+            Some(0),
+            -1,
+            0,
+            -1,
+            SolverStatsDelta {
+                lp_solves: 1,
+                first_try_successes: 5,
+                lp_successes: 5,
+                solve_time_ms: 100.0,
+                ..SolverStatsDelta::default()
+            },
+        );
+        let high = SolverStatsLogEntry::from_raw(
+            0,
+            "forward",
+            Some(0),
+            -1,
+            0,
+            -1,
+            SolverStatsDelta {
+                lp_solves: 999,
+                first_try_successes: 5,
+                lp_successes: 5,
+                solve_time_ms: 100.0,
+                ..SolverStatsDelta::default()
+            },
+        );
+
+        assert_eq!(
+            aggregate_solver_stats_log(&[low], None),
+            aggregate_solver_stats_log(&[high], None)
+        );
     }
 
     /// per-stage forward `stage_stats` summed element-wise across workers.

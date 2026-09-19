@@ -714,6 +714,31 @@ on a tree whose worst branch compounds), the `admission_gate_*` gate tests
 (`setup/tests.rs`), and the end-to-end `enumerated_cvar_gap` module
 (`tests/deterministic.rs`).
 
+## Enumerated traversal excludes dynamic cut selection
+
+`admission_gate` (`setup/mod.rs`) rejects `Traversal::Enumerated` paired with
+`CutSelectionStrategy::Dynamic` as a hard `SddpError::Validation`, through
+`reject_dynamic_cut_selection_under_enumerated`. The enumerated engine seeds each
+cut pool at its node-native stride (`enumerated_pool_cut_stride`), whereas dynamic
+cut selection's lazy core drives `build_initial_resident_set` (`cut/dcs.rs`) and
+`CutPool::enforce_budget`'s eviction-key reader (`cut/pool.rs`) under the
+sampled-selection eviction-key discipline; the pairing would drive that reader
+down an untested eviction path. Admitting the pairing is the wrong-but-compiling
+alternative — it compiles and runs, exercising an unvalidated eviction path.
+No shipped deck pairs them, so the reject is byte-neutral. Any non-`Dynamic`
+strategy (or none) under enumerated forwards, and `Dynamic` under sampled
+forwards, are admitted — the reject discriminates on the `Dynamic` variant, not on
+any strategy being present, and does not change `enforce_budget` or
+`build_initial_resident_set`, which the gate protects.
+
+Read: `setup/mod.rs` (`admission_gate`,
+`reject_dynamic_cut_selection_under_enumerated`), `cut/dcs.rs`
+(`build_initial_resident_set`), `cut/pool.rs` (`CutPool::enforce_budget`),
+`setup/node_graph.rs` (`enumerated_pool_cut_stride`). Pinned by
+`admission_gate_rejects_dynamic_cut_selection_under_enumerated` (`setup/mod.rs` —
+the positive enumerated + `Dynamic` reject, plus the enumerated-only and
+dynamic-only negatives that do not reject).
+
 ## Terminal boundary FCF is booked in the reported total cost
 
 The forward trajectory cost and the simulation per-scenario cost both reconstruct

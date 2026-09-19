@@ -171,19 +171,24 @@ pub struct StudyParams {
     /// (`config.exports.states`). Overridable post-construction via
     /// [`StudySetup::set_export_states`](super::StudySetup::set_export_states).
     pub export_states: bool,
-    /// Loaded `constraints/generic_parameters.json` entries; empty out of
-    /// [`Self::from_config`] (they are loaded from disk artifacts, not `Config`)
-    /// and patched by each setup caller before `from_broadcast_params`.
+    /// Loaded `constraints/generic_parameters.json` entries, supplied by the
+    /// caller — [`Self::from_config`] takes them as an argument rather than
+    /// defaulting them, so a boundary-configured study can never build against
+    /// an empty table by omission.
     pub scalar_parameters: Vec<ScalarParameter>,
 }
 
 impl StudyParams {
-    /// Extract study parameters from a validated [`Config`].
+    /// Extract study parameters from a validated [`Config`] plus the
+    /// caller-loaded scalar-parameter table.
     ///
     /// # Errors
     ///
     /// - [`SddpError::Validation`] if cut selection config is invalid.
-    pub fn from_config(config: &Config) -> Result<Self, SddpError> {
+    pub fn from_config(
+        config: &Config,
+        scalar_parameters: Vec<ScalarParameter>,
+    ) -> Result<Self, SddpError> {
         let seed = config
             .training
             .tree_seed
@@ -337,8 +342,7 @@ impl StudyParams {
             // feeds them, so from_config leaves the placeholder for the caller to patch.
             boundary: BoundaryStateRequirements::none(),
             export_states: config.exports.states,
-            // Loaded from disk artifacts, not Config; each setup caller patches it.
-            scalar_parameters: Vec::new(),
+            scalar_parameters,
         })
     }
 }
@@ -349,6 +353,7 @@ mod tests {
 
     use std::sync::{Arc, Mutex};
 
+    use cobre_core::{EntityId, ParameterKind, ScalarParameter};
     use cobre_io::config::{
         Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
         InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, ParallelismConfig,
@@ -528,7 +533,7 @@ mod tests {
     /// [`DEFAULT_COST_SCALE_FACTOR`] — the byte-neutral-at-default contract.
     #[test]
     fn cost_scale_factor_absent_resolves_to_default() {
-        let params = StudyParams::from_config(&config_with_cost_scale_factor(None))
+        let params = StudyParams::from_config(&config_with_cost_scale_factor(None), Vec::new())
             .expect("absent cost_scale_factor is valid");
         assert_eq!(params.cost_scale_factor, super::DEFAULT_COST_SCALE_FACTOR);
         assert_eq!(params.cost_scale_factor, 1_000_000.0);
@@ -537,8 +542,9 @@ mod tests {
     /// A valid custom `modeling.cost_scale_factor` resolves verbatim.
     #[test]
     fn cost_scale_factor_custom_value_resolves_verbatim() {
-        let params = StudyParams::from_config(&config_with_cost_scale_factor(Some(500.0)))
-            .expect("500.0 is within [1.0, 1e12] and > 0");
+        let params =
+            StudyParams::from_config(&config_with_cost_scale_factor(Some(500.0)), Vec::new())
+                .expect("500.0 is within [1.0, 1e12] and > 0");
         assert_eq!(params.cost_scale_factor, 500.0);
     }
 
@@ -549,8 +555,9 @@ mod tests {
         use crate::SddpError;
 
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            let err = StudyParams::from_config(&config_with_cost_scale_factor(Some(bad)))
-                .expect_err("non-finite cost_scale_factor must be rejected");
+            let err =
+                StudyParams::from_config(&config_with_cost_scale_factor(Some(bad)), Vec::new())
+                    .expect_err("non-finite cost_scale_factor must be rejected");
             assert!(
                 matches!(err, SddpError::Validation(_)),
                 "expected SddpError::Validation for {bad}, got: {err:?}"
@@ -569,8 +576,9 @@ mod tests {
         use crate::SddpError;
 
         for bad in [0.0, -1.0, -1e6] {
-            let err = StudyParams::from_config(&config_with_cost_scale_factor(Some(bad)))
-                .expect_err("non-positive cost_scale_factor must be rejected");
+            let err =
+                StudyParams::from_config(&config_with_cost_scale_factor(Some(bad)), Vec::new())
+                    .expect_err("non-positive cost_scale_factor must be rejected");
             assert!(
                 matches!(err, SddpError::Validation(_)),
                 "expected SddpError::Validation for {bad}, got: {err:?}"
@@ -590,7 +598,7 @@ mod tests {
         for outside in [0.5, 1e13] {
             let (subscriber, messages) = WarnRecorder::new();
             let params = tracing::subscriber::with_default(subscriber, || {
-                StudyParams::from_config(&config_with_cost_scale_factor(Some(outside)))
+                StudyParams::from_config(&config_with_cost_scale_factor(Some(outside)), Vec::new())
                     .expect("outside-advisory-range value must still construct successfully")
             });
             assert_eq!(params.cost_scale_factor, outside);
@@ -614,7 +622,7 @@ mod tests {
         for boundary in [1.0, 1e12] {
             let (subscriber, messages) = WarnRecorder::new();
             let _params = tracing::subscriber::with_default(subscriber, || {
-                StudyParams::from_config(&config_with_cost_scale_factor(Some(boundary)))
+                StudyParams::from_config(&config_with_cost_scale_factor(Some(boundary)), Vec::new())
                     .expect("boundary value must construct successfully")
             });
             let recorded = messages.lock().unwrap();
@@ -630,16 +638,22 @@ mod tests {
         }
     }
 
-    /// `from_config` leaves `boundary` at the `none()` placeholder and
-    /// `scalar_parameters` empty; the resolver
-    /// (`resolve_boundary_state_requirements`) owns both boundary facts and the
-    /// caller patches the resolved value + the disk-loaded scalar parameters in.
+    /// `from_config` leaves `boundary` at the `none()` placeholder (the
+    /// resolver, `resolve_boundary_state_requirements`, owns both boundary
+    /// facts and the caller patches the resolved value in) and echoes the
+    /// caller-supplied `scalar_parameters` table verbatim.
     #[test]
     fn from_config_leaves_boundary_requirements_none() {
-        let params = StudyParams::from_config(&base_test_config()).expect("base config is valid");
+        let table = vec![ScalarParameter {
+            id: EntityId(1),
+            name: "p".to_string(),
+            kind: ParameterKind::Constant { value: 1.0 },
+        }];
+        let params = StudyParams::from_config(&base_test_config(), table.clone())
+            .expect("base config is valid");
         assert!(!params.boundary.is_present());
         assert_eq!(params.boundary.inflow_lag_depth(), None);
-        assert!(params.scalar_parameters.is_empty());
+        assert_eq!(params.scalar_parameters, table);
     }
 
     /// `BoundaryStateRequirements` derives both facts together: `present(depth)`
@@ -666,8 +680,9 @@ mod tests {
     fn from_config_rejects_gap_stopping_rule_with_neither_field() {
         use crate::SddpError;
 
-        let err = StudyParams::from_config(&config_with_gap_stopping_rule_neither_field())
-            .expect_err("Gap stopping rule with neither field must be rejected");
+        let err =
+            StudyParams::from_config(&config_with_gap_stopping_rule_neither_field(), Vec::new())
+                .expect_err("Gap stopping rule with neither field must be rejected");
         assert!(
             matches!(err, SddpError::Validation(_)),
             "expected SddpError::Validation, got: {err:?}"
@@ -689,7 +704,7 @@ mod tests {
     fn from_config_maps_absolute_gap_rule() {
         use crate::stopping_rule::StoppingRule;
 
-        let params = StudyParams::from_config(&config_with_gap_stopping_rule())
+        let params = StudyParams::from_config(&config_with_gap_stopping_rule(), Vec::new())
             .expect("a well-formed Gap rule maps successfully");
         let rules = &params.stopping_rule_set.rules;
         assert!(
@@ -719,7 +734,7 @@ mod tests {
 
         let (subscriber, messages) = WarnRecorder::new();
         let params = tracing::subscriber::with_default(subscriber, || {
-            StudyParams::from_config(&config_with_gap_relative_only())
+            StudyParams::from_config(&config_with_gap_relative_only(), Vec::new())
                 .expect("a relative-only Gap rule maps successfully")
         });
         let rules = &params.stopping_rule_set.rules;
@@ -742,8 +757,11 @@ mod tests {
     fn from_config_gap_with_user_bound_stalling_passes_through() {
         use crate::stopping_rule::StoppingRule;
 
-        let params = StudyParams::from_config(&config_with_gap_relative_and_user_bound_stalling())
-            .expect("Gap + explicit BoundStalling maps successfully");
+        let params = StudyParams::from_config(
+            &config_with_gap_relative_and_user_bound_stalling(),
+            Vec::new(),
+        )
+        .expect("Gap + explicit BoundStalling maps successfully");
         let rules = &params.stopping_rule_set.rules;
         let bound_stallings: Vec<&StoppingRule> = rules
             .iter()
@@ -771,7 +789,7 @@ mod tests {
     fn from_config_resolves_forward_passes_from_selection() {
         let mut via_selection = base_test_config();
         via_selection.training.selection = Some(TrainingSelection::Sampled { forward_passes: 8 });
-        let params_selection = StudyParams::from_config(&via_selection)
+        let params_selection = StudyParams::from_config(&via_selection, Vec::new())
             .expect("sampled selection is a valid forward-pass source");
         assert_eq!(params_selection.forward_passes, 8);
     }
@@ -783,8 +801,8 @@ mod tests {
         let mut config = base_test_config();
         config.simulation.enabled = true;
         config.simulation.selection = Some(SimulationSelection::Sampled { num_scenarios: 500 });
-        let params =
-            StudyParams::from_config(&config).expect("sampled simulation selection is valid");
+        let params = StudyParams::from_config(&config, Vec::new())
+            .expect("sampled simulation selection is valid");
         assert_eq!(params.n_scenarios, 500);
         assert_eq!(
             params.simulation_enumerated,
@@ -800,8 +818,8 @@ mod tests {
     fn from_config_accepts_training_enumerated_selection() {
         let mut config = base_test_config();
         config.training.selection = Some(TrainingSelection::Enumerated {});
-        let params =
-            StudyParams::from_config(&config).expect("enumerated training selection is valid");
+        let params = StudyParams::from_config(&config, Vec::new())
+            .expect("enumerated training selection is valid");
         assert_eq!(params.forward_passes, super::DEFAULT_FORWARD_PASSES);
         assert!(params.training_enumerated);
     }
@@ -815,8 +833,8 @@ mod tests {
         let mut config = base_test_config();
         config.simulation.enabled = true;
         config.simulation.selection = Some(SimulationSelection::Enumerated {});
-        let params =
-            StudyParams::from_config(&config).expect("enumerated simulation selection is valid");
+        let params = StudyParams::from_config(&config, Vec::new())
+            .expect("enumerated simulation selection is valid");
         assert_eq!(params.n_scenarios, 0);
         assert_eq!(
             params.simulation_enumerated,
@@ -830,8 +848,9 @@ mod tests {
     fn study_params_warns_when_budget_below_forward_passes() {
         let (subscriber, messages) = WarnRecorder::new();
         tracing::subscriber::with_default(subscriber, || {
-            let _params = StudyParams::from_config(&config_with_budget_below_forward_passes())
-                .expect("config is valid; warning must not prevent construction");
+            let _params =
+                StudyParams::from_config(&config_with_budget_below_forward_passes(), Vec::new())
+                    .expect("config is valid; warning must not prevent construction");
         });
         let recorded = messages.lock().unwrap();
         let relevant: Vec<&str> = recorded

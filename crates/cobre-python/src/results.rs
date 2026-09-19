@@ -218,6 +218,11 @@ pub fn load_results(py: Python<'_>, output_dir: PathBuf) -> PyResult<Py<PyAny>> 
 /// | `time_total_ms`    | `int`           | Total iteration wall time (ms).                     |
 /// | `forward_passes`   | `int`           | Number of forward-pass scenarios.                   |
 /// | `lp_solves`        | `int`           | Total LP solves in this iteration.                  |
+/// | `mean_rows_in_lp`  | `float`         | Mean resident rows per lazy-selection LP solve (0 if none ran). |
+///
+/// The reader iterates the file's own schema, so the keys are exactly the
+/// columns the convergence Parquet schema declares; the rows above name the
+/// stable ones a caller indexes by hand.
 ///
 /// Returns an empty list if `training/convergence.parquet` has zero rows.
 ///
@@ -236,10 +241,8 @@ pub fn load_results(py: Python<'_>, output_dir: PathBuf) -> PyResult<Py<PyAny>> 
 /// for row in rows:
 ///     print(row["iteration"], row["lower_bound"], row["upper_bound"])
 /// ```
-// too_many_lines: a flat one-pass per-column projection into a Python dict;
-// splitting it would only thread the batch/index/dict through extra call frames.
 #[pyfunction]
-#[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value)]
 pub fn load_convergence(py: Python<'_>, output_dir: PathBuf) -> PyResult<Py<PyAny>> {
     let output_dir = canonicalize_dir(&output_dir)?;
 
@@ -260,51 +263,25 @@ pub fn load_convergence(py: Python<'_>, output_dir: PathBuf) -> PyResult<Py<PyAn
         let batch = batch_result
             .map_err(|e| PyOSError::new_err(format!("error reading Parquet batch: {e}")))?;
 
+        let schema = batch.schema();
         let n_rows = batch.num_rows();
-
-        let col_iteration = get_column_by_name::<Int32Array>(&batch, "iteration")?;
-        let col_lower_bound = get_column_by_name::<Float64Array>(&batch, "lower_bound")?;
-        let col_upper_bound = get_column_by_name::<Float64Array>(&batch, "upper_bound")?;
-        let col_upper_bound_std = get_column_by_name::<Float64Array>(&batch, "upper_bound_std")?;
-        let col_upper_bound_kind = get_column_by_name::<StringArray>(&batch, "upper_bound_kind")?;
-        let col_gap_percent = get_column_by_name::<Float64Array>(&batch, "gap_percent")?;
-        let col_cuts_added = get_column_by_name::<Int32Array>(&batch, "cuts_added")?;
-        let col_cuts_removed = get_column_by_name::<Int32Array>(&batch, "cuts_removed")?;
-        let col_cuts_active = get_column_by_name::<Int64Array>(&batch, "cuts_active")?;
-        let col_time_forward_ms = get_column_by_name::<Int64Array>(&batch, "time_forward_ms")?;
-        let col_time_backward_ms = get_column_by_name::<Int64Array>(&batch, "time_backward_ms")?;
-        let col_time_total_ms = get_column_by_name::<Int64Array>(&batch, "time_total_ms")?;
-        let col_forward_passes = get_column_by_name::<Int32Array>(&batch, "forward_passes")?;
-        let col_lp_solves = get_column_by_name::<Int64Array>(&batch, "lp_solves")?;
 
         for i in 0..n_rows {
             let row = PyDict::new(py);
-
-            row.set_item("iteration", col_iteration.value(i))?;
-            row.set_item("lower_bound", col_lower_bound.value(i))?;
-            row.set_item("upper_bound", col_upper_bound.value(i))?;
-            if col_upper_bound_std.is_null(i) {
-                row.set_item("upper_bound_std", py.None())?;
-            } else {
-                row.set_item("upper_bound_std", col_upper_bound_std.value(i))?;
+            for (col_idx, field) in schema.fields().iter().enumerate() {
+                let col = batch.column(col_idx);
+                let val: Py<PyAny> = if !col.is_null(i) && matches!(col.data_type(), DataType::Utf8)
+                {
+                    let arr = col
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .ok_or_else(|| PyOSError::new_err("Utf8 column downcast failed"))?;
+                    PyString::new(py, arr.value(i)).unbind().into()
+                } else {
+                    arrow_value_to_py(py, col.as_ref(), i)?
+                };
+                row.set_item(field.name(), val)?;
             }
-            row.set_item("upper_bound_kind", col_upper_bound_kind.value(i))?;
-
-            if col_gap_percent.is_null(i) {
-                row.set_item("gap_percent", py.None())?;
-            } else {
-                row.set_item("gap_percent", col_gap_percent.value(i))?;
-            }
-
-            row.set_item("cuts_added", col_cuts_added.value(i))?;
-            row.set_item("cuts_removed", col_cuts_removed.value(i))?;
-            row.set_item("cuts_active", col_cuts_active.value(i))?;
-            row.set_item("time_forward_ms", col_time_forward_ms.value(i))?;
-            row.set_item("time_backward_ms", col_time_backward_ms.value(i))?;
-            row.set_item("time_total_ms", col_time_total_ms.value(i))?;
-            row.set_item("forward_passes", col_forward_passes.value(i))?;
-            row.set_item("lp_solves", col_lp_solves.value(i))?;
-
             result_list.append(row)?;
         }
     }
@@ -332,24 +309,10 @@ pub fn load_convergence(py: Python<'_>, output_dir: PathBuf) -> PyResult<Py<PyAn
 ///
 /// # Schema
 ///
-/// Matches the convergence Parquet schema written by the solver:
-///
-/// | Column              | Arrow type   | Nullable |
-/// |---------------------|-------------|----------|
-/// | `iteration`         | Int32        | No       |
-/// | `lower_bound`       | Float64      | No       |
-/// | `upper_bound`       | Float64      | No       |
-/// | `upper_bound_std`   | Float64      | Yes      |
-/// | `upper_bound_kind`  | Utf8         | No       |
-/// | `gap_percent`       | Float64      | Yes      |
-/// | `cuts_added`        | Int32        | No       |
-/// | `cuts_removed`      | Int32        | No       |
-/// | `cuts_active`       | Int64        | No       |
-/// | `time_forward_ms`   | Int64        | No       |
-/// | `time_backward_ms`  | Int64        | No       |
-/// | `time_total_ms`     | Int64        | No       |
-/// | `forward_passes`    | Int32        | No       |
-/// | `lp_solves`         | Int64        | No       |
+/// The returned table carries the convergence Parquet schema written by the
+/// solver (`convergence_schema` in `cobre-io`): its columns, types, and
+/// nullability are exactly the fields that schema declares, so a schema change
+/// flows through without editing this doc.
 ///
 /// # Errors
 ///
@@ -756,18 +719,6 @@ pub fn load_stochastic(py: Python<'_>, output_dir: PathBuf) -> PyResult<Stochast
     })
 }
 
-fn get_column_by_name<'a, T: Array + 'static>(
-    batch: &'a RecordBatch,
-    name: &str,
-) -> PyResult<&'a T> {
-    batch
-        .column_by_name(name)
-        .ok_or_else(|| PyOSError::new_err(format!("convergence.parquet missing '{name}' column")))?
-        .as_any()
-        .downcast_ref::<T>()
-        .ok_or_else(|| PyOSError::new_err(format!("'{name}' column has unexpected type")))
-}
-
 /// Convert an Arrow column value at row `i` to a Python object based on the array's data type.
 ///
 /// Handles the Arrow types present in simulation output schemas (`Float64`,
@@ -1064,20 +1015,6 @@ fn load_entity_type(py: Python<'_>, entity_dir: &Path) -> PyResult<Py<PyList>> {
     Ok(result_list.unbind())
 }
 
-/// Entity types supported by the simulation output.
-const ENTITY_TYPES: &[&str] = &[
-    "costs",
-    "buses",
-    "hydros",
-    "thermals",
-    "exchanges",
-    "pumping_stations",
-    "contracts",
-    "non_controllables",
-    "inflow_lags",
-    "violations/generic",
-];
-
 /// Load simulation results from Hive-partitioned Parquet files.
 ///
 /// Reads `simulation/{entity_type}/scenario_id=NNNN/data.parquet` files
@@ -1144,7 +1081,7 @@ pub fn load_simulation(
         load_entity_type(py, &entity_dir).map(Py::from)
     } else {
         let result = PyDict::new(py);
-        for et in ENTITY_TYPES {
+        for et in cobre_io::simulation_family_subpaths() {
             let entity_dir = simulation_dir.join(et);
             if entity_dir.exists() {
                 let rows = load_entity_type(py, &entity_dir)?;
@@ -1386,7 +1323,7 @@ pub fn load_simulation_arrow(
     } else {
         let result = PyDict::new(py);
 
-        for et in ENTITY_TYPES {
+        for et in cobre_io::simulation_family_subpaths() {
             let entity_dir = simulation_dir.join(et);
             if !entity_dir.exists() {
                 continue;

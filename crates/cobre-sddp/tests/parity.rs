@@ -425,7 +425,7 @@ mod self_reproducibility_regression {
             .simulation_scenario_source(sentinel)
             .expect("simulation_scenario_source must parse");
 
-        let params = StudyParams::from_config(&config_with_sim)
+        let params = StudyParams::from_config(&config_with_sim, Vec::new())
             .expect("StudyParams::from_config must succeed");
 
         let mut setup = StudySetup::from_broadcast_params(
@@ -2388,8 +2388,8 @@ mod water_travel_time_no_arc_byte_identity {
             .simulation_scenario_source(sentinel)
             .expect("simulation_scenario_source must parse");
 
-        let params =
-            StudyParams::from_config(&config).expect("StudyParams::from_config must succeed");
+        let params = StudyParams::from_config(&config, Vec::new())
+            .expect("StudyParams::from_config must succeed");
 
         StudySetup::from_broadcast_params(
             &system,

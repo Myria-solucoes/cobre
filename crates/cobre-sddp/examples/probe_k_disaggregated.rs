@@ -127,10 +127,11 @@ fn run_probe(config_path: &Path) -> Result<(), ExitCode> {
         ExitCode::from(1)
     })?;
 
-    let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models).map_err(|e| {
-        eprintln!("error: StudySetup::new failed: {e}");
-        ExitCode::from(1)
-    })?;
+    let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
+        .map_err(|e| {
+            eprintln!("error: StudySetup::new failed: {e}");
+            ExitCode::from(1)
+        })?;
 
     // Redundant with the stopping-rule cap above, guarding any path that reads
     // max_iterations directly.

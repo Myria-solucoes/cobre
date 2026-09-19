@@ -7,6 +7,7 @@ use cobre_io::OutputContext;
 use cobre_io::now_iso8601;
 use cobre_sddp::SolverStatsDelta;
 use cobre_sddp::build_deviation_summary;
+use cobre_sddp::setup::RunPhasePlan;
 use cobre_solver::active_solver_metadata_id;
 
 use crate::progress::RenderMode;
@@ -163,74 +164,85 @@ fn execute_inner<C: Communicator>(ctx: &RunContext<C>, args: &RunArgs) -> Result
     let hostname = ctx.topology.leader_hostname().to_string();
     let mpi_world_size = u32::try_from(ctx.topology.world_size).unwrap_or(u32::MAX);
 
-    if training_enabled {
-        apply_training_policy(ctx, &system, &mut setup, root_config.as_ref(), policy_mode)?;
-        let training_started_at = now_iso8601();
-        let training = run_training_phase(ctx, &mut setup)?;
-        let training_completed_at = now_iso8601();
+    match RunPhasePlan::resolve(training_enabled, setup.simulation_config.n_scenarios > 0) {
+        RunPhasePlan::TrainedThenSimulated => {
+            apply_training_policy(ctx, &system, &mut setup, root_config.as_ref(), policy_mode)?;
+            let training_started_at = now_iso8601();
+            let training = run_training_phase(ctx, &mut setup)?;
+            let training_completed_at = now_iso8601();
 
-        // Write training outputs before simulation so they persist even if
-        // simulation fails.
-        if ctx.is_root {
-            let config = root_config.take().ok_or_else(|| CliError::Internal {
-                message: "root_config was None on rank 0 — internal invariant violated".to_string(),
-            })?;
-            let training_ctx = OutputContext {
-                hostname: hostname.clone(),
-                solver: active_solver_metadata_id().to_string(),
-                solver_version: Some(ctx.solver_version.clone()),
-                started_at: training_started_at,
-                completed_at: training_completed_at,
-                distribution: build_distribution_info(&ctx.topology, ctx.n_threads, mpi_world_size),
-                setup: setup_timings,
-                production_fit_deviation: build_deviation_summary(
-                    &setup.hydro_models.fpha_fit_deviations,
-                ),
-            };
-            write_training_outputs(&WriteTrainingArgs {
-                output_dir: &ctx.output_dir,
-                system: &system,
-                config: &config,
-                training_output: &training.output,
-                setup: &setup,
-                training_result: &training.result,
-                output_ctx: &training_ctx,
-                hydro_models: &setup.hydro_models,
-                quiet: ctx.quiet,
-                stderr: &ctx.stderr,
-            })?;
-            drop(config);
-        }
-
-        if let Some(ref training_error) = training.error {
+            // Write training outputs before simulation so they persist even if
+            // simulation fails.
             if ctx.is_root {
-                tracing::error!(
-                    "training failed after {} iterations: {training_error}",
-                    training.result.iterations
-                );
-                if !ctx.quiet {
-                    let _ = ctx.stderr.write_line(&format!(
-                        "Training failed after {} iterations. Partial outputs written to {}.",
-                        training.result.iterations,
-                        ctx.output_dir.display()
-                    ));
-                }
+                let config = root_config.take().ok_or_else(|| CliError::Internal {
+                    message: "root_config was None on rank 0 — internal invariant violated"
+                        .to_string(),
+                })?;
+                let training_ctx = OutputContext {
+                    hostname: hostname.clone(),
+                    solver: active_solver_metadata_id().to_string(),
+                    solver_version: Some(ctx.solver_version.clone()),
+                    started_at: training_started_at,
+                    completed_at: training_completed_at,
+                    distribution: build_distribution_info(
+                        &ctx.topology,
+                        ctx.n_threads,
+                        mpi_world_size,
+                    ),
+                    setup: setup_timings,
+                    production_fit_deviation: build_deviation_summary(
+                        &setup.hydro_models.fpha_fit_deviations,
+                    ),
+                };
+                write_training_outputs(&WriteTrainingArgs {
+                    output_dir: &ctx.output_dir,
+                    system: &system,
+                    config: &config,
+                    training_output: &training.output,
+                    setup: &setup,
+                    training_result: &training.result,
+                    output_ctx: &training_ctx,
+                    hydro_models: &setup.hydro_models,
+                    quiet: ctx.quiet,
+                    stderr: &ctx.stderr,
+                })?;
+                drop(config);
             }
-            return Err(CliError::Internal {
-                message: format!("training error: {training_error}"),
-            });
-        }
 
-        if setup.simulation_config.n_scenarios > 0 {
-            run_simulation_phase(ctx, &system, &mut setup, &training.result, &hostname)?;
+            if let Some(ref training_error) = training.error {
+                if ctx.is_root {
+                    tracing::error!(
+                        "training failed after {} iterations: {training_error}",
+                        training.result.iterations
+                    );
+                    if !ctx.quiet {
+                        let _ = ctx.stderr.write_line(&format!(
+                            "Training failed after {} iterations. Partial outputs written to {}.",
+                            training.result.iterations,
+                            ctx.output_dir.display()
+                        ));
+                    }
+                }
+                return Err(CliError::Internal {
+                    message: format!("training error: {training_error}"),
+                });
+            }
+
+            if setup.simulation_config.n_scenarios > 0 {
+                run_simulation_phase(ctx, &system, &mut setup, &training.result, &hostname)?;
+            }
         }
-    } else if setup.simulation_config.n_scenarios > 0 {
-        let training_result = load_policy_for_simulation(ctx, &system, &mut setup)?;
-        run_simulation_phase(ctx, &system, &mut setup, &training_result, &hostname)?;
-    } else if ctx.is_root && !ctx.quiet {
-        let _ = ctx
-            .stderr
-            .write_line("Training disabled, simulation disabled — nothing to do.");
+        RunPhasePlan::SimulateFromPolicy => {
+            let training_result = load_policy_for_simulation(ctx, &system, &mut setup)?;
+            run_simulation_phase(ctx, &system, &mut setup, &training_result, &hostname)?;
+        }
+        RunPhasePlan::Nothing => {
+            if ctx.is_root && !ctx.quiet {
+                let _ = ctx
+                    .stderr
+                    .write_line("Training disabled, simulation disabled — nothing to do.");
+            }
+        }
     }
 
     Ok(())

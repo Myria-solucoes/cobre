@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::NaiveDate;
 use clap::Args;
-use cobre_core::System;
+use cobre_core::{ScalarParameter, System};
 use cobre_io::{BoundaryPolicy, Config, LoadError, validate_case_with_artifacts};
 use cobre_sddp::hydro_models::prepare_hydro_models_from_artifacts;
 use cobre_sddp::validate_phases::{PrepPhase, prep_phase_metadata};
@@ -87,9 +87,9 @@ struct BoundaryOutcome {
 }
 
 /// One `cobre validate --json` early-abort failure: `phase` is
-/// [`prep_phase_metadata`]'s stable kind string (or `CaseValidationError` for
-/// the six-layer IO pipeline, which precedes any [`PrepPhase`]) — the same
-/// string programmatic callers already filter on; `message` is the
+/// [`prep_phase_metadata`]'s stable kind string, or [`LoadError::kind`]'s
+/// string for the six-layer IO pipeline (which precedes any [`PrepPhase`]) —
+/// the same string programmatic callers already filter on; `message` is the
 /// human-readable detail.
 #[derive(Debug, Serialize)]
 struct ValidateErrorOutput {
@@ -198,22 +198,6 @@ fn run_prep_phase<T>(
     }
 }
 
-/// Print a boundary-reconciliation error to `term` and return the
-/// `"policy.boundary: message"` string for the caller to embed in a
-/// [`CliError`].
-fn format_boundary_error(term: &Term, err: &SddpError, case_dir: &Path) -> String {
-    let message = err.to_string();
-    let _ = term.write_line(&format!(
-        "Validation: 1 errors, 0 warnings in {}",
-        case_dir.display()
-    ));
-    let _ = term.write_line(&format!(
-        "{} policy.boundary: {message}",
-        style("error:").red().bold()
-    ));
-    format!("policy.boundary: {message}")
-}
-
 /// Build a `StudySetup` from the parsed config and reconcile
 /// `config.policy.boundary` against its terminal manifest, without solving.
 fn reconcile_boundary(
@@ -223,6 +207,7 @@ fn reconcile_boundary(
     system: &System,
     stochastic: StochasticContext,
     hydro_models: PrepareHydroModelsResult,
+    scalar_parameters: Vec<ScalarParameter>,
 ) -> Result<BoundaryOutcome, SddpError> {
     let boundary_path = bp.checkpoint_path(case_dir);
 
@@ -237,6 +222,7 @@ fn reconcile_boundary(
         stochastic,
         hydro_models,
         boundary_requirements,
+        scalar_parameters,
     )?;
 
     // Rationale: the cast cannot truncate — `state_dimension` counts FCF
@@ -277,33 +263,41 @@ fn reconcile_boundary(
 }
 
 /// Reconcile `config.policy.boundary` when configured, mapping a reject into
-/// a [`CliError::Validation`] (pre-rendered to `stdout` in human mode, per the
-/// module's exit-0 contract). Returns `Ok(None)` when no boundary is
-/// configured — no `StudySetup` work runs.
+/// a [`CliError::Validation`] via [`prep_error_to_cli_error`] (which renders
+/// to `stdout` in human mode and emits the `--json` error object otherwise).
+/// Returns `Ok(None)` when no boundary is configured — no `StudySetup` work
+/// runs.
 fn run_boundary_check(
     case_dir: &Path,
     config: &Config,
     system: &System,
     stochastic: StochasticContext,
     hydro_models: PrepareHydroModelsResult,
+    scalar_parameters: Vec<ScalarParameter>,
     stdout: Option<&Term>,
+    json: bool,
 ) -> Result<Option<BoundaryOutcome>, CliError> {
     let Some(bp) = config.policy.boundary.as_ref() else {
         return Ok(None);
     };
 
-    match reconcile_boundary(case_dir, config, bp, system, stochastic, hydro_models) {
+    match reconcile_boundary(
+        case_dir,
+        config,
+        bp,
+        system,
+        stochastic,
+        hydro_models,
+        scalar_parameters,
+    ) {
         Ok(outcome) => Ok(Some(outcome)),
-        Err(err) => {
-            let Some(term) = stdout else {
-                return Err(CliError::from(err));
-            };
-            let report_msg = format_boundary_error(term, &err, case_dir);
-            Err(CliError::Validation {
-                report: report_msg,
-                already_rendered: true,
-            })
-        }
+        Err(ref err) => Err(prep_error_to_cli_error(
+            stdout,
+            json,
+            PrepPhase::Boundary,
+            err,
+            case_dir,
+        )?),
     }
 }
 
@@ -345,32 +339,39 @@ pub fn execute(args: ValidateArgs) -> Result<(), CliError> {
     // needs, avoiding a second disk read.
     let (loaded, report) = match validate_case_with_artifacts(&args.case_dir) {
         Ok(result) => result,
-        Err(LoadError::IoError { path, source }) => {
-            return Err(CliError::Io {
-                source,
-                context: path.display().to_string(),
-            });
-        }
-        Err(LoadError::ConstraintError { description }) => {
-            // Warnings are not available when errors abort the pipeline, so report 0.
-            if let Some(term) = stdout_sink {
-                format_constraint_description(term, &description, 0, &args.case_dir);
+        Err(err) => {
+            let kind = err.kind();
+            let message = err.to_string();
+            match err {
+                LoadError::IoError { path, source } => {
+                    if args.json {
+                        emit_validate_json(&ValidateBoundaryOutput::error(kind, &message))?;
+                    }
+                    return Err(CliError::Io {
+                        source,
+                        context: path.display().to_string(),
+                    });
+                }
+                LoadError::ConstraintError { description } => {
+                    // Warnings are not available when errors abort the pipeline, so report 0.
+                    if let Some(term) = stdout_sink {
+                        format_constraint_description(term, &description, 0, &args.case_dir);
+                    }
+                    if args.json {
+                        emit_validate_json(&ValidateBoundaryOutput::error(kind, &description))?;
+                    }
+                    return Err(CliError::Validation {
+                        report: description,
+                        already_rendered: true,
+                    });
+                }
+                _ => {
+                    if args.json {
+                        emit_validate_json(&ValidateBoundaryOutput::error(kind, &message))?;
+                    }
+                    return Err(CliError::Internal { message });
+                }
             }
-            if args.json {
-                emit_validate_json(&ValidateBoundaryOutput::error(
-                    "CaseValidationError",
-                    &description,
-                ))?;
-            }
-            return Err(CliError::Validation {
-                report: description,
-                already_rendered: true,
-            });
-        }
-        Err(other) => {
-            return Err(CliError::Internal {
-                message: other.to_string(),
-            });
         }
     };
 
@@ -378,10 +379,18 @@ pub fn execute(args: ValidateArgs) -> Result<(), CliError> {
     let artifacts = loaded.artifacts;
 
     let config_path = args.case_dir.join("config.json");
-    let config = cobre_io::parse_config(&config_path).map_err(CliError::from)?;
+    let config = match cobre_io::parse_config(&config_path) {
+        Ok(config) => config,
+        Err(err) => {
+            if args.json {
+                emit_validate_json(&ValidateBoundaryOutput::error(err.kind(), &err.to_string()))?;
+            }
+            return Err(CliError::from(err));
+        }
+    };
 
     let study_params = run_prep_phase(
-        StudyParams::from_config(&config),
+        StudyParams::from_config(&config, Vec::new()),
         stdout_sink,
         args.json,
         PrepPhase::Config,
@@ -392,9 +401,15 @@ pub fn execute(args: ValidateArgs) -> Result<(), CliError> {
 
     // config_path is a sentinel here: training_scenario_source uses it only for
     // historical-years look-up and error messages.
-    let training_source = config
-        .training_scenario_source(&config_path)
-        .map_err(CliError::from)?;
+    let training_source = match config.training_scenario_source(&config_path) {
+        Ok(source) => source,
+        Err(err) => {
+            if args.json {
+                emit_validate_json(&ValidateBoundaryOutput::error(err.kind(), &err.to_string()))?;
+            }
+            return Err(CliError::from(err));
+        }
+    };
 
     // The most expensive step (PAR estimation, opening trees); validate runs it
     // anyway so an exit-0 guarantees full parity with `run`.
@@ -458,7 +473,9 @@ pub fn execute(args: ValidateArgs) -> Result<(), CliError> {
         &prepared.system,
         prepared.stochastic,
         hydro_models,
+        artifacts.scalar_parameters,
         stdout_sink,
+        args.json,
     )?;
 
     if args.json {

@@ -1151,6 +1151,13 @@ const SIMULATION_FAMILIES: &[SimulationFamily] = &[
     },
 ];
 
+/// The `simulation/` subpath of every family the writer emits, in
+/// [`SIMULATION_FAMILIES`] order — the single owner, so a consumer that iterates
+/// this sees each new family without keeping a second list to drift.
+pub fn simulation_family_subpaths() -> impl Iterator<Item = &'static str> {
+    SIMULATION_FAMILIES.iter().map(|family| family.subpath)
+}
+
 /// Write the run-level, unpartitioned `simulation/paths.parquet` from the
 /// per-`(scenario, stage)` node-path rows.
 ///
@@ -3992,6 +3999,27 @@ mod tests {
                 family.subpath
             );
             seen_subpaths.push(family.subpath);
+        }
+    }
+
+    #[test]
+    fn simulation_family_subpaths_lists_every_family() {
+        let subpaths: Vec<&str> = simulation_family_subpaths().collect();
+        assert_eq!(
+            subpaths.len(),
+            SIMULATION_FAMILIES.len(),
+            "the public subpath accessor must yield one entry per family"
+        );
+        for expected in [
+            "hydro_bus_generation",
+            "in_transit",
+            "transit_seed",
+            "anticipated_lanes",
+        ] {
+            assert!(
+                subpaths.contains(&expected),
+                "simulation_family_subpaths() must include '{expected}'"
+            );
         }
     }
 }

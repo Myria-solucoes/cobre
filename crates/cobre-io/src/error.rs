@@ -121,6 +121,19 @@ impl LoadError {
             message: message.into(),
         }
     }
+
+    /// The stable `--json` classifier string for this variant — the single map
+    /// both `cobre validate --json` and `cobre.io.validate` draw `kind` from.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::IoError { .. } => "IoError",
+            Self::ParseError { .. } => "ParseError",
+            Self::SchemaError { .. } => "SchemaError",
+            Self::ConstraintError { .. } => "ConstraintError",
+            Self::PolicyIncompatible { .. } => "PolicyIncompatible",
+        }
+    }
 }
 
 #[cfg(test)]
@@ -214,6 +227,44 @@ mod tests {
         let dyn_err: &dyn std::error::Error = &err;
         assert!(dyn_err.source().is_none());
         assert!(err.to_string().contains("hydro cascade contains a cycle"));
+    }
+
+    #[test]
+    fn test_load_error_kind_is_exhaustive() {
+        assert_eq!(
+            LoadError::IoError {
+                path: PathBuf::from("x"),
+                source: io::Error::new(io::ErrorKind::NotFound, "x"),
+            }
+            .kind(),
+            "IoError"
+        );
+        assert_eq!(LoadError::parse("x", "x").kind(), "ParseError");
+        assert_eq!(
+            LoadError::SchemaError {
+                path: PathBuf::from("x"),
+                field: "x".to_string(),
+                message: "x".to_string(),
+            }
+            .kind(),
+            "SchemaError"
+        );
+        assert_eq!(
+            LoadError::ConstraintError {
+                description: "x".to_string(),
+            }
+            .kind(),
+            "ConstraintError"
+        );
+        assert_eq!(
+            LoadError::PolicyIncompatible {
+                check: "x".to_string(),
+                policy_value: "x".to_string(),
+                system_value: "x".to_string(),
+            }
+            .kind(),
+            "PolicyIncompatible"
+        );
     }
 
     #[test]

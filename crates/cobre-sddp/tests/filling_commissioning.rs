@@ -216,8 +216,8 @@ mod d38_dead_volume_filling_simulation {
         let hydro_models = prepare_hydro_models(&system, &case_dir, false)
             .expect("prepare_hydro_models must succeed");
 
-        let mut setup =
-            StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup::new");
+        let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
+            .expect("StudySetup::new");
 
         let comm = StubComm;
         let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
@@ -793,8 +793,8 @@ mod d40_filling_cascade_simulation {
         let hydro_models = prepare_hydro_models(&system, &case_dir, false)
             .expect("prepare_hydro_models must succeed");
 
-        let mut setup =
-            StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup::new");
+        let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
+            .expect("StudySetup::new");
 
         let comm = StubComm;
         let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
@@ -1190,8 +1190,8 @@ mod prefilling_spillage_frozen {
         let hydro_models = prepare_hydro_models(&system, &case_dir, false)
             .expect("prepare_hydro_models must succeed");
 
-        let mut setup =
-            StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup::new");
+        let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
+            .expect("StudySetup::new");
 
         let comm = StubComm;
         let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
@@ -2030,8 +2030,8 @@ mod d35_pumping_commissioning_simulation {
         let hydro_models = prepare_hydro_models(&system, &case_dir, false)
             .expect("prepare_hydro_models must succeed");
 
-        let mut setup =
-            StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup::new");
+        let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
+            .expect("StudySetup::new");
 
         let comm = StubComm;
         let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
@@ -2196,8 +2196,8 @@ mod d36_thermal_line_commissioning_simulation {
         let hydro_models = prepare_hydro_models(&system, &case_dir, false)
             .expect("prepare_hydro_models must succeed");
 
-        let mut setup =
-            StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup::new");
+        let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
+            .expect("StudySetup::new");
 
         let comm = StubComm;
         let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
@@ -2508,8 +2508,8 @@ mod d42_nonfilling_hydro_commissioning {
         let hydro_models = prepare_hydro_models(&system, &case_dir, false)
             .expect("prepare_hydro_models must succeed");
 
-        let mut setup =
-            StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup::new");
+        let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
+            .expect("StudySetup::new");
 
         let comm = StubComm;
         let mut solver = ActiveSolver::new().expect("ActiveSolver::new");

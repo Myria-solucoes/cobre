@@ -25,10 +25,12 @@ use crate::SddpError;
 /// | [`Config`]      | `StudyParams::from_config`             | `config.json`                 |
 /// | [`Stochastic`]  | `prepare_stochastic`                   | `scenarios/inflow_history.parquet` |
 /// | [`HydroModels`] | `prepare_hydro_models_from_artifacts`  | `system/hydro_production_models.json` |
+/// | [`Boundary`]    | `load_boundary_cuts`                   | `policy.boundary`              |
 ///
 /// [`Config`]: PrepPhase::Config
 /// [`Stochastic`]: PrepPhase::Stochastic
 /// [`HydroModels`]: PrepPhase::HydroModels
+/// [`Boundary`]: PrepPhase::Boundary
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrepPhase {
     /// `StudyParams::from_config` (config.json parsing and semantic validation).
@@ -37,6 +39,9 @@ pub enum PrepPhase {
     Stochastic,
     /// `prepare_hydro_models_from_artifacts` (production/evaporation models).
     HydroModels,
+    /// `load_boundary_cuts` (boundary checkpoint reconciliation against the
+    /// terminal entity manifest, when `config.policy.boundary` is set).
+    Boundary,
 }
 
 // ── prep_phase_metadata ───────────────────────────────────────────────────────
@@ -72,6 +77,7 @@ pub fn prep_phase_metadata(phase: PrepPhase, err: &SddpError) -> (&'static str, 
         PrepPhase::Config => "ConfigValidationError",
         PrepPhase::Stochastic => "StochasticPreparationError",
         PrepPhase::HydroModels => "HydroModelsPreparationError",
+        PrepPhase::Boundary => "BoundaryReconciliationError",
     };
 
     let file_label = match (phase, err) {
@@ -79,6 +85,7 @@ pub fn prep_phase_metadata(phase: PrepPhase, err: &SddpError) -> (&'static str, 
         (PrepPhase::Stochastic, SddpError::Stochastic(_)) => "scenarios/inflow_history.parquet",
         (PrepPhase::Stochastic, _) => "scenarios/",
         (PrepPhase::HydroModels, _) => "system/hydro_production_models.json",
+        (PrepPhase::Boundary, _) => "policy.boundary",
     };
 
     (kind, file_label)
@@ -127,12 +134,21 @@ mod tests {
     }
 
     #[test]
+    fn boundary_phase_returns_boundary_reconciliation_error() {
+        let err = SddpError::Validation("mismatched hydro set".to_string());
+        let (kind, file) = prep_phase_metadata(PrepPhase::Boundary, &err);
+        assert_eq!(kind, "BoundaryReconciliationError");
+        assert_eq!(file, "policy.boundary");
+    }
+
+    #[test]
     fn all_phases_produce_non_empty_kind_and_file() {
         let err = SddpError::Validation("test".to_string());
         for phase in [
             PrepPhase::Config,
             PrepPhase::Stochastic,
             PrepPhase::HydroModels,
+            PrepPhase::Boundary,
         ] {
             let (kind, file) = prep_phase_metadata(phase, &err);
             assert!(!kind.is_empty(), "kind must not be empty for {phase:?}");

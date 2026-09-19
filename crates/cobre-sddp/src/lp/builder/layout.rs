@@ -23,6 +23,7 @@ use crate::indexer::{
 use crate::lead_time::{AnticipatedResolution, SpreadResolution};
 use crate::setup::PostStudyResolved;
 
+use super::delivery_ring::for_each_ring_residue;
 use super::template::StageGeometry;
 use super::{
     EVAP_COLS_PER_HYDRO, EVAP_F_MINUS_OFFSET, EVAP_F_PLUS_OFFSET, EVAP_FLOW_OFFSET,
@@ -686,53 +687,26 @@ fn build_transit_bucket_row_pos(
 /// [`build_anticipated_fishing_row_pos`] and its entries-side `if`/`else` —
 /// never duplicated here.
 ///
-/// The sweep walks the RING axis, `r = stage_idx + depth + 1` — `stage_idx`
-/// is in-study, where [`PointResolution::physical_target`]'s excision is the
-/// identity, so this is exactly the ring's strictly-future window, contiguous
-/// by construction. Each plant's own physical delivery target
-/// `m = point.physical_target(r)` is resolved inside the plant loop, since
-/// the excision is per-plant. Walking the RAW delivery axis instead (a shared
-/// `m = stage_idx + depth + 1` read directly, pre-migration) is the
-/// wrong-but-compiling alternative once any plant's fixed post-horizon window
-/// excises part of the ring: `m mod k_max` is injective only over a
-/// contiguous run, which the excised window breaks. Returns the mapping and
-/// the reachable count.
+/// The strictly-future ring-window sweep and its per-plant physical-target
+/// resolution are owned by [`for_each_ring_residue`]; this builder only
+/// classifies each visited residue as carry (`is_interior`), deposit, or
+/// not-yet-ready. Returns the mapping and the reachable count.
 fn build_anticipated_slot_row_pos(
     state: &StateSpace,
     n_stages: usize,
     stage_idx: usize,
 ) -> (Vec<Option<usize>>, usize) {
     let n_anticipated = state.n_anticipated;
-    let k_max = state.k_max;
-    if n_anticipated == 0 || k_max == 0 {
-        return (Vec::new(), 0);
-    }
-    let n_delivery = state.delivery_stage_count(n_stages);
-    let points: Vec<_> = (0..n_anticipated)
-        .map(|plant| anticipated_resolution_for(state, AnticipatedLocal::new(plant), n_stages))
-        .collect();
-
-    let mut row_pos = vec![None; n_anticipated * k_max];
+    let mut row_pos = vec![None; n_anticipated * state.k_max];
     let mut n_reachable = 0_usize;
-    for depth in 0..k_max {
-        let r = stage_idx + depth + 1;
-        // `depth in 0..k_max` enumerates exactly `k_max` consecutive ring-axis
-        // `r` values, so every residue is visited exactly once — no
-        // self-collision within this sweep.
-        let slot = r % k_max;
-        for (plant, point) in points.iter().enumerate() {
-            let m = point.physical_target(r);
-            if m >= n_delivery {
-                continue;
-            }
-            let is_deposit = point.decider.get(m).copied().flatten() == Some(stage_idx);
-            let is_interior = !is_deposit && point.is_ready_at(m, stage_idx);
-            if is_interior {
-                row_pos[slot * n_anticipated + plant] = Some(n_reachable);
-                n_reachable += 1;
-            }
+    for_each_ring_residue(state, n_stages, stage_idx, |res, point| {
+        let is_deposit = point.decider.get(res.target).copied().flatten() == Some(stage_idx);
+        let is_interior = !is_deposit && point.is_ready_at(res.target, stage_idx);
+        if is_interior {
+            row_pos[res.slot * n_anticipated + res.plant] = Some(n_reachable);
+            n_reachable += 1;
         }
-    }
+    });
     debug_assert_eq!(
         row_pos.iter().filter(|pos| pos.is_some()).count(),
         n_reachable,

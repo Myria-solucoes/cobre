@@ -4,12 +4,11 @@ use cobre_core::{BlockMode, CoefficientRef, ContractType, EntityId, Stage};
 use crate::generic_constraints::resolve_variable_ref;
 use crate::hydro_models::EvaporationModel;
 use crate::indexer::{
-    AnticipatedLocal, BlockIdx, Boundary, EvapLocal, FphaCellLocal, HydroCell, HydroSys, LineSys,
-    StateSpace, anticipated_resolution_for,
+    BlockIdx, Boundary, EvapLocal, FphaCellLocal, HydroCell, HydroSys, LineSys, StateSpace,
 };
 
 use super::M3S_TO_HM3;
-use super::delivery_ring::DeliveryRing;
+use super::delivery_ring::{DeliveryRing, for_each_ring_residue};
 use super::fpha_cursor::for_each_fpha_plane;
 use super::layout::{StageLayout, StageProductionRole, TemplateBuildCtx};
 use crate::generic_constraints::{
@@ -115,13 +114,11 @@ pub(super) fn fill_anticipated_fishing_entries(
 
 /// Encode the commitment-hold ring's delivery-decision LATCH row
 /// `slot^out − decision_col = 0` for each plant with a genuine, active
-/// decision this stage (`anticipated_decision_row_pos`). `slot` is the
-/// RING-AXIS residue of the decision's own delivery target
-/// ([`PointResolution::ring_index`] owns the delivery-axis → ring-axis map),
-/// never a distance-derived boundary. `delivery_stage % k_max` — keying
-/// directly off the raw delivery axis — is the forbidden alternative: it
-/// collides the first post-study deposit with the last in-study seed's slot
-/// whenever a plant declares a fixed post-horizon window.
+/// decision this stage (`anticipated_decision_row_pos`). The decision's own
+/// delivery target is latched into its ring slot through
+/// [`for_each_ring_residue`], which owns the delivery-axis → ring-slot map;
+/// the active-count assert below covers the case a genuine target were ever
+/// excised (never latched, so short by one).
 pub(super) fn fill_anticipated_state_out_def_entries(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
@@ -129,26 +126,29 @@ pub(super) fn fill_anticipated_state_out_def_entries(
     col_entries: &mut [Vec<(usize, f64)>],
 ) {
     let n_stages = ctx.resolved.bounds.n_stages();
-    let n_ant = ctx.n_anticipated;
     let row_start = layout.anticipated.row_anticipated_state_out_def_start;
+    let decision_start = layout.anticipated.col_anticipated_decision_start;
     let ring = anticipated_ring(layout);
     let mut n_active: usize = 0;
-    for local_idx in 0..n_ant {
-        let point =
-            anticipated_resolution_for(layout.state, AnticipatedLocal::new(local_idx), n_stages);
+    for_each_ring_residue(layout.state, n_stages, stage_idx, |res, point| {
         let Some(delivery_stage) = point.genuine_decisions_at(stage_idx).next() else {
-            continue;
+            return;
         };
-        // Indexed via `.get` rather than `[local_idx]`: `build_anticipated_decision_row_pos`
-        // returns an empty vec whenever `k_max == 0`, regardless of `n_ant`.
+        // The walker visits every window residue for every plant; latch only at
+        // the residue this plant's own genuine decision matures into.
+        if delivery_stage != res.target {
+            return;
+        }
+        // Indexed via `.get` rather than `[res.plant]`: `build_anticipated_decision_row_pos`
+        // returns an empty vec whenever `k_max == 0`, regardless of `n_anticipated`.
         let Some(pos) = layout
             .anticipated
             .anticipated_decision_row_pos
-            .get(local_idx)
+            .get(res.plant)
             .copied()
             .flatten()
         else {
-            continue;
+            return;
         };
         let row = row_start + pos;
         debug_assert!(
@@ -156,18 +156,10 @@ pub(super) fn fill_anticipated_state_out_def_entries(
             "a genuine decision's delivery stage must be strictly after the decision \
              stage (K=0 self-delivery must already be excluded)"
         );
-        let r = point.ring_index(delivery_stage);
-        debug_assert!(
-            r.is_some(),
-            "plant local_idx={local_idx}: genuine delivery target {delivery_stage} is \
-             inside the excised fixed post-horizon window — never a ring member, so a \
-             genuine in-study decision cannot target it"
-        );
-        let slot = r.unwrap_or(delivery_stage) % layout.k_max;
-        let col_decision = layout.anticipated.col_anticipated_decision_start + local_idx;
-        ring.emit_deposit(slot, local_idx, row, col_decision, col_entries);
+        let col_decision = decision_start + res.plant;
+        ring.emit_deposit(res.slot, res.plant, row, col_decision, col_entries);
         n_active += 1;
-    }
+    });
     debug_assert_eq!(
         n_active, layout.anticipated.n_anticipated_state_out_def_rows,
         "fill_anticipated_state_out_def_entries: active count mismatch at stage {stage_idx}"

@@ -10,6 +10,7 @@ use cobre_sddp::SddpError;
 use cobre_sddp::SolverStatsDelta;
 use cobre_sddp::StudySetup;
 use cobre_sddp::TrainingResult;
+use cobre_sddp::aggregate_solver_stats_log;
 use cobre_sddp::sum_phase_timing_ms;
 use cobre_solver::ActiveSolver;
 
@@ -130,14 +131,14 @@ pub(super) fn run_training_phase(
     // Backward entries are allgatherv-replicated across every rank, so filter to
     // this rank's own contribution before allreduce(Sum); summing the replicated
     // entries would multiply backward stats by world_size.
-    let my_rank = i32::try_from(ctx.comm.rank()).unwrap_or(i32::MAX);
+    let my_rank = u32::try_from(ctx.comm.rank()).unwrap_or(u32::MAX);
     let (
         local_first_try,
         local_retried,
         local_failed,
         local_forward_solve_s,
         local_backward_solve_s,
-    ) = aggregate_solver_stats(&training_result.solver_stats_log, my_rank);
+    ) = aggregate_solver_stats_log(&training_result.solver_stats_log, Some(my_rank));
 
     let training_guard_delta = SolverStatsDelta {
         lp_successes: local_first_try.saturating_add(local_retried),
@@ -252,43 +253,4 @@ pub(super) fn run_training_phase(
         output: training_output,
         error: training_outcome.error,
     })
-}
-
-/// Aggregate this rank's own contribution from the training stats log.
-///
-/// Backward entries are allgatherv-replicated across ranks, so filtering by
-/// originating rank is required for the per-rank totals that `allreduce(Sum)`
-/// then sums correctly.
-fn aggregate_solver_stats(
-    stats_log: &[cobre_sddp::SolverStatsLogEntry],
-    my_rank: i32,
-) -> (u64, u64, u64, f64, f64) {
-    let mut first_try = 0u64;
-    let mut retried = 0u64;
-    let mut failed = 0u64;
-    let mut forward_solve_ms = 0.0_f64;
-    let mut backward_solve_ms = 0.0_f64;
-    for entry in stats_log {
-        if entry.rank != my_rank {
-            continue;
-        }
-        let delta = &entry.delta;
-        // lower_bound solve counts are included, but its solve_time_ms is
-        // deliberately dropped by the `_ => {}` arm: no output field receives it.
-        first_try += delta.first_try_successes;
-        retried += delta.lp_successes.saturating_sub(delta.first_try_successes);
-        failed += delta.lp_failures;
-        match entry.phase {
-            "forward" => forward_solve_ms += delta.solve_time_ms,
-            "backward" => backward_solve_ms += delta.solve_time_ms,
-            _ => {}
-        }
-    }
-    (
-        first_try,
-        retried,
-        failed,
-        forward_solve_ms / 1000.0,
-        backward_solve_ms / 1000.0,
-    )
 }

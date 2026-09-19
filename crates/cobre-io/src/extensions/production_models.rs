@@ -547,7 +547,7 @@ fn validate_production_models(
         match &model.selection {
             RawSelectionMode::StageRanges { stage_ranges } => {
                 for (range_idx, range) in stage_ranges.iter().enumerate() {
-                    validate_stage_range(range, entry_idx, range_idx, path)?;
+                    validate_stage_range(range, model.hydro_id, entry_idx, range_idx, path)?;
                 }
             }
             RawSelectionMode::Seasonal { seasons, .. } => {
@@ -557,6 +557,7 @@ fn validate_production_models(
                         season.productivity_mw_per_m3s,
                         season.fpha_config.as_ref(),
                         season.reference_volume.as_ref(),
+                        model.hydro_id,
                         &format!("production_models[{entry_idx}].seasons[{season_idx}]"),
                         path,
                     )?;
@@ -575,6 +576,7 @@ fn validate_production_models(
 /// Validate one stage range descriptor.
 fn validate_stage_range(
     range: &RawStageRange,
+    hydro_id: i32,
     entry_idx: usize,
     range_idx: usize,
     path: &Path,
@@ -600,6 +602,7 @@ fn validate_stage_range(
         range.productivity_mw_per_m3s,
         range.fpha_config.as_ref(),
         range.reference_volume.as_ref(),
+        hydro_id,
         &format!("production_models[{entry_idx}].stage_ranges[{range_idx}]"),
         path,
     )
@@ -612,6 +615,7 @@ fn validate_model_fields(
     productivity_mw_per_m3s: Option<f64>,
     fpha_config: Option<&RawFphaColumnLayout>,
     reference_volume: Option<&RawReferenceVolume>,
+    hydro_id: i32,
     field_prefix: &str,
     path: &Path,
 ) -> Result<(), LoadError> {
@@ -638,6 +642,7 @@ fn validate_model_fields(
     }
 
     if let Some(cfg) = fpha_config {
+        validate_fpha_discretization_counts(cfg, hydro_id, field_prefix, path)?;
         validate_fitting_window(
             cfg,
             &format!("{field_prefix}.fpha_config.fitting_window"),
@@ -647,6 +652,48 @@ fn validate_model_fields(
 
     if let Some(rv) = reference_volume {
         validate_reference_volume(rv, &format!("{field_prefix}.reference_volume"), path)?;
+    }
+
+    Ok(())
+}
+
+/// Reject any FPHA discretization count that is present and negative.
+///
+/// A negative count is not rejected downstream — the `unwrap_or(_) as usize`
+/// resolution wraps it into a huge count past the low-count guards — so it must
+/// fail here at the input boundary.
+fn validate_fpha_discretization_counts(
+    cfg: &RawFphaColumnLayout,
+    hydro_id: i32,
+    field_prefix: &str,
+    path: &Path,
+) -> Result<(), LoadError> {
+    for (value, name) in [
+        (
+            cfg.volume_discretization_points,
+            "volume_discretization_points",
+        ),
+        (
+            cfg.turbine_discretization_points,
+            "turbine_discretization_points",
+        ),
+        (
+            cfg.spillage_discretization_points,
+            "spillage_discretization_points",
+        ),
+        (cfg.max_planes_per_hydro, "max_planes_per_hydro"),
+    ] {
+        if let Some(count) = value
+            && count < 0
+        {
+            return Err(LoadError::SchemaError {
+                path: path.to_path_buf(),
+                field: format!("{field_prefix}.fpha_config.{name}"),
+                message: format!(
+                    "{name} must be non-negative, got {count} for hydro_id {hydro_id}"
+                ),
+            });
+        }
     }
 
     Ok(())
@@ -2021,6 +2068,128 @@ mod tests {
         assert!(
             text.contains("reference_volume"),
             "generated schema must expose the reference_volume property"
+        );
+    }
+
+    // ── FPHA discretization-count non-negativity ──────────────────────────────
+
+    /// Each of the four FPHA discretization counts, set negative in turn, is
+    /// rejected with a SchemaError whose field names the offending count and
+    /// whose message names the hydro.
+    #[test]
+    fn fpha_negative_discretization_count_rejected() {
+        for field_name in [
+            "volume_discretization_points",
+            "turbine_discretization_points",
+            "spillage_discretization_points",
+            "max_planes_per_hydro",
+        ] {
+            let json = format!(
+                r#"{{
+              "production_models": [{{
+                "hydro_id": 4,
+                "selection_mode": "stage_ranges",
+                "stage_ranges": [{{
+                  "start_stage_id": 0, "end_stage_id": null,
+                  "model": "fpha",
+                  "fpha_config": {{ "source": "computed", "{field_name}": -1 }}
+                }}]
+              }}]
+            }}"#
+            );
+            let f = write_json(&json);
+            let err = parse_production_models(f.path()).unwrap_err();
+            match &err {
+                LoadError::SchemaError { field, message, .. } => {
+                    assert!(
+                        field.contains(field_name),
+                        "field should name {field_name}, got: {field}"
+                    );
+                    assert!(
+                        message.contains("hydro_id 4"),
+                        "message should name the hydro, got: {message}"
+                    );
+                }
+                other => panic!("expected SchemaError for {field_name}, got: {other:?}"),
+            }
+        }
+    }
+
+    /// The shared discretization-count check also fires for a season entry,
+    /// naming the season's hydro.
+    #[test]
+    fn fpha_negative_discretization_count_rejected_in_seasonal() {
+        let json = r#"{
+          "production_models": [{
+            "hydro_id": 9,
+            "selection_mode": "seasonal",
+            "default_model": "constant_productivity",
+            "seasons": [{
+              "season_id": 0,
+              "model": "fpha",
+              "fpha_config": { "source": "computed", "max_planes_per_hydro": -3 }
+            }]
+          }]
+        }"#;
+        let f = write_json(json);
+        let err = parse_production_models(f.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert!(
+                    field.contains("max_planes_per_hydro"),
+                    "field should name max_planes_per_hydro, got: {field}"
+                );
+                assert!(
+                    message.contains("hydro_id 9"),
+                    "message should name the hydro, got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    /// Absent (`None`) and non-negative FPHA discretization counts pass validation
+    /// unchanged — the `unwrap_or` default and existing decks are unaffected.
+    #[test]
+    fn fpha_absent_or_nonnegative_discretization_counts_accepted() {
+        let absent = r#"{
+          "production_models": [{
+            "hydro_id": 0,
+            "selection_mode": "stage_ranges",
+            "stage_ranges": [{
+              "start_stage_id": 0, "end_stage_id": null,
+              "model": "fpha",
+              "fpha_config": { "source": "computed" }
+            }]
+          }]
+        }"#;
+        let f = write_json(absent);
+        assert!(
+            parse_production_models(f.path()).is_ok(),
+            "absent counts must pass unchanged"
+        );
+
+        let nonneg = r#"{
+          "production_models": [{
+            "hydro_id": 0,
+            "selection_mode": "stage_ranges",
+            "stage_ranges": [{
+              "start_stage_id": 0, "end_stage_id": null,
+              "model": "fpha",
+              "fpha_config": {
+                "source": "computed",
+                "volume_discretization_points": 0,
+                "turbine_discretization_points": 7,
+                "spillage_discretization_points": 3,
+                "max_planes_per_hydro": 10
+              }
+            }]
+          }]
+        }"#;
+        let f = write_json(nonneg);
+        assert!(
+            parse_production_models(f.path()).is_ok(),
+            "non-negative counts must pass unchanged"
         );
     }
 }

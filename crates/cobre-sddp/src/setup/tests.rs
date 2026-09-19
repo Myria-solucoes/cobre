@@ -585,6 +585,7 @@ fn new_minimal_valid_system_returns_ok() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     );
     assert!(result.is_ok(), "expected Ok, got {result:?}");
     let setup = result.unwrap();
@@ -615,6 +616,7 @@ fn new_zero_stages_returns_validation_error() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     );
     assert!(result.is_err(), "expected Err, got Ok");
     let err = result.unwrap_err();
@@ -650,6 +652,7 @@ fn accessor_methods_return_expected_values() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -699,6 +702,7 @@ fn fcf_mut_allows_cut_insertion() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -734,6 +738,7 @@ fn inflow_method_reflects_config() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -767,6 +772,7 @@ fn cut_selection_none_when_disabled() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -801,6 +807,7 @@ fn stage_ctx_fields_match_study_setup() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
     let ctx = setup.stage_ctx();
@@ -857,6 +864,7 @@ fn training_ctx_fields_match_study_setup() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
     let ctx = setup.training_ctx();
@@ -916,6 +924,7 @@ fn simulation_ctx_propagates_dynamic_dcs_from_setup() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
     let ctx = setup.simulation_ctx();
@@ -964,6 +973,7 @@ fn train_completes_within_iteration_limit() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
     let comm = LocalBackend;
@@ -1012,6 +1022,7 @@ fn train_generates_cuts_in_fcf() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
     let comm = LocalBackend;
@@ -1158,6 +1169,7 @@ fn node_native_binary_tree_loads_and_constructs_node_graph() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup: node-native binary tree must load end-to-end");
 
@@ -1227,6 +1239,7 @@ fn chain_fcf_pools_len_equals_num_stages_with_pool_id_identity() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup: chain must load end-to-end");
 
@@ -1273,6 +1286,7 @@ fn simulation_config_reflects_setup_fields() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -1311,6 +1325,7 @@ fn create_workspace_pool_returns_correct_size() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -1349,6 +1364,7 @@ fn build_training_output_non_empty() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
     let comm = LocalBackend;
@@ -1409,6 +1425,7 @@ fn simulate_after_train_returns_nonempty_costs() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -1476,7 +1493,7 @@ fn study_params_from_config_defaults() {
         estimation: EstimationConfig::default(),
     };
 
-    let params = StudyParams::from_config(&config).expect("from_config");
+    let params = StudyParams::from_config(&config, Vec::new()).expect("from_config");
 
     assert_eq!(
         params.seed, DEFAULT_SEED,
@@ -1553,7 +1570,7 @@ fn study_params_from_config_explicit() {
         estimation: EstimationConfig::default(),
     };
 
-    let params = StudyParams::from_config(&config).expect("from_config");
+    let params = StudyParams::from_config(&config, Vec::new()).expect("from_config");
 
     // Seed: i64::unsigned_abs(1234) == 1234
     assert_eq!(params.seed, 1234, "seed mismatch");
@@ -2060,7 +2077,8 @@ fn hydro_models_accessor_returns_stored_result() {
     .expect("stochastic context");
     let hydro_result = PrepareHydroModelsResult::default_from_system(&system);
 
-    let setup = StudySetup::new(&system, &config, stochastic, hydro_result).expect("setup");
+    let setup =
+        StudySetup::new(&system, &config, stochastic, hydro_result, Vec::new()).expect("setup");
 
     let models = &setup.hydro_models;
     assert_eq!(
@@ -2115,7 +2133,14 @@ fn energy_conversion_accessor_returns_built_set() {
         result
     };
 
-    let setup = StudySetup::new(&system, &config, stochastic, hydro_models_result).expect("setup");
+    let setup = StudySetup::new(
+        &system,
+        &config,
+        stochastic,
+        hydro_models_result,
+        Vec::new(),
+    )
+    .expect("setup");
 
     let ec = setup.energy_conversion();
     assert_eq!(ec.n_hydros(), system.hydros().len());
@@ -2152,6 +2177,7 @@ fn study_setup_propagates_fpha_missing_equivalent_productivity() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect_err("setup must reject misconfigured FPHA hydro");
 
@@ -3424,6 +3450,7 @@ fn study_setup_initial_state_has_nonzero_lags_from_derived_inflow_history() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup with inflow_history");
 
@@ -4705,6 +4732,7 @@ fn historical_library_none_for_insample() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -5000,6 +5028,7 @@ fn historical_library_built_when_scheme_is_historical() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -5274,6 +5303,7 @@ fn external_inflow_library_built_when_scheme_is_external() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -5543,6 +5573,7 @@ fn external_load_library_built_when_scheme_is_external() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -5846,6 +5877,7 @@ fn external_load_library_includes_zero_sigma_bus_when_scheme_is_external() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup must accept a sigma=0 External-scheme load bus");
 
@@ -6152,6 +6184,7 @@ fn external_ncs_library_built_when_scheme_is_external() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -6408,6 +6441,7 @@ fn historical_library_fails_when_no_valid_windows() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     );
 
     assert!(result.is_err(), "expected Err when no historical data");
@@ -6454,6 +6488,7 @@ fn test_simulate_uses_simulation_scheme() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -6509,6 +6544,7 @@ fn test_sim_historical_library_built_when_sim_scheme_is_historical() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -6838,6 +6874,7 @@ fn setup_wires_anticipated_metadata_into_indexer() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -6893,6 +6930,7 @@ fn setup_leadstages_resolution_preserves_k_max_and_state_dimension() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -7128,6 +7166,7 @@ fn stage_data_state_matches_indexer_role_a_uniform() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -7168,6 +7207,7 @@ fn resolve_state_layout_widens_dense_stride_and_mask_to_declared_depth() {
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
         BoundaryStateRequirements::present(24),
+        Vec::new(),
     )
     .expect("setup with a boundary depth exceeding the AR order");
 
@@ -7219,6 +7259,7 @@ fn resolve_state_layout_floors_declared_depth_at_ar_order() {
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
         BoundaryStateRequirements::present(1),
+        Vec::new(),
     )
     .expect("setup with a boundary depth below the AR order");
 
@@ -7275,6 +7316,7 @@ fn cobre_io_seed_depth_matches_resolve_state_layout_depth() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -7314,6 +7356,7 @@ fn stage_id_resolver_agrees_with_study_stage_ids() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -7638,6 +7681,7 @@ fn stage_data_geometry_role_b_matches_reference_build() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -7734,6 +7778,7 @@ fn stage_data_state_matches_indexer_role_a_anticipated() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -7773,6 +7818,7 @@ fn cut_row_from_state_matches_reference_loop() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -8111,6 +8157,7 @@ fn setup_from_system(system: &cobre_core::System) -> StudySetup {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(system),
+        Vec::new(),
     )
     .expect("setup")
 }
@@ -8735,6 +8782,7 @@ fn lead_time_fanout_rejected_at_setup() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     );
 
     let err = result.expect_err("a fan-out LeadTime study must be rejected at setup, not panic");
@@ -8976,6 +9024,7 @@ fn lead_time_fanout_rejection_is_declaration_order_invariant() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     );
 
     let err = result.expect_err(
@@ -9371,7 +9420,7 @@ fn admission_gate_rejects_gap_under_nonuniform_risk_enumerated() {
             lambda: 0.5,
         },
     ];
-    match super::admission_gate(&measures, &rules_with_gap(), true) {
+    match super::admission_gate(&measures, &rules_with_gap(), true, None) {
         Err(SddpError::Validation(msg)) => {
             assert!(msg.contains("gap"), "names the rule: {msg}");
             assert!(msg.contains("CVaR"), "names the measure: {msg}");
@@ -9397,7 +9446,7 @@ fn admission_gate_accepts_gap_under_enumerated_uniform_cvar() {
     };
     let measures = vec![cvar, cvar, cvar];
     assert!(
-        super::admission_gate(&measures, &rules_with_gap(), true).is_ok(),
+        super::admission_gate(&measures, &rules_with_gap(), true, None).is_ok(),
         "a uniform CVaR under enumerated forwards must admit a gap rule"
     );
 }
@@ -9413,7 +9462,7 @@ fn admission_gate_rejects_gap_under_uniform_cvar_sampled() {
         lambda: 0.4,
     };
     let measures = vec![cvar, cvar];
-    match super::admission_gate(&measures, &rules_with_gap(), false) {
+    match super::admission_gate(&measures, &rules_with_gap(), false, None) {
         Err(SddpError::Validation(msg)) => {
             assert!(msg.contains("gap"), "names the rule: {msg}");
             assert!(
@@ -9435,7 +9484,7 @@ fn admission_gate_accepts_gap_under_cvar_lambda_zero() {
         lambda: 0.0,
     }];
     assert!(
-        super::admission_gate(&measures, &rules_with_gap(), true).is_ok(),
+        super::admission_gate(&measures, &rules_with_gap(), true, None).is_ok(),
         "CVaR with lambda == 0 is effectively expectation and must admit a gap rule"
     );
 }
@@ -9445,7 +9494,7 @@ fn admission_gate_accepts_gap_under_cvar_lambda_zero() {
 fn admission_gate_accepts_gap_under_all_expectation() {
     use crate::risk_measure::RiskMeasure;
     let measures = vec![RiskMeasure::Expectation, RiskMeasure::Expectation];
-    assert!(super::admission_gate(&measures, &rules_with_gap(), true).is_ok());
+    assert!(super::admission_gate(&measures, &rules_with_gap(), true, None).is_ok());
 }
 
 /// An effective `CVaR` measure with no `gap` rule present is admitted — the arm
@@ -9457,7 +9506,7 @@ fn admission_gate_accepts_cvar_without_gap() {
         alpha: 0.1,
         lambda: 0.9,
     }];
-    assert!(super::admission_gate(&measures, &rules_without_gap(), true).is_ok());
+    assert!(super::admission_gate(&measures, &rules_without_gap(), true, None).is_ok());
 }
 
 /// The default study shape (expectation everywhere, an iteration-limit rule)
@@ -9466,7 +9515,7 @@ fn admission_gate_accepts_cvar_without_gap() {
 fn admission_gate_accepts_default_shape() {
     use crate::risk_measure::RiskMeasure;
     let measures = vec![RiskMeasure::Expectation; 4];
-    assert!(super::admission_gate(&measures, &rules_without_gap(), true).is_ok());
+    assert!(super::admission_gate(&measures, &rules_without_gap(), true, None).is_ok());
 }
 
 /// A `gap` rule under sampled forward selection (`training_enumerated == false`)
@@ -9476,7 +9525,7 @@ fn admission_gate_accepts_default_shape() {
 fn admission_gate_rejects_gap_under_sampled_selection() {
     use crate::risk_measure::RiskMeasure;
     let measures = vec![RiskMeasure::Expectation, RiskMeasure::Expectation];
-    match super::admission_gate(&measures, &rules_with_gap(), false) {
+    match super::admission_gate(&measures, &rules_with_gap(), false, None) {
         Err(SddpError::Validation(msg)) => {
             assert!(msg.contains("gap"), "names the rule: {msg}");
             assert!(
@@ -9499,7 +9548,7 @@ fn admission_gate_rejects_gap_under_sampled_selection() {
 fn admission_gate_accepts_gap_under_enumerated_expectation() {
     use crate::risk_measure::RiskMeasure;
     let measures = vec![RiskMeasure::Expectation, RiskMeasure::Expectation];
-    assert!(super::admission_gate(&measures, &rules_with_gap(), true).is_ok());
+    assert!(super::admission_gate(&measures, &rules_with_gap(), true, None).is_ok());
 }
 
 /// `enumerated_scenario_count` returns Σ over root→leaf paths of Π |Ω|: for the

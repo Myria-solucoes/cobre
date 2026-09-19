@@ -170,8 +170,8 @@ pub fn build_setup_for_case(
         .simulation_scenario_source(sentinel)
         .expect("simulation_scenario_source must parse");
 
-    let mut construction =
-        StudyParams::from_config(config).expect("StudyParams::from_config must succeed");
+    let mut construction = StudyParams::from_config(config, Vec::new())
+        .expect("StudyParams::from_config must succeed");
     construction.boundary = boundary_requirements(case_dir, config);
     construction.scalar_parameters = cobre_io::load_case_with_artifacts(case_dir)
         .expect("load_case_with_artifacts must succeed")
@@ -243,7 +243,7 @@ pub fn build_setup_in_code(system: System, config: &Config) -> StudySetup {
 
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
 
-    StudySetup::new(&system, config, stochastic, hydro_models).expect("StudySetup::new")
+    StudySetup::new(&system, config, stochastic, hydro_models, Vec::new()).expect("StudySetup::new")
 }
 
 /// Fallible sibling of [`build_setup_in_code`]: returns `StudySetup::new`'s
@@ -271,7 +271,7 @@ pub fn try_build_setup_in_code(
 
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
 
-    StudySetup::new(&system, config, stochastic, hydro_models)
+    StudySetup::new(&system, config, stochastic, hydro_models, Vec::new())
 }
 
 /// Train `iterations`, then run the one-scenario simulation and return the drained

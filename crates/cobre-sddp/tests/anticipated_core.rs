@@ -8720,7 +8720,8 @@ mod fixed_delivery_output {
 
         let hydro_models = PrepareHydroModelsResult::default_from_system(system);
 
-        StudySetup::new(system, config, stochastic, hydro_models).expect("StudySetup::new")
+        StudySetup::new(system, config, stochastic, hydro_models, Vec::new())
+            .expect("StudySetup::new")
     }
 
     fn assert_row_matches_window(row: &FixedDeliveryRow, expected: &DeclaredWindow) {

@@ -20,7 +20,7 @@
 //! #     -> Result<(), cobre_sddp::SddpError> {
 //! let stochastic = build_stochastic_context(system, 42, None, &[], &[], OpeningTreeInputs::default(), ClassSchemes { inflow: None, load: None, ncs: None })?;
 //! let hydro_models = PrepareHydroModelsResult::default_from_system(system);
-//! let setup = StudySetup::new(system, config, stochastic, hydro_models)?;
+//! let setup = StudySetup::new(system, config, stochastic, hydro_models, Vec::new())?;
 //! assert!(!setup.stage_data.stage_templates.templates.is_empty());
 //! # Ok(())
 //! # }
@@ -81,8 +81,9 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use cobre_core::{
-    AnticipatedConfig, EntityId, HorizonGraph, Hydro, HydroPastDefluence, PostStudyStages,
-    PostStudyThermalBound, Stage, StageId, System, Thermal,
+    AffineBound, AnticipatedConfig, CoefficientRef, EntityId, GenericConstraint, HorizonGraph,
+    Hydro, HydroPastDefluence, PostStudyStages, PostStudyThermalBound, ScalarParameter, Stage,
+    StageId, System, Thermal,
     scenario::{SamplingScheme, ScenarioSource},
 };
 use cobre_io::StageIdResolver;
@@ -95,6 +96,7 @@ use cobre_stochastic::{
 use crate::{
     config::{CutManagementConfig, EventParams},
     cut::FutureCostFunction,
+    cut_selection::CutSelectionStrategy,
     energy_conversion::{EnergyConversionSet, build_energy_conversion_set},
     error::SddpError,
     horizon_mode::HorizonMode,
@@ -344,6 +346,7 @@ impl StudySetup {
         config: &Config,
         stochastic: StochasticContext,
         hydro_models: PrepareHydroModelsResult,
+        scalar_parameters: Vec<ScalarParameter>,
     ) -> Result<Self, SddpError> {
         // No case dir to read the source checkpoint, so the depth is unresolved
         // (None); presence still follows the config, matching the boundary-mask
@@ -353,7 +356,14 @@ impl StudySetup {
         } else {
             BoundaryStateRequirements::none()
         };
-        Self::new_with_boundary_requirements(system, config, stochastic, hydro_models, boundary)
+        Self::new_with_boundary_requirements(
+            system,
+            config,
+            stochastic,
+            hydro_models,
+            boundary,
+            scalar_parameters,
+        )
     }
 
     /// [`Self::new`] with the boundary-derived state requirements supplied
@@ -374,8 +384,9 @@ impl StudySetup {
         stochastic: StochasticContext,
         hydro_models: PrepareHydroModelsResult,
         boundary: BoundaryStateRequirements,
+        scalar_parameters: Vec<ScalarParameter>,
     ) -> Result<Self, SddpError> {
-        let mut params = StudyParams::from_config(config)?;
+        let mut params = StudyParams::from_config(config, scalar_parameters)?;
         params.boundary = boundary;
         // Sentinel: the scenario-source resolvers use the path only for error
         // messages and the historical-years look-up, neither exercised here with a
@@ -729,7 +740,12 @@ impl StudySetup {
         let transit_seed_arcs = build_transit_seed_arcs(system);
         let past_defluences = system.initial_conditions().past_defluences.clone();
 
-        admission_gate(&risk_measures, &stopping_rule_set, training_enumerated)?;
+        admission_gate(
+            &risk_measures,
+            &stopping_rule_set,
+            training_enumerated,
+            cut_selection.as_ref(),
+        )?;
 
         let hydro_min_storage_hm3: Vec<f64> =
             system.hydros().iter().map(|h| h.min_storage_hm3).collect();
@@ -807,6 +823,60 @@ impl StudySetup {
             warm_start_basis_cache: None,
             boundary_requirements: boundary,
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RunPhasePlan
+// ---------------------------------------------------------------------------
+
+/// A run's top-level shape: whether training runs, and whether simulation
+/// runs from a stored policy instead. The single owner both L4 entry points
+/// (CLI, Python) match on instead of each re-deriving the same predicate
+/// pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunPhasePlan {
+    /// Training runs; whether simulation follows is a separate post-training
+    /// check the caller still makes.
+    TrainedThenSimulated,
+    /// Training is disabled; simulation runs from a stored policy.
+    SimulateFromPolicy,
+    /// Training is disabled and no simulation was requested.
+    Nothing,
+}
+
+impl RunPhasePlan {
+    /// Resolves the plan from `training_enabled` and whether simulation was
+    /// requested (`simulation_config.n_scenarios > 0`, already normalized).
+    #[must_use]
+    pub fn resolve(training_enabled: bool, simulate_requested: bool) -> Self {
+        match (training_enabled, simulate_requested) {
+            (true, _) => Self::TrainedThenSimulated,
+            (false, true) => Self::SimulateFromPolicy,
+            (false, false) => Self::Nothing,
+        }
+    }
+}
+
+#[cfg(test)]
+mod run_phase_plan_tests {
+    use super::RunPhasePlan;
+
+    #[test]
+    fn resolve_truth_table() {
+        assert_eq!(
+            RunPhasePlan::resolve(true, true),
+            RunPhasePlan::TrainedThenSimulated
+        );
+        assert_eq!(
+            RunPhasePlan::resolve(true, false),
+            RunPhasePlan::TrainedThenSimulated
+        );
+        assert_eq!(
+            RunPhasePlan::resolve(false, true),
+            RunPhasePlan::SimulateFromPolicy
+        );
+        assert_eq!(RunPhasePlan::resolve(false, false), RunPhasePlan::Nothing);
     }
 }
 
@@ -983,6 +1053,8 @@ fn build_energy_and_templates(
     )
     .map_err(|e| SddpError::Validation(e.to_string()))?;
 
+    check_scalar_parameters_present(system.generic_constraints(), &resolved_parameters)?;
+
     let mut stage_templates = build_stage_templates(
         system,
         inflow_method,
@@ -1022,6 +1094,54 @@ fn build_energy_and_templates(
         scaling_report,
         resolved_parameters,
     })
+}
+
+/// Fails loud when a generic constraint references a scalar-parameter id
+/// `resolved_parameters` never resolved, instead of letting
+/// [`ResolvedParameters::get`] fall through to its `0.0` sentinel once the LP
+/// build starts reading rows.
+///
+/// # Errors
+///
+/// [`SddpError::Validation`] naming the constraint and the missing id.
+fn check_scalar_parameters_present(
+    generic_constraints: &[GenericConstraint],
+    resolved_parameters: &ResolvedParameters,
+) -> Result<(), SddpError> {
+    let is_resolved = |id: EntityId| {
+        resolved_parameters
+            .id_to_slot
+            .binary_search_by_key(&id.0, |(k, _)| *k)
+            .is_ok()
+    };
+    for constraint in generic_constraints {
+        let expression_ids =
+            constraint
+                .expression
+                .terms
+                .iter()
+                .filter_map(|term| match term.coefficient {
+                    CoefficientRef::Parameter(id) => Some(id),
+                    CoefficientRef::Literal(_) => None,
+                });
+        let bound_ids = [
+            &constraint.bound_lower_affine,
+            &constraint.bound_upper_affine,
+        ]
+        .into_iter()
+        .flatten()
+        .flat_map(AffineBound::params);
+        for id in expression_ids.chain(bound_ids) {
+            if !is_resolved(id) {
+                return Err(SddpError::Validation(format!(
+                    "generic constraint '{}' references scalar parameter id={} not \
+                     present in the resolved parameter table",
+                    constraint.name, id.0
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `L_state = max(computed_order, boundary_depth)` — the single widening
@@ -2080,22 +2200,25 @@ fn build_risk_measures(system: &System) -> Vec<RiskMeasure> {
 /// The setup-time admission gate: the permanent arms that survive the
 /// node-native collapse, evaluated once from
 /// [`StudySetup::from_broadcast_params`]. Absent the gated features (no `gap`
-/// stopping rule, or enumerated forwards + an expectation measure at every
-/// stage) it returns `Ok(())` unconditionally, so a default study is
-/// byte-neutral.
+/// stopping rule, an expectation measure at every stage, and no dynamic cut
+/// selection under enumerated forwards) it returns `Ok(())` unconditionally, so
+/// a default study is byte-neutral.
 ///
 /// # Errors
 ///
 /// Returns [`SddpError::Validation`] when a `gap` stopping rule is present under
-/// any stage's effective non-expectation risk measure, or under sampled forward
-/// selection.
+/// any stage's effective non-expectation risk measure, under sampled forward
+/// selection, or when dynamic cut selection is paired with enumerated forward
+/// traversal.
 fn admission_gate(
     risk_measures: &[RiskMeasure],
     stopping_rules: &StoppingRuleSet,
     training_enumerated: bool,
+    cut_selection: Option<&CutSelectionStrategy>,
 ) -> Result<(), SddpError> {
     reject_gap_under_effective_risk_aversion(risk_measures, stopping_rules, training_enumerated)?;
-    reject_gap_under_sampled_selection(stopping_rules, training_enumerated)
+    reject_gap_under_sampled_selection(stopping_rules, training_enumerated)?;
+    reject_dynamic_cut_selection_under_enumerated(cut_selection, training_enumerated)
 }
 
 /// Reject a `gap` stopping rule that has no exact bound to compare against.
@@ -2190,6 +2313,36 @@ fn reject_gap_under_sampled_selection(
             "gap stopping rule is inadmissible under sampled forward selection; the upper \
              bound is then a statistical estimate, not the exact bound a gap rule requires — \
              a gap rule admits only enumerated forward selection"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Reject dynamic cut selection paired with enumerated forward traversal. The
+/// enumerated engine seeds each pool at its node-native cut stride, while
+/// dynamic cut selection assumes the sampled-selection eviction-key discipline
+/// its downstream budget-eviction reader depends on; the pairing would drive
+/// that reader down an untested eviction path. Any non-[`Dynamic`] strategy (or
+/// none) under enumerated forwards, and [`Dynamic`] under sampled forwards, are
+/// admitted.
+///
+/// [`Dynamic`]: CutSelectionStrategy::Dynamic
+///
+/// # Errors
+///
+/// Returns [`SddpError::Validation`] naming the pairing when `training_enumerated`
+/// and `cut_selection` is [`CutSelectionStrategy::Dynamic`].
+fn reject_dynamic_cut_selection_under_enumerated(
+    cut_selection: Option<&CutSelectionStrategy>,
+    training_enumerated: bool,
+) -> Result<(), SddpError> {
+    if training_enumerated && matches!(cut_selection, Some(CutSelectionStrategy::Dynamic { .. })) {
+        return Err(SddpError::Validation(
+            "dynamic cut selection is inadmissible under enumerated forward traversal; the \
+             enumerated engine seeds each cut pool at its node-native stride, whereas dynamic \
+             cut selection assumes the sampled-selection eviction-key discipline — pair \
+             enumerated forwards with a value-based cut selection strategy, or none"
                 .to_string(),
         ));
     }
@@ -3288,6 +3441,237 @@ mod transit_seed_round_trip_tests {
             seed_reference.iter().any(|&v| v.abs() > f64::EPSILON),
             "the reference seed must be non-degenerate (not all-zero) for this to be a \
              meaningful fidelity check"
+        );
+    }
+}
+
+/// The scalar-parameter table is now a `StudySetup` constructor input (never an
+/// empty placeholder — see [`StudyParams::from_config`]): each gap class
+/// `build_resolved_parameters` can raise surfaces through
+/// [`StudySetup::new_with_boundary_requirements`], and a generic constraint
+/// referencing an id the table never resolved fails loud via
+/// `check_scalar_parameters_present` instead of reaching
+/// [`ResolvedParameters::get`]'s `0.0` sentinel.
+#[cfg(test)]
+mod scalar_parameter_construction_tests {
+    use cobre_core::scenario::SamplingScheme;
+    use cobre_core::{
+        AffineBound, ComputedParameter, ConstraintExpression, EntityId, GenericConstraint,
+        ParameterKind, ScalarParameter, SlackConfig, SystemBuilder,
+    };
+    use cobre_io::Config;
+    use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
+
+    use super::{BoundaryStateRequirements, StudySetup};
+    use crate::SddpError;
+    use crate::hydro_models::PrepareHydroModelsResult;
+    use crate::test_support::{k_fan_config, k_fan_system};
+
+    fn build(
+        system: &cobre_core::System,
+        config: &Config,
+        scalar_parameters: Vec<ScalarParameter>,
+    ) -> Result<StudySetup, SddpError> {
+        let stochastic = build_stochastic_context(
+            system,
+            42,
+            None,
+            &[],
+            &[],
+            OpeningTreeInputs::default(),
+            ClassSchemes {
+                inflow: Some(SamplingScheme::InSample),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+        )
+        .expect("build_stochastic_context must succeed for a valid fixture system");
+        let hydro_models = PrepareHydroModelsResult::default_from_system(system);
+        StudySetup::new_with_boundary_requirements(
+            system,
+            config,
+            stochastic,
+            hydro_models,
+            BoundaryStateRequirements::present(0),
+            scalar_parameters,
+        )
+    }
+
+    fn scalar_param(kind: ParameterKind) -> ScalarParameter {
+        ScalarParameter {
+            id: EntityId(1),
+            name: "probe".to_string(),
+            kind,
+        }
+    }
+
+    #[test]
+    fn missing_season_rejects_at_construction() {
+        let system = k_fan_system(3, false);
+        let config = k_fan_config(1, 1);
+        // Every k_fan_system stage has `season_id: None`, resolving to season 0
+        // (`unwrap_or(0)`); a Seasonal table with no season-0 entry misses.
+        let table = vec![scalar_param(ParameterKind::Seasonal {
+            values: vec![(1, 100.0)],
+        })];
+        let err = build(&system, &config, table).expect_err("must reject the season gap");
+        assert!(
+            matches!(err, SddpError::Validation(ref msg) if msg.contains("season")),
+            "expected a MissingSeason message, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn per_stage_block_coverage_gap_rejects_at_construction() {
+        let system = k_fan_system(3, false);
+        let config = k_fan_config(1, 1);
+        // Every k_fan_system stage has exactly one block; an empty PerStageBlock
+        // table covers no (stage, block) cell.
+        let table = vec![scalar_param(ParameterKind::PerStageBlock {
+            values: vec![],
+        })];
+        let err = build(&system, &config, table).expect_err("must reject the coverage gap");
+        assert!(
+            matches!(err, SddpError::Validation(ref msg) if msg.contains("not covered")),
+            "expected a PerStageBlockCoverage message, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn missing_specific_productivity_rejects_at_construction() {
+        let base = k_fan_system(3, false);
+        let mut hydros = base.hydros().to_vec();
+        hydros[0].specific_productivity_mw_per_m3s_per_m = None;
+        let hydro_id = hydros[0].id;
+        let system = SystemBuilder::new()
+            .buses(base.buses().to_vec())
+            .hydros(hydros)
+            .stages(base.stages().to_vec())
+            .inflow_models(base.inflow_models().to_vec())
+            .load_models(base.load_models().to_vec())
+            .bounds(base.bounds().clone())
+            .penalties(base.penalties().clone())
+            .initial_conditions(base.initial_conditions().clone())
+            .policy_graph(base.policy_graph().clone())
+            .build()
+            .expect("clearing specific_productivity keeps the fixture valid");
+        let config = k_fan_config(1, 1);
+        let table = vec![scalar_param(ParameterKind::Computed {
+            computed_spec: ComputedParameter::SpecificProductivity { hydro_id },
+        })];
+        let err = build(&system, &config, table).expect_err("must reject the missing rho_esp");
+        assert!(
+            matches!(err, SddpError::Validation(ref msg) if msg.contains("specific productivity")),
+            "expected a MissingSpecificProductivity message, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn generic_constraint_unresolved_parameter_fails_loud_at_construction() {
+        let base = k_fan_system(3, false);
+        let constraint = GenericConstraint {
+            id: EntityId(500),
+            name: "probe_constraint".to_string(),
+            description: None,
+            expression: ConstraintExpression { terms: vec![] },
+            slack: SlackConfig {
+                enabled: false,
+                penalty: None,
+            },
+            bound_lower_affine: Some(AffineBound::single(EntityId(999))),
+            bound_upper_affine: None,
+        };
+        let system = SystemBuilder::new()
+            .buses(base.buses().to_vec())
+            .hydros(base.hydros().to_vec())
+            .stages(base.stages().to_vec())
+            .inflow_models(base.inflow_models().to_vec())
+            .load_models(base.load_models().to_vec())
+            .bounds(base.bounds().clone())
+            .penalties(base.penalties().clone())
+            .initial_conditions(base.initial_conditions().clone())
+            .policy_graph(base.policy_graph().clone())
+            .generic_constraints(vec![constraint])
+            .build()
+            .expect("adding a generic constraint keeps the fixture valid");
+        let config = k_fan_config(1, 1);
+        let err = build(&system, &config, Vec::new())
+            .expect_err("must reject the unresolved parameter reference before the LP builds");
+        assert!(
+            matches!(err, SddpError::Validation(ref msg) if msg.contains("probe_constraint") && msg.contains("999")),
+            "expected the fail-loud check naming the constraint and id=999, got: {err:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod admission_gate_dcs_tests {
+    use super::{CutSelectionStrategy, SddpError, admission_gate};
+    use crate::risk_measure::RiskMeasure;
+    use crate::stopping_rule::{StoppingMode, StoppingRule, StoppingRuleSet};
+
+    fn no_gap_rules() -> StoppingRuleSet {
+        StoppingRuleSet {
+            rules: vec![StoppingRule::IterationLimit { limit: 100 }],
+            mode: StoppingMode::Any,
+        }
+    }
+
+    fn dynamic() -> CutSelectionStrategy {
+        CutSelectionStrategy::Dynamic {
+            k1: None,
+            k2: 1,
+            nadic: 1,
+            epsilon_viol: 1e-6,
+            start_iteration: 1,
+        }
+    }
+
+    fn level1() -> CutSelectionStrategy {
+        CutSelectionStrategy::Level1 {
+            check_frequency: 5,
+            tie_tolerance: 1e-10,
+        }
+    }
+
+    /// Enumerated forward traversal paired with dynamic cut selection is rejected
+    /// at the real admission gate, the message naming the pairing; either
+    /// configuration alone is admitted, and a value-based strategy under
+    /// enumerated forwards is admitted — so the rejection discriminates on the
+    /// `Dynamic` variant, not on any strategy being present. Every other arm of
+    /// the gate is neutralised here (expectation measures, no `gap` rule).
+    #[test]
+    fn admission_gate_rejects_dynamic_cut_selection_under_enumerated() {
+        let measures = vec![RiskMeasure::Expectation, RiskMeasure::Expectation];
+        let rules = no_gap_rules();
+        let dcs = dynamic();
+        let l1 = level1();
+
+        match admission_gate(&measures, &rules, true, Some(&dcs)) {
+            Err(SddpError::Validation(msg)) => {
+                assert!(
+                    msg.contains("dynamic cut selection"),
+                    "names dynamic cut selection: {msg}"
+                );
+                assert!(
+                    msg.contains("enumerated"),
+                    "names enumerated traversal: {msg}"
+                );
+            }
+            other => panic!("expected a Validation reject for enumerated + Dynamic, got {other:?}"),
+        }
+
+        assert!(
+            admission_gate(&measures, &rules, true, None).is_ok(),
+            "enumerated forwards without dynamic cut selection must be admitted"
+        );
+        assert!(
+            admission_gate(&measures, &rules, true, Some(&l1)).is_ok(),
+            "a value-based cut selection strategy under enumerated forwards must be admitted"
+        );
+        assert!(
+            admission_gate(&measures, &rules, false, Some(&dcs)).is_ok(),
+            "dynamic cut selection under sampled forwards must be admitted"
         );
     }
 }

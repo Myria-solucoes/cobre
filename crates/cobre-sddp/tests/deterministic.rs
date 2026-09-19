@@ -1370,8 +1370,14 @@ fn d12_checkpoint_round_trip() {
     config_with_sim.simulation.enabled = true;
     config_with_sim.simulation.selection = Some(SimulationSelection::Sampled { num_scenarios: 1 });
 
-    let mut setup = StudySetup::new(&system, &config_with_sim, stochastic, hydro_models)
-        .expect("StudySetup must build");
+    let mut setup = StudySetup::new(
+        &system,
+        &config_with_sim,
+        stochastic,
+        hydro_models,
+        Vec::new(),
+    )
+    .expect("StudySetup must build");
 
     let comm = StubComm;
     let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
@@ -3498,8 +3504,8 @@ fn d29_weekly_par_noise_sharing() {
     let hydro_models =
         prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
 
-    let mut setup =
-        StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup must build");
+    let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
+        .expect("StudySetup must build");
 
     let groups = &setup.stage_data.noise_group_ids;
     assert_eq!(groups.len(), 4, "expected 4 study stages");
@@ -3605,8 +3611,8 @@ fn d30_multi_resolution_loads_and_trains() {
     let hydro_models =
         prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
 
-    let mut setup =
-        StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup must build");
+    let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
+        .expect("StudySetup must build");
 
     let comm = StubComm;
     let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
@@ -3664,8 +3670,14 @@ fn frozen_vs_fallback_simulation_costs_are_identical() {
     config_with_sim.simulation.enabled = true;
     config_with_sim.simulation.selection = Some(SimulationSelection::Sampled { num_scenarios: 4 });
 
-    let mut setup = StudySetup::new(&system, &config_with_sim, stochastic, hydro_models)
-        .expect("StudySetup must build");
+    let mut setup = StudySetup::new(
+        &system,
+        &config_with_sim,
+        stochastic,
+        hydro_models,
+        Vec::new(),
+    )
+    .expect("StudySetup must build");
 
     let comm = StubComm;
     let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");

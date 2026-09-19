@@ -141,7 +141,7 @@ pub(crate) struct BroadcastConfig {
 
 impl BroadcastConfig {
     pub(crate) fn from_config(config: &Config) -> Result<Self, CliError> {
-        let params = StudyParams::from_config(config).map_err(CliError::from)?;
+        let params = StudyParams::from_config(config, Vec::new()).map_err(CliError::from)?;
         // Sentinel path: the scenario-source helpers use it only for historical-years
         // look-up and error messages, neither exercised here.
         let sentinel_path = std::path::Path::new("config.json");

@@ -123,8 +123,14 @@ mod boundary_cuts {
         .expect("prepare_stochastic");
         let hydro_models =
             prepare_hydro_models(&prep.system, case_dir, false).expect("prepare_hydro_models");
-        let setup = StudySetup::new(&prep.system, config, prep.stochastic, hydro_models)
-            .expect("StudySetup::new");
+        let setup = StudySetup::new(
+            &prep.system,
+            config,
+            prep.stochastic,
+            hydro_models,
+            Vec::new(),
+        )
+        .expect("StudySetup::new");
         (setup, prep.system)
     }
 
@@ -989,7 +995,7 @@ mod basis_reconstruct_churn {
         let hydro_models = prepare_hydro_models(&system, &case_dir, false)
             .expect("prepare_hydro_models must succeed");
 
-        let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models)
+        let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
             .expect("StudySetup must build");
 
         let comm = StubComm;
@@ -1083,7 +1089,7 @@ mod basis_reconstruct_churn {
         let hydro_models = prepare_hydro_models(&system, &case_dir, false)
             .expect("prepare_hydro_models must succeed");
 
-        let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models)
+        let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
             .expect("StudySetup must build");
 
         let comm = StubComm;
@@ -1162,7 +1168,7 @@ mod basis_reconstruct_churn {
         let hydro_models = prepare_hydro_models(&system, &case_dir, false)
             .expect("prepare_hydro_models must succeed");
 
-        let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models)
+        let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
             .expect("StudySetup phase1 must build");
 
         let comm = StubComm;
@@ -1236,8 +1242,8 @@ mod basis_reconstruct_churn {
             let hydro2 = prepare_hydro_models(&system2, &case_dir, false)
                 .expect("prepare_hydro_models phase2");
 
-            let mut setup2 =
-                StudySetup::new(&system2, &config, stochastic2, hydro2).expect("StudySetup phase2");
+            let mut setup2 = StudySetup::new(&system2, &config, stochastic2, hydro2, Vec::new())
+                .expect("StudySetup phase2");
 
             // Read the placeholder-FCF metadata before the mutable borrow below
             // (borrow checker).
@@ -1342,7 +1348,7 @@ mod basis_reconstruct_churn {
         let hydro_models = prepare_hydro_models(&system, &case_dir, false)
             .expect("prepare_hydro_models must succeed");
 
-        let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models)
+        let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
             .expect("StudySetup must build");
 
         let comm = StubComm;
@@ -1662,8 +1668,14 @@ mod warm_start {
         .expect("prepare_stochastic");
         let hydro_models =
             prepare_hydro_models(&prep.system, case_dir, false).expect("prepare_hydro_models");
-        StudySetup::new(&prep.system, config, prep.stochastic, hydro_models)
-            .expect("StudySetup::new")
+        StudySetup::new(
+            &prep.system,
+            config,
+            prep.stochastic,
+            hydro_models,
+            Vec::new(),
+        )
+        .expect("StudySetup::new")
     }
 
     #[test]
@@ -1929,7 +1941,7 @@ mod test_backward_cache_reduces_pivots {
         let hydro_models = prepare_hydro_models(&system, &case_dir, false)
             .expect("prepare_hydro_models must succeed");
 
-        let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models)
+        let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
             .expect("StudySetup must build");
 
         let comm = StubComm;
@@ -3313,7 +3325,7 @@ mod range_warm_start_determinism {
             let stochastic = pr.stochastic;
             let hydro_models = prepare_hydro_models(&system, dir, false)
                 .expect("prepare_hydro_models must succeed");
-            let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models)
+            let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
                 .expect("StudySetup::new must succeed");
 
             let comm = StubComm;

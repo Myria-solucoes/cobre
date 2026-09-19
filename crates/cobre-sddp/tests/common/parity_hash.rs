@@ -282,8 +282,8 @@ where
         .simulation_scenario_source(sentinel)
         .expect("simulation_scenario_source must parse");
 
-    let params =
-        StudyParams::from_config(&config_with_sim).expect("StudyParams::from_config must succeed");
+    let params = StudyParams::from_config(&config_with_sim, Vec::new())
+        .expect("StudyParams::from_config must succeed");
     let construction = params;
 
     let mut setup = StudySetup::from_broadcast_params(

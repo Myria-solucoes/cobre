@@ -79,8 +79,8 @@ mod simulation_only {
         let hydro_models =
             prepare_hydro_models(&system, &case_dir, false).expect("prepare_hydro_models");
 
-        let mut setup =
-            StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup");
+        let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
+            .expect("StudySetup");
 
         let comm = StubComm;
         let mut solver = ActiveSolver::new().expect("ActiveSolver");
@@ -283,7 +283,7 @@ mod d17_signed_evaporation {
             .simulation_scenario_source(sentinel)
             .expect("simulation_scenario_source must parse");
 
-        let params = StudyParams::from_config(&config_with_sim)
+        let params = StudyParams::from_config(&config_with_sim, Vec::new())
             .expect("StudyParams::from_config must succeed");
         let construction = params;
 
@@ -457,8 +457,8 @@ mod d41_energy_contracts_simulation {
         let hydro_models = prepare_hydro_models(&system, &case_dir, false)
             .expect("prepare_hydro_models must succeed");
 
-        let mut setup =
-            StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup::new");
+        let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
+            .expect("StudySetup::new");
 
         let comm = StubComm;
         let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
@@ -675,8 +675,14 @@ mod multi_resolution_integration {
             .expect("prepare_stochastic");
         let hydro_models =
             prepare_hydro_models(&prep.system, case_dir, false).expect("prepare_hydro_models");
-        StudySetup::new(&prep.system, config, prep.stochastic, hydro_models)
-            .expect("StudySetup::new")
+        StudySetup::new(
+            &prep.system,
+            config,
+            prep.stochastic,
+            hydro_models,
+            Vec::new(),
+        )
+        .expect("StudySetup::new")
     }
 
     // ---------------------------------------------------------------------------
@@ -1065,8 +1071,14 @@ mod decomp_integration {
             .expect("prepare_stochastic");
         let hydro_models =
             prepare_hydro_models(&prep.system, case_dir, false).expect("prepare_hydro_models");
-        let setup = StudySetup::new(&prep.system, config, prep.stochastic, hydro_models)
-            .expect("StudySetup::new");
+        let setup = StudySetup::new(
+            &prep.system,
+            config,
+            prep.stochastic,
+            hydro_models,
+            Vec::new(),
+        )
+        .expect("StudySetup::new");
         (setup, prep.system)
     }
 

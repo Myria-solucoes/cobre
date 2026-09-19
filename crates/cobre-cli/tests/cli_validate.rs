@@ -244,6 +244,63 @@ fn validate_schema_failure_path_appears_once() {
     );
 }
 
+/// A duplicate bus id is collected by the six-layer pipeline into a single
+/// `LoadError::ConstraintError`; under `--json` its `phase` must be the shared
+/// `cobre-io` kind vocabulary, not a CLI-only classifier string.
+#[test]
+fn duplicate_bus_id_json_mode_reports_constraint_error_kind() {
+    let dir = TempDir::new().unwrap();
+    make_valid_case(&dir);
+    write_file(
+        dir.path(),
+        "system/buses.json",
+        r#"{ "buses": [{ "id": 1, "name": "BUS_1", "operational_start_date": "2024-01-01" }, { "id": 1, "name": "BUS_2", "operational_start_date": "2024-01-01" }] }"#,
+    );
+
+    let output = cobre()
+        .args(["validate", dir.path().to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "expected validation failure");
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(
+        value["error"]["phase"],
+        serde_json::json!("ConstraintError"),
+        "kind must be the shared cobre-io vocabulary: {value}"
+    );
+}
+
+/// A `config.json` parse failure is caught after the six-layer pipeline
+/// succeeds; under `--json` it must still emit a single error object, where
+/// previously stdout stayed empty on this failure.
+#[test]
+fn config_parse_failure_json_mode_emits_error_object() {
+    let dir = TempDir::new().unwrap();
+    make_valid_case(&dir);
+    write_file(dir.path(), "config.json", "{ not valid json");
+
+    let output = cobre()
+        .args(["validate", dir.path().to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "expected a validation failure");
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let parsed: Result<serde_json::Value, _> = serde_json::from_str(&stdout);
+    assert!(
+        parsed.is_ok(),
+        "stdout must be a single parseable JSON object, got parse error {:?} for: {stdout:?}",
+        parsed.as_ref().err()
+    );
+    let value = parsed.unwrap();
+    assert!(
+        value["error"]["message"].is_string(),
+        "expected an error object with a message, got: {value}"
+    );
+}
+
 #[test]
 fn nonexistent_path_exits_2() {
     cobre()
@@ -706,6 +763,43 @@ fn boundary_mismatched_hydro_set_exits_nonzero_and_names_hydro() {
         .code(1)
         .stdout(predicate::str::contains("hydro 0"))
         .stdout(predicate::str::contains("different set of plants"));
+}
+
+/// The same mismatched-hydro-set boundary reject under `--json` emits a
+/// single parseable error object whose `kind` is the shared
+/// `BoundaryReconciliationError` vocabulary — previously `--json` left
+/// stdout empty on a boundary reject.
+#[test]
+fn boundary_mismatched_hydro_set_json_mode_reports_boundary_reconciliation_error_kind() {
+    let target_dir = TempDir::new().unwrap();
+    write_boundary_case(target_dir.path(), 0);
+    run_case(target_dir.path());
+
+    let source_dir = TempDir::new().unwrap();
+    write_boundary_case(source_dir.path(), 1);
+    run_case(source_dir.path());
+
+    append_boundary_policy(target_dir.path(), &source_dir.path().join("output/policy"));
+
+    let output = cobre()
+        .args(["validate", target_dir.path().to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "expected validation failure");
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(
+        value["error"]["phase"],
+        serde_json::json!("BoundaryReconciliationError"),
+        "kind must be the shared boundary-phase vocabulary: {value}"
+    );
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("hydro 0")),
+        "expected the offending hydro named in the message, got: {value}"
+    );
 }
 
 /// A SOURCE boundary that prices an extra hydro the target does not model is
