@@ -3073,3 +3073,58 @@ mod branching_gate_roster {
     //! `training/backward_pass_state.rs`, `training/forward/stats_aggregation.rs`,
     //! `simulation/aggregation.rs`) is empty — no scratch mutation survives.
 }
+
+#[cfg(all(feature = "highs", feature = "test-support"))]
+mod drift_reduction_rank_invariant {
+    //! Real-MPI rank-count invariance of `TrainingResult.drift`. Under
+    //! `mpiexec -n N` each rank folds its workers' read-back drift tallies, then
+    //! all ranks reduce with the two-collective `Max`/`Sum` Allreduce; the
+    //! reduced tally must match the single-rank reference bit-for-bit
+    //! (`create_communicator(Auto)` resolves to `LocalBackend` under plain
+    //! `cargo test` and to the `mpiexec` world otherwise). The `Debug` render is
+    //! the comparison surface because the tally's fields are crate-internal.
+
+    use cobre_comm::{BackendKind, Communicator, LocalBackend, create_communicator};
+    use cobre_sddp::TrainingResult;
+    use cobre_sddp::test_support::k_fan_setup;
+    use cobre_solver::ActiveSolver;
+
+    const K: usize = 8;
+    const FORWARD_PASSES: u32 = 6;
+    const MAX_ITERATIONS: u32 = 3;
+
+    fn train_drift<C: Communicator>(comm: &C) -> TrainingResult {
+        let mut fixture = k_fan_setup(K, FORWARD_PASSES, MAX_ITERATIONS);
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+        let outcome = fixture
+            .setup
+            .train(&mut solver, comm, 1, ActiveSolver::new, None, None)
+            .expect("k_fan training must return Ok");
+        assert!(
+            outcome.error.is_none(),
+            "k_fan training must not error: {:?}",
+            outcome.error
+        );
+        outcome.result
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow: run with --features slow-tests"
+    )]
+    fn drift_reduction_rank_invariant() {
+        let world =
+            create_communicator(BackendKind::Auto).expect("communicator construction must succeed");
+        let world_size = world.size();
+
+        let world_drift = format!("{:?}", train_drift(&world).drift);
+        let reference_drift = format!("{:?}", train_drift(&LocalBackend).drift);
+
+        assert_eq!(
+            world_drift, reference_drift,
+            "TrainingResult.drift at world size {world_size} (real MPI) must be bit-identical to \
+             the single-rank reference"
+        );
+    }
+}

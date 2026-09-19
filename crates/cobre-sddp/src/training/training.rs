@@ -23,7 +23,7 @@ use crate::{
     setup::NodePos,
     solver_stats::SolverStatsLogEntry,
     training_session::{IterationOutcome, TrainingSession},
-    workspace::CapturedBasis,
+    workspace::{CapturedBasis, DriftTally},
 };
 
 // ---------------------------------------------------------------------------
@@ -89,6 +89,11 @@ pub struct TrainingResult {
     /// stage template plus that pool's active cuts). Always `Some`: freeze runs
     /// unconditionally before the first iteration and is never reverted.
     pub frozen_templates: Option<Vec<StageTemplate>>,
+
+    /// Phase-global outgoing-state read-back drift, reduced across ranks so it
+    /// is identical on every rank. `Default` (all-zero) on the
+    /// loaded-checkpoint / disabled-training paths, which observe no clamps.
+    pub drift: DriftTally,
 }
 
 impl TrainingResult {
@@ -113,6 +118,7 @@ impl TrainingResult {
         solver_stats_log: Vec<SolverStatsLogEntry>,
         visited_archive: Option<VisitedStatesArchive>,
         frozen_templates: Option<Vec<StageTemplate>>,
+        drift: DriftTally,
     ) -> Self {
         Self {
             final_lb,
@@ -126,6 +132,7 @@ impl TrainingResult {
             solver_stats_log,
             visited_archive,
             frozen_templates,
+            drift,
         }
     }
 }

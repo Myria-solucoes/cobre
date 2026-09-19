@@ -14,6 +14,7 @@ use cobre_io::PolicyMode::Resume;
 use cobre_io::PolicyMode::WarmStart;
 use cobre_io::output::policy::read_policy_checkpoint;
 use cobre_sddp::BoundaryLoadRequest;
+use cobre_sddp::DriftTally;
 use cobre_sddp::FullFcf;
 use cobre_sddp::FutureCostFunction;
 use cobre_sddp::PolicyLoadProof;
@@ -379,5 +380,7 @@ pub(super) fn load_policy_for_simulation(
         // Checkpoints store no frozen templates; `simulate()` re-freezes from the FCF
         // row pool when this is None.
         None,
+        // drift: a checkpoint load observes no read-back clamps.
+        DriftTally::default(),
     ))
 }

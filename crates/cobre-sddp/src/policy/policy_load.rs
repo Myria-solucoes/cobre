@@ -3452,6 +3452,7 @@ mod tests {
             Vec::new(),
             None,
             None,
+            crate::DriftTally::default(),
         );
 
         let (col_u8, row_u8) = convert_basis_cache(&training_result);

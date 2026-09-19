@@ -43,7 +43,9 @@ use cobre_core::TrainingEvent::IterationSummary;
 use cobre_io::BoundaryPolicy;
 use cobre_io::Config;
 use cobre_io::DistributionInfo;
+use cobre_io::DriftSummary;
 use cobre_io::EntitySlot;
+use cobre_io::FamilyDrift;
 use cobre_io::LoadedCase;
 use cobre_io::MetadataCost;
 use cobre_io::MetadataSimulationSolveStats;
@@ -86,9 +88,12 @@ use cobre_sddp::SddpError;
 use cobre_sddp::SimulationWeighting;
 use cobre_sddp::TrainingResult;
 use cobre_sddp::ValidatedBoundaryCuts;
+use cobre_sddp::DriftTally;
 use cobre_sddp::aggregate_simulation;
 use cobre_sddp::build_basis_cache_from_checkpoint;
+use cobre_sddp::simulation::aggregation::reduce_simulation_drift;
 use cobre_sddp::build_deviation_summary;
+use cobre_sddp::build_drift_summary;
 use cobre_sddp::build_evaporation_model_rows;
 use cobre_sddp::build_fixed_delivery_rows;
 use cobre_sddp::build_generic_constraint_echo_rows;
@@ -197,11 +202,17 @@ pub(crate) struct RunSummary {
     stochastic: Option<StochasticSummary>,
     hydro_models: Option<HydroModelSummary>,
     provenance: Option<ModelProvenanceReport>,
+    /// Reduced training-phase read-back drift, from `build_drift_summary`.
+    /// `None` when no family clamped.
+    drift: Option<DriftSummary>,
 }
 
 pub(crate) struct SimSummary {
     pub(crate) n_scenarios: u32,
     pub(crate) completed: u32,
+    /// Reduced simulation-phase read-back drift, from `build_drift_summary`.
+    /// `None` when no family clamped.
+    pub(crate) drift: Option<DriftSummary>,
 }
 
 /// Validate that `threads`, when given, is >= 1.
@@ -579,6 +590,7 @@ pub(crate) fn write_training_artifacts(
         // Mirrors the CLI write site so Python and CLI emit the same
         // `production_fit_deviation` section.
         production_fit_deviation: build_deviation_summary(&setup.hydro_models.fpha_fit_deviations),
+        drift: build_drift_summary(&training.result.drift),
     };
     write_training_results(output_dir, &training.output, system, config, &training_ctx)
         .map_err(|e| format!("output write error: training results output: {e}"))?;
@@ -782,13 +794,16 @@ pub(crate) fn run_simulation_phase_py(
         Some(weights) => SimulationWeighting::Census { weights },
         None => SimulationWeighting::Uniform,
     };
-    let (cost_summary, gathered_scenario_costs) = aggregate_simulation(
+    let (mut cost_summary, gathered_scenario_costs) = aggregate_simulation(
         &sim_run_result.costs,
         setup.simulation_config(),
         &LocalBackend,
         weighting,
     )
     .map_err(|e| format!("simulation error: cost aggregation: {e}"))?;
+
+    cost_summary.drift = reduce_simulation_drift(&sim_pool.workspaces, &LocalBackend)
+        .map_err(|e| format!("simulation error: drift reduction: {e}"))?;
 
     let scenario_summary_rows: Vec<(u32, Option<f64>, f64)> = gathered_scenario_costs
         .iter()
@@ -840,6 +855,7 @@ pub(crate) fn run_simulation_phase_py(
     let sim_summary = SimSummary {
         n_scenarios: sim_out.n_scenarios,
         completed: sim_out.completed,
+        drift: build_drift_summary(&cost_summary.drift),
     };
     let sim_ctx = OutputContext {
         hostname: get_hostname(),
@@ -851,6 +867,7 @@ pub(crate) fn run_simulation_phase_py(
         setup: None,
         // training-only.
         production_fit_deviation: None,
+        drift: build_drift_summary(&cost_summary.drift),
     };
     write_simulation_results(output_dir, &sim_out, &sim_ctx)
         .map_err(|e| format!("output write error: simulation results output: {e}"))?;
@@ -1385,6 +1402,8 @@ pub(crate) fn reconstruct_policy_from_checkpoint(
         // None: checkpoints store no frozen templates; simulate() re-freezes from the
         // FCF cut pool at startup.
         None,
+        // drift: a checkpoint load observes no read-back clamps.
+        DriftTally::default(),
     );
 
     Ok((loaded_fcf, training_result))
@@ -1438,6 +1457,7 @@ pub(crate) fn run_via_study(
             stochastic: Some(study.stochastic_summary().clone()),
             hydro_models: Some(study.hydro_models_summary().clone()),
             provenance: Some(study.provenance().clone()),
+            drift: build_drift_summary(&result.drift),
         })
     } else if should_simulate {
         let policy = study.load_policy_native(None)?;
@@ -1460,6 +1480,7 @@ pub(crate) fn run_via_study(
             stochastic: Some(study.stochastic_summary().clone()),
             hydro_models: Some(study.hydro_models_summary().clone()),
             provenance: Some(study.provenance().clone()),
+            drift: build_drift_summary(&result.drift),
         })
     } else {
         Ok(RunSummary {
@@ -1474,6 +1495,9 @@ pub(crate) fn run_via_study(
             stochastic: Some(study.stochastic_summary().clone()),
             hydro_models: Some(study.hydro_models_summary().clone()),
             provenance: Some(study.provenance().clone()),
+            // No training ran and no policy was loaded, so no `TrainingResult`
+            // exists to source a drift tally from.
+            drift: None,
         })
     }
 }
@@ -1485,6 +1509,32 @@ fn stochastic_source_str(source: &StochasticSource) -> Option<&'static str> {
         StochasticSource::Loaded => Some("loaded"),
         StochasticSource::None => None,
     }
+}
+
+/// Convert a [`FamilyDrift`] to a Python dict: `{"max_abs", "max_rel", "clamped_count"}`.
+fn family_drift_to_dict<'py>(py: Python<'py>, family: &FamilyDrift) -> PyResult<Bound<'py, PyDict>> {
+    let dict = PyDict::new(py);
+    dict.set_item("max_abs", family.max_abs)?;
+    dict.set_item("max_rel", family.max_rel)?;
+    dict.set_item("clamped_count", family.clamped_count)?;
+    Ok(dict)
+}
+
+/// Convert a [`DriftSummary`] to the nested `"drift"` Python dict: one
+/// sub-dict per bounded state family (`storage`, `transit_buckets`,
+/// `commitment_hold`).
+fn drift_summary_to_dict<'py>(py: Python<'py>, drift: &DriftSummary) -> PyResult<Bound<'py, PyDict>> {
+    let dict = PyDict::new(py);
+    dict.set_item("storage", family_drift_to_dict(py, &drift.storage)?)?;
+    dict.set_item(
+        "transit_buckets",
+        family_drift_to_dict(py, &drift.transit_buckets)?,
+    )?;
+    dict.set_item(
+        "commitment_hold",
+        family_drift_to_dict(py, &drift.commitment_hold)?,
+    )?;
+    Ok(dict)
 }
 
 /// Convert an [`ArOrderSummary`] to a Python dict.
@@ -1638,7 +1688,9 @@ fn iteration_summary_to_dict<'py>(
 /// GIL is released for the entire Rust computation.
 /// Returns a dict with keys: `"converged"`, `"iterations"`, `"lower_bound"`, `"upper_bound"`,
 /// `"gap_percent"`, `"total_time_ms"`, `"output_dir"`, `"simulation"`, `"stochastic"`,
-/// `"hydro_models"`, `"provenance"`.
+/// `"hydro_models"`, `"provenance"`, and the optional `"drift"` (omitted when no bounded
+/// state family clamped during training; `summary["simulation"]["drift"]` mirrors it for
+/// the simulation phase).
 ///
 /// `config_overrides` is an optional flat dotted-key mapping (e.g.
 /// `{"training.tree_seed": 7}`) that is deep-merged into `config.json` before the
@@ -1704,12 +1756,19 @@ pub fn run(
             dict.set_item("total_time_ms", summary.total_time_ms)?;
             dict.set_item("output_dir", summary.output_dir.to_string_lossy().as_ref())?;
 
+            if let Some(drift) = &summary.drift {
+                dict.set_item("drift", drift_summary_to_dict(py, drift)?)?;
+            }
+
             dict.set_item(
                 "simulation",
                 if let Some(sim) = summary.simulation {
                     let sim_dict = PyDict::new(py);
                     sim_dict.set_item("n_scenarios", sim.n_scenarios)?;
                     sim_dict.set_item("completed", sim.completed)?;
+                    if let Some(drift) = &sim.drift {
+                        sim_dict.set_item("drift", drift_summary_to_dict(py, drift)?)?;
+                    }
                     sim_dict.into()
                 } else {
                     py.None()

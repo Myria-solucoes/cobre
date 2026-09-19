@@ -7,6 +7,7 @@ use cobre_io::OutputContext;
 use cobre_io::now_iso8601;
 use cobre_sddp::SolverStatsDelta;
 use cobre_sddp::build_deviation_summary;
+use cobre_sddp::build_drift_summary;
 use cobre_solver::active_solver_metadata_id;
 
 use crate::progress::RenderMode;
@@ -186,6 +187,7 @@ fn execute_inner<C: Communicator>(ctx: &RunContext<C>, args: &RunArgs) -> Result
                 production_fit_deviation: build_deviation_summary(
                     &setup.hydro_models.fpha_fit_deviations,
                 ),
+                drift: build_drift_summary(&training.result.drift),
             };
             write_training_outputs(&WriteTrainingArgs {
                 output_dir: &ctx.output_dir,

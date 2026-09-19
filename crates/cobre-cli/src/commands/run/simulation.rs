@@ -21,9 +21,11 @@ use cobre_sddp::SolverStatsDelta;
 use cobre_sddp::StudySetup;
 use cobre_sddp::TrainingResult;
 use cobre_sddp::aggregate_simulation;
+use cobre_sddp::build_drift_summary;
 use cobre_sddp::pack_delta_scalars;
 use cobre_sddp::pack_scenario_stats;
 use cobre_sddp::reconcile_global_ok;
+use cobre_sddp::simulation::aggregation::reduce_simulation_drift;
 use cobre_sddp::unpack_delta_scalars;
 use cobre_sddp::unpack_scenario_stats;
 use cobre_solver::ActiveSolver;
@@ -163,12 +165,21 @@ pub(super) fn run_simulation_phase(
         Some(weights) => SimulationWeighting::Census { weights },
         None => SimulationWeighting::Uniform,
     };
-    let (cost_summary, gathered_scenario_costs) =
+    let (mut cost_summary, gathered_scenario_costs) =
         aggregate_simulation(&sim_run_result.costs, sim_config, &ctx.comm, weighting).map_err(
             |e| CliError::Internal {
                 message: format!("simulation cost aggregation error: {e}"),
             },
         )?;
+
+    // Reduce the read-back drift here, past the sim-outcome reconcile above, so a
+    // peer failure never strands this rank in the collective; the sim workspaces
+    // still hold each worker's tally.
+    cost_summary.drift = reduce_simulation_drift(&sim_pool.workspaces, &ctx.comm).map_err(|e| {
+        CliError::Internal {
+            message: format!("simulation drift reduction error: {e}"),
+        }
+    })?;
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let parallelism = (ctx.n_threads as u32).saturating_mul(ctx.comm.size() as u32);
@@ -210,6 +221,7 @@ pub(super) fn run_simulation_phase(
             &global_scenario_stats,
             &global_path_rows,
             &gathered_scenario_costs,
+            &cost_summary,
         )?;
     }
 
@@ -225,6 +237,7 @@ fn write_sim_outputs_on_root(
     global_scenario_stats: &[(u32, SolverStatsDelta)],
     global_path_rows: &[SimulationPathRecord],
     gathered_scenario_costs: &[(u32, f64, Option<f64>)],
+    cost_summary: &cobre_sddp::SimulationSummary,
 ) -> Result<(), CliError> {
     let mpi_world_size = u32::try_from(ctx.topology.world_size).unwrap_or(u32::MAX);
     let sim_ctx = OutputContext {
@@ -236,6 +249,7 @@ fn write_sim_outputs_on_root(
         distribution: build_distribution_info(&ctx.topology, ctx.n_threads, mpi_world_size),
         setup: None,
         production_fit_deviation: None,
+        drift: build_drift_summary(&cost_summary.drift),
     };
     write_simulation_outputs(&WriteSimulationArgs {
         output_dir: &ctx.output_dir,
@@ -273,6 +287,7 @@ fn print_sim_summary(
             total_failed_solves: agg.lp_failures,
             total_solve_time_seconds: agg.solve_time_ms / 1000.0,
             parallelism,
+            drift: build_drift_summary(&cost_summary.drift),
         },
     );
 }

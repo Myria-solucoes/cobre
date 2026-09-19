@@ -15,6 +15,7 @@ use crate::cut_selection::CutSelectionStrategy::Level1;
 use crate::cut_selection::CutSelectionStrategy::Lml1;
 use crate::visited_states::VisitedStatesArchive;
 use crate::workspace::CapturedBasis;
+use crate::workspace::workspace::{allreduce_drift, fold_worker_drift};
 
 use std::ops::RangeInclusive;
 pub(crate) mod iteration_scratch;
@@ -630,6 +631,13 @@ where
 
         let basis_cache = broadcast_basis_cache(&self.basis_store, self.comm)?;
 
+        // Same clean-path lockstep as broadcast_basis_cache: reconcile has
+        // already diverted any failed peer, so every surviving rank enters this
+        // Allreduce together.
+        let local_drift = fold_worker_drift(&self.fwd_pool.workspaces);
+        let drift = allreduce_drift(&local_drift, self.comm).map_err(SddpError::Communication)?;
+        drift.warn_if_exceeds(self.comm.rank() == 0, "training");
+
         Ok(TrainingOutcome {
             result: TrainingResult::new(
                 final_lb,
@@ -643,6 +651,7 @@ where
                 solver_stats_log,
                 visited_archive,
                 Some(frozen_templates),
+                drift,
             ),
             error: None,
         })
@@ -703,6 +712,11 @@ where
             },
         );
 
+        // No collective on the failure path: a peer has already failed, so an
+        // Allreduce would deadlock. Carry the un-reduced rank-local fold
+        // (best-effort), mirroring the empty basis_cache passed below.
+        let drift = fold_worker_drift(&self.fwd_pool.workspaces);
+
         TrainingOutcome {
             result: TrainingResult::new(
                 final_lb,
@@ -716,6 +730,7 @@ where
                 solver_stats_log,
                 visited_archive,
                 Some(frozen_templates),
+                drift,
             ),
             error: Some(err),
         }

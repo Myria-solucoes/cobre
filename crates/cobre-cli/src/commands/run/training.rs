@@ -10,6 +10,7 @@ use cobre_sddp::SddpError;
 use cobre_sddp::SolverStatsDelta;
 use cobre_sddp::StudySetup;
 use cobre_sddp::TrainingResult;
+use cobre_sddp::build_drift_summary;
 use cobre_sddp::sum_phase_timing_ms;
 use cobre_solver::ActiveSolver;
 
@@ -230,6 +231,7 @@ pub(super) fn run_training_phase(
         serial_cut_sync_seconds: Some(global_stats.serial_cut_sync_ms as f64 / 1000.0),
         serial_allreduce_seconds: Some(global_stats.serial_allreduce_ms as f64 / 1000.0),
         serial_scheduling_seconds: Some(global_stats.serial_scheduling_ms as f64 / 1000.0),
+        drift: build_drift_summary(&training_result.drift),
     };
     if !ctx.quiet && ctx.is_root {
         print_training_summary(&ctx.stderr, &training_summary);

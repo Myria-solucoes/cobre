@@ -206,3 +206,5 @@ pub use training::state_exchange::ExchangeBuffers;
 pub use training::trajectory::TrajectoryRecord;
 // ── workspace ─────────────────────────────────────────────────────────────────
 pub use workspace::workspace::{BASIS_BROADCAST_FORMAT_TAG, CapturedBasis};
+
+pub use workspace::drift_tally::{DriftTally, FamilyDrift, build_drift_summary};

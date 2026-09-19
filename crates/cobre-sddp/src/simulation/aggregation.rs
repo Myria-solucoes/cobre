@@ -8,6 +8,7 @@
 //! a subsequent broadcast.
 
 use cobre_comm::Communicator;
+use cobre_solver::SolverInterface;
 
 use crate::risk_measure::RiskMeasure;
 use crate::simulation::{
@@ -15,6 +16,8 @@ use crate::simulation::{
     error::SimulationError,
     types::{ScenarioCategoryCosts, SimulationSummary},
 };
+use crate::workspace::workspace::{allreduce_drift, fold_worker_drift};
+use crate::workspace::{DriftTally, SolverWorkspace};
 
 /// Gathered per-scenario `(scenario_id, total_cost, weight)`, canonical
 /// order — `weight` is `Some` only under [`SimulationWeighting::Census`].
@@ -177,9 +180,39 @@ pub fn aggregate_simulation<C: Communicator>(
             std_cost,
             #[allow(clippy::cast_possible_truncation)]
             n_scenarios: total_gathered as u32,
+            // Placeholder: the caller (which holds the sim workspaces and comm)
+            // fills this via `reduce_simulation_drift` after this returns, so the
+            // fold + Allreduce stays off the pre-`reconcile_global_ok` path.
+            drift: DriftTally::default(),
         },
         gathered,
     ))
+}
+
+/// Reduces the simulation workers' per-family read-back drift into the
+/// phase-global [`DriftTally`], identical on every rank, and emits the single
+/// coordinator warning when the reduced drift exceeds the diagnostic threshold.
+///
+/// The single owner of the simulation-phase drift reduction: both the CLI and
+/// Python paths call it so their [`SimulationSummary::drift`] agree by
+/// construction. Call it AFTER the sim-outcome reconcile (never inside the
+/// collective-free `simulate`), so a peer failure cannot strand a rank in this
+/// Allreduce.
+///
+/// # Errors
+///
+/// Returns [`SimulationError::IoError`] if either Allreduce fails, matching the
+/// sibling collectives in [`aggregate_simulation`].
+pub fn reduce_simulation_drift<S: SolverInterface, C: Communicator>(
+    workspaces: &[SolverWorkspace<S>],
+    comm: &C,
+) -> Result<DriftTally, SimulationError> {
+    let local = fold_worker_drift(workspaces);
+    let drift = allreduce_drift(&local, comm).map_err(|e| SimulationError::IoError {
+        message: format!("allreduce(drift) failed: {e}"),
+    })?;
+    drift.warn_if_exceeds(comm.rank() == 0, "simulation");
+    Ok(drift)
 }
 
 // ── Private helpers ────────────────────────────────────────────────────────────
@@ -405,7 +438,7 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_summary_carries_exactly_three_fields() {
+    fn aggregate_summary_carries_expected_fields() {
         let local_costs = vec![(0u32, 999.0, zero_cats())];
         let config = make_config(1);
         let comm = LocalBackend;
@@ -420,10 +453,12 @@ mod tests {
             mean_cost,
             std_cost,
             n_scenarios,
+            drift,
         } = summary;
         assert_eq!(mean_cost, 999.0);
         assert_eq!(std_cost, 0.0);
         assert_eq!(n_scenarios, 1);
+        assert_eq!(drift.storage.clamped_count, 0);
     }
 
     // A grep-asserted inspection test: `compute_cvar`, `CVAR_ALPHA`,

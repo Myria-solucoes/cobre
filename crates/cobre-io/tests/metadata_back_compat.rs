@@ -135,6 +135,7 @@ fn legacy_training_json_deserializes_with_defaults() {
     // Regression gate for an accidental `#[serde(default)]` removal on either optional section.
     assert!(decoded.setup.is_none());
     assert!(decoded.production_fit_deviation.is_none());
+    assert!(decoded.drift.is_none());
 
     assert_eq!(decoded.iterations.completed, 100);
     assert_eq!(decoded.row_pool.total_generated, 1_250_000);
@@ -156,6 +157,7 @@ fn legacy_simulation_json_deserializes_with_defaults() {
     assert_eq!(decoded.solve_stats.parallelism, None);
 
     assert!(decoded.distribution.hosts.is_empty());
+    assert!(decoded.drift.is_none());
 
     assert_eq!(decoded.scenarios.total, 100);
     assert_eq!(decoded.scenarios.completed, 100);
@@ -185,6 +187,10 @@ fn legacy_training_fixture_omits_new_keys() {
         !LEGACY_TRAINING_JSON.contains("production_fit_deviation"),
         "legacy training fixture must omit the `production_fit_deviation` key to exercise back-compat"
     );
+    assert!(
+        !LEGACY_TRAINING_JSON.contains(r#""drift""#),
+        "legacy training fixture must omit the `drift` key to exercise back-compat"
+    );
 }
 
 #[test]
@@ -200,6 +206,10 @@ fn legacy_simulation_fixture_omits_new_keys() {
     assert!(
         !LEGACY_SIM_JSON.contains("\"hosts\""),
         "legacy simulation fixture must omit the `hosts` key to exercise back-compat"
+    );
+    assert!(
+        !LEGACY_SIM_JSON.contains(r#""drift""#),
+        "legacy simulation fixture must omit the `drift` key to exercise back-compat"
     );
 }
 
@@ -319,6 +329,7 @@ fn fully_populated_training_metadata() -> TrainingMetadata {
                 max_abs: 31.7,
             }),
         }),
+        drift: None,
         distribution: fully_populated_distribution(),
     }
 }
@@ -350,6 +361,7 @@ fn fully_populated_simulation_metadata() -> SimulationMetadata {
             solve_seconds: Some(321.0),
             parallelism: Some(8),
         },
+        drift: None,
         distribution: fully_populated_distribution(),
     }
 }
