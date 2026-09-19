@@ -2604,11 +2604,10 @@ mod range_warm_start_determinism {
             })
             .collect();
 
-        let n_thermals = 1;
         let resolved_bounds = ResolvedBounds::new(
             &BoundsCountsSpec {
                 n_hydros: 0,
-                n_thermals,
+                n_thermals: 1,
                 n_lines: 0,
                 n_pumping: 0,
                 n_contracts: 0,

@@ -196,11 +196,9 @@ pub(super) fn run_training_phase(
     let training_summary = TrainingSummary {
         iterations: training_result.iterations,
         converged: training_output.converged,
-        converged_at: if training_output.converged {
-            Some(training_result.iterations)
-        } else {
-            None
-        },
+        converged_at: training_output
+            .converged
+            .then_some(training_result.iterations),
         reason: training_result.reason.clone(),
         lower_bound: training_result.final_lb,
         upper_bound: training_result.final_ub,

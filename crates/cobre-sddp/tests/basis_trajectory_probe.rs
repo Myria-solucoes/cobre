@@ -152,9 +152,7 @@ fn classify_stage_rows(
 
     let mut fam = vec![RowFamily::CutRow; total_rows];
     let mark = |fam: &mut [RowFamily], range: Range<usize>, family: RowFamily| {
-        for r in range {
-            fam[r] = family;
-        }
+        fam[range].fill(family);
     };
 
     let z_inflow_range = geom.z_inflow_row_start..geom.z_inflow_row_start + n_hydros;

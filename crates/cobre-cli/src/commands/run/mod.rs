@@ -206,7 +206,6 @@ fn execute_inner<C: Communicator>(ctx: &RunContext<C>, args: &RunArgs) -> Result
                     quiet: ctx.quiet,
                     stderr: &ctx.stderr,
                 })?;
-                drop(config);
             }
 
             if let Some(ref training_error) = training.error {

@@ -43,23 +43,14 @@ fn json_value_to_py(py: Python<'_>, val: &serde_json::Value) -> PyResult<Py<PyAn
 
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                Ok(i.into_pyobject(py)
-                    .map_err(|e| PyValueError::new_err(e.to_string()))?
-                    .unbind()
-                    .into())
+                into_py(py, i)
             } else if let Some(u) = n.as_u64() {
-                Ok(u.into_pyobject(py)
-                    .map_err(|e| PyValueError::new_err(e.to_string()))?
-                    .unbind()
-                    .into())
+                into_py(py, u)
             } else {
                 let f = n.as_f64().ok_or_else(|| {
                     PyValueError::new_err("JSON number is not representable as f64")
                 })?;
-                Ok(f.into_pyobject(py)
-                    .map_err(|e| PyValueError::new_err(e.to_string()))?
-                    .unbind()
-                    .into())
+                into_py(py, f)
             }
         }
 
@@ -735,47 +726,28 @@ fn arrow_value_to_py(py: Python<'_>, col: &dyn Array, i: usize) -> PyResult<Py<P
                 .as_any()
                 .downcast_ref::<Float64Array>()
                 .ok_or_else(|| PyOSError::new_err("Float64 column downcast failed"))?;
-            Ok(arr
-                .value(i)
-                .into_pyobject(py)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?
-                .unbind()
-                .into())
+            into_py(py, arr.value(i))
         }
         DataType::Int32 => {
             let arr = col
                 .as_any()
                 .downcast_ref::<Int32Array>()
                 .ok_or_else(|| PyOSError::new_err("Int32 column downcast failed"))?;
-            Ok(arr
-                .value(i)
-                .into_pyobject(py)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?
-                .unbind()
-                .into())
+            into_py(py, arr.value(i))
         }
         DataType::Int64 => {
             let arr = col
                 .as_any()
                 .downcast_ref::<Int64Array>()
                 .ok_or_else(|| PyOSError::new_err("Int64 column downcast failed"))?;
-            Ok(arr
-                .value(i)
-                .into_pyobject(py)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?
-                .unbind()
-                .into())
+            into_py(py, arr.value(i))
         }
         DataType::Int8 => {
             let arr = col
                 .as_any()
                 .downcast_ref::<Int8Array>()
                 .ok_or_else(|| PyOSError::new_err("Int8 column downcast failed"))?;
-            Ok(i32::from(arr.value(i))
-                .into_pyobject(py)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?
-                .unbind()
-                .into())
+            into_py(py, i32::from(arr.value(i)))
         }
         DataType::Boolean => {
             let arr = col

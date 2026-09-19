@@ -42,7 +42,6 @@ use cobre_sddp::{StudySetup, hydro_models::prepare_hydro_models, setup::prepare_
 #[cfg(feature = "highs")]
 use cobre_solver::highs::HighsSolver;
 
-/// Iteration cap for the probe.
 #[cfg(feature = "highs")]
 const PROBE_MAX_ITERATIONS: u32 = 1;
 
@@ -69,7 +68,6 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Drive the single-iteration probe.
 #[cfg(feature = "highs")]
 fn run_probe(config_path: &Path) -> Result<(), ExitCode> {
     let case_dir = match config_path.parent() {
@@ -190,12 +188,8 @@ fn print_pool_report(setup: &StudySetup) -> PoolReport {
         let k = pool.populated();
         let a = pool.active_count();
         println!("stage={t} populated_count={k} active_count={a}");
-        if k > max_k {
-            max_k = k;
-        }
-        if k < min_k {
-            min_k = k;
-        }
+        max_k = max_k.max(k);
+        min_k = min_k.min(k);
         total_k = total_k.saturating_add(k as u64);
     }
 

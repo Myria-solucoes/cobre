@@ -90,7 +90,6 @@ mod extraction_nonuniform_block_bases {
 
         let params = StudyParams::from_config(&config_with_sim, Vec::new())
             .expect("StudyParams::from_config must succeed");
-        let construction = params;
 
         let sentinel = Path::new("config.json");
         let training_source = config_with_sim
@@ -103,7 +102,7 @@ mod extraction_nonuniform_block_bases {
         let mut setup = StudySetup::from_broadcast_params(
             &system,
             stochastic,
-            construction,
+            params,
             hydro_models,
             &training_source,
             &simulation_source,

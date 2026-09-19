@@ -361,7 +361,6 @@ pub(super) fn for_each_ring_residue<F>(
         let r = stage_idx + depth + 1;
         let slot = r % k_max;
         for (plant, point) in points.iter().enumerate() {
-            let point: &PointResolution = point;
             let target = point.physical_target(r);
             if target >= n_delivery {
                 continue;

@@ -1457,7 +1457,6 @@ fn stochastic_source_str(source: &StochasticSource) -> Option<&'static str> {
     }
 }
 
-
 /// Convert an [`ArOrderSummary`] to a Python dict.
 fn ar_order_to_dict<'py>(
     py: Python<'py>,

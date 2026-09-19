@@ -783,10 +783,10 @@ fn scenario_batch_costs(
     result: &ScenarioWritePayload,
     scenario_id: i32,
 ) -> Result<Option<RecordBatch>, OutputError> {
-    if !result.stages.iter().any(|s| !s.costs.is_empty()) {
+    let n: usize = result.stages.iter().map(|s| s.costs.len()).sum();
+    if n == 0 {
         return Ok(None);
     }
-    let n: usize = result.stages.iter().map(|s| s.costs.len()).sum();
     let batch = build_costs_batch(
         result.stages.iter().flat_map(|s| s.costs.iter()),
         scenario_id,
@@ -800,10 +800,10 @@ fn scenario_batch_hydros(
     result: &ScenarioWritePayload,
     scenario_id: i32,
 ) -> Result<Option<RecordBatch>, OutputError> {
-    if !result.stages.iter().any(|s| !s.hydros.is_empty()) {
+    let n: usize = result.stages.iter().map(|s| s.hydros.len()).sum();
+    if n == 0 {
         return Ok(None);
     }
-    let n: usize = result.stages.iter().map(|s| s.hydros.len()).sum();
     let batch = build_hydros_batch(
         result.stages.iter().flat_map(|s| s.hydros.iter()),
         scenario_id,
@@ -818,18 +818,14 @@ fn scenario_batch_hydro_bus_generation(
     result: &ScenarioWritePayload,
     scenario_id: i32,
 ) -> Result<Option<RecordBatch>, OutputError> {
-    if !result
-        .stages
-        .iter()
-        .any(|s| !s.hydro_bus_generation.is_empty())
-    {
-        return Ok(None);
-    }
     let n: usize = result
         .stages
         .iter()
         .map(|s| s.hydro_bus_generation.len())
         .sum();
+    if n == 0 {
+        return Ok(None);
+    }
     let batch = build_hydro_bus_generation_batch(
         result
             .stages
@@ -847,10 +843,10 @@ fn scenario_batch_thermals(
     result: &ScenarioWritePayload,
     scenario_id: i32,
 ) -> Result<Option<RecordBatch>, OutputError> {
-    if !result.stages.iter().any(|s| !s.thermals.is_empty()) {
+    let n: usize = result.stages.iter().map(|s| s.thermals.len()).sum();
+    if n == 0 {
         return Ok(None);
     }
-    let n: usize = result.stages.iter().map(|s| s.thermals.len()).sum();
     let batch = build_thermals_batch(
         result.stages.iter().flat_map(|s| s.thermals.iter()),
         scenario_id,
@@ -865,10 +861,10 @@ fn scenario_batch_exchanges(
     result: &ScenarioWritePayload,
     scenario_id: i32,
 ) -> Result<Option<RecordBatch>, OutputError> {
-    if !result.stages.iter().any(|s| !s.exchanges.is_empty()) {
+    let n: usize = result.stages.iter().map(|s| s.exchanges.len()).sum();
+    if n == 0 {
         return Ok(None);
     }
-    let n: usize = result.stages.iter().map(|s| s.exchanges.len()).sum();
     let batch = build_exchanges_batch(
         result.stages.iter().flat_map(|s| s.exchanges.iter()),
         scenario_id,
@@ -884,10 +880,10 @@ fn scenario_batch_buses(
     result: &ScenarioWritePayload,
     scenario_id: i32,
 ) -> Result<Option<RecordBatch>, OutputError> {
-    if !result.stages.iter().any(|s| !s.buses.is_empty()) {
+    let n: usize = result.stages.iter().map(|s| s.buses.len()).sum();
+    if n == 0 {
         return Ok(None);
     }
-    let n: usize = result.stages.iter().map(|s| s.buses.len()).sum();
     let batch = build_buses_batch(
         result.stages.iter().flat_map(|s| s.buses.iter()),
         scenario_id,
@@ -902,10 +898,10 @@ fn scenario_batch_pumping_stations(
     result: &ScenarioWritePayload,
     scenario_id: i32,
 ) -> Result<Option<RecordBatch>, OutputError> {
-    if !result.stages.iter().any(|s| !s.pumping_stations.is_empty()) {
+    let n: usize = result.stages.iter().map(|s| s.pumping_stations.len()).sum();
+    if n == 0 {
         return Ok(None);
     }
-    let n: usize = result.stages.iter().map(|s| s.pumping_stations.len()).sum();
     let batch = build_pumping_batch(
         result.stages.iter().flat_map(|s| s.pumping_stations.iter()),
         scenario_id,
@@ -920,10 +916,10 @@ fn scenario_batch_contracts(
     result: &ScenarioWritePayload,
     scenario_id: i32,
 ) -> Result<Option<RecordBatch>, OutputError> {
-    if !result.stages.iter().any(|s| !s.contracts.is_empty()) {
+    let n: usize = result.stages.iter().map(|s| s.contracts.len()).sum();
+    if n == 0 {
         return Ok(None);
     }
-    let n: usize = result.stages.iter().map(|s| s.contracts.len()).sum();
     let batch = build_contracts_batch(
         result.stages.iter().flat_map(|s| s.contracts.iter()),
         scenario_id,
@@ -938,18 +934,14 @@ fn scenario_batch_non_controllables(
     result: &ScenarioWritePayload,
     scenario_id: i32,
 ) -> Result<Option<RecordBatch>, OutputError> {
-    if !result
-        .stages
-        .iter()
-        .any(|s| !s.non_controllables.is_empty())
-    {
-        return Ok(None);
-    }
     let n: usize = result
         .stages
         .iter()
         .map(|s| s.non_controllables.len())
         .sum();
+    if n == 0 {
+        return Ok(None);
+    }
     let batch = build_non_controllables_batch(
         result
             .stages
@@ -970,10 +962,10 @@ fn scenario_batch_inflow_lags(
     result: &ScenarioWritePayload,
     scenario_id: i32,
 ) -> Result<Option<RecordBatch>, OutputError> {
-    if !result.stages.iter().any(|s| !s.inflow_lags.is_empty()) {
+    let n: usize = result.stages.iter().map(|s| s.inflow_lags.len()).sum();
+    if n == 0 {
         return Ok(None);
     }
-    let n: usize = result.stages.iter().map(|s| s.inflow_lags.len()).sum();
     let batch = build_inflow_lags_batch(
         result.stages.iter().flat_map(|s| s.inflow_lags.iter()),
         scenario_id,
@@ -987,10 +979,10 @@ fn scenario_batch_in_transit(
     result: &ScenarioWritePayload,
     scenario_id: i32,
 ) -> Result<Option<RecordBatch>, OutputError> {
-    if !result.stages.iter().any(|s| !s.transit_buckets.is_empty()) {
+    let n: usize = result.stages.iter().map(|s| s.transit_buckets.len()).sum();
+    if n == 0 {
         return Ok(None);
     }
-    let n: usize = result.stages.iter().map(|s| s.transit_buckets.len()).sum();
     let batch = build_in_transit_batch(
         result.stages.iter().flat_map(|s| s.transit_buckets.iter()),
         scenario_id,
@@ -1023,18 +1015,14 @@ fn scenario_batch_generic_violations(
     result: &ScenarioWritePayload,
     scenario_id: i32,
 ) -> Result<Option<RecordBatch>, OutputError> {
-    if !result
-        .stages
-        .iter()
-        .any(|s| !s.generic_violations.is_empty())
-    {
-        return Ok(None);
-    }
     let n: usize = result
         .stages
         .iter()
         .map(|s| s.generic_violations.len())
         .sum();
+    if n == 0 {
+        return Ok(None);
+    }
     let batch = build_generic_violations_batch(
         result
             .stages
@@ -1051,18 +1039,14 @@ fn scenario_batch_anticipated_lanes(
     result: &ScenarioWritePayload,
     scenario_id: i32,
 ) -> Result<Option<RecordBatch>, OutputError> {
-    if !result
-        .stages
-        .iter()
-        .any(|s| !s.anticipated_lanes.is_empty())
-    {
-        return Ok(None);
-    }
     let n: usize = result
         .stages
         .iter()
         .map(|s| s.anticipated_lanes.len())
         .sum();
+    if n == 0 {
+        return Ok(None);
+    }
     let batch = build_anticipated_lanes_batch(
         result
             .stages

@@ -303,7 +303,7 @@ pub fn run_simulation(setup: &mut StudySetup, iterations: usize) -> Vec<Simulati
     let (result_tx, result_rx) = mpsc::sync_channel(io_capacity);
     let drain_handle = std::thread::spawn(move || result_rx.into_iter().collect::<Vec<_>>());
 
-    let _sim_run = setup
+    setup
         .simulate(
             &mut pool.workspaces,
             &comm,

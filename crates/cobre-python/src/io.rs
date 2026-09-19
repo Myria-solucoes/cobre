@@ -47,10 +47,6 @@ use crate::run::reconcile_boundary_policy;
 
 // ── Error conversion ──────────────────────────────────────────────────────────
 
-fn load_error_kind(err: &LoadError) -> &'static str {
-    err.kind()
-}
-
 /// Load and validate the effective config for [`validate`]'s phase 7.
 ///
 /// Deep-merges `overrides` onto the config file via
@@ -230,7 +226,7 @@ pub fn validate(
     let (loaded, report) = match validate_case_with_artifacts(&path) {
         Ok(result) => result,
         Err(err) => {
-            return_error!(load_error_kind(&err), err.to_string());
+            return_error!(err.kind(), err.to_string());
         }
     };
 
@@ -241,7 +237,7 @@ pub fn validate(
     let config = match load_validate_config(&config_path, overrides.as_ref()) {
         Ok(c) => c,
         Err(ref err) => {
-            return_error!(load_error_kind(err), err.to_string());
+            return_error!(err.kind(), err.to_string());
         }
     };
 
@@ -266,7 +262,7 @@ pub fn validate(
     let training_source = match config.training_scenario_source(&config_path) {
         Ok(s) => s,
         Err(ref err) => {
-            return_error!(load_error_kind(err), err.to_string());
+            return_error!(err.kind(), err.to_string());
         }
     };
 

@@ -230,17 +230,16 @@ impl StudyParams {
                     relative_tolerance,
                 } => {
                     if tolerance.is_none() && relative_tolerance.is_none() {
-                        Err(SddpError::Validation(
+                        return Err(SddpError::Validation(
                             "gap stopping rule requires at least one of tolerance / \
                              relative_tolerance to be present"
                                 .to_string(),
-                        ))
-                    } else {
-                        Ok(StoppingRule::Gap {
-                            tolerance,
-                            relative_tolerance,
-                        })
+                        ));
                     }
+                    Ok(StoppingRule::Gap {
+                        tolerance,
+                        relative_tolerance,
+                    })
                 }
             })
             .collect::<Result<Vec<_>, _>>()?;

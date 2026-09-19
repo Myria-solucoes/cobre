@@ -1220,7 +1220,6 @@ pub fn write_backward_opening_outcome_for_probe<S: SolverInterface + Send>(
             view.primal[col] * col_scale.get(col).copied().unwrap_or(1.0)
         })
         .collect();
-    let _ = view;
     ws.backward_accum.state_duals_buf = state_duals;
 
     let mut stats_after = SolverStatistics::default();

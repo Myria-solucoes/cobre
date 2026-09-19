@@ -311,6 +311,15 @@ fn emit_validate_json(output: &ValidateBoundaryOutput) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Emit `--json`'s error object ahead of the caller's own `CliError` return.
+/// No-op when `json` is false.
+fn emit_json_error(json: bool, kind: &str, message: &str) -> Result<(), CliError> {
+    if json {
+        emit_validate_json(&ValidateBoundaryOutput::error(kind, message))?;
+    }
+    Ok(())
+}
+
 /// Execute the `validate` subcommand, printing a structured diagnostic report
 /// (with any pipeline warnings) to stdout. Honors the module's validation contract:
 /// exit 0 implies `cobre run` will not fail before the solver begins iterating.
@@ -344,9 +353,7 @@ pub fn execute(args: ValidateArgs) -> Result<(), CliError> {
             let message = err.to_string();
             match err {
                 LoadError::IoError { path, source } => {
-                    if args.json {
-                        emit_validate_json(&ValidateBoundaryOutput::error(kind, &message))?;
-                    }
+                    emit_json_error(args.json, kind, &message)?;
                     return Err(CliError::Io {
                         source,
                         context: path.display().to_string(),
@@ -357,18 +364,14 @@ pub fn execute(args: ValidateArgs) -> Result<(), CliError> {
                     if let Some(term) = stdout_sink {
                         format_constraint_description(term, &description, 0, &args.case_dir);
                     }
-                    if args.json {
-                        emit_validate_json(&ValidateBoundaryOutput::error(kind, &description))?;
-                    }
+                    emit_json_error(args.json, kind, &description)?;
                     return Err(CliError::Validation {
                         report: description,
                         already_rendered: true,
                     });
                 }
                 _ => {
-                    if args.json {
-                        emit_validate_json(&ValidateBoundaryOutput::error(kind, &message))?;
-                    }
+                    emit_json_error(args.json, kind, &message)?;
                     return Err(CliError::Internal { message });
                 }
             }
@@ -382,9 +385,7 @@ pub fn execute(args: ValidateArgs) -> Result<(), CliError> {
     let config = match cobre_io::parse_config(&config_path) {
         Ok(config) => config,
         Err(err) => {
-            if args.json {
-                emit_validate_json(&ValidateBoundaryOutput::error(err.kind(), &err.to_string()))?;
-            }
+            emit_json_error(args.json, err.kind(), &err.to_string())?;
             return Err(CliError::from(err));
         }
     };
@@ -404,9 +405,7 @@ pub fn execute(args: ValidateArgs) -> Result<(), CliError> {
     let training_source = match config.training_scenario_source(&config_path) {
         Ok(source) => source,
         Err(err) => {
-            if args.json {
-                emit_validate_json(&ValidateBoundaryOutput::error(err.kind(), &err.to_string()))?;
-            }
+            emit_json_error(args.json, err.kind(), &err.to_string())?;
             return Err(CliError::from(err));
         }
     };
