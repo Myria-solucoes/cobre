@@ -90,9 +90,12 @@ pub struct TrainingResult {
     /// unconditionally before the first iteration and is never reverted.
     pub frozen_templates: Option<Vec<StageTemplate>>,
 
-    /// Phase-global outgoing-state read-back drift, reduced across ranks so it
-    /// is identical on every rank. `Default` (all-zero) on the
-    /// loaded-checkpoint / disabled-training paths, which observe no clamps.
+    /// Phase-global outgoing-state read-back drift. On a clean finish it is
+    /// reduced across ranks (Allreduce Max/Sum) so it is identical on every
+    /// rank; on the training-failure exit it is a best-effort un-reduced
+    /// rank-local fold (no collective is safe once a peer has failed), so it
+    /// may differ across ranks. `Default` (all-zero) on the loaded-checkpoint /
+    /// disabled-training paths, which observe no clamps.
     pub drift: DriftTally,
 }
 

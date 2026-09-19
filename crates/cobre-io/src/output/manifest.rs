@@ -1270,7 +1270,8 @@ mod tests {
     #[test]
     fn training_metadata_without_drift_summary_reads_as_none() {
         // A no-drift metadata omits the key; deserializing it back exercises the
-        // serde(default) absent-key path (the legacy-metadata contract).
+        // serde(default) absent-key read. The frozen-legacy-file back-compat
+        // suite (tests/metadata_back_compat.rs) owns the real old-file contract.
         let json = serde_json::to_string(&TrainingMetadata {
             drift: None,
             ..make_training_metadata()

@@ -8,8 +8,7 @@ use std::ops::Range;
 
 use cobre_comm::{CommError, Communicator, ReduceOp};
 use cobre_core::WorkerPhaseTimings;
-use cobre_solver::SolverStatistics;
-use cobre_solver::{Basis, BasisStatus, ProfiledSolver, SolverInterface};
+use cobre_solver::{Basis, BasisStatus, ProfiledSolver, SolverInterface, SolverStatistics};
 
 use crate::SddpError;
 use crate::SddpError::Validation;
