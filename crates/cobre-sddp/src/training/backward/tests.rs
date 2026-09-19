@@ -59,10 +59,7 @@ use crate::{
     state_exchange::ExchangeBuffers,
     test_support,
     trajectory::TrajectoryRecord,
-    workspace::{
-        BackwardAccumulators, BasisStore, CapturedBasis, DriftTally, ScratchBuffers,
-        SolverWorkspace,
-    },
+    workspace::{BackwardAccumulators, BasisStore, CapturedBasis, ScratchBuffers, SolverWorkspace},
 };
 
 /// Owned backing arrays for a single-successor (chain-degenerate) reified
@@ -568,7 +565,6 @@ fn single_workspace<S: SolverInterface + Send>(
         solver: ProfiledSolver::new(solver),
         patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
         current_state: Vec::with_capacity(n_state),
-        drift_tally: DriftTally::default(),
         scratch: ScratchBuffers {
             noise_buf: Vec::new(),
             inflow_m3s_buf: Vec::new(),
@@ -620,7 +616,6 @@ fn transit_bucket_only_workspace(
         solver: ProfiledSolver::new(solver),
         patch_buf: PatchBuffer::new(0, 0, 0, 0, n_buckets, 0, 0),
         current_state: Vec::new(),
-        drift_tally: DriftTally::default(),
         scratch: ScratchBuffers {
             noise_buf: Vec::new(),
             inflow_m3s_buf: Vec::new(),
@@ -2627,7 +2622,6 @@ fn test_backward_pass_parallel_cut_determinism() {
         solver: ProfiledSolver::new(solver_1),
         patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
         current_state: Vec::with_capacity(n_state),
-        drift_tally: DriftTally::default(),
         scratch: ScratchBuffers {
             noise_buf: Vec::new(),
             inflow_m3s_buf: Vec::new(),
@@ -2748,7 +2742,6 @@ fn test_backward_pass_parallel_cut_determinism() {
             solver: ProfiledSolver::new(MockSolver::always_ok(solution.clone())),
             patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(n_state),
-            drift_tally: DriftTally::default(),
             scratch: ScratchBuffers {
                 noise_buf: Vec::new(),
                 inflow_m3s_buf: Vec::new(),
@@ -3116,7 +3109,6 @@ fn backward_pass_load_patches_applied() {
         solver: ProfiledSolver::new(MockSolver::always_ok(solution)),
         patch_buf,
         current_state: Vec::with_capacity(n_state),
-        drift_tally: DriftTally::default(),
         scratch: ScratchBuffers {
             noise_buf: Vec::new(),
             inflow_m3s_buf: Vec::new(),
@@ -3306,7 +3298,6 @@ fn backward_pass_no_load_buses_unchanged() {
         solver: ProfiledSolver::new(MockSolver::always_ok(solution)),
         patch_buf,
         current_state: Vec::with_capacity(n_state),
-        drift_tally: DriftTally::default(),
         scratch: ScratchBuffers {
             noise_buf: Vec::new(),
             inflow_m3s_buf: Vec::new(),
@@ -3491,7 +3482,6 @@ fn backward_pass_cut_coefficients_unaffected() {
         solver: ProfiledSolver::new(MockSolver::always_ok(solution)),
         patch_buf,
         current_state: Vec::with_capacity(n_state),
-        drift_tally: DriftTally::default(),
         scratch: ScratchBuffers {
             noise_buf: Vec::new(),
             inflow_m3s_buf: Vec::new(),
@@ -3973,7 +3963,6 @@ fn run_backward_pass_with_n_workers(n_workers: usize) -> FutureCostFunction {
             solver: ProfiledSolver::new(MockSolver::always_ok(solution.clone())),
             patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(n_state),
-            drift_tally: DriftTally::default(),
             scratch: ScratchBuffers {
                 noise_buf: Vec::new(),
                 inflow_m3s_buf: Vec::new(),
@@ -4345,7 +4334,6 @@ fn allgatherv_single_rank_two_workers_stage_stats_has_per_worker_entries() {
             solver: ProfiledSolver::new(MockSolver::always_ok(solution.clone())),
             patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(n_state),
-            drift_tally: DriftTally::default(),
             scratch: ScratchBuffers {
                 noise_buf: Vec::new(),
                 inflow_m3s_buf: Vec::new(),
@@ -4581,7 +4569,6 @@ fn allgatherv_dual_rank_stub_stage_stats_contains_both_ranks() {
             solver: ProfiledSolver::new(MockSolver::always_ok(solution.clone())),
             patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(n_state),
-            drift_tally: DriftTally::default(),
             scratch: ScratchBuffers {
                 noise_buf: Vec::new(),
                 inflow_m3s_buf: Vec::new(),
@@ -5388,7 +5375,6 @@ fn handshake_passes_with_local_backend() {
             solver: ProfiledSolver::new(MockSolver::always_ok(solution.clone())),
             patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(n_state),
-            drift_tally: DriftTally::default(),
             scratch: ScratchBuffers {
                 noise_buf: Vec::new(),
                 inflow_m3s_buf: Vec::new(),

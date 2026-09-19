@@ -23,7 +23,6 @@
 use chrono::NaiveDate;
 
 use crate::setup::NodeId;
-use crate::workspace::DriftTally;
 
 /// Cost breakdown for one (stage, block) pair.
 ///
@@ -584,10 +583,6 @@ pub struct SimulationSummary {
     pub std_cost: f64,
     /// Number of scenarios simulated (across all ranks).
     pub n_scenarios: u32,
-    /// Phase-global outgoing-state read-back drift, reduced across ranks so it
-    /// is identical on every rank. Populated by the caller after
-    /// `aggregate_simulation` via `reduce_simulation_drift`; `Default` here.
-    pub drift: DriftTally,
 }
 
 const _: fn() = || {
@@ -598,7 +593,7 @@ const _: fn() = || {
 #[cfg(test)]
 mod tests {
     use super::{
-        DriftTally, NodeId, ScenarioCategoryCosts, SimulationBusResult, SimulationContractResult,
+        NodeId, ScenarioCategoryCosts, SimulationBusResult, SimulationContractResult,
         SimulationCostResult, SimulationExchangeResult, SimulationGenericViolationResult,
         SimulationHydroBusResult, SimulationHydroResult, SimulationInflowLagResult,
         SimulationNonControllableResult, SimulationPumpingResult, SimulationScenarioResult,
@@ -1103,7 +1098,6 @@ mod tests {
             mean_cost: 1_500_000.0,
             std_cost: 200_000.0,
             n_scenarios: 2000,
-            drift: DriftTally::default(),
         };
 
         assert_eq!(summary.mean_cost, 1_500_000.0);

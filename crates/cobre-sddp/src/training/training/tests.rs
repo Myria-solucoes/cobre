@@ -47,7 +47,6 @@ use crate::{
     setup::NodeId,
     solver_stats::{SolverStatsDelta, SolverStatsLogEntry},
     test_support,
-    workspace::{DriftTally, drift_tally::StateFamilyKind},
 };
 
 /// Minimal LP for N=1 hydro, L=0 PAR order.
@@ -3045,9 +3044,6 @@ fn ac_training_result_new_assigns_all_fields() {
         SolverStatsDelta::default(),
     )];
 
-    let mut drift = DriftTally::default();
-    drift.record(StateFamilyKind::Storage, 2.0, 4.0);
-
     let result = super::TrainingResult::new(
         1.5_f64,                       // final_lb
         2.5_f64,                       // final_ub
@@ -3058,9 +3054,8 @@ fn ac_training_result_new_assigns_all_fields() {
         9_999_u64,                     // total_time_ms
         basis_cache,
         solver_stats_log,
-        None,  // visited_archive
-        None,  // frozen_templates
-        drift, // drift
+        None, // visited_archive
+        None, // frozen_templates
     );
 
     assert_eq!(result.final_lb, 1.5_f64, "final_lb");
@@ -3080,5 +3075,4 @@ fn ac_training_result_new_assigns_all_fields() {
     );
     assert!(result.visited_archive.is_none(), "visited_archive");
     assert!(result.frozen_templates.is_none(), "frozen_templates");
-    assert_eq!(result.drift.storage.max_abs, 2.0, "drift");
 }

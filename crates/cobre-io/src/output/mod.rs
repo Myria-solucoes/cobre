@@ -40,8 +40,8 @@ pub use hydro_models::{
     write_hydro_model_summary,
 };
 pub use manifest::{
-    DeviationSummary, DeviationWorstEntry, DistributionInfo, DriftSummary, FamilyDrift, HostLayout,
-    MetadataBounds, MetadataConfiguration, MetadataConvergence, MetadataCost, MetadataIterations,
+    DeviationSummary, DeviationWorstEntry, DistributionInfo, HostLayout, MetadataBounds,
+    MetadataConfiguration, MetadataConvergence, MetadataCost, MetadataIterations,
     MetadataProblemDimensions, MetadataRowPool, MetadataScenarios, MetadataSimulationSolveStats,
     MetadataTrainingSolveStats, OutputContext, SetupTimings, SimulationMetadata, TrainingMetadata,
     get_hostname, now_iso8601, read_simulation_metadata, read_training_metadata,

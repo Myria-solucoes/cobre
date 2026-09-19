@@ -1299,7 +1299,6 @@ pub mod output {
             },
             setup: None,
             production_fit_deviation: None,
-            drift: None,
         }
     }
 

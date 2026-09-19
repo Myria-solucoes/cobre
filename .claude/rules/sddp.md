@@ -2247,33 +2247,38 @@ That sub-tolerance drift is absorbed at the outgoing-state read-back seam, not
 judged on the solve path: `assemble_outgoing_state` projects every outgoing state
 onto its admissible box before the value is pinned, solved against, or dotted
 into a cut, so the commitment reaches the delivery stage already inside its
-bound, and the drift is tallied by family (`workspace/drift_tally.rs`) rather
-than rejected. The `commit_out ∪ commit_in` carry is additionally made bit-exact
-by `apply_commitment_hold_col_scale_unscale` (`col_scale = 1.0`), removing the
+bound; the clamp absorbs the drift silently — no runtime verdict, no telemetry.
+The `commit_out ∪ commit_in` carry is additionally made bit-exact by
+`apply_commitment_hold_col_scale_unscale` (`col_scale = 1.0`), removing the
 ring-carry drift at its source; the basis-factorization drift at the deposit row
 is what the seam absorbs, since exactness there is the solver's to give and it
-does not give it. A *genuine* over-commitment — past the delivery bound by more
-than solver noise — is no longer a runtime verdict; validating it moves to
-`cobre-io` load time, before the study runs (that validator is forthcoming, so
-until it lands the seam absorbs genuine and sub-tolerance overshoot alike).
+does not give it.
 
-The read-back seam must absorb drift for ALL solve sites uniformly — forward,
-backward, lower bound, and simulation each canonicalize through
-`assemble_outgoing_state`; a per-site opt-out is what once let solve sites
-silently diverge. Absorption must never be conflated with hiding a genuine
-over-commitment: the clamp is applied unconditionally, but the load-time
-validator (forthcoming) is what distinguishes solver noise from a modelling
-error — the seam does not.
+A *genuine* over-commitment — past the delivery bound by more than solver noise —
+is NOT a runtime verdict and NOT the seam's to catch: it is rejected before the
+study runs, at `cobre-io` load time, by `check_committed_value_bounds`
+(`validation/semantic/thermal.rs`), which checks each committed value against the
+delivery-stage resolved generation box. The seam absorbs solver noise; the
+load-time validator rejects the modelling error. Letting the seam decide which
+overshoot is "genuine" is the wrong-but-compiling alternative this split forbids:
+the clamp is applied unconditionally to every solve site — forward, backward,
+lower bound, and simulation each canonicalize through `assemble_outgoing_state`,
+a per-site opt-out being what once let solve sites silently diverge — and it never
+distinguishes noise from error, because the validator has already rejected any
+genuine over-commitment at load.
 
 Read: `solve/stage_solve.rs` (`assemble_outgoing_state`, the read-back seam),
-`workspace/drift_tally.rs`, `lp/builder/scaling.rs`
-(`apply_commitment_hold_col_scale_unscale`). Pinned by
+`lp/builder/scaling.rs` (`apply_commitment_hold_col_scale_unscale`), and `cobre-io`
+`validation/semantic/thermal.rs` (`check_committed_value_bounds`, the load-time
+over-commitment reject). Pinned for the seam by
 `anticipated_commitment_drifted_over_cap_is_absorbed` (a seed a hair past the cap
-trains to completion rather than aborting). `anticipated_commitment_at_cap_survives_ring_carry`
-does NOT pin this contract: a seed exactly at the cap carries zero drift and
-never exercises the absorption. The authoritative statement of the load-time
-over-commitment contract is finalized once the `cobre-io` validator lands; until
-then this section states the absorb-at-seam invariant only.
+trains to completion rather than aborting, `tests/state_drift_absorption.rs`), and
+for the load-time validator by `delivery_box_sub_tolerance_drift_accepted`
+(sub-tolerance accepted) and `delivery_box_override_tightens_max_rejects_over_commitment`
+plus `test_committed_value_above_max_bounds_error` (genuine over-commitment
+rejected). `anticipated_commitment_at_cap_survives_ring_carry` does NOT pin the
+seam: a seed exactly at the cap carries zero drift and never exercises the
+absorption.
 
 ### Post-study delivery without a boundary carries zero value, never a reject
 

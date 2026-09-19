@@ -240,7 +240,7 @@ fn partial_to_iteration_record(iter: u64, partial: &PartialRecord) -> IterationR
 /// # Examples
 ///
 /// ```rust
-/// use cobre_sddp::{build_training_output, DriftTally, TrainingResult, FutureCostFunction};
+/// use cobre_sddp::{build_training_output, TrainingResult, FutureCostFunction};
 /// use cobre_core::TrainingEvent;
 ///
 /// let result = TrainingResult::new(
@@ -255,7 +255,6 @@ fn partial_to_iteration_record(iter: u64, partial: &PartialRecord) -> IterationR
 ///     Vec::new(),
 ///     None,
 ///     None,
-///     DriftTally::default(),
 /// );
 ///
 /// let events = vec![TrainingEvent::IterationSummary {
@@ -563,7 +562,6 @@ mod tests {
             Vec::new(),
             None,
             None,
-            crate::DriftTally::default(),
         )
     }
 

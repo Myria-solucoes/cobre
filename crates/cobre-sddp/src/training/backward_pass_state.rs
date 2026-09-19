@@ -2208,8 +2208,7 @@ mod tests {
         },
         trajectory::TrajectoryRecord,
         workspace::{
-            BackwardAccumulators, BasisStore, CapturedBasis, DriftTally, ScratchBuffers,
-            SolverWorkspace,
+            BackwardAccumulators, BasisStore, CapturedBasis, ScratchBuffers, SolverWorkspace,
         },
     };
 
@@ -2425,7 +2424,6 @@ mod tests {
             solver: ProfiledSolver::new(solver),
             patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(n_state),
-            drift_tally: DriftTally::default(),
             scratch: ScratchBuffers {
                 noise_buf: Vec::new(),
                 inflow_m3s_buf: Vec::new(),

@@ -17,7 +17,7 @@ use crate::{
     lp_builder::StateBox,
     noise::{DownstreamAccumState, LagAccumState, accumulate_and_shift_lag_state},
     setup::{NodeId, StageIdx},
-    workspace::{CapturedBasis, DriftTally, SolverWorkspace, drift_tally::StateFamilyKind},
+    workspace::{CapturedBasis, SolverWorkspace},
 };
 
 /// Read-only inputs for one LP solve at stage `t`, scenario `m`.
@@ -255,15 +255,14 @@ pub(crate) fn fill_unscaled_dual(out: &mut Vec<f64>, scaled: &[f64], row_scale: 
 /// columns, run the lag accumulation/shift, verify the bucket/commitment-hold
 /// copy-gap invariant, then clamp every dimension onto its admissible box.
 /// The clamp is the identity for an in-box value — a solve whose state stays
-/// in box is byte-for-byte unaffected by it — and tallies any dimension it
-/// moves, by family, into `tally`. Every consumer of the outgoing state (the
-/// trajectory, the backward pass's `x_hat`, the cut intercept, the simulation
-/// output) reads this same canonical vector; there is no second
+/// in box is byte-for-byte unaffected by it. Every consumer of the outgoing
+/// state (the trajectory, the backward pass's `x_hat`, the cut intercept, the
+/// simulation output) reads this same canonical vector; there is no second
 /// canonicalization point at LP pin time.
 // Rationale (too_many_arguments): every argument is a caller-owned buffer or
 // borrow threaded straight through to `accumulate_and_shift_lag_state` (which
-// already takes the same shape) plus the box and tally this seam adds; a
-// bundle would just wrap them for one call site.
+// already takes the same shape) plus the box this seam adds; a bundle would
+// just wrap them for one call site.
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::float_cmp)]
 pub(crate) fn assemble_outgoing_state(
@@ -275,7 +274,6 @@ pub(crate) fn assemble_outgoing_state(
     stage_lag: StageLagTransition,
     lag: &mut LagAccumState<'_>,
     ds: &mut DownstreamAccumState<'_>,
-    tally: &mut DriftTally,
 ) {
     current_state.clear();
     current_state.extend_from_slice(&unscaled_primal[..layout.n_state]);
@@ -295,21 +293,14 @@ pub(crate) fn assemble_outgoing_state(
         if clamped == *value {
             continue;
         }
-        let drift_abs = (*value - clamped).abs();
         *value = clamped;
-        let family = if layout.storage.contains(&j) {
-            StateFamilyKind::Storage
-        } else if layout.transit_buckets_out.contains(&j) {
-            StateFamilyKind::TransitBuckets
-        } else {
-            debug_assert!(
-                layout.commit_out.contains(&j),
-                "a clamped state dimension must be storage, transit-bucket, or \
-                 commitment-hold — inflow lags are unbounded and never clamp"
-            );
-            StateFamilyKind::CommitmentHold
-        };
-        tally.record(family, drift_abs, clamped);
+        debug_assert!(
+            layout.storage.contains(&j)
+                || layout.transit_buckets_out.contains(&j)
+                || layout.commit_out.contains(&j),
+            "a clamped state dimension must be storage, transit-bucket, or \
+             commitment-hold — inflow lags are unbounded and never clamp"
+        );
     }
 }
 
@@ -366,7 +357,7 @@ mod tests {
         noise::{DownstreamAccumState, LagAccumState, accumulate_and_shift_lag_state},
         setup::{NodeId, StageIdx},
         test_support::state_layout_with_transit_buckets,
-        workspace::{CapturedBasis, DriftTally, SolverWorkspace, WorkspaceSizing},
+        workspace::{CapturedBasis, SolverWorkspace, WorkspaceSizing},
     };
 
     // -----------------------------------------------------------------------
@@ -1028,7 +1019,7 @@ mod tests {
     }
 
     #[test]
-    fn assemble_outgoing_state_in_box_is_byte_identical_and_tallies_nothing() {
+    fn assemble_outgoing_state_in_box_is_byte_identical() {
         let layout = seam_layout();
         let unscaled_primal = seam_primal(10.0, 30.0, 20.0);
         let lag_matrix_buf = vec![2.0_f64];
@@ -1074,7 +1065,6 @@ mod tests {
         let mut ds_weight = 0.0_f64;
         let mut ds_completed: Vec<f64> = vec![];
         let mut ds_n_completed = 0_usize;
-        let mut tally = DriftTally::default();
         assemble_outgoing_state(
             &mut current_state,
             &unscaled_primal,
@@ -1093,21 +1083,17 @@ mod tests {
                 n_completed: &mut ds_n_completed,
                 par_order: 0,
             },
-            &mut tally,
         );
 
         assert_eq!(
             current_state, expected,
             "an in-box clamp must be byte-identical to the pre-clamp assembled state"
         );
-        for family in [tally.storage, tally.transit_buckets, tally.commitment_hold] {
-            assert_eq!(family.clamped_count, 0);
-        }
     }
 
     #[test]
     #[allow(clippy::float_cmp)]
-    fn assemble_outgoing_state_clamps_and_tallies_out_of_box() {
+    fn assemble_outgoing_state_clamps_out_of_box() {
         let layout = seam_layout();
         let commit_j = layout.commit_out.start;
         let mut unscaled_primal = seam_primal(10.0, 30.0, 20.0);
@@ -1126,7 +1112,6 @@ mod tests {
         let mut ds_weight = 0.0_f64;
         let mut ds_completed: Vec<f64> = vec![];
         let mut ds_n_completed = 0_usize;
-        let mut tally = DriftTally::default();
         assemble_outgoing_state(
             &mut current_state,
             &unscaled_primal,
@@ -1145,13 +1130,8 @@ mod tests {
                 n_completed: &mut ds_n_completed,
                 par_order: 0,
             },
-            &mut tally,
         );
 
         assert_eq!(current_state[commit_j], 0.0, "must equal the clamped bound");
-        assert_eq!(tally.commitment_hold.clamped_count, 1);
-        assert_eq!(tally.commitment_hold.max_abs, 0.5);
-        assert_eq!(tally.storage.clamped_count, 0);
-        assert_eq!(tally.transit_buckets.clamped_count, 0);
     }
 }

@@ -2575,10 +2575,6 @@ fn study_stages_slice(system: &System) -> &[Stage] {
 /// residue-0 slot bounds a later delivery than the incoming seed carried there —
 /// that family is projected onto its own delivery-stage bound at seed time in
 /// [`build_initial_state`] instead.
-// DEBT(initial-seed-drift-untallied): the read-back seam records a `DriftTally`
-// per clamped dimension; these setup-time seed clamps do not. `DriftTally` is a
-// training/simulation workspace accumulator that does not exist at setup, and
-// threading one across the setup→training boundary is out of this change's scope.
 fn canonicalize_initial_state(state: &mut [f64], layout: &StateSpace, stage0_box: &StateBox) {
     for j in layout
         .storage

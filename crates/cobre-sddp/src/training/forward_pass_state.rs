@@ -1088,9 +1088,7 @@ mod tests {
         lp_builder::{PatchBuffer, StateBox},
         test_support::{state_layout, study_dims},
         trajectory::TrajectoryRecord,
-        workspace::{
-            BackwardAccumulators, BasisStore, DriftTally, ScratchBuffers, SolverWorkspace,
-        },
+        workspace::{BackwardAccumulators, BasisStore, ScratchBuffers, SolverWorkspace},
     };
 
     // ── Minimal mock solver ────────────────────────────────────────────────
@@ -1217,7 +1215,6 @@ mod tests {
             solver: ProfiledSolver::new(solver),
             patch_buf: PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(state.n_state),
-            drift_tally: DriftTally::default(),
             scratch: ScratchBuffers {
                 noise_buf: Vec::with_capacity(state.hydro_count),
                 inflow_m3s_buf: Vec::with_capacity(state.hydro_count),

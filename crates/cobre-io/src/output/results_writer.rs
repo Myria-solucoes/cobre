@@ -106,7 +106,6 @@ pub fn write_training_results(
         solve_stats: training_output.training_solve_stats.clone(),
         setup: ctx.setup.clone(),
         production_fit_deviation: ctx.production_fit_deviation.clone(),
-        drift: ctx.drift.clone(),
         distribution: ctx.distribution.clone(),
     };
     write_training_metadata(&output_dir.join("training/metadata.json"), &metadata)?;
@@ -147,7 +146,6 @@ pub fn write_simulation_results(
         },
         cost: simulation_output.cost.clone(),
         solve_stats: simulation_output.solve_stats.clone(),
-        drift: ctx.drift.clone(),
         distribution: ctx.distribution.clone(),
     };
     write_simulation_metadata(&output_dir.join("simulation/metadata.json"), &metadata)?;

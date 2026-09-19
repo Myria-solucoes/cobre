@@ -40,7 +40,7 @@ use crate::{
     setup::{NodeId, NodePos},
     test_support,
     trajectory::TrajectoryRecord,
-    workspace::{BackwardAccumulators, BasisStore, DriftTally, ScratchBuffers, SolverWorkspace},
+    workspace::{BackwardAccumulators, BasisStore, ScratchBuffers, SolverWorkspace},
 };
 
 // ── Mock solver ──────────────────────────────────────────────────────────
@@ -565,7 +565,6 @@ fn single_workspace(solver: MockSolver, state: &StateSpace) -> SolverWorkspace<M
         solver: ProfiledSolver::new(solver),
         patch_buf: PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0, 0),
         current_state: Vec::with_capacity(state.n_state),
-        drift_tally: DriftTally::default(),
         scratch: ScratchBuffers {
             noise_buf: Vec::with_capacity(state.hydro_count),
             inflow_m3s_buf: Vec::with_capacity(state.hydro_count),
@@ -2790,7 +2789,6 @@ fn forward_pass_load_noise_positive_realization() {
         ))),
         patch_buf,
         current_state: Vec::with_capacity(state.n_state),
-        drift_tally: DriftTally::default(),
         scratch: ScratchBuffers {
             noise_buf: Vec::with_capacity(1),
             inflow_m3s_buf: Vec::with_capacity(1),
@@ -2956,7 +2954,6 @@ fn forward_pass_load_noise_clamped_to_zero() {
         ))),
         patch_buf,
         current_state: Vec::with_capacity(state.n_state),
-        drift_tally: DriftTally::default(),
         scratch: ScratchBuffers {
             noise_buf: Vec::with_capacity(1),
             inflow_m3s_buf: Vec::with_capacity(1),

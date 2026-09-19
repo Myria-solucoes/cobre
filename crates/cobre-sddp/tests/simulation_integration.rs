@@ -948,7 +948,6 @@ fn train_simulate_write_cycle() {
         },
         setup: None,
         production_fit_deviation: None,
-        drift: None,
     };
     write_results(
         output_dir,

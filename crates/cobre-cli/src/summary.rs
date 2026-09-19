@@ -10,7 +10,6 @@
 
 use chrono::NaiveDate;
 use cobre_comm::ExecutionTopology;
-use cobre_io::DriftSummary;
 use cobre_io::SetupTimings;
 use console::Term;
 
@@ -424,30 +423,6 @@ fn fmt_sci(v: f64) -> String {
     raw
 }
 
-/// Format the drift summary line naming each family with a nonzero clamp
-/// count. Callers gate on `Option::is_some`, so at least one family is
-/// guaranteed nonzero here (the invariant `build_drift_summary` upholds).
-fn format_drift_line(drift: &DriftSummary) -> String {
-    let families = [
-        ("storage", &drift.storage),
-        ("transit_buckets", &drift.transit_buckets),
-        ("commitment_hold", &drift.commitment_hold),
-    ];
-    let parts: Vec<String> = families
-        .into_iter()
-        .filter(|(_, f)| f.clamped_count > 0)
-        .map(|(name, f)| {
-            format!(
-                "{name} (max_abs {}, max_rel {}, clamped {})",
-                fmt_sci(f.max_abs),
-                fmt_sci(f.max_rel),
-                f.clamped_count
-            )
-        })
-        .collect();
-    format!("  Drift:        {}", parts.join("; "))
-}
-
 /// Training convergence metrics and timing for display in the post-run summary.
 ///
 /// The phase-wall, wait, and serial `*_seconds` timing fields are `None` when
@@ -559,10 +534,6 @@ pub struct TrainingSummary {
     /// `Serial`-bucket rayon scheduling overhead, summed over both phases
     /// (`fwd_scheduling_overhead_ms + bwd_scheduling_overhead_ms`).
     pub serial_scheduling_seconds: Option<f64>,
-
-    /// Reduced outgoing-state read-back drift, from `build_drift_summary`.
-    /// `None` when no family clamped — the drift line is omitted.
-    pub drift: Option<DriftSummary>,
 }
 
 /// Simulation completion statistics for display in the post-run summary.
@@ -602,10 +573,6 @@ pub struct SimulationSummary {
 
     /// Effective parallelism (`n_ranks * n_workers_local`).
     pub parallelism: u32,
-
-    /// Reduced outgoing-state read-back drift, from `build_drift_summary`.
-    /// `None` when no family clamped — the drift line is omitted.
-    pub drift: Option<DriftSummary>,
 }
 
 fn format_duration(ms: u64) -> String {
@@ -856,9 +823,6 @@ fn training_summary_lines(t: &TrainingSummary) -> Vec<String> {
         lines.push(format!("  Avg iter:     {avg_iter_ms:.0}ms"));
     }
     lines.extend(format_time_split_training(t));
-    if let Some(drift) = &t.drift {
-        lines.push(format_drift_line(drift));
-    }
     lines
 }
 
@@ -917,9 +881,6 @@ fn simulation_summary_lines(sim: &SimulationSummary) -> Vec<String> {
         format_split_duration(other),
         pct_of(other, total_s)
     ));
-    if let Some(drift) = &sim.drift {
-        lines.push(format_drift_line(drift));
-    }
     lines
 }
 
@@ -953,10 +914,8 @@ mod tests {
 
     use console::Term;
 
-    use cobre_io::FamilyDrift;
-
     use super::{
-        DriftSummary, SimulationSummary, TrainingSummary, format_duration, format_split_duration,
+        SimulationSummary, TrainingSummary, format_duration, format_split_duration,
         output_path_line, policy_rows_lines, print_output_path, print_simulation_summary,
         print_training_summary, simulation_summary_lines, time_split_training_walls,
         training_summary_lines,
@@ -997,7 +956,6 @@ mod tests {
             serial_cut_sync_seconds: Some(0.2),
             serial_allreduce_seconds: Some(0.1),
             serial_scheduling_seconds: Some(0.4),
-            drift: None,
         }
     }
 
@@ -1015,7 +973,6 @@ mod tests {
             total_failed_solves: 10,
             total_solve_time_seconds: 4.2,
             parallelism: 2,
-            drift: None,
         }
     }
 
@@ -1263,76 +1220,6 @@ mod tests {
         assert!(
             s.contains("480 active / 1200 generated"),
             "summary must contain policy row counts, got: {s}"
-        );
-    }
-
-    // ── Drift tests ─────────────────────────────────────────────────────────
-
-    #[test]
-    fn training_summary_lines_omits_drift_line_when_absent() {
-        let s = training_summary_lines(&make_training_summary()).join("\n");
-        assert!(
-            !s.contains("Drift:"),
-            "a no-drift run must not print a drift line, got: {s}"
-        );
-    }
-
-    #[test]
-    fn training_summary_lines_includes_drift_line_when_present() {
-        let training = TrainingSummary {
-            drift: Some(DriftSummary {
-                storage: FamilyDrift {
-                    max_abs: 1.5e-6,
-                    max_rel: 2.0e-7,
-                    clamped_count: 3,
-                },
-                ..DriftSummary::default()
-            }),
-            ..make_training_summary()
-        };
-        let s = training_summary_lines(&training).join("\n");
-        assert!(s.contains("Drift:"), "drift line missing, got: {s}");
-        assert!(
-            s.contains("storage") && s.contains("clamped 3"),
-            "drift line must name the drifting family and its clamp count, got: {s}"
-        );
-        assert!(
-            !s.contains("transit_buckets") && !s.contains("commitment_hold"),
-            "non-drifting families must not be named, got: {s}"
-        );
-    }
-
-    #[test]
-    fn simulation_summary_lines_omits_drift_line_when_absent() {
-        let s = simulation_summary_lines(&make_simulation_summary()).join("\n");
-        assert!(
-            !s.contains("Drift:"),
-            "a no-drift run must not print a drift line, got: {s}"
-        );
-    }
-
-    #[test]
-    fn simulation_summary_lines_includes_drift_line_when_present() {
-        let sim = SimulationSummary {
-            drift: Some(DriftSummary {
-                commitment_hold: FamilyDrift {
-                    max_abs: 4.2e-5,
-                    max_rel: 1.1e-6,
-                    clamped_count: 7,
-                },
-                ..DriftSummary::default()
-            }),
-            ..make_simulation_summary()
-        };
-        let s = simulation_summary_lines(&sim).join("\n");
-        assert!(s.contains("Drift:"), "drift line missing, got: {s}");
-        assert!(
-            s.contains("commitment_hold") && s.contains("clamped 7"),
-            "drift line must name the drifting family and its clamp count, got: {s}"
-        );
-        assert!(
-            !s.contains("storage") && !s.contains("transit_buckets"),
-            "non-drifting families must not be named, got: {s}"
         );
     }
 

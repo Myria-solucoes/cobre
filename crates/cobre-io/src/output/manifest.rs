@@ -46,10 +46,6 @@ pub struct OutputContext {
     /// (e.g. the simulation context, or a run with no computed production
     /// model); the metadata `production_fit_deviation` section is then omitted.
     pub production_fit_deviation: Option<DeviationSummary>,
-    /// Run-level rollup of the per-family outgoing-state read-back drift.
-    /// `None` when no state family clamped; the metadata `drift` section is
-    /// then omitted.
-    pub drift: Option<DriftSummary>,
 }
 
 /// Read the system hostname via the `gethostname` syscall.
@@ -331,41 +327,6 @@ pub struct DeviationWorstEntry {
     pub max_abs: f64,
 }
 
-/// Run-level rollup of the per-family outgoing-state read-back drift, embedded
-/// in [`TrainingMetadata`] and [`SimulationMetadata`].
-///
-/// One [`FamilyDrift`] per bounded state family. The field names are the frozen
-/// on-disk keys; all fields are `#[serde(default)]`, so pre-section metadata
-/// reads back as zeros.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct DriftSummary {
-    /// Storage-family drift.
-    #[serde(default)]
-    pub storage: FamilyDrift,
-    /// Transit-bucket-family drift.
-    #[serde(default)]
-    pub transit_buckets: FamilyDrift,
-    /// Commitment-hold-family drift.
-    #[serde(default)]
-    pub commitment_hold: FamilyDrift,
-}
-
-/// One state family's drift magnitudes and clamp count within a [`DriftSummary`].
-///
-/// All fields are `#[serde(default)]`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct FamilyDrift {
-    /// Largest absolute read-back drift, `|value - clamped|`, over the family.
-    #[serde(default)]
-    pub max_abs: f64,
-    /// Largest relative drift, `drift / max(1, |clamp_target|)`, over the family.
-    #[serde(default)]
-    pub max_rel: f64,
-    /// Number of clamped dimensions folded into the family.
-    #[serde(default)]
-    pub clamped_count: u64,
-}
-
 /// Scenario counts embedded in [`SimulationMetadata`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetadataScenarios {
@@ -459,11 +420,6 @@ pub struct TrainingMetadata {
     /// deviation is measured and from any legacy metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub production_fit_deviation: Option<DeviationSummary>,
-    /// Run-level rollup of the per-family outgoing-state read-back drift
-    /// (informational, never hashed). Absent when no state family clamped and
-    /// from any legacy metadata.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub drift: Option<DriftSummary>,
     /// Execution distribution and environment information.
     pub distribution: DistributionInfo,
 }
@@ -498,11 +454,6 @@ pub struct SimulationMetadata {
     /// Simulation solve statistics.
     #[serde(default)]
     pub solve_stats: MetadataSimulationSolveStats,
-    /// Run-level rollup of the per-family outgoing-state read-back drift
-    /// (informational, never hashed). Absent when no state family clamped and
-    /// from any legacy metadata.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub drift: Option<DriftSummary>,
     /// Execution distribution and environment information.
     pub distribution: DistributionInfo,
 }
@@ -672,7 +623,6 @@ mod tests {
             },
             setup: None,
             production_fit_deviation: None,
-            drift: None,
             distribution: make_distribution_info(),
         }
     }
@@ -704,7 +654,6 @@ mod tests {
                 solve_seconds: Some(321.0),
                 parallelism: Some(8),
             },
-            drift: None,
             distribution: make_distribution_info(),
         }
     }
@@ -1193,94 +1142,6 @@ mod tests {
 
         let decoded: TrainingMetadata = serde_json::from_str(without_deviation).unwrap();
         assert!(decoded.production_fit_deviation.is_none());
-    }
-
-    // ── DriftSummary ─────────────────────────────────────────────────────────
-
-    #[test]
-    fn drift_summary_populated_round_trips() {
-        let original = TrainingMetadata {
-            drift: Some(DriftSummary {
-                storage: FamilyDrift {
-                    max_abs: 1.5,
-                    max_rel: 0.25,
-                    clamped_count: 3,
-                },
-                transit_buckets: FamilyDrift {
-                    max_abs: 0.0,
-                    max_rel: 0.0,
-                    clamped_count: 0,
-                },
-                commitment_hold: FamilyDrift {
-                    max_abs: 9.0,
-                    max_rel: 0.75,
-                    clamped_count: 7,
-                },
-            }),
-            ..make_training_metadata()
-        };
-
-        let json = serde_json::to_string(&original).unwrap();
-        assert!(
-            json.contains(r#""drift""#),
-            "serialized JSON must contain the drift section, got: {json}"
-        );
-
-        let decoded: TrainingMetadata = serde_json::from_str(&json).unwrap();
-        let drift = decoded
-            .drift
-            .expect("drift summary must survive round-trip");
-        assert_eq!(drift.storage.max_abs, 1.5);
-        assert_eq!(drift.storage.max_rel, 0.25);
-        assert_eq!(drift.storage.clamped_count, 3);
-        assert_eq!(drift.transit_buckets.clamped_count, 0);
-        assert_eq!(drift.commitment_hold.max_abs, 9.0);
-        assert_eq!(drift.commitment_hold.max_rel, 0.75);
-        assert_eq!(drift.commitment_hold.clamped_count, 7);
-    }
-
-    #[test]
-    fn training_metadata_skips_drift_summary_when_none() {
-        let metadata = TrainingMetadata {
-            drift: None,
-            ..make_training_metadata()
-        };
-
-        let json = serde_json::to_string(&metadata).unwrap();
-        assert!(
-            !json.contains(r#""drift""#),
-            "the drift key must be omitted when None, got: {json}"
-        );
-    }
-
-    #[test]
-    fn simulation_metadata_skips_drift_summary_when_none() {
-        let metadata = SimulationMetadata {
-            drift: None,
-            ..make_simulation_metadata()
-        };
-
-        let json = serde_json::to_string(&metadata).unwrap();
-        assert!(
-            !json.contains(r#""drift""#),
-            "the drift key must be omitted when None, got: {json}"
-        );
-    }
-
-    #[test]
-    fn training_metadata_without_drift_summary_reads_as_none() {
-        // A no-drift metadata omits the key; deserializing it back exercises the
-        // serde(default) absent-key read. The frozen-legacy-file back-compat
-        // suite (tests/metadata_back_compat.rs) owns the real old-file contract.
-        let json = serde_json::to_string(&TrainingMetadata {
-            drift: None,
-            ..make_training_metadata()
-        })
-        .unwrap();
-        assert!(!json.contains(r#""drift""#));
-
-        let decoded: TrainingMetadata = serde_json::from_str(&json).unwrap();
-        assert!(decoded.drift.is_none());
     }
 
     // ── Writer tests ─────────────────────────────────────────────────────────

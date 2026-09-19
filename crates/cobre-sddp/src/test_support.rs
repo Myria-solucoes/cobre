@@ -76,9 +76,7 @@ use crate::training::stage_solve_prep::{
     InflowNoise, LoadNoise, StageSolvePrep, StageSolvePrepParams, StateSource,
 };
 use crate::trajectory::TrajectoryRecord;
-use crate::workspace::{
-    CapturedBasis, DriftTally, ScratchBuffers, SolverWorkspace, WorkspaceSizing,
-};
+use crate::workspace::{CapturedBasis, ScratchBuffers, SolverWorkspace, WorkspaceSizing};
 use cobre_core::scenario::{ExternalLoadRow, ExternalScenarioRow};
 use cobre_solver::{
     ActiveSolver, Basis, BasisStatus, RowBatch, SolutionView, SolverError, SolverInterface,
@@ -1168,7 +1166,6 @@ pub fn write_backward_opening_outcome_for_probe<S: SolverInterface + Send>(
     let mut ds_weight_accum = 0.0_f64;
     let mut ds_completed_lags = vec![0.0_f64; ds_par_order * layout.hydro_count];
     let mut ds_n_completed = 0_usize;
-    let mut drift = DriftTally::default();
     assemble_outgoing_state(
         &mut canonical_state,
         &unscaled_primal,
@@ -1187,7 +1184,6 @@ pub fn write_backward_opening_outcome_for_probe<S: SolverInterface + Send>(
             n_completed: &mut ds_n_completed,
             par_order: ds_par_order,
         },
-        &mut drift,
     );
     let canonical_x_hat = canonical_state[..layout.n_state].to_vec();
 

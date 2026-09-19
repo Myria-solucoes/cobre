@@ -29,7 +29,7 @@ use crate::{
     },
     solve::solver_phase::Phase,
     test_support,
-    workspace::{BackwardAccumulators, CapturedBasis, DriftTally, ScratchBuffers, SolverWorkspace},
+    workspace::{BackwardAccumulators, CapturedBasis, ScratchBuffers, SolverWorkspace},
 };
 
 /// A fully-permissive `(-inf, inf)` box per stage, for fixtures driving
@@ -527,7 +527,6 @@ fn single_workspace_with_load_buses(
         solver: ProfiledSolver::new(solver),
         patch_buf: PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0, 0),
         current_state: Vec::with_capacity(1),
-        drift_tally: DriftTally::default(),
         scratch: ScratchBuffers {
             noise_buf: Vec::new(),
             inflow_m3s_buf: Vec::new(),
@@ -577,7 +576,6 @@ fn single_workspace(solver: MockSolver) -> Vec<SolverWorkspace<MockSolver>> {
         solver: ProfiledSolver::new(solver),
         patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0), // N=1, L=0
         current_state: Vec::with_capacity(1),
-        drift_tally: DriftTally::default(),
         scratch: ScratchBuffers {
             noise_buf: Vec::new(),
             inflow_m3s_buf: Vec::new(),
@@ -1603,7 +1601,6 @@ fn single_workspace_with_hydros(
         solver: ProfiledSolver::new(solver),
         patch_buf: PatchBuffer::new(hydro_count, 0, 0, 0, 0, 0, 0),
         current_state: Vec::with_capacity(hydro_count),
-        drift_tally: DriftTally::default(),
         scratch: ScratchBuffers {
             noise_buf: Vec::new(),
             inflow_m3s_buf: Vec::new(),

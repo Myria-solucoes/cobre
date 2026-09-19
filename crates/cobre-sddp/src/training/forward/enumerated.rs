@@ -423,7 +423,6 @@ fn solve_forward_node<S: SolverInterface + Send>(
             n_completed: &mut ws.scratch.downstream_n_completed,
             par_order: downstream_par_order,
         },
-        &mut ws.drift_tally,
     );
     ws.scratch.unscaled_primal = unscaled_primal;
 

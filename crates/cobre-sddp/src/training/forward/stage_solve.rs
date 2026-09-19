@@ -218,7 +218,6 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
             n_completed: &mut ws.scratch.downstream_n_completed,
             par_order: downstream_par_order,
         },
-        &mut ws.drift_tally,
     );
     // Last read of `unscaled_primal`; restore it so the next stage reuses the
     // warmed allocation.

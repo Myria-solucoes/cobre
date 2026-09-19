@@ -6,7 +6,6 @@
 
 use std::ops::Range;
 
-use cobre_comm::{CommError, Communicator, ReduceOp};
 use cobre_core::WorkerPhaseTimings;
 use cobre_solver::{Basis, BasisStatus, ProfiledSolver, SolverInterface, SolverStatistics};
 
@@ -19,45 +18,6 @@ use crate::risk_measure::{BackwardOutcome, RiskMeasureScratch};
 use crate::setup::{NodeId, NodePos};
 use crate::solve::partition;
 use crate::solver_stats::SolverStatsDelta;
-use crate::workspace::DriftTally;
-
-/// Folds every worker's per-family [`DriftTally`] into one rank-local tally.
-/// Order-invariant: [`DriftTally::merge`] is commutative and associative.
-pub(crate) fn fold_worker_drift<S: SolverInterface>(
-    workspaces: &[SolverWorkspace<S>],
-) -> DriftTally {
-    let mut folded = DriftTally::default();
-    for ws in workspaces {
-        folded.merge(&ws.drift_tally);
-    }
-    folded
-}
-
-/// Reduces a rank-local [`DriftTally`] across ranks into the phase-global tally
-/// held identically on every rank (Allreduce, not reduce-to-coordinator).
-///
-/// The reduction is rank- and worker-count invariant: magnitudes reduce with
-/// [`ReduceOp::Max`] and counts with [`ReduceOp::Sum`] over the exact `f64`-cast
-/// integers of [`DriftTally::to_reduce_buffers`], so no rank-order-dependent
-/// float sum enters. This is the single owner of the two-collective reduction;
-/// the training and simulation phases both route through it. It must run in
-/// lockstep on every rank, never on a path a peer failure can make a rank skip.
-///
-/// # Errors
-///
-/// Returns the underlying [`CommError`] if either Allreduce fails; the caller
-/// maps it to its phase error type.
-pub(crate) fn allreduce_drift<C: Communicator>(
-    local: &DriftTally,
-    comm: &C,
-) -> Result<DriftTally, CommError> {
-    let (max_buf, sum_buf) = local.to_reduce_buffers();
-    let mut max_out = [0.0_f64; 6];
-    let mut sum_out = [0.0_f64; 3];
-    comm.allreduce(&max_buf, &mut max_out, ReduceOp::Max)?;
-    comm.allreduce(&sum_buf, &mut sum_out, ReduceOp::Sum)?;
-    Ok(DriftTally::from_reduce_buffers(&max_out, &sum_out))
-}
 
 // ---------------------------------------------------------------------------
 // CapturedBasis
@@ -764,9 +724,6 @@ pub struct SolverWorkspace<S: SolverInterface> {
     pub patch_buf: PatchBuffer,
     /// Scratch buffer for the current state vector.
     pub current_state: Vec<f64>,
-    /// Per-family clamp drift recorded by the outgoing-state read-back seam,
-    /// folded across workers and reduced across ranks at end of phase.
-    pub(crate) drift_tally: DriftTally,
     /// Pre-allocated scratch buffers for noise transformation and simulation.
     pub(crate) scratch: ScratchBuffers,
     /// Pre-allocated destination basis for [`reconstruct_basis`], filled in-place
@@ -814,7 +771,6 @@ impl<S: SolverInterface> SolverWorkspace<S> {
             solver: ProfiledSolver::new(solver),
             patch_buf,
             current_state: Vec::with_capacity(n_state),
-            drift_tally: DriftTally::default(),
             scratch: ScratchBuffers::new(sizing),
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::new(

@@ -10,45 +10,20 @@ keys.
 
 from typing import Any, NotRequired, Optional, TypedDict
 
-class FamilyDrift(TypedDict):
-    """One bounded-state family's read-back drift magnitudes and clamp count.
-
-    Mirrors `family_drift_to_dict` in `src/run.rs`.
-    """
-
-    max_abs: float
-    max_rel: float
-    clamped_count: int
-
-class DriftSummary(TypedDict):
-    """Per-family outgoing-state read-back drift, keyed by bounded state family.
-
-    Mirrors `drift_summary_to_dict` in `src/run.rs`. Appears as the optional
-    `drift` key on `RunResult` (training-phase drift) and on
-    `SimulationSummary` (simulation-phase drift), present only when at least
-    one family clamped; omitted otherwise.
-    """
-
-    storage: FamilyDrift
-    transit_buckets: FamilyDrift
-    commitment_hold: FamilyDrift
-
 class SimulationSummary(TypedDict):
     """Nested `simulation` sub-dict built by `cobre.run.run`."""
 
     n_scenarios: int
     completed: int
-    drift: NotRequired[DriftSummary]
 
 class TrainingSummary(TypedDict):
     """Training headline fields.
 
     The `run()` result inlines these fields at the **top level** of
     `RunResult` (`converged`, `iterations`, `lower_bound`, `upper_bound`,
-    `gap_percent`, `total_time_ms`, and the optional `drift`) rather than
-    nesting them under a `training` key. This standalone `TypedDict` mirrors
-    them for reuse by callers who want to annotate the training headline in
-    isolation.
+    `gap_percent`, and `total_time_ms`) rather than nesting them under a
+    `training` key. This standalone `TypedDict` mirrors them for reuse by
+    callers who want to annotate the training headline in isolation.
     """
 
     converged: bool
@@ -57,7 +32,6 @@ class TrainingSummary(TypedDict):
     upper_bound: Optional[float]
     gap_percent: Optional[float]
     total_time_ms: int
-    drift: NotRequired[DriftSummary]
 
 class StochasticSummary(TypedDict, total=False):
     """Nested `stochastic` sub-dict.
@@ -115,8 +89,7 @@ class RunResult(TypedDict):
     when the corresponding phase did not run, so `RunResult` is **not** `total=False`.
     `upper_bound` and `gap_percent` are `None` on simulation-only and both-disabled
     runs (mirrors `RunSummary.{upper_bound,gap_percent}: Option<f64>`); `lower_bound`
-    is always present. `drift` is the sole exception: it is `NotRequired` (omitted,
-    not `None`) when no bounded state family clamped during training.
+    is always present.
     """
 
     converged: bool
@@ -130,4 +103,3 @@ class RunResult(TypedDict):
     stochastic: Optional[StochasticSummary]
     hydro_models: Optional[HydroModelsSummary]
     provenance: Optional[ProvenanceReport]
-    drift: NotRequired[DriftSummary]

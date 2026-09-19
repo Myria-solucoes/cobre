@@ -20,8 +20,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
 use cobre_sddp::{
-    DriftTally, FutureCostFunction, HydroModelSummary, ModelProvenanceReport, StochasticSummary,
-    StudySetup, TrainingResult,
+    FutureCostFunction, HydroModelSummary, ModelProvenanceReport, StochasticSummary, StudySetup,
+    TrainingResult,
 };
 
 use crate::convert::pydict_to_json_map;
@@ -329,8 +329,6 @@ impl Study {
                 Vec::new(),
                 None,
                 None,
-                // drift: disabled training observes no read-back clamps.
-                DriftTally::default(),
             );
             return Ok(Policy {
                 training_result: synthetic,

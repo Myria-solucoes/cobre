@@ -590,7 +590,6 @@ pub(crate) fn solve_simulation_stage<S: SolverInterface>(
             n_completed: &mut ws.scratch.downstream_n_completed,
             par_order: downstream_par_order,
         },
-        &mut ws.drift_tally,
     );
 
     Ok((immediate_cost, result))
