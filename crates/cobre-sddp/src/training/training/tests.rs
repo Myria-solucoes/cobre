@@ -42,11 +42,10 @@ use crate::{
     error::SddpError,
     horizon_mode::HorizonMode,
     inflow_method::InflowNonNegativityMethod,
-    lp_builder::StateBox,
     risk_measure::RiskMeasure,
     setup::NodeId,
     solver_stats::{SolverStatsDelta, SolverStatsLogEntry},
-    test_support,
+    test_support::{self, permissive_state_boxes},
 };
 
 /// Minimal LP for N=1 hydro, L=0 PAR order.
@@ -410,18 +409,6 @@ fn make_fcf(
         max_iter,
         &vec![0; n_stages],
     )
-}
-
-/// A fully-permissive `(-inf, inf)` box per stage, for fixtures driving
-/// `train` through the seam without exercising the clamp.
-fn permissive_state_boxes(n_state: usize, n_stages: usize) -> Vec<StateBox> {
-    vec![
-        StateBox {
-            lower: vec![f64::NEG_INFINITY; n_state],
-            upper: vec![f64::INFINITY; n_state],
-        };
-        n_stages
-    ]
 }
 
 fn iteration_limit_rules(limit: u64) -> StoppingRuleSet {

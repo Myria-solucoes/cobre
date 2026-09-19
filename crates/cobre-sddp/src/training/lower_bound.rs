@@ -528,7 +528,7 @@ mod tests {
         setup::{
             NodeGraph, NodeId, NodeOpenings, NodePos, NodeRuntime, NodeSuccessor, OpeningSource,
         },
-        test_support,
+        test_support::{self, permissive_state_boxes},
         workspace::{ScratchBuffers, WorkspaceSizing},
     };
     use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
@@ -958,17 +958,6 @@ mod tests {
         FutureCostFunction::new(n_stages, n_state, 2, 100, &vec![0; n_stages])
     }
 
-    /// One unbounded box per stage — the pin-time box-membership assert stays
-    /// vacuous regardless of which stage `evaluate_lower_bound` indexes.
-    fn permissive_state_boxes(n_stages: usize, n_state: usize) -> Vec<StateBox> {
-        (0..n_stages)
-            .map(|_| StateBox {
-                lower: vec![f64::NEG_INFINITY; n_state],
-                upper: vec![f64::INFINITY; n_state],
-            })
-            .collect()
-    }
-
     /// Owned backing data for the "simple" LB unit tests' `StageContext`/
     /// `TrainingContext` pair, mirroring how `StudySetup` owns `StageData` and
     /// lends `stage_ctx()`/`training_ctx()`. Every simple test shares this shape
@@ -1007,7 +996,7 @@ mod tests {
             let stochastic = wrap_opening_tree(opening_tree);
             let node_graph = test_support::chain_node_graph(&stochastic);
             Self {
-                state_boxes: permissive_state_boxes(1, state.n_state),
+                state_boxes: permissive_state_boxes(state.n_state, 1),
                 templates: vec![template],
                 base_rows: vec![base_row],
                 noise_scale,
@@ -2027,7 +2016,7 @@ mod tests {
         let ncs_stochastic_dense_col: Vec<usize> = (0..n_ncs).collect();
         let ncs_stochastic_windows: Vec<(Option<i32>, Option<i32>)> = vec![(None, None); n_ncs];
         let ncs_col_starts = vec![0_usize];
-        let state_boxes = permissive_state_boxes(1, state.n_state);
+        let state_boxes = permissive_state_boxes(state.n_state, 1);
 
         let ctx = StageContext {
             state_boxes: &state_boxes,
@@ -2831,7 +2820,7 @@ mod tests {
         let opening_tree = filling_opening_tree(1);
         let rm = RiskMeasure::Expectation;
         let stochastic = wrap_opening_tree(opening_tree);
-        let state_boxes = permissive_state_boxes(templates.templates.len(), state.n_state);
+        let state_boxes = permissive_state_boxes(state.n_state, templates.templates.len());
 
         let ctx = StageContext {
             state_boxes: &state_boxes,
@@ -2943,7 +2932,7 @@ mod tests {
         let comm = LocalComm;
         let mut solver = MockSolver::with_objectives(vec![0.0]);
         let stochastic = wrap_opening_tree(opening_tree);
-        let state_boxes = permissive_state_boxes(1, state.n_state);
+        let state_boxes = permissive_state_boxes(state.n_state, 1);
 
         let ctx = StageContext {
             state_boxes: &state_boxes,

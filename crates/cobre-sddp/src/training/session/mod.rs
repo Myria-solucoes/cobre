@@ -1561,7 +1561,7 @@ mod tests {
             NodeGraph, NodeId, NodeOpenings, NodePos, NodeRuntime, NodeSuccessor, OpeningSource,
         },
         solver_stats::WORKER_STATS_ENTRY_STRIDE,
-        test_support,
+        test_support::{self, permissive_state_boxes},
     };
 
     // ── Shared helpers (mirrors training.rs test helpers) ──────────────────
@@ -1917,19 +1917,6 @@ mod tests {
                 export_states: false,
             },
         }
-    }
-
-    /// A fully-permissive `(-inf, inf)` box per stage, for fixtures driving
-    /// `TrainingSession::run_iteration` through the seam without exercising
-    /// the clamp.
-    fn permissive_state_boxes(n_state: usize, n_stages: usize) -> Vec<StateBox> {
-        vec![
-            StateBox {
-                lower: vec![f64::NEG_INFINITY; n_state],
-                upper: vec![f64::INFINITY; n_state],
-            };
-            n_stages
-        ]
     }
 
     fn make_stage_ctx<'a>(

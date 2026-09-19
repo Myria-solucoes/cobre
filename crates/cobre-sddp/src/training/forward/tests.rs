@@ -35,10 +35,10 @@ use crate::{
     horizon_mode::HorizonMode,
     indexer::StateSpace,
     inflow_method::InflowNonNegativityMethod,
-    lp_builder::{PatchBuffer, StateBox},
+    lp_builder::PatchBuffer,
     risk_measure::RiskMeasure,
     setup::{NodeId, NodePos},
-    test_support,
+    test_support::{self, permissive_state_boxes},
     trajectory::TrajectoryRecord,
     workspace::{BackwardAccumulators, BasisStore, ScratchBuffers, SolverWorkspace},
 };
@@ -219,18 +219,6 @@ fn empty_records(n: usize) -> Vec<TrajectoryRecord> {
             state: Vec::new(),
         })
         .collect()
-}
-
-/// A fully-permissive `(-inf, inf)` box per stage, for fixtures driving
-/// `run_forward_pass` through the seam without exercising the clamp.
-fn permissive_state_boxes(n_state: usize, n_stages: usize) -> Vec<StateBox> {
-    vec![
-        StateBox {
-            lower: vec![f64::NEG_INFINITY; n_state],
-            upper: vec![f64::INFINITY; n_state],
-        };
-        n_stages
-    ]
 }
 
 /// Build a minimal `StochasticContext` for a single-hydro, 3-stage system.

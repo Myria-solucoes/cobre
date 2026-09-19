@@ -1085,8 +1085,8 @@ mod tests {
         horizon_mode::HorizonMode,
         indexer::{StateSpace, StudyDimensions},
         inflow_method::InflowNonNegativityMethod,
-        lp_builder::{PatchBuffer, StateBox},
-        test_support::{state_layout, study_dims},
+        lp_builder::PatchBuffer,
+        test_support::{permissive_state_boxes, state_layout, study_dims},
         trajectory::TrajectoryRecord,
         workspace::{BackwardAccumulators, BasisStore, ScratchBuffers, SolverWorkspace},
     };
@@ -1161,18 +1161,6 @@ mod tests {
     }
 
     // ── Fixture helpers ────────────────────────────────────────────────────
-
-    /// A fully-permissive `(-inf, inf)` box per stage, for fixtures driving
-    /// `run_forward_stage` through the seam without exercising the clamp.
-    fn permissive_state_boxes(n_state: usize, n_stages: usize) -> Vec<StateBox> {
-        vec![
-            StateBox {
-                lower: vec![f64::NEG_INFINITY; n_state],
-                upper: vec![f64::INFINITY; n_state],
-            };
-            n_stages
-        ]
-    }
 
     fn minimal_template_1_0() -> StageTemplate {
         StageTemplate {

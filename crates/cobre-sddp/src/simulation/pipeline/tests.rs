@@ -19,7 +19,7 @@ use crate::{
     energy_conversion::EnergyConversionSet,
     horizon_mode::HorizonMode,
     inflow_method::InflowNonNegativityMethod,
-    lp_builder::{PatchBuffer, StateBox},
+    lp_builder::PatchBuffer,
     setup::node_graph::Traversal,
     simulation::{
         config::SimulationConfig,
@@ -28,22 +28,9 @@ use crate::{
         state::{SimulationInputs, SimulationState},
     },
     solve::solver_phase::Phase,
-    test_support,
+    test_support::{self, permissive_state_boxes},
     workspace::{BackwardAccumulators, CapturedBasis, ScratchBuffers, SolverWorkspace},
 };
-
-/// A fully-permissive `(-inf, inf)` box per stage, for fixtures driving
-/// `run_simulate`/`run_simulate_with_profile` through the seam without
-/// exercising the clamp.
-fn permissive_state_boxes(n_state: usize, n_stages: usize) -> Vec<StateBox> {
-    vec![
-        StateBox {
-            lower: vec![f64::NEG_INFINITY; n_state],
-            upper: vec![f64::INFINITY; n_state],
-        };
-        n_stages
-    ]
-}
 
 // A params struct would churn every call site; the wide arity is deliberate.
 #[allow(clippy::too_many_arguments)]
