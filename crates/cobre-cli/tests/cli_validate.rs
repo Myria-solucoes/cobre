@@ -3,7 +3,7 @@
 #![allow(clippy::unwrap_used)]
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use assert_cmd::prelude::*;
@@ -903,4 +903,83 @@ fn fpha_hydro_without_production_models_json_stdout_mentions_file() {
         .failure()
         .code(1)
         .stdout(predicate::str::contains("hydro_production_models.json"));
+}
+
+// ── non-boundary scalar-parameter presence guard ───────────────────────────────
+
+/// Absolute path to `examples/<name>`, resolved two levels above the crate.
+fn example_case(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .unwrap()
+        .join("examples")
+        .join(name)
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) {
+    fs::create_dir_all(dst).unwrap();
+    for entry in fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir_recursive(&from, &to);
+        } else {
+            fs::copy(&from, &to).unwrap();
+        }
+    }
+}
+
+/// A non-boundary deck whose scalar-parameter table has a resolution gap (a
+/// `seasonal` param with no entry for the resolved season) now exits 1, honoring
+/// the module contract that a clean `validate` implies a clean pre-solver `run`.
+/// The `--json` kind and message are identical to `cobre.io.validate`'s.
+#[test]
+fn non_boundary_scalar_parameter_gap_is_rejected() {
+    let dir = TempDir::new().unwrap();
+    copy_dir_recursive(&example_case("1dtoy"), dir.path());
+    write_file(
+        dir.path(),
+        "constraints/generic_parameters.json",
+        r#"{"scalar_parameters": [{"id": 1, "name": "p_gap", "kind": "seasonal", "values": [[5, 1.0]]}]}"#,
+    );
+
+    let output = cobre()
+        .args(["validate", dir.path().to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "gap deck must exit 1");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(
+        value["error"]["phase"],
+        serde_json::json!("GenericConstraintValidationError"),
+        "kind must match cobre.io.validate: {value}"
+    );
+    assert_eq!(
+        value["error"]["message"],
+        serde_json::json!(
+            "constraints/: configuration validation error: parameter 'p_gap': no seasonal value for season_id=0 (needed by stage 0)"
+        ),
+        "message must match cobre.io.validate byte-for-byte: {value}"
+    );
+}
+
+/// The same non-boundary deck with a fully-resolved scalar parameter still
+/// validates and exits 0 — the guard raises no false rejection.
+#[test]
+fn non_boundary_resolved_scalar_parameter_validates() {
+    let dir = TempDir::new().unwrap();
+    copy_dir_recursive(&example_case("1dtoy"), dir.path());
+    write_file(
+        dir.path(),
+        "constraints/generic_parameters.json",
+        r#"{"scalar_parameters": [{"id": 1, "name": "p_ok", "kind": "constant", "value": 1.0}]}"#,
+    );
+
+    cobre()
+        .args(["validate", dir.path().to_str().unwrap()])
+        .assert()
+        .success();
 }

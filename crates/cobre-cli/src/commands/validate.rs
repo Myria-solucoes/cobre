@@ -21,7 +21,11 @@
 //!    history, loads user opening trees, and builds the stochastic context.
 //! 3. [`cobre_sddp::hydro_models::prepare_hydro_models_from_artifacts`] — resolves
 //!    production and evaporation models from the pre-parsed artifact bundle.
-//! 4. When `config.policy.boundary` is configured, [`cobre_sddp::StudySetup::new`]
+//! 4. [`cobre_sddp::validate_generic_constraint_parameters`] — builds the resolved
+//!    scalar-parameter table and rejects a generic constraint that references an
+//!    unresolved id. Run for a deck with no boundary policy; a boundary deck
+//!    runs the same guard inside [`cobre_sddp::StudySetup::new`] (phase 5).
+//! 5. When `config.policy.boundary` is configured, [`cobre_sddp::StudySetup::new`]
 //!    plus [`cobre_sddp::load_boundary_cuts`] — builds the study and reconciles
 //!    the boundary policy against its terminal manifest, without solving.
 
@@ -36,7 +40,7 @@ use cobre_sddp::validate_phases::{PrepPhase, prep_phase_metadata};
 use cobre_sddp::{
     BoundaryLoadRequest, BoundaryReconciliationReport, PrepareHydroModelsResult, SddpError,
     StudyParams, StudySetup, load_boundary_cuts, orchestration, prepare_stochastic,
-    resolve_boundary_state_requirements, study_horizon_end,
+    resolve_boundary_state_requirements, study_horizon_end, validate_generic_constraint_parameters,
 };
 use cobre_stochastic::StochasticContext;
 use console::{Term, style};
@@ -301,6 +305,37 @@ fn run_boundary_check(
     }
 }
 
+/// Run study construction's scalar-parameter presence guard for a deck with no
+/// boundary policy; a boundary deck runs the same guard inside [`StudySetup::new`]
+/// via [`run_boundary_check`], so this is a no-op there. A reject maps to a
+/// [`CliError::Validation`] via [`prep_error_to_cli_error`].
+fn run_generic_constraint_parameter_check(
+    case_dir: &Path,
+    config: &Config,
+    system: &System,
+    hydro_models: &PrepareHydroModelsResult,
+    scalar_parameters: &[ScalarParameter],
+    cost_scale_factor: f64,
+    stdout: Option<&Term>,
+    json: bool,
+) -> Result<(), CliError> {
+    if config.policy.boundary.is_some() {
+        return Ok(());
+    }
+    run_prep_phase(
+        validate_generic_constraint_parameters(
+            system,
+            hydro_models,
+            scalar_parameters,
+            cost_scale_factor,
+        ),
+        stdout,
+        json,
+        PrepPhase::GenericConstraints,
+        case_dir,
+    )
+}
+
 /// Serialize `output` as `cobre validate --json`'s single stdout JSON object.
 /// Stdout carries exactly one JSON object and no human-readable text.
 fn emit_validate_json(output: &ValidateBoundaryOutput) -> Result<(), CliError> {
@@ -465,6 +500,17 @@ pub fn execute(args: ValidateArgs) -> Result<(), CliError> {
             }
         }
     }
+
+    run_generic_constraint_parameter_check(
+        &args.case_dir,
+        &config,
+        &prepared.system,
+        &hydro_models,
+        &artifacts.scalar_parameters,
+        study_params.cost_scale_factor,
+        stdout_sink,
+        args.json,
+    )?;
 
     let boundary_outcome = run_boundary_check(
         &args.case_dir,

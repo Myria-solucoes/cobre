@@ -20,16 +20,18 @@ use crate::SddpError;
 /// Each variant corresponds to one of the four SDDP preparation steps that
 /// follow the six-layer cobre-io loading pipeline:
 ///
-/// | Phase           | Function called                        | Typical trigger file           |
-/// |-----------------|----------------------------------------|-------------------------------|
-/// | [`Config`]      | `StudyParams::from_config`             | `config.json`                 |
-/// | [`Stochastic`]  | `prepare_stochastic`                   | `scenarios/inflow_history.parquet` |
-/// | [`HydroModels`] | `prepare_hydro_models_from_artifacts`  | `system/hydro_production_models.json` |
-/// | [`Boundary`]    | `load_boundary_cuts`                   | `policy.boundary`              |
+/// | Phase                | Function called                            | Typical trigger file                  |
+/// |----------------------|--------------------------------------------|---------------------------------------|
+/// | [`Config`]           | `StudyParams::from_config`                 | `config.json`                         |
+/// | [`Stochastic`]       | `prepare_stochastic`                       | `scenarios/inflow_history.parquet`    |
+/// | [`HydroModels`]      | `prepare_hydro_models_from_artifacts`      | `system/hydro_production_models.json` |
+/// | [`GenericConstraints`] | `validate_generic_constraint_parameters` | `constraints/`                        |
+/// | [`Boundary`]         | `load_boundary_cuts`                       | `policy.boundary`                     |
 ///
 /// [`Config`]: PrepPhase::Config
 /// [`Stochastic`]: PrepPhase::Stochastic
 /// [`HydroModels`]: PrepPhase::HydroModels
+/// [`GenericConstraints`]: PrepPhase::GenericConstraints
 /// [`Boundary`]: PrepPhase::Boundary
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrepPhase {
@@ -39,6 +41,11 @@ pub enum PrepPhase {
     Stochastic,
     /// `prepare_hydro_models_from_artifacts` (production/evaporation models).
     HydroModels,
+    /// `validate_generic_constraint_parameters` (resolved scalar-parameter table
+    /// build plus the generic-constraint parameter-presence guard, run for a deck
+    /// with no boundary policy — a boundary deck runs the same guard inside
+    /// `StudySetup::new`).
+    GenericConstraints,
     /// `load_boundary_cuts` (boundary checkpoint reconciliation against the
     /// terminal entity manifest, when `config.policy.boundary` is set).
     Boundary,
@@ -77,6 +84,7 @@ pub fn prep_phase_metadata(phase: PrepPhase, err: &SddpError) -> (&'static str, 
         PrepPhase::Config => "ConfigValidationError",
         PrepPhase::Stochastic => "StochasticPreparationError",
         PrepPhase::HydroModels => "HydroModelsPreparationError",
+        PrepPhase::GenericConstraints => "GenericConstraintValidationError",
         PrepPhase::Boundary => "BoundaryReconciliationError",
     };
 
@@ -85,6 +93,7 @@ pub fn prep_phase_metadata(phase: PrepPhase, err: &SddpError) -> (&'static str, 
         (PrepPhase::Stochastic, SddpError::Stochastic(_)) => "scenarios/inflow_history.parquet",
         (PrepPhase::Stochastic, _) => "scenarios/",
         (PrepPhase::HydroModels, _) => "system/hydro_production_models.json",
+        (PrepPhase::GenericConstraints, _) => "constraints/",
         (PrepPhase::Boundary, _) => "policy.boundary",
     };
 
@@ -142,12 +151,21 @@ mod tests {
     }
 
     #[test]
+    fn generic_constraints_phase_returns_constraints_dir() {
+        let err = SddpError::Validation("unresolved scalar parameter".to_string());
+        let (kind, file) = prep_phase_metadata(PrepPhase::GenericConstraints, &err);
+        assert_eq!(kind, "GenericConstraintValidationError");
+        assert_eq!(file, "constraints/");
+    }
+
+    #[test]
     fn all_phases_produce_non_empty_kind_and_file() {
         let err = SddpError::Validation("test".to_string());
         for phase in [
             PrepPhase::Config,
             PrepPhase::Stochastic,
             PrepPhase::HydroModels,
+            PrepPhase::GenericConstraints,
             PrepPhase::Boundary,
         ] {
             let (kind, file) = prep_phase_metadata(phase, &err);

@@ -45,6 +45,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`cobre validate` now runs the generic-constraint parameter check for every
+  deck, not only boundary-configured ones, so a scalar-parameter resolution gap
+  is caught at validate time instead of only at run time.** A generic constraint
+  referencing a scalar parameter that does not resolve for a stage's season
+  previously passed `cobre validate` on a deck without a configured boundary
+  policy and only failed once `cobre run` built the study; validation now reports
+  it up front (kind `GenericConstraintValidationError`), restoring the guarantee
+  that a case which validates cleanly will not fail this phase at run time. The
+  CLI and the Python `cobre.io.validate` binding reject identically.
+
 - **A negative FPHA discretization count in `hydro_production_models.json` is now
   rejected at load with a diagnostic naming the field and hydro.** The count
   fields — `volume_discretization_points`, `turbine_discretization_points`,

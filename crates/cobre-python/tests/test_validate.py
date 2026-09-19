@@ -469,3 +469,69 @@ def test_validate_rejects_missing_specific_productivity(
     assert any("specific productivity" in err["message"] for err in result["errors"]), (
         f"expected an error naming the missing productivity, got: {result['errors']!r}"
     )
+
+
+# ── Non-boundary scalar-parameter presence guard ──────────────────────────────
+#
+# A deck with no boundary policy builds no StudySetup, yet validate must still run
+# study construction's scalar-parameter guard so a gap is rejected before the
+# solver — identically to `cobre validate` (same error kind
+# GenericConstraintValidationError and the same message).
+
+
+def _write_scalar_parameters(
+    case_dir: pathlib.Path, scalar_parameters: list[dict[str, object]]
+) -> None:
+    """Write `constraints/generic_parameters.json` into an existing case dir."""
+    constraints_dir = case_dir / "constraints"
+    constraints_dir.mkdir(exist_ok=True)
+    (constraints_dir / "generic_parameters.json").write_text(
+        json.dumps({"scalar_parameters": scalar_parameters})
+    )
+
+
+def test_validate_rejects_non_boundary_scalar_parameter_gap() -> None:
+    """A non-boundary deck whose scalar-parameter table has a resolution gap (a
+    `seasonal` param with no entry for the resolved season; 1dtoy resolves every
+    stage to season 0) is rejected as GenericConstraintValidationError, closing
+    the gap that previously let it pass validate while `cobre run` failed.
+    """
+    import cobre.io  # noqa: PLC0415
+
+    case_dir = copy_case_to_tempdir(VALID_CASE_1DTOY)
+    try:
+        _write_scalar_parameters(
+            case_dir,
+            [{"id": 1, "name": "p_gap", "kind": "seasonal", "values": [[5, 1.0]]}],
+        )
+        result = cobre.io.validate(str(case_dir))
+        assert result["valid"] is False, f"expected a reject, got: {result!r}"
+        assert len(result["errors"]) == 1
+        err = result["errors"][0]
+        assert err["kind"] == "GenericConstraintValidationError", (
+            f"kind must match `cobre validate`, got: {err['kind']!r}"
+        )
+        assert err["message"] == (
+            "constraints/: configuration validation error: parameter 'p_gap': "
+            "no seasonal value for season_id=0 (needed by stage 0)"
+        ), f"message must match `cobre validate` byte-for-byte, got: {err['message']!r}"
+    finally:
+        shutil.rmtree(case_dir.parent, ignore_errors=True)
+
+
+def test_validate_accepts_non_boundary_resolved_scalar_parameter() -> None:
+    """A non-boundary deck whose scalar-parameter table resolves cleanly still
+    validates with zero errors (the new guard raises no false rejection)."""
+    import cobre.io  # noqa: PLC0415
+
+    case_dir = copy_case_to_tempdir(VALID_CASE_1DTOY)
+    try:
+        _write_scalar_parameters(
+            case_dir,
+            [{"id": 1, "name": "p_ok", "kind": "constant", "value": 1.0}],
+        )
+        result = cobre.io.validate(str(case_dir))
+        assert result["valid"] is True, f"expected valid, got: {result!r}"
+        assert result["errors"] == []
+    finally:
+        shutil.rmtree(case_dir.parent, ignore_errors=True)

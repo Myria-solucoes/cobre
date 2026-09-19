@@ -1003,6 +1003,70 @@ fn build_energy_and_templates(
     arc_arrival_density: &HashMap<usize, Vec<Option<Vec<f64>>>>,
     hydro_cell_index: &HydroCellIndex,
 ) -> Result<EnergyAndTemplates, SddpError> {
+    let (energy_conversion, resolved_parameters) = build_energy_conversion_and_resolved_parameters(
+        system,
+        hydro_models,
+        scalar_parameters,
+        cost_scale_factor,
+    )?;
+
+    let mut stage_templates = build_stage_templates(
+        system,
+        inflow_method,
+        stochastic.par(),
+        stochastic.normal(),
+        &hydro_models.production,
+        &hydro_models.evaporation,
+        &resolved_parameters,
+        state_layout,
+        per_stage_mask,
+        arc_stage_weights,
+        arc_spread_chrono,
+        arc_arrival_density,
+        hydro_cell_index,
+        stochastic
+            .provenance()
+            .load_scheme
+            .unwrap_or(SamplingScheme::InSample),
+    )?;
+
+    let scaling_report = template_postprocess::postprocess_templates(
+        &mut stage_templates,
+        system,
+        state_layout,
+        cost_scale_factor,
+    );
+
+    if stage_templates.templates.is_empty() {
+        return Err(SddpError::Validation(
+            "system has no study stages".to_string(),
+        ));
+    }
+
+    Ok(EnergyAndTemplates {
+        energy_conversion,
+        stage_templates,
+        scaling_report,
+        resolved_parameters,
+    })
+}
+
+/// Build the energy-conversion set and the resolved-parameter table, then fail
+/// loud on a generic constraint that references an unresolved scalar-parameter
+/// id — the shared prefix of [`build_energy_and_templates`] and the
+/// validate-time [`validate_generic_constraint_parameters`].
+///
+/// # Errors
+///
+/// [`SddpError::Validation`] on energy-conversion or resolved-parameter
+/// construction failure, or a generic constraint referencing an id the resolved
+/// table never held (via [`check_scalar_parameters_present`]).
+fn build_energy_conversion_and_resolved_parameters(
+    system: &System,
+    hydro_models: &PrepareHydroModelsResult,
+    scalar_parameters: &[ScalarParameter],
+    cost_scale_factor: f64,
+) -> Result<(EnergyConversionSet, ResolvedParameters), SddpError> {
     let study_stage_ids: Vec<StageId> = system
         .stages()
         .iter()
@@ -1055,45 +1119,31 @@ fn build_energy_and_templates(
 
     check_scalar_parameters_present(system.generic_constraints(), &resolved_parameters)?;
 
-    let mut stage_templates = build_stage_templates(
-        system,
-        inflow_method,
-        stochastic.par(),
-        stochastic.normal(),
-        &hydro_models.production,
-        &hydro_models.evaporation,
-        &resolved_parameters,
-        state_layout,
-        per_stage_mask,
-        arc_stage_weights,
-        arc_spread_chrono,
-        arc_arrival_density,
-        hydro_cell_index,
-        stochastic
-            .provenance()
-            .load_scheme
-            .unwrap_or(SamplingScheme::InSample),
-    )?;
+    Ok((energy_conversion, resolved_parameters))
+}
 
-    let scaling_report = template_postprocess::postprocess_templates(
-        &mut stage_templates,
+/// Run study construction's scalar-parameter presence guard for `system`
+/// without building stage templates or a full [`StudySetup`], so a deck with no
+/// boundary policy still rejects an unresolved generic-constraint parameter at
+/// validate time (a boundary deck runs the same guard inside [`StudySetup::new`]).
+///
+/// # Errors
+///
+/// [`SddpError::Validation`] on a scalar parameter that fails to resolve, or a
+/// generic constraint referencing an id the resolved table never held.
+pub fn validate_generic_constraint_parameters(
+    system: &System,
+    hydro_models: &PrepareHydroModelsResult,
+    scalar_parameters: &[ScalarParameter],
+    cost_scale_factor: f64,
+) -> Result<(), SddpError> {
+    build_energy_conversion_and_resolved_parameters(
         system,
-        state_layout,
+        hydro_models,
+        scalar_parameters,
         cost_scale_factor,
-    );
-
-    if stage_templates.templates.is_empty() {
-        return Err(SddpError::Validation(
-            "system has no study stages".to_string(),
-        ));
-    }
-
-    Ok(EnergyAndTemplates {
-        energy_conversion,
-        stage_templates,
-        scaling_report,
-        resolved_parameters,
-    })
+    )?;
+    Ok(())
 }
 
 /// Fails loud when a generic constraint references a scalar-parameter id
@@ -3601,6 +3651,61 @@ mod scalar_parameter_construction_tests {
             matches!(err, SddpError::Validation(ref msg) if msg.contains("probe_constraint") && msg.contains("999")),
             "expected the fail-loud check naming the constraint and id=999, got: {err:?}"
         );
+    }
+
+    #[test]
+    fn validate_generic_constraint_parameters_rejects_unresolved_reference_without_a_setup() {
+        let base = k_fan_system(3, false);
+        let constraint = GenericConstraint {
+            id: EntityId(500),
+            name: "probe_constraint".to_string(),
+            description: None,
+            expression: ConstraintExpression { terms: vec![] },
+            slack: SlackConfig {
+                enabled: false,
+                penalty: None,
+            },
+            bound_lower_affine: Some(AffineBound::single(EntityId(999))),
+            bound_upper_affine: None,
+        };
+        let system = SystemBuilder::new()
+            .buses(base.buses().to_vec())
+            .hydros(base.hydros().to_vec())
+            .stages(base.stages().to_vec())
+            .inflow_models(base.inflow_models().to_vec())
+            .load_models(base.load_models().to_vec())
+            .bounds(base.bounds().clone())
+            .penalties(base.penalties().clone())
+            .initial_conditions(base.initial_conditions().clone())
+            .policy_graph(base.policy_graph().clone())
+            .generic_constraints(vec![constraint])
+            .build()
+            .expect("adding a generic constraint keeps the fixture valid");
+        let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
+        let err = super::validate_generic_constraint_parameters(
+            &system,
+            &hydro_models,
+            &[],
+            crate::DEFAULT_COST_SCALE_FACTOR,
+        )
+        .expect_err("the validate-time guard must reject the unresolved reference");
+        assert!(
+            matches!(err, SddpError::Validation(ref msg) if msg.contains("probe_constraint") && msg.contains("999")),
+            "expected the same fail-loud message the construction path emits, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_generic_constraint_parameters_accepts_a_gap_free_deck() {
+        let system = k_fan_system(3, false);
+        let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
+        super::validate_generic_constraint_parameters(
+            &system,
+            &hydro_models,
+            &[],
+            crate::DEFAULT_COST_SCALE_FACTOR,
+        )
+        .expect("a deck with no generic-constraint parameter gap must pass the guard");
     }
 }
 

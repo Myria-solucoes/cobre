@@ -37,6 +37,7 @@ use cobre_sddp::hydro_models::prepare_hydro_models_from_artifacts;
 use cobre_sddp::validate_phases::{PrepPhase, prep_phase_metadata};
 use cobre_sddp::{
     StudyParams, StudySetup, prepare_stochastic, resolve_boundary_state_requirements,
+    validate_generic_constraint_parameters,
 };
 
 use crate::convert::pydict_to_json_map;
@@ -154,7 +155,11 @@ pub fn load_case(path: PathBuf) -> PyResult<PySystem> {
 ///    and surfaces deprecation warnings for fields scheduled for removal
 /// 9. [`prepare_stochastic`] — PAR estimation, opening trees, stochastic context
 /// 10. [`prepare_hydro_models_from_artifacts`] — production/evaporation models
-/// 11. Boundary reconciliation — when `config.policy.boundary` is configured,
+/// 11. [`validate_generic_constraint_parameters`] — builds the resolved
+///     scalar-parameter table and rejects a generic constraint referencing an
+///     unresolved id. Run for a deck with no boundary policy; a boundary deck
+///     runs the same guard inside the phase-12 `StudySetup` build.
+/// 12. Boundary reconciliation — when `config.policy.boundary` is configured,
 ///     build the `StudySetup` and reconcile the boundary checkpoint against the
 ///     terminal entity manifest. Skipped when no boundary policy is configured.
 ///
@@ -308,6 +313,18 @@ pub fn validate(
 
         if let Err(ref err) = reconcile_boundary_policy(&setup, &prepared.system, bp, &path) {
             let (kind, file_label) = prep_phase_metadata(PrepPhase::Boundary, err);
+            return_error!(kind, format!("{file_label}: {err}"));
+        }
+    } else {
+        // The boundary branch above runs this guard inside `StudySetup::new`; a
+        // non-boundary deck builds none.
+        if let Err(ref err) = validate_generic_constraint_parameters(
+            &prepared.system,
+            &hydro_models,
+            &artifacts.scalar_parameters,
+            study_params.cost_scale_factor,
+        ) {
+            let (kind, file_label) = prep_phase_metadata(PrepPhase::GenericConstraints, err);
             return_error!(kind, format!("{file_label}: {err}"));
         }
     }
