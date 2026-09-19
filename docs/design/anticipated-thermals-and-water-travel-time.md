@@ -494,15 +494,18 @@ boundary FCF then prices its carried state directly through the generic `β·sta
 projection. (Reachable slots use `(-inf, inf)`, not water's `[0, inf)`, because a
 committed MW value carries either sign.)
 
-**Drift reconciliation** (`crates/cobre-sddp/src/lp/builder/commitment_reconcile.rs`):
-a latched `commit_out` is a _basic_ variable produced by the simplex factorization,
-so it is accurate only to the backend's `primal_feasibility_tolerance` (`1e-9`),
-never 1 ULP; a commitment at its cap arrives a hair outside it and the no-slack
-fishing equality would turn that hair into a false `Infeasible`. `StageSolvePrep`
-reconciles every pinned commitment against the delivery column's enforced bound
-within a `drift_margin`; drift beyond that is a real error, never absorbed. The
-reconciliation is mandatory and non-parametric — all four solve sites get it and
-none can opt out.
+**Drift reconciliation** (`crates/cobre-sddp/src/solve/stage_solve.rs`,
+`assemble_outgoing_state`): a latched `commit_out` is a _basic_ variable produced by
+the simplex factorization, so it is accurate only to the backend's
+`primal_feasibility_tolerance` (`1e-9`), never 1 ULP; a commitment at its cap arrives
+a hair outside it and the no-slack fishing equality would turn that hair into a false
+`Infeasible`. The outgoing-state read-back seam projects every outgoing state onto its
+admissible box before the value is pinned, solved against, or dotted into a cut, so the
+sub-tolerance drift is absorbed silently — no runtime verdict, no telemetry. The clamp
+runs at all four solve sites uniformly (forward, backward, lower bound, simulation). A
+_genuine_ over-commitment — a declared value outside the delivery stage's resolved
+generation box — is rejected before the study runs, at cobre-io load time
+(`check_committed_value_bounds`), never on the solve path.
 
 ### 3.5 `col_scale` and boundary pricing
 

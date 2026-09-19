@@ -11,6 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Every stored state value is canonicalized onto its admissible bounds at
+  read-back, so an out-of-tolerance solver drift can no longer abort a run.** On
+  the training and simulation solve path each outgoing state — reservoir storage,
+  in-transit water buckets, and anticipated-commitment holds — is projected onto
+  its resolved bounds before the value is pinned, solved against, or priced into a
+  future-cost cut. A commitment the simplex places a hair outside its cap is
+  absorbed rather than raising a spurious infeasibility that would end the run. A
+  genuine over-commitment — a committed value outside the delivery stage's resolved
+  generation bounds — is now rejected at case-load time with a clear diagnostic,
+  instead of aborting mid-solve.
+
 - **`Study.stochastic`, `Study.hydro_models` and `Study.provenance` accessors
   read the three structural summaries a study captures at construction.** A
   caller can now read the stochastic summary, the hydro-model summary and the

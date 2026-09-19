@@ -2212,7 +2212,20 @@ surfaced by `warn_thermal_generation_on_anticipated_thermal` and is the general
 "a hard generic constraint may be infeasible" class, not an anticipated-specific
 hole.
 
+The StateBox commitment-slot box is the SECOND reader of this same
+delivery-anchored base: `fill_commitment_hold_box` (`lp/builder/state_box.rs`)
+resolves each reachable hold slot's box from the SAME
+`thermal_block_base(delivery_stage)` the decision column reads, and depends on the
+SAME `check_block_id_on_anticipated_thermal` load-time rule for the
+overlay-ignoring base read's safety. They are one delivery-anchored dependency
+with two readers — and the box the read-back seam clamps onto IS this box — so a
+change to the delivery-stage bound source, or to the block-id rule that makes the
+overlay-ignoring base read safe, must update BOTH readers; updating only one
+prices a commitment against a different bound than its own box permits.
+
 Read: `lp/builder/columns.rs` (`fill_anticipated_columns`),
+`lp/builder/state_box.rs` (`fill_commitment_hold_box`, the box reader of the same
+delivery-anchored base),
 `lp/indexer/anticipated_gate.rs` (`is_anticipated_decision_active_for_delivery`),
 `lp/generic_constraints.rs` (`resolve_anticipated_decision`),
 `cobre-io` `validation/semantic/thermal.rs`
@@ -2272,7 +2285,7 @@ Read: `solve/stage_solve.rs` (`assemble_outgoing_state`, the read-back seam),
 `validation/semantic/thermal.rs` (`check_committed_value_bounds`, the load-time
 over-commitment reject). Pinned for the seam by
 `anticipated_commitment_drifted_over_cap_is_absorbed` (a seed a hair past the cap
-trains to completion rather than aborting, `tests/state_drift_absorption.rs`), and
+trains to completion rather than aborting, `tests/anticipated_scenarios.rs`), and
 for the load-time validator by `delivery_box_sub_tolerance_drift_accepted`
 (sub-tolerance accepted) and `delivery_box_override_tightens_max_rejects_over_commitment`
 plus `test_committed_value_above_max_bounds_error` (genuine over-commitment
