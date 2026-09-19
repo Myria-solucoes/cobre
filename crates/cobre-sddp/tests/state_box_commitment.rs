@@ -430,7 +430,7 @@ fn state_box_commitment_slot_takes_the_delivery_stage_resolved_bound() {
     assert_eq!(upper[j], OVERRIDE_MAX_MW);
 }
 
-/// DEBT-001 regression: at decision stage 0, the K=2 ring's slot for
+/// At decision stage 0, the K=2 ring's slot for
 /// `INTERIOR_DELIVERY_STAGE` (a pre-study, `decider == None`, seeded target still
 /// in flight — not this stage's fresh deposit, which targets `DELIVERY_STAGE`
 /// instead) must carry its OWN held target's resolved bound, not the `[0, 0]`
