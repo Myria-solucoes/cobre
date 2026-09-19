@@ -20,9 +20,6 @@ use crate::setup::PostStudyResolved;
 /// [`StateSpace::n_state`]. A reachable dimension has `lower <= upper` by
 /// construction; an inverted or empty box is a load-time validator concern, not
 /// this builder's.
-// Rationale (dead_code): built and unit-tested here; read by the outgoing-state
-// canonicalization seam this box feeds once that consumer lands.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct StateBox {
     /// Per-dimension lower bound.
