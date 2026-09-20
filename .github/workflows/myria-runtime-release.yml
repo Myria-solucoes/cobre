@@ -15,11 +15,17 @@ on:
         type: boolean
         default: false
 
+      validate_only:
+        description: Validate an existing optimized release without publishing artifacts
+        type: boolean
+        default: false
+
 permissions:
   contents: write
 
 jobs:
   release:
+    if: ${{ !inputs.validate_only }}
     name: Build Linux runtime artifacts
     runs-on: ubuntu-24.04
     env:
@@ -78,3 +84,49 @@ jobs:
             --notes "Pinned Myria runtime built from ${GITHUB_SHA}." \
             dist/cobre-cli-x86_64-unknown-linux-gnu.tar.xz \
             dist/*.whl
+
+  validate:
+    if: ${{ inputs.validate_only }}
+    name: Validate published runtime (${{ matrix.arch }})
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+      ARTIFACT_ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+          path: release-source
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Download and verify published artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$RELEASE_TAG" --json assets > release-assets.json
+          gh release download "$RELEASE_TAG" --dir dist \
+            --pattern "cobre-cli-${ARTIFACT_ARCH}-unknown-linux-gnu.tar.xz" \
+            --pattern "*${ARTIFACT_ARCH}.whl"
+          python - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          assets = {a['name']: a['digest'] for a in json.loads(Path('release-assets.json').read_text())['assets']}
+          for artifact in Path('dist').iterdir():
+              assert assets[artifact.name] == 'sha256:' + hashlib.sha256(artifact.read_bytes()).hexdigest()
+          PY
+          tar -xJf "dist/cobre-cli-${ARTIFACT_ARCH}-unknown-linux-gnu.tar.xz" -C dist
+          python -m pip install --no-deps dist/*.whl
+      - name: Exercise CLI and Python runtime
+        run: python scripts/benchmarks/verify_runtime.py --cli dist/cobre --case release-source/examples/4ree

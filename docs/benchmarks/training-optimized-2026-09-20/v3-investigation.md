@@ -201,4 +201,46 @@ speedup. It does not extrapolate the compact 47% progressive-population gain.
 The deduplicated backward phase attributed 28% of its time to worker wait. A
 follow-up keeps eight workers and the same complete set of points/openings, using
 ten-opening/two-point chains to investigate work distribution and basis reuse.
-That follow-up is still running.
+That follow-up completed; its regression is recorded below.
+
+### Full-case cross-point regression
+
+Ten-opening/two-point chains with eight workers took 412.284 seconds, versus
+310.796 seconds for eight-worker by-scenario (+32.65%). The LP/cut counts remained
+37,352/1,776 and no solve failed. Final lower bound was 87,428,504,896.98741,
+versus 87,794,918,239.24646 (-0.4173%); after just two iterations this is not a
+comparison of converged policies. Do not enable this grouped setting for round
+1687 on the strength of the compact-case result. It remains opt-in, default off.
+
+The grouped backward phase took 386 seconds and attributed 24% to worker wait,
+versus roughly 28% in the prior deduplicated pass. A lower wait fraction did not
+compensate for more solver work: the grouped run performed 26,277,601 backward
+simplex iterations versus 18,911,125 by-scenario (+38.95%). The public preview retains the capability for further study,
+not a universal speed recommendation.
+
+## Published opt.3 package checks
+
+The immutable prerelease targets `3e3bdbc4081c247611465f8bd849a75a5de31bff`.
+Both x86_64 and ARM64 CLI/wheel builds succeeded. All four downloaded files match
+their GitHub asset SHA-256 digests; latest remains `v0.15.0-myria.4`.
+Myria's actual `cobre-worker-base` Docker stage built locally on Linux ARM64 with
+the updated opt.3 hash lock. The stable wheel accepts the plain case and rejects
+experimental fields; the isolated wheel trains four iterations with progressive
+population, point grouping and audited selection, with LML1 and DCS. The stable
+package files remain unchanged.
+
+The real ARM64 installer succeeded twice in a disposable Ubuntu 24.04 container:
+second installation idempotent, stable and prior-opt.2 sentinel hashes unchanged,
+and the installed CLI trained the combined fixture. The reusable
+`scripts/benchmarks/verify_runtime.py` also passed natively on ARM64, checking
+CLI/Python bound agreement, Python one/two-worker invariance, and invalid schedule
+rejection for both cut-selection methods. These are smoke tests, not policy
+non-inferiority tests.
+
+An initial local x86_64 emulation check failed with illegal instruction. A control
+with the published opt.2 CLI failed identically (exit 132); this VirtualApple CPU
+exposes no AVX2/FMA, which `.cargo/config.toml` requests for both builds. Native
+x86_64 package execution therefore still needs its own check. The release workflow
+now has a read-only `validate_only` mode for existing optimized releases, using
+native x86_64/ARM64 runners, digest verification and the reusable artifact check;
+it does not publish or replace release assets.
