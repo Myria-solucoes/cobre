@@ -1,0 +1,30 @@
+[
+  {
+    "hydro_id": 0,
+    "capacity_hm3": 204078.3,
+    "reference_mean_terminal_hm3": 707.7826487933888,
+    "candidate_mean_terminal_hm3": 707.7826487933888,
+    "difference_capacity_percentage_points": 0.0
+  },
+  {
+    "hydro_id": 1,
+    "capacity_hm3": 19929.2,
+    "reference_mean_terminal_hm3": 0.0,
+    "candidate_mean_terminal_hm3": 0.0,
+    "difference_capacity_percentage_points": 0.0
+  },
+  {
+    "hydro_id": 2,
+    "capacity_hm3": 51806.1,
+    "reference_mean_terminal_hm3": 2088.4084152165456,
+    "candidate_mean_terminal_hm3": 1916.8229617350732,
+    "difference_capacity_percentage_points": -0.3312070460456825
+  },
+  {
+    "hydro_id": 3,
+    "capacity_hm3": 15765.5,
+    "reference_mean_terminal_hm3": 0.0,
+    "candidate_mean_terminal_hm3": 0.0,
+    "difference_capacity_percentage_points": 0.0
+  }
+]

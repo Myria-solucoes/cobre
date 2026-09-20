@@ -169,3 +169,36 @@ comparison: two iterations/eight forwards, by-scenario four-worker reference,
 eight-worker candidate, then eight-worker complete-state deduplication. Simulation
 is disabled; this is a timing/solver-work diagnostic, not a trained-policy quality
 gate. The original risk/input files are retained. Manager SSH is still pending.
+
+The by-scenario comparison's terminal storage difference is concentrated in hydro
+ID 2: mean 2,088.408 → 1,916.823 hm3, or -0.3312 percentage points of that hydro's
+51,806.1 hm3 usable capacity. Hydro IDs 0, 1 and 3 have unchanged mean terminal
+storage. See `v3-local-point-tiles-terminal-by-hydro.json`. This per-hydro result
+is more informative than diluting the difference across total system capacity;
+no operational acceptance margin has been inferred from it.
+
+## Full-case local short comparison
+
+The serial native macOS comparison completed on the original 112-stage round-1687
+converted case, preserving the input risk settings. It uses only two iterations
+and eight forward trajectories; one timing per arm, no simulation. All arms use
+by-scenario scheduling and LML1 selection each iteration.
+
+| Arm | Threads | Training | LPs | Generated cuts | Final LB |
+|---|---:|---:|---:|---:|---:|
+| Reference | 4 | 504.874 s | 37,352 | 1,776 | 87,794,918,239.24646 |
+| Candidate | 8 | 310.796 s | 37,352 | 1,776 | 87,794,918,239.24646 |
+| Candidate, full-state deduplication | 8 | 308.017 s | 37,352 | 1,776 | 87,794,918,239.24646 |
+
+Eight workers reduced training by 38.44% in this single local comparison.
+Deduplication removed no solves or cuts; its additional 0.89% timing difference
+is not persuasive evidence of a benefit. No solve failed; all arms retried 130
+solves. All 112 exported cut files are byte-identical across the three arms; their
+SHA-256 hashes are recorded separately. This is a short training
+throughput measurement, not evidence about converged-policy quality or a server
+speedup. It does not extrapolate the compact 47% progressive-population gain.
+
+The deduplicated backward phase attributed 28% of its time to worker wait. A
+follow-up keeps eight workers and the same complete set of points/openings, using
+ten-opening/two-point chains to investigate work distribution and basis reuse.
+That follow-up is still running.
