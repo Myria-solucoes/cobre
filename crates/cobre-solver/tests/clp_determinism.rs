@@ -537,7 +537,7 @@ fn merged_ss1_2_template() -> StageTemplate {
     }
 }
 
-// ─── Wired-knob determinism (DSE pricing, refactor cadence, hot-start) ────────
+// ─── Wired-knob determinism (DSE pricing, refactor cadence) ──────────────────
 
 /// The mutate-then-solve sequence shared by the wired-knob determinism tests:
 /// solve `SS1.1` cold, append the two `SS1.2` rows, solve, tighten a column

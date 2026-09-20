@@ -306,7 +306,7 @@ fn main() {
         clp_build.compile("clp_wrapper");
 
         // C++ shim: implements the CLP class-only knobs (dual-steepest-edge
-        // pricing, factorization frequency, hot-start snapshot/restore) that
+        // pricing and factorization frequency) that
         // live solely on the C++ ClpSimplex class and are absent from
         // <Clp_C_Interface.h>. It casts the opaque model handle to `Clp_Simplex*`
         // (the concrete C-interface wrapper struct) and reads `->model_` to reach

@@ -257,7 +257,7 @@ pub struct BackwardPassState {
     pub(crate) worker_totals: Vec<f64>,
 
     /// Cross-rank error-reconciliation scratch, reused each stage by the
-    /// pre-`sync_packed_records` reconcile so that reconciliation never allocates.
+    /// pre-`sync_level_records` reconcile so that reconciliation never allocates.
     pub(crate) reconcile_scratch: [i32; 1],
 
     /// Resolved backward-phase solver profile applied at [`Self::run`] entry.

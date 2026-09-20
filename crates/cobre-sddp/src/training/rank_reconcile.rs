@@ -335,7 +335,7 @@ mod tests {
     /// Backward-phase deadlock-freedom: with rank 1's backward solve returning
     /// `Infeasible` on a 2-rank comm (ranks solve disjoint trial points, so the
     /// failure is divergent), the reconcile between the cut-insert loop and
-    /// `sync_packed_records` makes BOTH ranks return `Err` before any sync
+    /// `sync_level_records` makes BOTH ranks return `Err` before any sync
     /// collective — `ReconcileStub::allgatherv` is unreachable, so reaching one
     /// would panic instead of hanging as the real allgatherv would.
     #[test]

@@ -1,4 +1,4 @@
-//! The [`ClpSolver`] handle wrapper, its lifecycle/hot-start primitives, and the
+//! The [`ClpSolver`] handle wrapper, its lifecycle primitives, and the
 //! [`clp_version`] free function.
 
 use std::os::raw::c_void;

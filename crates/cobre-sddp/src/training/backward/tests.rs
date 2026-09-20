@@ -3614,7 +3614,7 @@ fn backward_pass_cut_coefficients_unaffected() {
 ///    without sync, because single-rank sync is a no-op that does not change
 ///    results but exercises the code path.
 /// 3. Using `LocalBackend` (the production single-rank communicator) instead
-///    of `StubComm` exercises the full `sync_cuts` → allgatherv → deserialize
+///    of `StubComm` exercises the full `sync_level_records` → allgatherv → deserialize
 ///    path, confirming no panics or data corruption.
 ///
 /// True multi-rank correctness testing requires actual MPI and is out of
@@ -3737,7 +3737,7 @@ fn per_stage_cut_sync_invariant_after_bug1_fix() {
     );
 
     // Verify cut_sync_time_ms was captured (structural evidence that
-    // sync_cuts was called inside the backward loop).
+    // sync_level_records was called inside the backward loop).
     // For single-rank LocalBackend, sync is a no-op, so time should be
     // very small but the field must be populated (not default/garbage).
     // We just verify it's a valid non-negative value.
