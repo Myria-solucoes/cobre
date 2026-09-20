@@ -574,6 +574,7 @@ fn run_one_deterministic_pass(
         &mut solver,
         TrainingConfig {
             loop_config: LoopConfig {
+                forward_schedule: None,
                 forward_passes: 1,
                 training_enumerated: false,
                 max_iterations: 10,
@@ -637,6 +638,7 @@ fn train_converges_with_mock_solver() {
 
     let config = TrainingConfig {
         loop_config: LoopConfig {
+            forward_schedule: None,
             forward_passes: 1,
             training_enumerated: false,
             max_iterations: 10,
@@ -758,6 +760,7 @@ fn train_lb_monotonically_nondecreasing() {
     let (tx, rx) = mpsc::channel::<TrainingEvent>();
     let config = TrainingConfig {
         loop_config: LoopConfig {
+            forward_schedule: None,
             forward_passes: 1,
             training_enumerated: false,
             max_iterations: 20,
@@ -868,6 +871,7 @@ fn train_emits_correct_event_sequence() {
     let (tx, rx) = mpsc::channel::<TrainingEvent>();
     let config = TrainingConfig {
         loop_config: LoopConfig {
+            forward_schedule: None,
             forward_passes: 1,
             training_enumerated: false,
             max_iterations: 10,
@@ -1013,6 +1017,7 @@ fn train_stops_at_iteration_limit() {
         &mut solver,
         TrainingConfig {
             loop_config: LoopConfig {
+                forward_schedule: None,
                 forward_passes: 1,
                 training_enumerated: false,
                 max_iterations: 10,
@@ -1116,6 +1121,7 @@ fn train_stops_on_graceful_shutdown() {
         &mut solver,
         TrainingConfig {
             loop_config: LoopConfig {
+                forward_schedule: None,
                 forward_passes: 1,
                 training_enumerated: false,
                 max_iterations: 20,
@@ -1209,6 +1215,7 @@ fn train_propagates_infeasible_error() {
         &mut solver,
         TrainingConfig {
             loop_config: LoopConfig {
+                forward_schedule: None,
                 forward_passes: 1,
                 training_enumerated: false,
                 max_iterations: 10,
@@ -1291,6 +1298,7 @@ fn d17_level1_cut_selection_convergence() {
     let (tx, rx) = mpsc::channel::<TrainingEvent>();
     let config = TrainingConfig {
         loop_config: LoopConfig {
+            forward_schedule: None,
             forward_passes: 1,
             training_enumerated: false,
             max_iterations: 10,
@@ -1481,6 +1489,7 @@ fn d17_level1_cut_selection_reconstruction() {
         &mut solver,
         TrainingConfig {
             loop_config: LoopConfig {
+                forward_schedule: None,
                 forward_passes: 1,
                 training_enumerated: false,
                 max_iterations: 10,
@@ -1567,6 +1576,7 @@ fn d18_lml1_cut_selection_convergence() {
     let (tx, rx) = mpsc::channel::<TrainingEvent>();
     let config = TrainingConfig {
         loop_config: LoopConfig {
+            forward_schedule: None,
             forward_passes: 1,
             training_enumerated: false,
             max_iterations: 10,
@@ -1841,6 +1851,7 @@ fn frozen_backward_pass_smoke_test() {
         &mut solver,
         TrainingConfig {
             loop_config: LoopConfig {
+                forward_schedule: None,
                 forward_passes: 1,
                 training_enumerated: false,
                 max_iterations: n_iter,

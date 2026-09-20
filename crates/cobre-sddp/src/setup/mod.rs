@@ -436,6 +436,7 @@ impl StudySetup {
             inflow_method,
             cut_selection,
             backward_selection,
+            forward_schedule,
             cut_activity_tolerance,
             budget,
             export_states,
@@ -774,6 +775,7 @@ impl StudySetup {
             node_graph,
             loop_params: LoopParams {
                 seed,
+                forward_schedule,
                 forward_passes,
                 training_enumerated,
                 max_iterations,

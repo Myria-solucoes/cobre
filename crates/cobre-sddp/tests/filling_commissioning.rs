@@ -1690,6 +1690,7 @@ mod filling_cut_validity {
                 cost_scale_factor: None,
             },
             training: TrainingConfig {
+                forward_schedule: None,
                 backward_selection: None,
                 enabled: true,
                 tree_seed: Some(42),

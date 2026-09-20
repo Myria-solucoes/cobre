@@ -1935,7 +1935,7 @@ fn compute_one_backward_node<S: SolverInterface + Send, C: Communicator>(
     } else {
         let basis_slices = inputs
             .basis_store
-            .split_workers_mut(params.n_workers_local.max(1));
+            .split_active_workers_mut(params.n_workers_local.max(1), inputs.local_work);
         let worker_staged = process_stage_backward(
             inputs.workspaces,
             ctx,

@@ -351,15 +351,20 @@ fn cli_run_writes_inflow_annual_component_when_par_a_active() {
 
 #[test]
 fn periodic_checkpoint_resumes_in_a_new_output_directory() {
-    check_checkpoint_resume(false);
+    check_checkpoint_resume(false, false);
 }
 
 #[test]
 fn selected_points_checkpoint_resumes_without_artificial_cuts() {
-    check_checkpoint_resume(true);
+    check_checkpoint_resume(true, false);
 }
 
-fn check_checkpoint_resume(selected: bool) {
+#[test]
+fn progressive_forward_checkpoint_resumes_before_refinement() {
+    check_checkpoint_resume(true, true);
+}
+
+fn check_checkpoint_resume(selected: bool, progressive: bool) {
     let dir = TempDir::new().unwrap();
     make_valid_case(&dir);
     let mut config: serde_json::Value = serde_json::from_str(CONFIG_JSON).unwrap();
@@ -373,6 +378,11 @@ fn check_checkpoint_resume(selected: bool) {
         });
         config["training"]["cut_selection"] = serde_json::json!({
             "selection": {"method": "lml1", "check_frequency": 1}
+        });
+    }
+    if progressive {
+        config["training"]["forward_schedule"] = serde_json::json!({
+            "initial_passes": 2, "growth_interval": 2, "full_from_iteration": 4
         });
     }
     config["policy"] = serde_json::json!({"mode":"fresh", "checkpointing": {

@@ -519,6 +519,7 @@ mod tests {
             schema: None,
             modeling: ModelingConfig::default(),
             training: TrainingConfig {
+                forward_schedule: None,
                 backward_selection: None,
                 enabled: true,
                 tree_seed: None,

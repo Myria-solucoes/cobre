@@ -1066,10 +1066,17 @@ impl BasisStore {
     /// Panics if `n_workers == 0`.
     #[must_use]
     pub fn split_workers_mut(&mut self, n_workers: usize) -> Vec<BasisStoreSliceMut<'_>> {
+        self.split_active_workers_mut(n_workers, self.num_scenarios())
+    }
+
+    pub(crate) fn split_active_workers_mut(
+        &mut self,
+        n_workers: usize,
+        total_scenarios: usize,
+    ) -> Vec<BasisStoreSliceMut<'_>> {
         debug_assert!(n_workers > 0, "n_workers must be > 0");
-        let total_scenarios = self.num_scenarios();
         let mut slices = Vec::with_capacity(n_workers);
-        let mut bases_rem = self.bases.as_mut_slice();
+        let mut bases_rem = &mut self.bases[..total_scenarios * self.num_nodes];
         let mut offset = 0usize;
 
         for w in 0..n_workers {

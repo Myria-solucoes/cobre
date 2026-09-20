@@ -1326,6 +1326,7 @@ fn k_fan_config(forward_passes: u32, max_iterations: u32) -> Config {
             cost_scale_factor: None,
         },
         training: TrainingConfig {
+            forward_schedule: None,
             backward_selection: None,
             enabled: true,
             tree_seed: Some(K_FAN_TREE_SEED),

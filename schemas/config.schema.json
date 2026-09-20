@@ -1170,6 +1170,18 @@
           "description": "Enable the training phase. When `false`, skip directly to simulation.",
           "type": "boolean"
         },
+        "forward_schedule": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrajectorySchedule"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional trajectory ramp; absent uses the full count in every iteration."
+        },
         "parallelism": {
           "$ref": "#/$defs/ParallelismConfig",
           "default": {
@@ -1322,6 +1334,36 @@
           "type": "number"
         }
       },
+      "type": "object"
+    },
+    "TrajectorySchedule": {
+      "additionalProperties": false,
+      "description": "Geometric trajectory growth with an explicit full-population refinement phase.",
+      "properties": {
+        "full_from_iteration": {
+          "description": "First absolute iteration using the full configured population.",
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "growth_interval": {
+          "description": "Iterations between doublings.",
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "initial_passes": {
+          "description": "Trajectories in the first iteration.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "initial_passes",
+        "growth_interval",
+        "full_from_iteration"
+      ],
       "type": "object"
     },
     "TrialPointSelection": {

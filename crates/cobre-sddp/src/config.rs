@@ -53,6 +53,8 @@ pub struct LoopParams {
     pub seed: u64,
     /// Number of forward-pass trajectories per training iteration.
     pub forward_passes: u32,
+    /// Optional trajectory ramp, evaluated at the absolute iteration number.
+    pub forward_schedule: Option<cobre_io::config::training::TrajectorySchedule>,
     /// `true` when the forward selection is `enumerated`; selects the exact
     /// probability-weighted upper bound instead of the sampled statistical one.
     pub training_enumerated: bool,
@@ -81,6 +83,8 @@ pub struct LoopParams {
 pub struct LoopConfig {
     /// Total forward scenarios per iteration across all ranks. Must be `>= 1`.
     pub forward_passes: u32,
+    /// Optional trajectory ramp, evaluated at the absolute iteration number.
+    pub forward_schedule: Option<cobre_io::config::training::TrajectorySchedule>,
 
     /// `true` when the forward selection is `enumerated`; [`crate::train`] then
     /// assembles the exact probability-weighted upper bound rather than the
@@ -105,10 +109,31 @@ pub struct LoopConfig {
     pub stopping_rules: StoppingRuleSet,
 }
 
+impl LoopConfig {
+    pub(crate) fn active_forward_passes(&self, iteration: u64) -> u32 {
+        let Some(schedule) = self.forward_schedule else {
+            return self.forward_passes;
+        };
+        if iteration >= schedule.full_from_iteration.get() {
+            return self.forward_passes;
+        }
+        let doublings = iteration.saturating_sub(1) / schedule.growth_interval.get();
+        let multiplier = 1_u32.checked_shl(u32::try_from(doublings).unwrap_or(u32::MAX));
+        multiplier.map_or(self.forward_passes, |factor| {
+            schedule
+                .initial_passes
+                .get()
+                .saturating_mul(factor)
+                .min(self.forward_passes)
+        })
+    }
+}
+
 impl Default for LoopConfig {
     fn default() -> Self {
         Self {
             forward_passes: 1,
+            forward_schedule: None,
             training_enumerated: false,
             max_iterations: 1,
             start_iteration: 0,
@@ -385,5 +410,30 @@ mod tests {
             debug.contains("max_iterations"),
             "debug must contain field name: {debug}"
         );
+    }
+    #[test]
+    fn forward_schedule_grows_caps_and_forces_full_refinement() {
+        let mut config = LoopConfig {
+            forward_passes: 20,
+            forward_schedule: Some(cobre_io::config::training::TrajectorySchedule {
+                initial_passes: 3.try_into().unwrap(),
+                growth_interval: 2.try_into().unwrap(),
+                full_from_iteration: 8.try_into().unwrap(),
+            }),
+            ..LoopConfig::default()
+        };
+        let counts: Vec<_> = (1..=9).map(|i| config.active_forward_passes(i)).collect();
+        assert_eq!(counts, [3, 3, 6, 6, 12, 12, 20, 20, 20]);
+        let schedule = config.forward_schedule.as_mut().unwrap();
+        schedule.growth_interval = 100.try_into().unwrap();
+        schedule.full_from_iteration = 4.try_into().unwrap();
+        assert_eq!(config.active_forward_passes(3), 3);
+        assert_eq!(config.active_forward_passes(4), 20);
+        let schedule = config.forward_schedule.as_mut().unwrap();
+        schedule.growth_interval = 1.try_into().unwrap();
+        schedule.full_from_iteration = u64::MAX.try_into().unwrap();
+        assert_eq!(config.active_forward_passes(u64::MAX - 1), 20);
+        config.forward_schedule = None;
+        assert_eq!(config.active_forward_passes(1), 20);
     }
 }

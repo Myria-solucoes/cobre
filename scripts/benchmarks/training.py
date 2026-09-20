@@ -20,6 +20,10 @@ def main():
     parser.add_argument('--threads', type=int, default=4)
     parser.add_argument('--candidate-threads', type=int,
                         help='Override worker count for candidate/selected arms only')
+    parser.add_argument('--forward-initial', type=int,
+                        help='Enable a progressive forward population in candidate/selected arms')
+    parser.add_argument('--forward-growth-interval', type=int, default=3)
+    parser.add_argument('--forward-full-from', type=int)
     parser.add_argument('--arms', nargs='+', choices=['baseline', 'candidate', 'selected'], default=['baseline', 'candidate', 'selected'])
     parser.add_argument('--lml1-frequency', type=int, default=1)
     parser.add_argument('--repeats', type=int, default=3)
@@ -59,6 +63,13 @@ def main():
                 {'method': 'by_node', 'block_size': args.block_size} if args.scheduler == 'by_node' else
                 {'method': 'by_scenario'})}
             config['training']['selection'] = {'method': 'sampled', 'forward_passes': args.forwards}
+            config['training'].pop('forward_schedule', None)
+            if arm != 'baseline' and args.forward_initial is not None:
+                config['training']['forward_schedule'] = {
+                    'initial_passes': args.forward_initial,
+                    'growth_interval': args.forward_growth_interval,
+                    'full_from_iteration': (args.forward_full_from if args.forward_full_from is not None
+                                            else max(1, args.iterations * 2 // 3))}
             config['training']['stopping_rules'] = [{'type': 'iteration_limit', 'limit': args.iterations}]
             config['training']['cut_selection'] = {'selection': (
                 {'method': 'lml1', 'check_frequency': args.lml1_frequency} if args.cut_method == 'lml1' else

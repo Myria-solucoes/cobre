@@ -1971,6 +1971,17 @@ and `cvar_mixture_matches_primal_tail_formula_and_envelope`.
 
 ## Experimental point selection and sparse pools
 
+`training.forward_schedule` changes the active sampled population at absolute
+iteration numbers. Rank, exchange, trajectory and basis partitions must use that
+same active prefix; capacity and each pool's cut-slot stride stay fixed at the
+configured maximum. Partitioning the full basis capacity while processing a
+shorter trajectory prefix assigns a worker bases from a different scenario window.
+`progressive_forward_cvar_refines_and_preserves_thread_invariance` catches that
+mismatch with fewer active trajectories than workers and checks actual LP counts.
+`progressive_population_excludes_stale_slots_without_reallocating` pins exclusion
+of inactive gathered states. Enumerated training rejects the schedule. A resumed
+schedule uses absolute iterations; early stopping can precede full refinement.
+
 `training.backward_selection` processes a deterministic subset of sampled trial
 points on a single rank, retaining every opening at each selected point. Full
 periodic passes and the configured refinement restore complete coverage; they do

@@ -426,6 +426,7 @@ fn make_config() -> Config {
             cost_scale_factor: None,
         },
         training: IoTrainingConfig {
+            forward_schedule: None,
             backward_selection: None,
             enabled: true,
             tree_seed: None,
@@ -602,6 +603,7 @@ fn train_simulate_write_cycle() {
     let (tx, rx) = mpsc::channel::<TrainingEvent>();
     let training_config = TrainingConfig {
         loop_config: LoopConfig {
+            forward_schedule: None,
             forward_passes: 1,
             training_enumerated: false,
             max_iterations: 10,
@@ -1416,6 +1418,7 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
 
     let training_config = TrainingConfig {
         loop_config: LoopConfig {
+            forward_schedule: None,
             forward_passes: 1,
             training_enumerated: false,
             max_iterations: 1,
@@ -1608,6 +1611,7 @@ fn enumerated_census_k1_matches_sampled_single_scenario() {
 
     let training_config = TrainingConfig {
         loop_config: LoopConfig {
+            forward_schedule: None,
             forward_passes: 1,
             training_enumerated: false,
             max_iterations: 3,

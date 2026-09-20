@@ -1,7 +1,7 @@
 //! Training-phase configuration types for `config.json → training`.
 
 use std::fmt;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -61,6 +61,23 @@ pub struct TrainingConfig {
     /// Experimental point selection; absent preserves exhaustive point processing.
     #[serde(default)]
     pub backward_selection: Option<TrialPointSelection>,
+
+    /// Optional trajectory ramp; absent uses the full count in every iteration.
+    #[serde(default)]
+    pub forward_schedule: Option<TrajectorySchedule>,
+}
+
+/// Geometric trajectory growth with an explicit full-population refinement phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct TrajectorySchedule {
+    /// Trajectories in the first iteration.
+    pub initial_passes: NonZeroU32,
+    /// Iterations between doublings.
+    pub growth_interval: NonZeroU64,
+    /// First absolute iteration using the full configured population.
+    pub full_from_iteration: NonZeroU64,
 }
 
 /// Training-phase scenario selection and its method-specific parameters
@@ -1062,6 +1079,19 @@ mod tests {
                 relative_tolerance: Some(rt)
             } if (rt - 0.01).abs() < f64::EPSILON
         ));
+    }
+    #[test]
+    fn trajectory_schedule_requires_positive_fields_and_rejects_unknown_controls() {
+        let valid = serde_json::json!({"initial_passes": 2, "growth_interval": 3, "full_from_iteration": 8});
+        assert!(serde_json::from_value::<super::TrajectorySchedule>(valid.clone()).is_ok());
+        for field in ["initial_passes", "growth_interval", "full_from_iteration"] {
+            let mut invalid = valid.clone();
+            invalid[field] = serde_json::json!(0);
+            assert!(serde_json::from_value::<super::TrajectorySchedule>(invalid).is_err());
+        }
+        let mut invalid = valid;
+        invalid["unknown"] = serde_json::json!(1);
+        assert!(serde_json::from_value::<super::TrajectorySchedule>(invalid).is_err());
     }
 }
 

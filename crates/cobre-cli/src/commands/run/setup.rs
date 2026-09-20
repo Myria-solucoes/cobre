@@ -435,6 +435,7 @@ fn build_study_setup(
     let training_solver_forward = bcast_config.training_solver_forward.take();
     let simulation_solver = bcast_config.simulation_solver.take();
     let config = StudyParams {
+        forward_schedule: bcast_config.forward_schedule,
         seed: bcast_config.seed,
         forward_passes: bcast_config.forward_passes,
         training_enumerated: bcast_config.training_enumerated,

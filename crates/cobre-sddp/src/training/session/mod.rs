@@ -172,6 +172,15 @@ where
             ));
         }
         let horizon = training_ctx.horizon;
+        if let Some(schedule) = config.loop_config.forward_schedule
+            && (config.loop_config.training_enumerated
+                || schedule.initial_passes.get() > config.loop_config.forward_passes
+                || schedule.full_from_iteration.get() > config.loop_config.max_iterations)
+        {
+            return Err(SddpError::Validation(
+                "invalid forward_schedule for the configured population or iteration budget".into(),
+            ));
+        }
         let state = training_ctx.state;
         let num_stages = horizon.num_stages();
         let total_forward_passes = config.loop_config.forward_passes as usize;
@@ -458,6 +467,10 @@ where
         }
 
         let iter_start = Instant::now();
+
+        let active_forwards = self.config.loop_config.active_forward_passes(iteration) as usize;
+        self.ranks.set_active_total(active_forwards);
+        self.exchange_bufs.set_active_total(active_forwards);
 
         // Snapshot before this iteration's solves so the post-backward delta
         // isolates this iteration's contribution.
@@ -865,7 +878,7 @@ where
             self.runtime.event_sender(),
             TrainingEvent::ForwardPassComplete {
                 iteration,
-                scenarios: self.config.loop_config.forward_passes,
+                scenarios: self.config.loop_config.active_forward_passes(iteration),
                 #[allow(clippy::cast_precision_loss)]
                 ub_mean: if local_n > 0 {
                     local_cost_sum / local_n as f64
@@ -1927,6 +1940,7 @@ mod tests {
     ) -> TrainingConfig {
         TrainingConfig {
             loop_config: LoopConfig {
+                forward_schedule: None,
                 forward_passes,
                 training_enumerated: false,
                 max_iterations,

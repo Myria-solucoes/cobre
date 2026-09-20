@@ -112,6 +112,7 @@ pub(crate) struct BroadcastConfig {
     /// `config.training.cut_selection.max_active_per_stage`.
     pub(crate) budget: Option<u32>,
     pub(crate) backward_selection: Option<cobre_io::config::training::TrialPointSelection>,
+    pub(crate) forward_schedule: Option<cobre_io::config::training::TrajectorySchedule>,
     /// Scenario source for the training forward pass, broadcast so non-root
     /// ranks build the stochastic context with matching sampling schemes.
     pub(crate) training_source: ScenarioSource,
@@ -221,6 +222,7 @@ impl BroadcastConfig {
             simulation_solver: params.simulation_solver,
             backward_scheduler: params.backward_scheduler.into(),
             backward_selection: params.backward_selection,
+            forward_schedule: params.forward_schedule,
             cost_scale_factor: params.cost_scale_factor,
             boundary: params.boundary,
         })
@@ -853,9 +855,22 @@ mod tests {
         );
     }
 
-    /// Postcard round-trip for a populated `training.solver.backward` /
-    /// `.forward` / `simulation.solver` block: every field, not just presence,
-    /// must survive the wire hop identically.
+    #[test]
+    fn broadcast_forward_schedule_roundtrips_via_postcard() {
+        let config: cobre_io::Config = serde_json::from_value(serde_json::json!({
+            "training": {
+                "selection": {"method": "sampled", "forward_passes": 16},
+                "stopping_rules": [{"type": "iteration_limit", "limit": 20}],
+                "forward_schedule": {"initial_passes": 2, "growth_interval": 3, "full_from_iteration": 12}
+            }
+        })).unwrap();
+        let original = super::BroadcastConfig::from_config(&config).unwrap();
+        let bytes = postcard::to_allocvec(&original).unwrap();
+        let decoded: super::BroadcastConfig = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.forward_schedule, config.training.forward_schedule);
+        assert!(decoded.forward_schedule.is_some());
+    }
+
     #[test]
     fn broadcast_config_solver_profile_roundtrips_via_postcard() {
         use super::BroadcastConfig;

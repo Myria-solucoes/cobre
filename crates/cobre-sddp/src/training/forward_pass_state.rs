@@ -440,7 +440,9 @@ impl ForwardPassState {
             record_slices.push(slice);
             remaining = rest;
         }
-        let basis_slices = inputs.basis_store.split_workers_mut(n_workers);
+        let basis_slices = inputs
+            .basis_store
+            .split_active_workers_mut(n_workers, forward_passes);
 
         let noise_dim = stochastic.dim();
 

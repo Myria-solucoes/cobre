@@ -101,6 +101,44 @@ cost, deficit, storage and an evaluation compatible with nested conditional risk
 the CVaR of total simulated cost alone is not that nested objective. A stable lower
 bound is not a quality certificate.
 
+## Experimental progressive trajectories
+
+This option requires a source build containing `forward_schedule`; the published
+`opt.2` runtime does not accept it. Validation of this new option is in progress.
+
+```json
+{
+  "training": {
+    "selection": { "method": "sampled", "forward_passes": 64 },
+    "forward_schedule": {
+      "initial_passes": 8,
+      "growth_interval": 3,
+      "full_from_iteration": 12
+    },
+    "stopping_rules": [{ "type": "iteration_limit", "limit": 20 }]
+  }
+}
+```
+
+The population doubles every `growth_interval` iterations, capped at
+`selection.forward_passes`, and uses the full population from
+`full_from_iteration` onward. All three schedule fields must be positive;
+the initial population cannot exceed the configured full population and the
+refinement iteration must fit within the iteration limit. Enumerated training
+does not accept this option. Omitting it retains fixed-population training.
+
+Buffers and cut-slot strides retain their maximum capacity. Only active
+trajectories contribute to sampling statistics, backward routing and the visited
+state archive. Every selected backward state still integrates all its successor
+openings. With `backward_selection`, both controls apply: the forward population
+determines the visited states, then backward selection chooses among them.
+
+The schedule uses absolute iteration numbers, including after resume. Keep the
+schedule and full population unchanged when comparing resumed runs. Existing
+stopping rules can terminate before refinement; verify the completed iterations.
+A smaller population changes statistical precision and the learned policy, so
+full refinement alone is not a guarantee of equivalent policy quality.
+
 ## Reproducible compact comparisons
 
 Run benchmarks serially on an otherwise idle machine. Both executables should

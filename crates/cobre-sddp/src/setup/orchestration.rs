@@ -175,6 +175,7 @@ impl StudySetup {
         let training_config = TrainingConfig {
             loop_config: LoopConfig {
                 forward_passes: self.loop_params.forward_passes,
+                forward_schedule: self.loop_params.forward_schedule,
                 training_enumerated: self.loop_params.training_enumerated,
                 max_iterations: self.loop_params.max_iterations,
                 start_iteration: self.loop_params.start_iteration,

@@ -343,6 +343,16 @@ impl ExchangeBuffers {
         self.real_total
     }
 
+    pub(crate) fn set_active_total(&mut self, total: usize) {
+        let base = total / self.num_ranks;
+        let remainder = total % self.num_ranks;
+        debug_assert!(base + usize::from(remainder > 0) <= self.local_count);
+        for (rank, count) in self.actual_counts.iter_mut().enumerate() {
+            *count = base + usize::from(rank < remainder);
+        }
+        self.real_total = total;
+    }
+
     /// Copy only the real (non-padded) state vectors from the receive buffer
     /// into `buf`.
     ///
@@ -815,5 +825,26 @@ mod tests {
             1,
             "rank 1's padding slot must not reach the archive"
         );
+    }
+    #[test]
+    fn progressive_population_excludes_stale_slots_without_reallocating() {
+        let mut buffers = ExchangeBuffers::with_actual_counts(1, 3, 2, &[3, 3]);
+        buffers
+            .recv_buf
+            .copy_from_slice(&[10.0, 20.0, 30.0, 40.0, 50.0, 60.0]);
+        let original = buffers.recv_buf.as_ptr();
+        let mut packed = Vec::with_capacity(6);
+        for (count, expected) in [
+            (1, vec![10.0]),
+            (3, vec![10.0, 20.0, 40.0]),
+            (6, vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0]),
+        ] {
+            buffers.set_active_total(count);
+            buffers.pack_real_states_into(&mut packed);
+            assert_eq!(packed, expected);
+            assert_eq!(buffers.real_total_scenarios(), count);
+            assert_eq!(buffers.total_scenarios(), 6);
+            assert_eq!(buffers.recv_buf.as_ptr(), original);
+        }
     }
 }

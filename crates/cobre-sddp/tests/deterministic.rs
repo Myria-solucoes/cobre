@@ -6216,6 +6216,7 @@ mod chronological_telescoping {
                 cost_scale_factor: None,
             },
             training: TrainingConfig {
+                forward_schedule: None,
                 backward_selection: None,
                 enabled: true,
                 tree_seed: Some(42),
@@ -6924,6 +6925,7 @@ mod chronological_attribution {
                 cost_scale_factor: None,
             },
             training: TrainingConfig {
+                forward_schedule: None,
                 backward_selection: None,
                 enabled: true,
                 tree_seed: Some(42),
@@ -8605,6 +8607,7 @@ mod enumerated_external {
         n_scenarios: u32,
     ) -> StudyParams {
         StudyParams {
+            forward_schedule: None,
             backward_selection: None,
             seed: 42,
             forward_passes: 1,
@@ -10255,6 +10258,7 @@ mod enumerated_cvar_gap {
                 cost_scale_factor: Some(1.0),
             },
             training: TrainingConfig {
+                forward_schedule: None,
                 backward_selection: None,
                 enabled: true,
                 tree_seed: Some(42),
@@ -10323,6 +10327,79 @@ mod enumerated_cvar_gap {
             "reported gap must be non-negative, got {}",
             r.final_gap
         );
+    }
+
+    #[test]
+    fn progressive_forward_cvar_refines_and_preserves_thread_invariance() {
+        use cobre_io::config::training::TrajectorySchedule;
+        let mut config = enumerated_gap_config();
+        config.training.selection = Some(TrainingSelection::Sampled { forward_passes: 16 });
+        config.training.stopping_rules =
+            Some(vec![StoppingRuleConfig::IterationLimit { limit: 20 }]);
+        let mut reference: Option<f64> = None;
+        let mut progressive_reference = None;
+        for (progressive, threads) in [(false, 1), (true, 1), (true, 4)] {
+            config.training.forward_schedule = progressive.then_some(TrajectorySchedule {
+                initial_passes: 2.try_into().unwrap(),
+                growth_interval: 2.try_into().unwrap(),
+                full_from_iteration: 7.try_into().unwrap(),
+            });
+            let mut setup = build_setup_in_code(build_system(&[CVAR, CVAR]), &config);
+            let mut solver = ActiveSolver::new().unwrap();
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let outcome = setup
+                .train(
+                    &mut solver,
+                    &StubComm,
+                    threads,
+                    ActiveSolver::new,
+                    Some(sender),
+                    None,
+                )
+                .unwrap();
+            assert!(outcome.error.is_none(), "{:?}", outcome.error);
+            let counts: Vec<_> = receiver
+                .try_iter()
+                .filter_map(|event| match event {
+                    cobre_core::TrainingEvent::ForwardPassComplete { scenarios, .. } => {
+                        Some(scenarios)
+                    }
+                    _ => None,
+                })
+                .collect();
+            let mut expected = vec![16; 20];
+            if progressive {
+                expected[..6].copy_from_slice(&[2, 2, 4, 4, 8, 8]);
+            }
+            assert_eq!(counts, expected);
+            for (index, count) in expected.iter().enumerate() {
+                let solves: u64 = outcome
+                    .result
+                    .solver_stats_log
+                    .iter()
+                    .filter(|row| row.phase == "forward" && row.iteration == index as u64 + 1)
+                    .map(|row| row.delta.lp_solves)
+                    .sum();
+                assert_eq!(
+                    solves,
+                    u64::from(*count) * 2,
+                    "inactive trajectories were solved"
+                );
+            }
+            let lb = outcome.result.final_lb;
+            if let Some(expected) = reference {
+                assert!((lb - expected).abs() <= 1e-4 + 1e-6 * lb.abs());
+            } else {
+                reference = Some(lb);
+            }
+            if progressive {
+                if let Some(expected) = progressive_reference {
+                    assert_eq!(lb.to_bits(), expected);
+                } else {
+                    progressive_reference = Some(lb.to_bits());
+                }
+            }
+        }
     }
 
     #[test]

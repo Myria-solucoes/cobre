@@ -635,6 +635,7 @@ fn ac_two_scenarios_three_stages_fixed_solution() {
     let fcf = FutureCostFunction::new(3, state.n_state, 2, 100, &[0; 3]);
     let config = TrainingConfig {
         loop_config: LoopConfig {
+            forward_schedule: None,
             forward_passes: 2,
             training_enumerated: false,
             max_iterations: 100,
@@ -769,6 +770,7 @@ fn ac_infeasible_at_stage_1_scenario_0_returns_infeasible_error() {
     let fcf = FutureCostFunction::new(3, state.n_state, 2, 100, &[0; 3]);
     let config = TrainingConfig {
         loop_config: LoopConfig {
+            forward_schedule: None,
             forward_passes: 2,
             training_enumerated: false,
             max_iterations: 100,
@@ -907,6 +909,7 @@ fn cost_statistics_accumulated_correctly() {
     let fcf = FutureCostFunction::new(3, state.n_state, 2, 100, &[0; 3]);
     let config = TrainingConfig {
         loop_config: LoopConfig {
+            forward_schedule: None,
             forward_passes: 2,
             training_enumerated: false,
             max_iterations: 100,
@@ -1520,6 +1523,7 @@ fn run_one_iteration(
     let fcf = FutureCostFunction::new(3, state.n_state, 1, 100, &[0; 3]);
     let config = TrainingConfig {
         loop_config: LoopConfig {
+            forward_schedule: None,
             forward_passes: 1,
             training_enumerated: false,
             max_iterations: 100,
@@ -2347,6 +2351,7 @@ fn none_method_unchanged_with_truncation_code_present() {
     let fcf = FutureCostFunction::new(3, state.n_state, 2, 100, &[0; 3]);
     let config = TrainingConfig {
         loop_config: LoopConfig {
+            forward_schedule: None,
             forward_passes: 2,
             training_enumerated: false,
             max_iterations: 100,

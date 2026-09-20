@@ -1205,6 +1205,76 @@ mod by_node_scheduler_determinism {
     }
 
     #[test]
+    fn progressive_forward_schedulers_cover_nonuniform_states_and_dcs() {
+        use cobre_io::config::training::TrajectorySchedule;
+        for case_dir in [fixture_case_dir(), non_uniform_cut_projection_case_dir()] {
+            for scheduler in [
+                BackwardScheduler::ByScenario {},
+                BackwardScheduler::ByNode { block_size: None },
+            ] {
+                for dynamic in [false, true] {
+                    let mut reference = None;
+                    for threads in [1, 4] {
+                        let mut setup = fresh_setup_with(case_dir, |config| {
+                            config.training.selection =
+                                Some(cobre_io::config::TrainingSelection::Sampled {
+                                    forward_passes: 4,
+                                });
+                            config.training.stopping_rules =
+                                Some(vec![cobre_io::config::StoppingRuleConfig::IterationLimit {
+                                    limit: 6,
+                                }]);
+                            config.training.parallelism.backward_scheduler = scheduler;
+                            config.training.forward_schedule = Some(TrajectorySchedule {
+                                initial_passes: 1.try_into().unwrap(),
+                                growth_interval: 1.try_into().unwrap(),
+                                full_from_iteration: 3.try_into().unwrap(),
+                            });
+                            if dynamic {
+                                config.training.cut_selection.selection =
+                                    Some(SelectionMethod::Dynamic {
+                                        start_iteration: 1,
+                                        seed_window: 1,
+                                        candidate_recency: None,
+                                        max_added_per_round: 2,
+                                        adaptive_max_added_per_round: Some(8),
+                                        violation_tolerance: 1e-10,
+                                    });
+                            }
+                        });
+                        if case_dir == non_uniform_cut_projection_case_dir() {
+                            let dimensions: std::collections::BTreeSet<_> = setup
+                                .fcf
+                                .pools
+                                .iter()
+                                .map(|pool| pool.state_dimension)
+                                .collect();
+                            assert!(
+                                dimensions.len() > 1,
+                                "fixture must have nonuniform state projections"
+                            );
+                        }
+                        setup.set_risk_measures(vec![
+                            RiskMeasure::CVaR {
+                                alpha: 0.5,
+                                lambda: 0.4
+                            };
+                            setup.num_stages()
+                        ]);
+                        let lb = train_final_lb(setup, threads, &StubComm);
+                        assert!(lb.is_finite());
+                        if let Some(expected) = reference {
+                            assert_eq!(lb.to_bits(), expected);
+                        } else {
+                            reference = Some(lb.to_bits());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     #[cfg_attr(
         not(feature = "slow-tests"),
         ignore = "slow: run with --features slow-tests"

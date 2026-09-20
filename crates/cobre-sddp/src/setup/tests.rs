@@ -515,6 +515,7 @@ fn minimal_config(forward_passes: u32, max_iterations: u32) -> Config {
             cost_scale_factor: None,
         },
         training: TrainingConfig {
+            forward_schedule: None,
             backward_selection: None,
             enabled: true,
             tree_seed: Some(42),
@@ -1462,6 +1463,7 @@ fn study_params_from_config_defaults() {
             cost_scale_factor: None,
         },
         training: TrainingConfig {
+            forward_schedule: None,
             backward_selection: None,
             enabled: true,
             tree_seed: None,
@@ -1530,6 +1532,7 @@ fn study_params_from_config_explicit() {
             cost_scale_factor: None,
         },
         training: TrainingConfig {
+            forward_schedule: None,
             backward_selection: None,
             enabled: true,
             tree_seed: Some(1234),
@@ -1616,6 +1619,7 @@ fn minimal_prepare_config() -> cobre_io::Config {
             cost_scale_factor: None,
         },
         training: TrainingConfig {
+            forward_schedule: None,
             backward_selection: None,
             enabled: true,
             tree_seed: None,

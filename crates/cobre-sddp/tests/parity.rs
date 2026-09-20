@@ -1241,6 +1241,7 @@ mod determinism {
 
         let config = TrainingConfig {
             loop_config: LoopConfig {
+                forward_schedule: None,
                 forward_passes: 1,
                 training_enumerated: false,
                 max_iterations: n_iterations,
@@ -2203,6 +2204,7 @@ mod water_travel_time_no_arc_byte_identity {
                 cost_scale_factor: None,
             },
             training: TrainingConfig {
+                forward_schedule: None,
                 backward_selection: None,
                 enabled: true,
                 tree_seed: Some(42),

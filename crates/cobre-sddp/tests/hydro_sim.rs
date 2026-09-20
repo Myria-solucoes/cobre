@@ -1607,6 +1607,7 @@ mod transit_seed_output {
                 cost_scale_factor: Some(1.0),
             },
             training: TrainingConfig {
+                forward_schedule: None,
                 backward_selection: None,
                 enabled: true,
                 tree_seed: Some(42),
@@ -2018,6 +2019,7 @@ mod transit_seed_round_trip {
                 cost_scale_factor: Some(1.0),
             },
             training: TrainingConfig {
+                forward_schedule: None,
                 backward_selection: None,
                 enabled: true,
                 tree_seed: Some(42),
@@ -2618,6 +2620,7 @@ mod diversion_outflow_bounds {
                 cost_scale_factor: Some(1.0),
             },
             training: TrainingConfig {
+                forward_schedule: None,
                 backward_selection: None,
                 enabled: true,
                 tree_seed: Some(42),
@@ -3097,6 +3100,7 @@ mod water_arc_and_post_study_anticipated_coexist_on_extended_layout {
                 cost_scale_factor: Some(1.0),
             },
             training: TrainingConfig {
+                forward_schedule: None,
                 backward_selection: None,
                 enabled: true,
                 tree_seed: Some(42),

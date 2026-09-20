@@ -529,6 +529,7 @@ fn train_fixture(
         &mut solver,
         TrainingConfig {
             loop_config: LoopConfig {
+                forward_schedule: None,
                 forward_passes: 1,
                 training_enumerated: false,
                 max_iterations: 10,

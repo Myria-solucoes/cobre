@@ -1,17 +1,13 @@
-//! Rank-distribution constants for one training run.
+//! Rank-distribution capacity and active trajectory population.
 
 use cobre_comm::Communicator;
 
 /// Base/remainder arithmetic that divides `total_forward_passes` across MPI
-/// ranks. All fields are set once in `RankDistribution::new` and read-only for
-/// the run.
+/// ranks. Capacity stays fixed while the active population may grow.
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct RankDistribution {
     pub num_stages: usize,
     pub num_ranks: usize,
-    // Rationale: read only by unit tests via `per_rank[rd.my_rank]`; MPI call
-    // sites use the `i32` `fwd_rank` instead.
-    #[allow(dead_code)]
     pub my_rank: usize,
     pub my_actual_fwd: usize,
     pub my_fwd_offset: usize,
@@ -22,6 +18,15 @@ pub(crate) struct RankDistribution {
 }
 
 impl RankDistribution {
+    pub(crate) fn set_active_total(&mut self, total: usize) {
+        let base = total / self.num_ranks;
+        let remainder = total % self.num_ranks;
+        debug_assert!(base + usize::from(remainder > 0) <= self.max_local_fwd);
+        self.my_actual_fwd = base + usize::from(self.my_rank < remainder);
+        self.my_fwd_offset = base * self.my_rank + self.my_rank.min(remainder);
+        self.num_total_forward_passes = total;
+    }
+
     /// Derive all rank-distribution constants from the communicator and config.
     ///
     /// The first `remainder_fwd` ranks each receive `base_fwd + 1` forward
@@ -213,6 +218,24 @@ mod tests {
                 per_rank[rd.my_rank], rd.my_actual_fwd,
                 "rank {rank}: per_rank[my_rank] == my_actual_fwd"
             );
+        }
+    }
+    #[test]
+    fn progressive_population_preserves_capacity_and_rank_offsets() {
+        for rank in 0..3 {
+            let comm = StubCommN { rank, size: 3 };
+            let mut distribution = RankDistribution::new(&comm, 5, 8, 10);
+            for total in [1, 4, 8] {
+                distribution.set_active_total(total);
+                let counts = distribution.actual_per_rank(total);
+                assert_eq!(distribution.my_actual_fwd, counts[rank]);
+                assert_eq!(
+                    distribution.my_fwd_offset,
+                    counts[..rank].iter().sum::<usize>()
+                );
+                assert_eq!(distribution.num_total_forward_passes, total);
+                assert_eq!(distribution.max_local_fwd, 3);
+            }
         }
     }
 }

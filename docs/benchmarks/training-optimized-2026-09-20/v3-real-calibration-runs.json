@@ -1,0 +1,22 @@
+[
+  {
+    "arm": "candidate",
+    "repeat": 0,
+    "wall_seconds": 432.86681061197305,
+    "exit_code": 0,
+    "command": [
+      "/home/jackson/tmp/cobre-optimized-20260920/candidate/cobre-candidate",
+      "run",
+      "/home/jackson/tmp/cobre-optimization-next/calibration-2x8/0-candidate/case",
+      "--output",
+      "/home/jackson/tmp/cobre-optimization-next/calibration-2x8/0-candidate/output",
+      "--threads",
+      "8",
+      "--comm-backend",
+      "local",
+      "--color",
+      "never"
+    ],
+    "binary_sha256": "9bda57b17c432588c51ac075571e2f8b6a8a558adb7ded30c08c7c1300f1cca2"
+  }
+]
