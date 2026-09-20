@@ -170,8 +170,7 @@ pub(super) fn run_simulation_phase(
             },
         )?;
 
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let parallelism = (ctx.n_threads as u32).saturating_mul(ctx.comm.size() as u32);
+    let parallelism = super::compute_parallelism(ctx.n_threads, ctx.comm.size());
 
     merged_sim_output.cost = Some(MetadataCost {
         mean_cost: cost_summary.mean_cost,

@@ -8,6 +8,7 @@
 //! by `load_policy`, so a load → write cycle resets it (cut activity round-trips
 //! through each cut's `is_active`).
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -371,13 +372,14 @@ fn reject_unreserved_lag_coefficients(
 
 /// Owned per-stage payload data: the entity manifest and each cut's coefficient
 /// vector, either as supplied or widened by an inflow-lag reservation, plus the
-/// resulting `state_dimension`. Owning these lets the borrowed
+/// resulting `state_dimension`. Owning the manifest lets the borrowed
 /// [`StageCutsPayload`]/[`PolicyCutRecord`] views reference the reserved
 /// coefficients (which the writer must own — the caller's `coefficients` are
-/// storage-only when a reservation runs).
-struct StageCutsData {
+/// storage-only when a reservation runs); the no-reservation branch borrows
+/// `sc.cuts[*].coefficients` directly instead of cloning.
+struct StageCutsData<'a> {
     manifest: Vec<EntitySlot>,
-    coefficients: Vec<Vec<f64>>,
+    coefficients: Vec<Cow<'a, [f64]>>,
     state_dimension: u32,
 }
 
@@ -386,11 +388,12 @@ struct StageCutsData {
 fn build_stage_cuts_data(
     sc: &PyStageCutsPayload,
     reserve_depth: Option<u32>,
-) -> PyResult<StageCutsData> {
+) -> PyResult<StageCutsData<'_>> {
     let manifest: Vec<EntitySlot> = sc.entity_manifest.iter().map(EntitySlot::from).collect();
-    let coefficients: Vec<Vec<f64>> = sc.cuts.iter().map(|c| c.coefficients.clone()).collect();
     match reserve_depth {
         Some(depth) => {
+            let coefficients: Vec<Vec<f64>> =
+                sc.cuts.iter().map(|c| c.coefficients.clone()).collect();
             let cut_lag: Vec<HashMap<i32, Vec<f64>>> = sc
                 .cuts
                 .iter()
@@ -404,13 +407,17 @@ fn build_stage_cuts_data(
                     })?;
             Ok(StageCutsData {
                 manifest: reserved.manifest,
-                coefficients: reserved.coefficients,
+                coefficients: reserved.coefficients.into_iter().map(Cow::Owned).collect(),
                 state_dimension: reserved.state_dimension,
             })
         }
         None => Ok(StageCutsData {
             manifest,
-            coefficients,
+            coefficients: sc
+                .cuts
+                .iter()
+                .map(|c| Cow::Borrowed(c.coefficients.as_slice()))
+                .collect(),
             state_dimension: sc.state_dimension,
         }),
     }
@@ -462,7 +469,7 @@ pub fn write_policy_checkpoint(
 
     let reserve_depth = inflow_lag_depth.filter(|&n| n > 0);
     reject_unreserved_lag_coefficients(&stage_cuts, reserve_depth)?;
-    let stage_data: Vec<StageCutsData> = stage_cuts
+    let stage_data: Vec<StageCutsData<'_>> = stage_cuts
         .iter()
         .map(|sc| build_stage_cuts_data(sc, reserve_depth))
         .collect::<PyResult<_>>()?;

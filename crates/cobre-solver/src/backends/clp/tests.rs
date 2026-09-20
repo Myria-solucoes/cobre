@@ -1,4 +1,5 @@
-use crate::backends::clp::{ClpAlgorithm, ClpProfile, ClpSolver, LADDER_RUNGS, clp_version};
+use super::retry::LADDER_RUNGS;
+use crate::backends::clp::{ClpAlgorithm, ClpProfile, ClpSolver, clp_version};
 use crate::profile::DEFAULT_PROFILE_HEURISTIC_SENTINEL;
 use crate::types::{Basis, RowBatch, SolutionView, SolverError, SolverStatistics, StageTemplate};
 use crate::{BasisStatus, ProfiledSolver, SolverInterface};

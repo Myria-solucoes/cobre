@@ -596,23 +596,15 @@ impl Stochastic {
         })?;
 
         let rows = &self.opening_rows;
-        let mut start = None;
-        let mut end = 0usize;
-        for (i, &s) in rows.stage_id.iter().enumerate() {
-            if s == stage_i32 {
-                if start.is_none() {
-                    start = Some(i);
-                }
-                end = i + 1;
-            }
-        }
+        let start = rows.stage_id.partition_point(|&s| s < stage_i32);
+        let end = rows.stage_id.partition_point(|&s| s <= stage_i32);
 
-        let Some(start) = start else {
+        if start == end {
             let valid = stage_range_message(rows);
             return Err(PyIndexError::new_err(format!(
                 "stage {stage} not present in the opening tree ({valid})"
             )));
-        };
+        }
 
         // Rows are sorted, so the matching rows form a contiguous block; dim and
         // n_openings derive from the maxima within it.

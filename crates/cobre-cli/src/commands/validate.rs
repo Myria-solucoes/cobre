@@ -392,8 +392,7 @@ fn emit_json_error(json: bool, kind: &str, message: &str) -> Result<(), CliError
 /// Returns [`CliError::Validation`] when the case directory fails validation,
 /// [`CliError::Io`] on filesystem errors, or [`CliError::Internal`] for
 /// unexpected parse or schema failures.
-#[allow(clippy::needless_pass_by_value)]
-pub fn execute(args: ValidateArgs) -> Result<(), CliError> {
+pub fn execute(args: &ValidateArgs) -> Result<(), CliError> {
     let stdout = Term::stdout();
     let stdout_sink = (!args.json).then_some(&stdout);
 

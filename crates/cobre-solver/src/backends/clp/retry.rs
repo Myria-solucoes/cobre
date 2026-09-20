@@ -19,8 +19,7 @@ use crate::clp_ffi;
 /// Typed `usize` so it can size the `RUNGS` array without a fallible cast; the
 /// `retry_count` use-sites widen it to `u64`.
 ///
-/// `pub(crate)` because the exhausted-ladder `retry_count` regression test
-/// reads it through the `clp/mod.rs` re-export.
+/// `pub(crate)` so the exhausted-ladder `retry_count` regression test can read it.
 pub(crate) const LADDER_RUNGS: usize = 5;
 
 /// Outcome of a recovered [`ClpSolver::escalate_solve`] run.

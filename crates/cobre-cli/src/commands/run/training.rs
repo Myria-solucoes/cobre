@@ -189,8 +189,7 @@ pub(super) fn run_training_phase(
         .first()
         .and_then(|r| r.gap_percent);
 
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let parallelism = (ctx.n_threads as u32).saturating_mul(ctx.comm.size() as u32);
+    let parallelism = super::compute_parallelism(ctx.n_threads, ctx.comm.size());
 
     #[allow(clippy::cast_precision_loss)]
     let training_summary = TrainingSummary {

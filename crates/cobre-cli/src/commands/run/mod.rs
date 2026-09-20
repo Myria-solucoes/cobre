@@ -202,7 +202,6 @@ fn execute_inner<C: Communicator>(ctx: &RunContext<C>, args: &RunArgs) -> Result
                     setup: &setup,
                     training_result: &training.result,
                     output_ctx: &training_ctx,
-                    hydro_models: &setup.hydro_models,
                     quiet: ctx.quiet,
                     stderr: &ctx.stderr,
                 })?;
@@ -312,6 +311,12 @@ pub(super) fn build_distribution_info(
         slurm_job_id: topology.slurm.as_ref().map(|s| s.job_id.clone()),
         hosts: host_layouts(topology),
     }
+}
+
+/// Total parallelism as thread count times participating rank count.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+pub(super) fn compute_parallelism(n_threads: usize, comm_size: usize) -> u32 {
+    (n_threads as u32).saturating_mul(comm_size as u32)
 }
 
 /// Map per-host rank assignments into [`cobre_io::HostLayout`] carriers,

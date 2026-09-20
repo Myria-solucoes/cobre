@@ -30,7 +30,7 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc::Sender;
 use std::time::Instant;
 
-use cobre_comm::{Communicator, ReduceOp};
+use cobre_comm::{Communicator, ReduceOp, per_rank_counts};
 use cobre_core::{StageRowSelectionRecord, TrainingEvent};
 use cobre_solver::SolverInterface;
 
@@ -242,7 +242,7 @@ where
         // the chain) so the backward warm-start keys by successor node position.
         let basis_store = BasisStore::new(ranks.max_local_fwd, training_ctx.node_graph.nodes.len());
 
-        let actual_per_rank = ranks.actual_per_rank(total_forward_passes);
+        let actual_per_rank = per_rank_counts(total_forward_passes, ranks.num_ranks);
         let exchange_bufs = ExchangeBuffers::with_actual_counts(
             ranks.n_state,
             ranks.max_local_fwd,

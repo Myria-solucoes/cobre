@@ -260,6 +260,8 @@ jobs:
           python-version: "3.12"
       - name: Infra genericity gate
         run: bash scripts/ci/check-infra-genericity.sh
+      - name: Lint table drift gate
+        run: bash scripts/ci/check-lints-drift.sh
       - name: Cut-selection determinism gate
         run: bash scripts/ci/check-cut-selection-determinism.sh
       - name: cfg(test) boundary drift guard (shared scan lib)

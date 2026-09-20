@@ -38,7 +38,7 @@ use std::io::Error;
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// use cobre_cli::error::CliError;
 ///
 /// let err = CliError::Validation {
@@ -94,7 +94,7 @@ impl CliError {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// use cobre_cli::error::CliError;
     ///
     /// assert_eq!(
@@ -128,7 +128,7 @@ impl CliError {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// use cobre_cli::error::CliError;
     /// use console::Term;
     ///

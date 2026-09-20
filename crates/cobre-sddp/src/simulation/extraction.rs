@@ -1179,14 +1179,11 @@ fn extract_hydros(
             })
             .collect()
     } else {
-        spec.entity_counts
-            .hydro_ids
-            .iter()
-            .enumerate()
-            .flat_map(|(h, &hydro_id)| {
-                extract_hydro_per_block(view, spec, lookup, h, hydro_id, stage_id)
-            })
-            .collect()
+        let mut results = Vec::with_capacity(spec.entity_counts.hydro_ids.len() * spec.n_blks);
+        results.extend(spec.entity_counts.hydro_ids.iter().enumerate().flat_map(
+            |(h, &hydro_id)| extract_hydro_per_block(view, spec, lookup, h, hydro_id, stage_id),
+        ));
+        results
     }
 }
 
@@ -1332,11 +1329,9 @@ fn extract_exchanges(
             .collect()
     } else {
         let grid = spec.block_grid();
-        spec.entity_counts
-            .line_ids
-            .iter()
-            .enumerate()
-            .flat_map(move |(l, &line_id)| {
+        let mut results = Vec::with_capacity(spec.entity_counts.line_ids.len() * n_blks);
+        results.extend(spec.entity_counts.line_ids.iter().enumerate().flat_map(
+            move |(l, &line_id)| {
                 (0..n_blks).map(move |b| {
                     let fwd_col = grid.flat(spec.geometry.line_fwd.start, l, BlockIdx::new(b));
                     let rev_col = grid.flat(spec.geometry.line_rev.start, l, BlockIdx::new(b));
@@ -1357,8 +1352,9 @@ fn extract_exchanges(
                         operative_state_code: 2,
                     }
                 })
-            })
-            .collect()
+            },
+        ));
+        results
     }
 }
 
@@ -1386,11 +1382,9 @@ fn extract_buses(
     } else {
         let grid = spec.block_grid();
         let max_segs = spec.study_dims.max_deficit_segments;
-        spec.entity_counts
-            .bus_ids
-            .iter()
-            .enumerate()
-            .flat_map(move |(bus_idx, &bus_id)| {
+        let mut results = Vec::with_capacity(spec.entity_counts.bus_ids.len() * n_blks);
+        results.extend(spec.entity_counts.bus_ids.iter().enumerate().flat_map(
+            move |(bus_idx, &bus_id)| {
                 (0..n_blks).map(move |b| {
                     // Deficit is the 3-term bus-outer/segment-middle/block-inner
                     // shape, so address it with `deficit`, not `flat`.
@@ -1426,8 +1420,9 @@ fn extract_buses(
                         },
                     }
                 })
-            })
-            .collect()
+            },
+        ));
+        results
     }
 }
 
@@ -2049,12 +2044,10 @@ fn extract_stub_collections(
     Vec<SimulationContractResult>,
 ) {
     let state = spec.state;
-    let inflow_lags: Vec<SimulationInflowLagResult> = spec
-        .entity_counts
-        .hydro_ids
-        .iter()
-        .enumerate()
-        .flat_map(|(h, &hydro_id)| {
+    let mut inflow_lags =
+        Vec::with_capacity(spec.entity_counts.hydro_ids.len() * state.max_par_order);
+    inflow_lags.extend(spec.entity_counts.hydro_ids.iter().enumerate().flat_map(
+        |(h, &hydro_id)| {
             (0..state.max_par_order).map(move |l| {
                 #[allow(clippy::cast_possible_truncation)]
                 SimulationInflowLagResult {
@@ -2064,8 +2057,8 @@ fn extract_stub_collections(
                     inflow_m3s: view.primal[state.lag_incoming_col(l, h).get()],
                 }
             })
-        })
-        .collect();
+        },
+    ));
     let pumping_stations = extract_pumping_stations(view, spec, stage_id);
     let contracts = extract_contracts(view, spec, stage_id);
     (inflow_lags, pumping_stations, contracts)

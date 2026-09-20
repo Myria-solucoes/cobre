@@ -84,39 +84,6 @@ pub(crate) struct SimulationInputs<'a, S: SolverInterface + Send, C> {
     pub traversal: &'a Traversal,
 }
 
-impl<'a, S: SolverInterface + Send, C> SimulationInputs<'a, S, C> {
-    /// Construct a `SimulationInputs` bundle from positional arguments.
-    // RATIONALE: a field-for-field bundle constructor; splitting would only
-    // relocate the parameter list, not reduce it — the struct already bundles
-    // what can be bundled.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
-        workspaces: &'a mut [SolverWorkspace<S>],
-        ctx: &'a StageContext<'a>,
-        fcf: &'a FutureCostFunction,
-        training_ctx: &'a TrainingContext<'a>,
-        config: &'a SimulationConfig,
-        output: SimulationOutputSpec<'a>,
-        frozen_templates: Option<&'a [StageTemplate]>,
-        node_bases: &'a [Option<CapturedBasis>],
-        comm: &'a C,
-        traversal: &'a Traversal,
-    ) -> Self {
-        Self {
-            workspaces,
-            ctx,
-            fcf,
-            training_ctx,
-            config,
-            output,
-            frozen_templates,
-            node_bases,
-            comm,
-            traversal,
-        }
-    }
-}
-
 /// Read-only captures shared by reference across all rayon workers; the mutable
 /// per-worker [`SolverWorkspace`] rides on a separate `ws` argument.
 ///

@@ -37,14 +37,38 @@ class Hydro:
 class EnergyContract:
     id: Any
     name: str
+    operational_start_date: Any
+    bus_id: Any
+    contract_type: Any
+    entry_stage_id: Any
+    exit_stage_id: Any
+    price_per_mwh: Any
+    min_mw: Any
+    max_mw: Any
 
 class PumpingStation:
     id: Any
     name: str
+    operational_start_date: Any
+    bus_id: Any
+    source_hydro_id: Any
+    destination_hydro_id: Any
+    entry_stage_id: Any
+    exit_stage_id: Any
+    consumption_mw_per_m3s: Any
+    min_flow_m3s: Any
+    max_flow_m3s: Any
 
 class NonControllableSource:
     id: Any
     name: str
+    operational_start_date: Any
+    bus_id: Any
+    entry_stage_id: Any
+    exit_stage_id: Any
+    max_generation_mw: Any
+    allow_curtailment: Any
+    curtailment_cost: Any
 
 class System:
     n_buses: int

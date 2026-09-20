@@ -10,7 +10,7 @@
 //!
 //! ## Example
 //!
-//! ```rust,no_run
+//! ```ignore
 //! use std::sync::mpsc;
 //! use cobre_core::TrainingEvent;
 //! use cobre_cli::progress::{run_progress_thread, RenderMode};

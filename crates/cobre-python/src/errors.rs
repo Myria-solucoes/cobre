@@ -252,20 +252,51 @@ fn convert_error_with(py: Python<'_>, source: ErrorSource<'_>) -> PyErr {
     }
 }
 
+/// Prefix minted for output-serialization/write failures (classified as `CaseIoError`).
+pub(crate) const OUTPUT_WRITE_ERROR_PREFIX: &str = "output write error";
+
+/// Prefix minted for policy-checkpoint write failures (classified as `CaseIoError`).
+pub(crate) const POLICY_CHECKPOINT_ERROR_PREFIX: &str = "policy checkpoint error";
+
+/// Prefix minted for config-override merge failures (classified as `ValidationError`).
+pub(crate) const CONFIG_OVERRIDE_ERROR_PREFIX: &str = "config override error";
+
+/// Prefix minted for config JSON parse failures (classified as `ValidationError`).
+pub(crate) const CONFIG_PARSE_ERROR_PREFIX: &str = "config parse error";
+
+/// Prefix minted for config file read failures (classified as `ValidationError`).
+pub(crate) const CONFIG_READ_ERROR_PREFIX: &str = "config read error";
+
+/// Prefix minted for warm-start/resume policy validation failures (classified
+/// as `PolicyIncompatibleError`).
+pub(crate) const POLICY_VALIDATION_ERROR_PREFIX: &str = "policy validation error";
+
+/// Prefix minted for simulation-phase failures (classified as `SimulationError`).
+pub(crate) const SIMULATION_ERROR_PREFIX: &str = "simulation error";
+
+/// Prefix minted for internal software/environment faults (classified as `InternalError`).
+pub(crate) const INTERNAL_ERROR_PREFIX: &str = "internal error";
+
+/// Prefix minted for training-phase failures. Unrecognized by the classifier
+/// below (it falls through to `SolverError`, same as today); named here so the
+/// run-path minter shares one owning constant with the other prefixes.
+pub(crate) const TRAINING_ERROR_PREFIX: &str = "training error";
+
 /// Map a string-prefixed run/study message to its typed class.
 fn message_prefix_to_pyerr(py: Python<'_>, msg: &str) -> PyErr {
-    if msg.starts_with("output write error") || msg.starts_with("policy checkpoint error") {
+    if msg.starts_with(OUTPUT_WRITE_ERROR_PREFIX) || msg.starts_with(POLICY_CHECKPOINT_ERROR_PREFIX)
+    {
         case_io_error(py, msg)
-    } else if msg.starts_with("config override error")
-        || msg.starts_with("config parse error")
-        || msg.starts_with("config read error")
+    } else if msg.starts_with(CONFIG_OVERRIDE_ERROR_PREFIX)
+        || msg.starts_with(CONFIG_PARSE_ERROR_PREFIX)
+        || msg.starts_with(CONFIG_READ_ERROR_PREFIX)
     {
         validation_error(py, msg)
-    } else if msg.starts_with("policy validation error") {
+    } else if msg.starts_with(POLICY_VALIDATION_ERROR_PREFIX) {
         new_leaf_err(py, &POLICY_INCOMPATIBLE_ERROR, msg)
-    } else if msg.starts_with("simulation error") {
+    } else if msg.starts_with(SIMULATION_ERROR_PREFIX) {
         new_leaf_err(py, &SIMULATION_ERROR, msg)
-    } else if msg.starts_with("internal error") {
+    } else if msg.starts_with(INTERNAL_ERROR_PREFIX) {
         new_leaf_err(py, &INTERNAL_ERROR, msg)
     } else {
         // Unrecognized prefix (e.g. "training error" / "training failed after")
@@ -356,7 +387,6 @@ pub(crate) fn register_errors(m: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::{
         ErrorSource, INTERNAL_ERROR, LeafClass, SIMULATION_ERROR, SOLVER_ERROR, convert_error_with,

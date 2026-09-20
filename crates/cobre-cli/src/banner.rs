@@ -7,7 +7,7 @@
 //!
 //! ```rust,no_run
 //! use console::Term;
-//! use cobre::banner;
+//! use crate::banner;
 //!
 //! banner::print_banner(&Term::buffered_stderr());
 //! ```

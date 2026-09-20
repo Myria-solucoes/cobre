@@ -1368,4 +1368,109 @@ mod research_tests {
             "current_profile must equal HighsProfile::default() immediately after construction"
         );
     }
+
+    #[test]
+    fn highs_profile_default_matches_default_options_table() {
+        use crate::HighsProfile;
+        use crate::backends::highs::config::{DefaultOption, OptionValue, default_options};
+
+        fn value_of<'a>(options: &'a [DefaultOption], name: &std::ffi::CStr) -> &'a OptionValue {
+            &options
+                .iter()
+                .find(|opt| opt.name == name)
+                .expect("default_options() must contain this entry")
+                .value
+        }
+
+        let profile = HighsProfile::default();
+        let options = default_options();
+
+        match value_of(&options, c"primal_feasibility_tolerance") {
+            OptionValue::Double(v) => assert_eq!(
+                profile.primal_feasibility_tolerance, *v,
+                "primal_feasibility_tolerance must match default_options()"
+            ),
+            _ => panic!("primal_feasibility_tolerance is not a Double option"),
+        }
+        match value_of(&options, c"dual_feasibility_tolerance") {
+            OptionValue::Double(v) => assert_eq!(
+                profile.dual_feasibility_tolerance, *v,
+                "dual_feasibility_tolerance must match default_options()"
+            ),
+            _ => panic!("dual_feasibility_tolerance is not a Double option"),
+        }
+        match value_of(&options, c"simplex_dual_edge_weight_strategy") {
+            OptionValue::Int(v) => assert_eq!(
+                profile.simplex_dual_edge_weight_strategy, *v,
+                "simplex_dual_edge_weight_strategy must match default_options()"
+            ),
+            _ => panic!("simplex_dual_edge_weight_strategy is not an Int option"),
+        }
+        match value_of(&options, c"simplex_scale_strategy") {
+            OptionValue::Int(v) => assert_eq!(
+                profile.simplex_scale_strategy, *v,
+                "simplex_scale_strategy must match default_options()"
+            ),
+            _ => panic!("simplex_scale_strategy is not an Int option"),
+        }
+        match value_of(&options, c"simplex_price_strategy") {
+            OptionValue::Int(v) => assert_eq!(
+                profile.simplex_price_strategy, *v,
+                "simplex_price_strategy must match default_options()"
+            ),
+            _ => panic!("simplex_price_strategy is not an Int option"),
+        }
+        match value_of(&options, c"presolve") {
+            OptionValue::Str(v) => assert_eq!(
+                profile.presolve.as_option(),
+                *v,
+                "presolve must match default_options()"
+            ),
+            _ => panic!("presolve is not a Str option"),
+        }
+        match value_of(&options, c"simplex_update_limit") {
+            OptionValue::Int(v) => assert_eq!(
+                i64::from(profile.simplex_update_limit),
+                i64::from(*v),
+                "simplex_update_limit must match default_options()"
+            ),
+            _ => panic!("simplex_update_limit is not an Int option"),
+        }
+        match value_of(&options, c"factor_pivot_threshold") {
+            OptionValue::Double(v) => assert_eq!(
+                profile.factor_pivot_threshold, *v,
+                "factor_pivot_threshold must match default_options()"
+            ),
+            _ => panic!("factor_pivot_threshold is not a Double option"),
+        }
+        match value_of(&options, c"use_warm_start") {
+            OptionValue::Bool(v) => assert_eq!(
+                i32::from(profile.use_warm_start),
+                *v,
+                "use_warm_start must match default_options()"
+            ),
+            _ => panic!("use_warm_start is not a Bool option"),
+        }
+        match value_of(&options, c"dual_simplex_cost_perturbation_multiplier") {
+            OptionValue::Double(v) => assert_eq!(
+                profile.cost_perturbation, *v,
+                "cost_perturbation must match default_options()"
+            ),
+            _ => panic!("dual_simplex_cost_perturbation_multiplier is not a Double option"),
+        }
+        match value_of(&options, c"rebuild_refactor_solution_error_tolerance") {
+            OptionValue::Double(v) => assert_eq!(
+                profile.refactor_error_tolerance, *v,
+                "refactor_error_tolerance must match default_options()"
+            ),
+            _ => panic!("rebuild_refactor_solution_error_tolerance is not a Double option"),
+        }
+        match value_of(&options, c"dual_steepest_edge_weight_log_error_threshold") {
+            OptionValue::Double(v) => assert_eq!(
+                profile.steepest_edge_devex_fallback_threshold, *v,
+                "steepest_edge_devex_fallback_threshold must match default_options()"
+            ),
+            _ => panic!("dual_steepest_edge_weight_log_error_threshold is not a Double option"),
+        }
+    }
 }

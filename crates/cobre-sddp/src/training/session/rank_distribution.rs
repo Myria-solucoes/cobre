@@ -54,12 +54,6 @@ impl RankDistribution {
             fwd_rank,
         }
     }
-
-    /// Return a vector of length `num_ranks` where index `r` holds the number
-    /// of forward passes assigned to rank `r`.
-    pub(crate) fn actual_per_rank(&self, total_forward_passes: usize) -> Vec<usize> {
-        cobre_comm::per_rank_counts(total_forward_passes, self.num_ranks)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -74,7 +68,7 @@ impl RankDistribution {
     clippy::float_cmp
 )]
 mod tests {
-    use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
+    use cobre_comm::{CommData, CommError, Communicator, ReduceOp, per_rank_counts};
 
     use super::RankDistribution;
 
@@ -207,7 +201,7 @@ mod tests {
             let comm = StubCommN { rank, size: 3 };
             let rd = RankDistribution::new(&comm, 5, 8, 10);
 
-            let per_rank = rd.actual_per_rank(8);
+            let per_rank = per_rank_counts(8, rd.num_ranks);
             assert_eq!(per_rank, vec![3, 3, 2], "rank {rank}: per_rank vec");
             assert_eq!(
                 per_rank[rd.my_rank], rd.my_actual_fwd,

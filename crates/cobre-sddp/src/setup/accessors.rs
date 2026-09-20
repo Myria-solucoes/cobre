@@ -2,6 +2,7 @@
 
 use cobre_core::AnticipatedCommitmentHistory;
 use cobre_core::System;
+#[cfg(any(test, feature = "test-support"))]
 use cobre_core::commissioning::commissioning_active;
 use cobre_core::scenario::SamplingScheme;
 use cobre_io::EntitySlot;
@@ -209,6 +210,7 @@ impl StudySetup {
     /// Outer index is the study stage; inner is the stochastic slot (id-sorted
     /// `StochasticContext::ncs_entity_ids` order). `true` marks a
     /// commissioning-dormant slot whose dense NCS column is zeroed at that stage.
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn ncs_stochastic_dormant_for_test(&self) -> Vec<Vec<bool>> {
         self.stage_data

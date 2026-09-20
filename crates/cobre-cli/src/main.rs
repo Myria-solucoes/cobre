@@ -96,8 +96,8 @@ fn main() {
     let result = match cli.command {
         Command::Init(args) => init::execute(args),
         Command::Run(ref args) => run::execute(args),
-        Command::Validate(args) => validate::execute(args),
-        Command::Schema(args) => schema::execute(args),
+        Command::Validate(ref args) => validate::execute(args),
+        Command::Schema(ref args) => schema::execute(args),
         Command::Version => version::execute(),
     };
 

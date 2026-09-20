@@ -13,15 +13,7 @@ use console::Term;
 
 use std::path::Path;
 
-// Rationale: the `#[cfg(test)]` blocks in this module import
-// `HydroProductionProvenance`, `InflowProvenance`, and `ProvenanceSource` via
-// `use super::{...}`; this `pub use` is the declaration that puts those names on
-// the module surface so those test imports resolve. Without it they would not.
-#[allow(unused_imports)]
-pub use cobre_sddp::{
-    BoundaryReconciliationReport, HydroModelSummary, HydroProductionProvenance, InflowProvenance,
-    ModelProvenanceReport, ProvenanceSource,
-};
+use cobre_sddp::{BoundaryReconciliationReport, HydroModelSummary, ModelProvenanceReport};
 
 /// The exact lines `print_hydro_model_summary` writes, one per `stderr` line.
 fn hydro_model_summary_lines(summary: &HydroModelSummary) -> Vec<String> {
@@ -1892,10 +1884,9 @@ mod tests {
 
     // ── ModelProvenanceReport tests ───────────────────────────────────────────
 
-    use super::{
-        HydroProductionProvenance, InflowProvenance, ModelProvenanceReport, ProvenanceSource,
-        print_provenance_summary, provenance_summary_lines,
-    };
+    use cobre_sddp::{HydroProductionProvenance, InflowProvenance, ProvenanceSource};
+
+    use super::{ModelProvenanceReport, print_provenance_summary, provenance_summary_lines};
 
     fn make_provenance_report_full_estimation() -> ModelProvenanceReport {
         ModelProvenanceReport {

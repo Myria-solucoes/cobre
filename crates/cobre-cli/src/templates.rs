@@ -15,7 +15,7 @@
 //! # Example
 //!
 //! ```rust
-//! use cobre::templates;
+//! use crate::templates;
 //!
 //! let templates = templates::available_templates();
 //! assert!(!templates.is_empty());
@@ -142,7 +142,7 @@ pub(crate) fn available_templates() -> &'static [Template] {
 /// # Example
 ///
 /// ```rust
-/// use cobre::templates;
+/// use crate::templates;
 ///
 /// assert!(templates::find_template("1dtoy").is_some());
 /// assert!(templates::find_template("nonexistent").is_none());

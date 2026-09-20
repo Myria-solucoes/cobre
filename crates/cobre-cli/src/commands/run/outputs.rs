@@ -25,7 +25,6 @@ use cobre_io::write_simulation_results;
 use cobre_io::write_simulation_solver_stats;
 use cobre_io::write_solver_stats;
 use cobre_io::write_training_results;
-use cobre_sddp::PrepareHydroModelsResult;
 use cobre_sddp::SolverStatsDelta;
 use cobre_sddp::StudySetup;
 use cobre_sddp::TrainingResult;
@@ -49,7 +48,6 @@ pub(super) struct WriteTrainingArgs<'a> {
     pub(super) setup: &'a StudySetup,
     pub(super) training_result: &'a TrainingResult,
     pub(super) output_ctx: &'a OutputContext,
-    pub(super) hydro_models: &'a PrepareHydroModelsResult,
     pub(super) quiet: bool,
     pub(super) stderr: &'a Term,
 }
@@ -87,18 +85,18 @@ pub(super) fn write_training_outputs(args: &WriteTrainingArgs<'_>) -> Result<(),
     )
     .map_err(CliError::from)?;
 
-    if !args.hydro_models.fpha_export_rows.is_empty() {
+    if !args.setup.hydro_models.fpha_export_rows.is_empty() {
         let fpha_path = args
             .output_dir
             .join("hydro_models")
             .join("fpha_hyperplanes.parquet");
-        write_fpha_hyperplanes(&fpha_path, &args.hydro_models.fpha_export_rows)
+        write_fpha_hyperplanes(&fpha_path, &args.setup.hydro_models.fpha_export_rows)
             .map_err(CliError::from)?;
     }
 
     // No evaporation-modeled hydro writes no file (FPHA "if-any" behavior);
     // mirror on the Python side: `write_evaporation_models_if_any`.
-    let evaporation_rows = build_evaporation_model_rows(args.hydro_models, args.system);
+    let evaporation_rows = build_evaporation_model_rows(&args.setup.hydro_models, args.system);
     if !evaporation_rows.is_empty() {
         let evaporation_path = args
             .output_dir
@@ -110,7 +108,7 @@ pub(super) fn write_training_outputs(args: &WriteTrainingArgs<'_>) -> Result<(),
     // Off by default, so a default run writes no file and stays byte-identical;
     // mirror on the Python side: `write_fpha_deviation_points_if_any`.
     if args.config.exports.fpha_deviation_points {
-        let deviation_point_rows = args.hydro_models.fpha_deviation_point_rows.as_slice();
+        let deviation_point_rows = args.setup.hydro_models.fpha_deviation_point_rows.as_slice();
         if !deviation_point_rows.is_empty() {
             let deviation_points_path = args
                 .output_dir

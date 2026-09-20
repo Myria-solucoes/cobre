@@ -19,7 +19,7 @@ use crate::types::{RowBatch, StageTemplate};
 /// state (once the largest seen template/batch has been processed).
 #[derive(Debug, Default)]
 pub struct FreezeScratch {
-    cut_nz_per_col: Vec<u32>,
+    csc_nz_per_col: Vec<u32>,
     col_list_start: Vec<u32>,
     col_list_row: Vec<i32>,
     col_list_val: Vec<f64>,
@@ -134,11 +134,11 @@ pub fn freeze_rows_into_template(
     let num_cols = base.num_cols;
     let num_rows = base.num_rows + rows.num_rows;
 
-    scratch.cut_nz_per_col.clear();
-    scratch.cut_nz_per_col.resize(num_cols, 0u32);
+    scratch.csc_nz_per_col.clear();
+    scratch.csc_nz_per_col.resize(num_cols, 0u32);
     #[allow(clippy::cast_sign_loss)]
     for &col in &rows.col_indices {
-        scratch.cut_nz_per_col[col as usize] += 1;
+        scratch.csc_nz_per_col[col as usize] += 1;
     }
 
     out.col_starts.clear();
@@ -185,7 +185,7 @@ pub fn freeze_rows_into_template(
     scratch.col_list_start.clear();
     scratch.col_list_start.reserve(num_cols + 1);
     let mut running = 0u32;
-    for &count in &scratch.cut_nz_per_col {
+    for &count in &scratch.csc_nz_per_col {
         scratch.col_list_start.push(running);
         running += count;
     }
@@ -817,7 +817,7 @@ mod tests {
         freeze_rows_into_template(&base, &rows, &mut out1, &mut scratch);
 
         // Capacities after the first freeze (must not shrink on reuse).
-        let cap_cut_nz = scratch.cut_nz_per_col.capacity();
+        let cap_cut_nz = scratch.csc_nz_per_col.capacity();
         let cap_col_start = scratch.col_list_start.capacity();
         let cap_col_row = scratch.col_list_row.capacity();
         let cap_col_val = scratch.col_list_val.capacity();
@@ -846,7 +846,7 @@ mod tests {
         assert_eq!(out1.row_scale, out_fresh.row_scale);
 
         // No downward realloc on the second (reused) freeze.
-        assert!(scratch.cut_nz_per_col.capacity() >= cap_cut_nz);
+        assert!(scratch.csc_nz_per_col.capacity() >= cap_cut_nz);
         assert!(scratch.col_list_start.capacity() >= cap_col_start);
         assert!(scratch.col_list_row.capacity() >= cap_col_row);
         assert!(scratch.col_list_val.capacity() >= cap_col_val);

@@ -116,6 +116,12 @@ pub fn resolve_production_models_from_artifacts(
             HashMap::new()
         };
 
+    let long_term_mean_inflow_table: HashMap<EntityId, f64> = if uses_computed_fpha {
+        build_long_term_mean_inflow_table(system)
+    } else {
+        HashMap::new()
+    };
+
     let study_stages: Vec<&Stage> = system.stages().iter().filter(|s| s.id >= 0).collect();
     let n_stages = study_stages.len();
     let n_hydros = system.hydros().len();
@@ -175,6 +181,7 @@ pub fn resolve_production_models_from_artifacts(
                 system,
                 n_stages,
                 collect_deviation_points,
+                &long_term_mean_inflow_table,
             )
         })
         .collect::<Result<Vec<_>, SddpError>>()?;
@@ -270,6 +277,7 @@ fn fit_one_hydro(
     system: &System,
     n_stages: usize,
     collect_deviation_points: bool,
+    long_term_mean_inflow_table: &HashMap<EntityId, f64>,
 ) -> Result<PerHydroFit, SddpError> {
     let config_entry = config_map.get(&hydro.id).copied();
 
@@ -286,7 +294,10 @@ fn fit_one_hydro(
         if source == ProductionModelSource::ComputedFromGeometry {
             // Drives the lateral-secant `S_max = 2·long-term mean inflow`; a
             // history-less hydro yields `0.0`, falling back to `2 × max_turbined`.
-            let long_term_mean_inflow_m3s = long_term_mean_inflow(system, hydro.id);
+            let long_term_mean_inflow_m3s = long_term_mean_inflow_table
+                .get(&hydro.id)
+                .copied()
+                .unwrap_or(0.0);
             let per_stage = fit_computed_planes_per_stage(
                 hydro,
                 config_entry,
@@ -378,16 +389,40 @@ fn resolve_downstream_level(
     Some(forebay.height(v_ref))
 }
 
-/// Per-hydro long-term mean natural inflow (m³/s), or `0.0` when the hydro has no
-/// inflow history. Feeds the lateral-secant `S_max = 2·mean`; the `0.0` case maps
-/// to the `2 × max_turbined` fallback in `resolve_s_max`.
+/// Long-term mean natural inflow (m³/s) for every hydro, keyed by canonical
+/// [`EntityId`], from ONE sequential pass over `System::inflow_history()`.
+/// Feeds the lateral-secant `S_max = 2·mean`; a hydro absent from the table
+/// (no history) falls back to `0.0` at the lookup site, mapping to the
+/// `2 × max_turbined` fallback in `resolve_s_max`.
 ///
 /// # Determinism
 ///
-/// A single sequential pass over `System::inflow_history()` in its stored
-/// canonical order. A partitioned-then-reduced parallel accumulator would reorder
-/// the adds and break bit-determinism.
-fn long_term_mean_inflow(system: &System, hydro_id: EntityId) -> f64 {
+/// One sequential pass in `inflow_history()`'s stored canonical order; each
+/// hydro's `(sum, count)` accumulates in that same encounter order regardless
+/// of hydro declaration order, so every mean stays bit-identical to a
+/// per-hydro filtered scan. A partitioned-then-reduced parallel accumulator
+/// would reorder the adds and break bit-determinism.
+fn build_long_term_mean_inflow_table(system: &System) -> HashMap<EntityId, f64> {
+    let mut acc: HashMap<EntityId, (f64, u64)> = HashMap::new();
+    for row in system.inflow_history() {
+        let entry = acc.entry(row.hydro_id).or_insert((0.0, 0));
+        entry.0 += row.value_m3s;
+        entry.1 += 1;
+    }
+    acc.into_iter()
+        .map(|(hydro_id, (sum, count))| {
+            #[allow(clippy::cast_precision_loss)]
+            let mean = sum / (count as f64);
+            (hydro_id, mean)
+        })
+        .collect()
+}
+
+/// Reference oracle for [`build_long_term_mean_inflow_table`]: the retired
+/// per-hydro filtered scan, kept to prove the one-pass batch table's mean is
+/// bit-identical to a direct per-hydro `inflow_history()` scan.
+#[cfg(test)]
+fn long_term_mean_inflow_reference(system: &System, hydro_id: EntityId) -> f64 {
     let mut sum = 0.0_f64;
     let mut count = 0_u64;
     for row in system.inflow_history() {

@@ -34,7 +34,11 @@ use serde_json::Value;
 use cobre_core::TrainingEvent;
 
 use crate::convert::pydict_to_json_map;
-use crate::errors::{ErrorSource, convert_error};
+use crate::errors::{
+    CONFIG_OVERRIDE_ERROR_PREFIX, CONFIG_PARSE_ERROR_PREFIX, CONFIG_READ_ERROR_PREFIX, ErrorSource,
+    INTERNAL_ERROR_PREFIX, OUTPUT_WRITE_ERROR_PREFIX, POLICY_CHECKPOINT_ERROR_PREFIX,
+    POLICY_VALIDATION_ERROR_PREFIX, SIMULATION_ERROR_PREFIX, TRAINING_ERROR_PREFIX, convert_error,
+};
 use cobre_io::LoadError;
 
 use cobre_comm::LocalBackend;
@@ -244,7 +248,7 @@ where
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(n)
         .build()
-        .map_err(|e| format!("internal error: rayon pool construction failed: {e}"))?;
+        .map_err(|e| format!("{INTERNAL_ERROR_PREFIX}: rayon pool construction failed: {e}"))?;
     Ok(pool.install(|| f(n)))
 }
 
@@ -327,7 +331,7 @@ pub(crate) fn run_training_phase_py(
             None,
         )
         .map_err(|e| PhaseError::Sddp {
-            message: format!("training error: {e}"),
+            message: format!("{TRAINING_ERROR_PREFIX}: {e}"),
             error: e,
         })?;
 
@@ -393,11 +397,11 @@ pub(crate) fn run_training_phase_py_streaming(
     // diagnostic failure.
     let drain_result = drain_handle.join();
     let training_outcome = training_outcome.map_err(|e| PhaseError::Sddp {
-        message: format!("training error: {e}"),
+        message: format!("{TRAINING_ERROR_PREFIX}: {e}"),
         error: e,
     })?;
     let (events, captured_pyerr) =
-        drain_result.map_err(|_| "internal error: drain thread panicked".to_string())?;
+        drain_result.map_err(|_| format!("{INTERNAL_ERROR_PREFIX}: drain thread panicked"))?;
 
     let phase = build_training_phase_result(
         setup,
@@ -518,12 +522,12 @@ pub(crate) fn write_training_artifacts(
             export_states: config.exports.states,
         },
     )
-    .map_err(|e| format!("policy checkpoint error: {e}"))?;
+    .map_err(|e| format!("{POLICY_CHECKPOINT_ERROR_PREFIX}: {e}"))?;
 
     if !training.result.solver_stats_log.is_empty() {
         let rows = solver_stats_log_to_rows(&training.result.solver_stats_log);
         write_solver_stats(output_dir, &rows)
-            .map_err(|e| format!("output write error: solver stats output: {e}"))?;
+            .map_err(|e| format!("{OUTPUT_WRITE_ERROR_PREFIX}: solver stats output: {e}"))?;
     }
 
     if !training.output.cut_selection_records.is_empty() {
@@ -532,7 +536,7 @@ pub(crate) fn write_training_artifacts(
             &training.output.cut_selection_records,
             &ParquetWriterConfig::default(),
         )
-        .map_err(|e| format!("output write error: cut selection output: {e}"))?;
+        .map_err(|e| format!("{OUTPUT_WRITE_ERROR_PREFIX}: cut selection output: {e}"))?;
     }
 
     let training_ctx = OutputContext {
@@ -548,7 +552,7 @@ pub(crate) fn write_training_artifacts(
         production_fit_deviation: build_deviation_summary(&setup.hydro_models.fpha_fit_deviations),
     };
     write_training_results(output_dir, &training.output, system, config, &training_ctx)
-        .map_err(|e| format!("output write error: training results output: {e}"))?;
+        .map_err(|e| format!("{OUTPUT_WRITE_ERROR_PREFIX}: training results output: {e}"))?;
 
     Ok(())
 }
@@ -566,8 +570,9 @@ pub(crate) fn write_fpha_hyperplanes_if_any(
         let fpha_path = output_dir
             .join("hydro_models")
             .join("fpha_hyperplanes.parquet");
-        write_fpha_hyperplanes(&fpha_path, &setup.hydro_models.fpha_export_rows)
-            .map_err(|e| format!("output write error: failed to write fpha_hyperplanes: {e}"))?;
+        write_fpha_hyperplanes(&fpha_path, &setup.hydro_models.fpha_export_rows).map_err(|e| {
+            format!("{OUTPUT_WRITE_ERROR_PREFIX}: failed to write fpha_hyperplanes: {e}")
+        })?;
     }
     Ok(())
 }
@@ -588,8 +593,9 @@ pub(crate) fn write_evaporation_models_if_any(
         let evaporation_path = output_dir
             .join("hydro_models")
             .join("evaporation_models.parquet");
-        write_evaporation_models(&evaporation_path, &rows)
-            .map_err(|e| format!("output write error: failed to write evaporation_models: {e}"))?;
+        write_evaporation_models(&evaporation_path, &rows).map_err(|e| {
+            format!("{OUTPUT_WRITE_ERROR_PREFIX}: failed to write evaporation_models: {e}")
+        })?;
     }
     Ok(())
 }
@@ -611,7 +617,7 @@ pub(crate) fn write_generic_constraint_echo_if_any(
             .join("generic_constraints")
             .join("resolved_echo.parquet");
         write_generic_constraint_echo(&echo_path, &rows).map_err(|e| {
-            format!("output write error: failed to write generic_constraint_echo: {e}")
+            format!("{OUTPUT_WRITE_ERROR_PREFIX}: failed to write generic_constraint_echo: {e}")
         })?;
     }
     Ok(())
@@ -629,7 +635,7 @@ pub(crate) fn write_fixed_delivery_if_any(
 ) -> Result<(), String> {
     let rows = build_fixed_delivery_rows(setup, system);
     write_fixed_delivery(output_dir, &rows)
-        .map_err(|e| format!("output write error: failed to write fixed_delivery: {e}"))
+        .map_err(|e| format!("{OUTPUT_WRITE_ERROR_PREFIX}: failed to write fixed_delivery: {e}"))
 }
 
 /// Write the per-sampled-point FPHA deviation table sidecar, when the run opted
@@ -653,7 +659,7 @@ pub(crate) fn write_fpha_deviation_points_if_any(
             .join("hydro_models")
             .join("fpha_deviation_points.parquet");
         write_fpha_deviation_points(&deviation_points_path, rows).map_err(|e| {
-            format!("output write error: failed to write fpha_deviation_points: {e}")
+            format!("{OUTPUT_WRITE_ERROR_PREFIX}: failed to write fpha_deviation_points: {e}")
         })?;
     }
     Ok(())
@@ -708,7 +714,7 @@ pub(crate) fn run_simulation_phase_py(
         .map_err(|e| {
             // Build the message from the original `SimulationError` before
             // wrapping, so the text stays byte-identical to the old string path.
-            let message = format!("simulation error: {e}");
+            let message = format!("{SIMULATION_ERROR_PREFIX}: {e}");
             PhaseError::Sddp {
                 message,
                 error: SddpError::from(e),
@@ -718,7 +724,7 @@ pub(crate) fn run_simulation_phase_py(
 
     let (sim_writer, write_failures) = drain_handle
         .join()
-        .map_err(|_| "internal error: simulation drain thread panicked".to_string())?;
+        .map_err(|_| format!("{INTERNAL_ERROR_PREFIX}: simulation drain thread panicked"))?;
     let sim_run_result = sim_result?;
 
     #[allow(clippy::cast_possible_truncation)]
@@ -728,7 +734,7 @@ pub(crate) fn run_simulation_phase_py(
     // so no cross-rank gather (unlike the CLI). Written before `finalize`
     // consumes the writer.
     write_paths(output_dir, sim_writer.path_rows().to_vec())
-        .map_err(|e| format!("output write error: simulation paths output: {e}"))?;
+        .map_err(|e| format!("{OUTPUT_WRITE_ERROR_PREFIX}: simulation paths output: {e}"))?;
 
     let mut sim_out = sim_writer.finalize(sim_time_ms);
     sim_out.failed = write_failures;
@@ -755,7 +761,7 @@ pub(crate) fn run_simulation_phase_py(
         &LocalBackend,
         weighting,
     )
-    .map_err(|e| format!("simulation error: cost aggregation: {e}"))?;
+    .map_err(|e| format!("{SIMULATION_ERROR_PREFIX}: cost aggregation: {e}"))?;
 
     let scenario_summary_rows: Vec<(u32, Option<f64>, f64)> = gathered_scenario_costs
         .iter()
@@ -763,8 +769,9 @@ pub(crate) fn run_simulation_phase_py(
             (scenario_id, probability, discounted_immediate_cost)
         })
         .collect();
-    write_scenario_summary(output_dir, &scenario_summary_rows)
-        .map_err(|e| format!("output write error: simulation scenario summary output: {e}"))?;
+    write_scenario_summary(output_dir, &scenario_summary_rows).map_err(|e| {
+        format!("{OUTPUT_WRITE_ERROR_PREFIX}: simulation scenario summary output: {e}")
+    })?;
 
     let parallelism = u32::try_from(n_threads).unwrap_or(u32::MAX);
     sim_out.cost = Some(MetadataCost {
@@ -800,8 +807,9 @@ pub(crate) fn run_simulation_phase_py(
                 )
             })
             .collect();
-        write_simulation_solver_stats(output_dir, &rows)
-            .map_err(|e| format!("output write error: simulation solver stats output: {e}"))?;
+        write_simulation_solver_stats(output_dir, &rows).map_err(|e| {
+            format!("{OUTPUT_WRITE_ERROR_PREFIX}: simulation solver stats output: {e}")
+        })?;
     }
 
     let sim_summary = SimSummary {
@@ -820,7 +828,7 @@ pub(crate) fn run_simulation_phase_py(
         production_fit_deviation: None,
     };
     write_simulation_results(output_dir, &sim_out, &sim_ctx)
-        .map_err(|e| format!("output write error: simulation results output: {e}"))?;
+        .map_err(|e| format!("{OUTPUT_WRITE_ERROR_PREFIX}: simulation results output: {e}"))?;
 
     Ok(sim_summary)
 }
@@ -839,12 +847,13 @@ fn load_effective_config(
     match overrides {
         Some(map) if !map.is_empty() => {
             let raw = std::fs::read_to_string(config_path)
-                .map_err(|e| format!("config read error: {e}"))?;
-            let base: Value =
-                serde_json::from_str(&raw).map_err(|e| format!("config parse error: {e}"))?;
-            Config::with_overrides(&base, map).map_err(|e| format!("config override error: {e}"))
+                .map_err(|e| format!("{CONFIG_READ_ERROR_PREFIX}: {e}"))?;
+            let base: Value = serde_json::from_str(&raw)
+                .map_err(|e| format!("{CONFIG_PARSE_ERROR_PREFIX}: {e}"))?;
+            Config::with_overrides(&base, map)
+                .map_err(|e| format!("{CONFIG_OVERRIDE_ERROR_PREFIX}: {e}"))
         }
-        _ => parse_config(config_path).map_err(|e| format!("config parse error: {e}")),
+        _ => parse_config(config_path).map_err(|e| format!("{CONFIG_PARSE_ERROR_PREFIX}: {e}")),
     }
 }
 
@@ -1004,19 +1013,21 @@ pub(crate) fn build_study_setup(
 
     let scaling_path = output_dir.join("training/scaling_report.json");
     write_scaling_report(&scaling_path, &setup.stage_data.scaling_report)
-        .map_err(|e| format!("output write error: failed to write scaling report: {e}"))?;
+        .map_err(|e| format!("{OUTPUT_WRITE_ERROR_PREFIX}: failed to write scaling report: {e}"))?;
 
     let provenance_path = output_dir.join("training/model_provenance.json");
-    write_provenance_report(&provenance_path, &provenance_report)
-        .map_err(|e| format!("output write error: failed to write model provenance: {e}"))?;
+    write_provenance_report(&provenance_path, &provenance_report).map_err(|e| {
+        format!("{OUTPUT_WRITE_ERROR_PREFIX}: failed to write model provenance: {e}")
+    })?;
 
     let stochastic_summary =
         build_stochastic_summary(&system, &setup.stochastic, estimation_report.as_ref(), seed);
     let hydro_models_summary = build_hydro_model_summary(&setup.hydro_models, &system);
 
     let hydro_models_path = output_dir.join("training/hydro_models.json");
-    write_hydro_model_summary(&hydro_models_path, &hydro_models_summary)
-        .map_err(|e| format!("output write error: failed to write hydro model summary: {e}"))?;
+    write_hydro_model_summary(&hydro_models_path, &hydro_models_summary).map_err(|e| {
+        format!("{OUTPUT_WRITE_ERROR_PREFIX}: failed to write hydro model summary: {e}")
+    })?;
 
     Ok(LoadedStudy {
         setup,
@@ -1054,7 +1065,7 @@ fn validate_loaded_policy(
     setup: &StudySetup,
 ) -> Result<PolicyLoadProof<FullFcf>, String> {
     let source_cost_scale_factor = checkpoint_terminal_cost_scale_factor(checkpoint)
-        .map_err(|e| format!("policy validation error: {e}"))?;
+        .map_err(|e| format!("{POLICY_VALIDATION_ERROR_PREFIX}: {e}"))?;
     rescale_checkpoint_cuts_for_load(
         &mut checkpoint.stage_cuts,
         Some(source_cost_scale_factor),
@@ -1093,7 +1104,7 @@ fn validate_loaded_policy(
         graph: &current_graph,
     };
     let proof = validate_policy_load::<FullFcf>(&source, &current)
-        .map_err(|e| format!("policy validation error: {e}"))?;
+        .map_err(|e| format!("{POLICY_VALIDATION_ERROR_PREFIX}: {e}"))?;
 
     for msg in &proof.warnings {
         eprintln!("cobre-python: policy validation warning: {msg}");
