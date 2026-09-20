@@ -299,6 +299,7 @@ mod tests {
                 cost_scale_factor: None,
             },
             training: TrainingConfig {
+                backward_selection: None,
                 enabled: true,
                 tree_seed: None,
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 10 }]),

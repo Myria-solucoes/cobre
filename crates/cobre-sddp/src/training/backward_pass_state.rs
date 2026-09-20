@@ -98,6 +98,8 @@ pub struct BackwardPassInputs<'a, S: SolverInterface + Send, C: Communicator> {
 
     /// Minimum dual multiplier for a cut to count as binding.
     pub cut_activity_tolerance: f64,
+    /// Optional experimental trial-point budget.
+    pub backward_selection: Option<cobre_io::config::training::TrialPointSelection>,
 
     /// Current training iteration index (1-based), used for cut metadata.
     pub iteration: u64,
@@ -163,6 +165,7 @@ impl<'a, S: SolverInterface + Send, C: Communicator> BackwardPassInputs<'a, S, C
             event_sender: runtime.event_sender(),
             risk_measures: &cut_mgmt.risk_measures,
             cut_activity_tolerance: cut_mgmt.cut_activity_tolerance,
+            backward_selection: cut_mgmt.backward_selection,
             iteration,
             local_work: ranks.my_actual_fwd,
             fwd_offset: ranks.my_fwd_offset,
@@ -182,6 +185,7 @@ impl<'a, S: SolverInterface + Send, C: Communicator> BackwardPassInputs<'a, S, C
 /// Per-iteration inputs (exchange buffers, records, risk measures, etc.) are
 /// passed via [`BackwardPassInputs`] at each `run()` call.
 pub struct BackwardPassState {
+    selection_scratch: super::point_selection::SelectionScratch,
     /// Uniform opening probabilities.
     pub(crate) probabilities_buf: Vec<f64>,
 
@@ -428,6 +432,7 @@ impl BackwardPassState {
             n_state,
             num_stages,
             by_node_scratch: ByNodeScratch::default(),
+            selection_scratch: super::point_selection::SelectionScratch::default(),
             level_nodes_scratch: Vec::new(),
             level_pools_scratch: Vec::new(),
             routed_trials_scratch: Vec::new(),
@@ -1625,14 +1630,22 @@ fn run_one_backward_level<S: SolverInterface + Send, C: Communicator>(
     let mut cut_batch_build_ms = 0u64;
     for (level_idx, &node_pos) in level.iter().enumerate() {
         let trial_points = &routed_trials[routed_offsets[level_idx]..routed_offsets[level_idx + 1]];
+        let mut selected = std::mem::take(&mut state.selection_scratch);
+        let points = if let Some(selection) = inputs.backward_selection {
+            selected.select(selection, inputs.iteration, trial_points, inputs.exchange);
+            selected.points.as_slice()
+        } else {
+            trial_points
+        };
         let nc = compute_one_backward_node(
             state,
             inputs,
             node_pos,
-            trial_points,
+            points,
             node_visit_offsets[level_idx],
             params,
         )?;
+        state.selection_scratch = selected;
         cut_batch_build_ms += nc.cut_batch_build_ms;
         nodes_out.push(nc);
     }
@@ -2770,6 +2783,7 @@ mod tests {
         );
 
         let mut inputs = BackwardPassInputs {
+            backward_selection: None,
             workspaces: &mut workspaces,
             basis_store: &mut basis_store,
             ctx: &ctx,
@@ -2947,6 +2961,7 @@ mod tests {
         );
 
         let mut inputs = BackwardPassInputs {
+            backward_selection: None,
             workspaces: &mut workspaces,
             basis_store: &mut basis_store,
             ctx: &ctx,
@@ -3362,6 +3377,7 @@ mod tests {
         state_machine.set_scheduler(scheduler);
 
         let mut inputs = BackwardPassInputs {
+            backward_selection: None,
             workspaces: &mut workspaces,
             basis_store: &mut basis_store,
             ctx: &ctx,
@@ -3602,6 +3618,7 @@ mod tests {
             BackwardPassState::new(1, 1, bwd_max_openings, n_state, 1, n_state, n_stages);
 
         let mut inputs = BackwardPassInputs {
+            backward_selection: None,
             workspaces: &mut workspaces,
             basis_store: &mut basis_store,
             ctx: &ctx,
@@ -4134,6 +4151,7 @@ mod tests {
         bwd_state.set_profile(resolved);
 
         let mut inputs = BackwardPassInputs {
+            backward_selection: None,
             workspaces: &mut workspaces,
             basis_store: &mut basis_store,
             ctx: &ctx,
@@ -4268,6 +4286,7 @@ mod tests {
         );
 
         let mut inputs = BackwardPassInputs {
+            backward_selection: None,
             workspaces: &mut workspaces,
             basis_store: &mut basis_store,
             ctx: &ctx,
@@ -4963,6 +4982,7 @@ mod tests {
         );
 
         let mut inputs = BackwardPassInputs {
+            backward_selection: None,
             workspaces: &mut pool.workspaces,
             basis_store: &mut basis_store,
             ctx: &stage_ctx,

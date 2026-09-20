@@ -1250,6 +1250,7 @@ mod determinism {
                 stopping_rules: iteration_limit(n_iterations),
             },
             cut_management: CutManagementConfig {
+                backward_selection: None,
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
@@ -2202,6 +2203,7 @@ mod water_travel_time_no_arc_byte_identity {
                 cost_scale_factor: None,
             },
             training: TrainingConfig {
+                backward_selection: None,
                 enabled: true,
                 tree_seed: Some(42),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 1 }]),

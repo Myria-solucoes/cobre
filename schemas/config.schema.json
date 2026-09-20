@@ -1134,6 +1134,18 @@
       "additionalProperties": false,
       "description": "Training parameters (`config.json → training`).\n\nA forward-pass count (via `selection`) and `stopping_rules` are mandatory —\nthe loader returns [`crate::LoadError::SchemaError`] if either is absent.",
       "properties": {
+        "backward_selection": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrialPointSelection"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Experimental point selection; absent preserves exhaustive point processing."
+        },
         "cut_selection": {
           "$ref": "#/$defs/RowSelectionConfig",
           "default": {
@@ -1300,6 +1312,43 @@
           "type": "number"
         }
       },
+      "type": "object"
+    },
+    "TrialPointSelection": {
+      "additionalProperties": false,
+      "description": "Experimental diverse-point budget with full audit and refinement iterations.",
+      "properties": {
+        "exploration_points": {
+          "description": "Additional pseudo-random representatives from the remaining points.",
+          "format": "uint",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "full_every": {
+          "description": "Process every point at each multiple of this iteration interval.",
+          "format": "uint",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "full_from_iteration": {
+          "description": "Process every point from this absolute iteration onward.",
+          "format": "uint",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "initial_points": {
+          "description": "Initial number of diverse representatives per node; increases toward full coverage.",
+          "format": "uint",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "initial_points",
+        "exploration_points",
+        "full_every",
+        "full_from_iteration"
+      ],
       "type": "object"
     },
     "UpperBoundEvaluationConfig": {

@@ -573,11 +573,17 @@ pub fn build_stage_cut_records(fcf: &FutureCostFunction) -> Vec<Vec<PolicyCutRec
         .iter()
         .map(|pool| {
             (0..pool.populated())
+                .filter(|&slot| pool.is_occupied(slot))
                 .map(|i| {
                     let meta = pool.metadata(i);
                     PolicyCutRecord {
-                        cut_id: meta.iteration_generated * u64::from(pool.visit_stride)
-                            + u64::from(meta.forward_pass_index),
+                        // The warm-start iteration sentinel is not an arithmetic iteration.
+                        cut_id: if meta.iteration_generated == crate::cut::WARM_START_ITERATION {
+                            u64::MAX - i as u64
+                        } else {
+                            meta.iteration_generated * u64::from(pool.visit_stride)
+                                + u64::from(meta.forward_pass_index)
+                        },
                         slot_index: i as u32,
                         iteration: meta.iteration_generated as u32,
                         forward_pass_index: meta.forward_pass_index,
@@ -716,7 +722,7 @@ pub fn build_stage_cuts_payloads<'a>(
             warm_start_count: pool_data.warm_start_count,
             cuts: &stage_records[pool],
             active_cut_indices: &stage_active_indices[pool],
-            populated_count: pool_data.populated() as u32,
+            populated_count: stage_records[pool].len() as u32,
             entity_manifest: &stage_manifests[pool],
             cost_scale_factor,
             node_id: sole_pool_owner_node_id(node_graph, pool),
@@ -792,6 +798,11 @@ pub fn build_stage_basis_records<'a>(
         .iter()
         .enumerate()
         .filter_map(|(node, opt)| {
+            let pool = &fcf.pools[node_graph.nodes[NodePos(node)].pool_id];
+            // Reload compacts sparse slots; a basis keyed to old slots must not be reused.
+            if (0..pool.populated()).any(|slot| !pool.is_occupied(slot)) {
+                return None;
+            }
             opt.as_ref().map(|_| {
                 let pool = node_graph.nodes[NodePos(node)].pool_id;
                 let num_cut_rows = fcf
@@ -2353,5 +2364,23 @@ mod tests {
         assert!(
             reserve_boundary_inflow_lag_slots(&manifest, &cut_coefficients, &cut_lag, 0).is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod sparse_tests {
+    use super::*;
+    use crate::setup::NodeId;
+
+    #[test]
+    fn export_excludes_unused_slots_between_selected_iterations() {
+        let mut fcf = FutureCostFunction::new(2, 1, 4, 3, &[0, 0]);
+        fcf.add_cut(NodeId(0), 0, 0, 0, -1.0, &[0.0]);
+        fcf.add_cut(NodeId(0), 0, 1, 0, -2.0, &[0.0]);
+        let records = build_stage_cut_records(&fcf);
+        assert_eq!(records[0].len(), 2);
+        assert_eq!(records[0][0].intercept, -1.0);
+        assert_eq!(records[0][1].intercept, -2.0);
+        assert!(records[0].iter().all(|record| record.is_active));
     }
 }

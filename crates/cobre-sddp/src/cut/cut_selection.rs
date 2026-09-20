@@ -342,7 +342,11 @@ impl CutSelectionStrategy {
         }
 
         let eligible: Vec<bool> = (0..populated)
-            .map(|k| k >= warm_start && pool.metadata(k).iteration_generated < current_iteration)
+            .map(|k| {
+                pool.is_occupied(k)
+                    && k >= warm_start
+                    && pool.metadata(k).iteration_generated < current_iteration
+            })
             .collect();
         let n_eligible = eligible.iter().filter(|&&e| e).count();
         if n_eligible < 2 {
@@ -385,7 +389,11 @@ impl CutSelectionStrategy {
                     for (k, &intercept) in intercepts.iter().enumerate().take(populated) {
                         let row = k * m_len;
                         for col in 0..m_len {
-                            v_block_active[row + col] += intercept;
+                            v_block_active[row + col] = if pool.is_occupied(k) {
+                                v_block_active[row + col] + intercept
+                            } else {
+                                f64::NEG_INFINITY
+                            };
                         }
                     }
 
@@ -2372,5 +2380,25 @@ mod tests {
         let via_select = strategy.select(&pool, &[0.0], 10);
         assert!(via_select.updates.is_empty());
         assert!(via_select.reactivations.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod sparse_tests {
+    use super::*;
+
+    #[test]
+    fn selection_does_not_reactivate_unwritten_zero_cuts() {
+        let mut pool = CutPool::new(12, 1, 4, 0);
+        pool.add_cut(NodeId(0), 1, 0, -1.0, &[0.0]);
+        pool.add_cut(NodeId(0), 2, 0, -2.0, &[0.0]);
+        let strategy = CutSelectionStrategy::Lml1 {
+            check_frequency: 1,
+            tie_tolerance: 1e-10,
+        };
+        let selected = strategy.select_for_stage(&pool, &[0.0], 1, 3, 0);
+        assert!(selected.reactivations.is_empty());
+        assert_eq!(selected.updates, vec![8]);
+        assert!(!selected.updates.contains(&4));
     }
 }

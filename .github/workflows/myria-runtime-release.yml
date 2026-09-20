@@ -10,6 +10,10 @@ on:
         description: Immutable GitHub Release tag (for example v0.15.0-myria.1)
         required: true
         default: v0.15.0-myria.1
+      prerelease:
+        description: Publish an opt-in preview without changing the latest release
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -22,6 +26,7 @@ jobs:
       CARGO_INCREMENTAL: 0
       CARGO_NET_RETRY: 10
       RELEASE_TAG: ${{ inputs.tag }}
+      PRERELEASE: ${{ inputs.prerelease }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -63,7 +68,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           test "$(find dist -maxdepth 1 -name '*.whl' | wc -l)" -eq 1
-          gh release create "$RELEASE_TAG" \
+          release_options=()
+          if [[ "$PRERELEASE" == "true" ]]; then
+            release_options+=(--prerelease --latest=false)
+          fi
+          gh release create "$RELEASE_TAG" "${release_options[@]}" \
             --target "$GITHUB_SHA" \
             --title "Myria Cobre runtime ${RELEASE_TAG#v}" \
             --notes "Pinned Myria runtime built from ${GITHUB_SHA}." \

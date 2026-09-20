@@ -426,6 +426,7 @@ fn make_config() -> Config {
             cost_scale_factor: None,
         },
         training: IoTrainingConfig {
+            backward_selection: None,
             enabled: true,
             tree_seed: None,
             stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 3 }]),
@@ -610,6 +611,7 @@ fn train_simulate_write_cycle() {
             stopping_rules: iteration_limit(3),
         },
         cut_management: CutManagementConfig {
+            backward_selection: None,
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
@@ -1423,6 +1425,7 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
             stopping_rules: iteration_limit(1),
         },
         cut_management: CutManagementConfig {
+            backward_selection: None,
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
@@ -1614,6 +1617,7 @@ fn enumerated_census_k1_matches_sampled_single_scenario() {
             stopping_rules: iteration_limit(3),
         },
         cut_management: CutManagementConfig {
+            backward_selection: None,
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,

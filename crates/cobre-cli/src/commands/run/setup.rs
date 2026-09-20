@@ -453,6 +453,7 @@ fn build_study_setup(
         training_solver_forward,
         simulation_solver,
         backward_scheduler: bcast_config.backward_scheduler.into(),
+        backward_selection: bcast_config.backward_selection,
         cost_scale_factor: bcast_config.cost_scale_factor,
         boundary: bcast_config.boundary.clone(),
     };

@@ -647,6 +647,7 @@ fn ac_two_scenarios_three_stages_fixed_solution() {
             },
         },
         cut_management: CutManagementConfig {
+            backward_selection: None,
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
@@ -780,6 +781,7 @@ fn ac_infeasible_at_stage_1_scenario_0_returns_infeasible_error() {
             },
         },
         cut_management: CutManagementConfig {
+            backward_selection: None,
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
@@ -917,6 +919,7 @@ fn cost_statistics_accumulated_correctly() {
             },
         },
         cut_management: CutManagementConfig {
+            backward_selection: None,
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
@@ -1529,6 +1532,7 @@ fn run_one_iteration(
             },
         },
         cut_management: CutManagementConfig {
+            backward_selection: None,
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
@@ -2355,6 +2359,7 @@ fn none_method_unchanged_with_truncation_code_present() {
             },
         },
         cut_management: CutManagementConfig {
+            backward_selection: None,
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,

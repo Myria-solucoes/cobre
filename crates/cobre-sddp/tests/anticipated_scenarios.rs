@@ -413,6 +413,7 @@ mod anticipated_5stage_k2_smoke {
                 cost_scale_factor: None,
             },
             training: TrainingConfig {
+                backward_selection: None,
                 enabled: true,
                 tree_seed: Some(42),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 8 }]),
@@ -896,6 +897,7 @@ mod anticipated_two_plants_smoke {
                 cost_scale_factor: None,
             },
             training: TrainingConfig {
+                backward_selection: None,
                 enabled: true,
                 tree_seed: Some(42),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 12 }]),
@@ -1399,6 +1401,7 @@ mod anticipated_simulation_ring_buffer {
                 cost_scale_factor: None,
             },
             training: TrainingConfig {
+                backward_selection: None,
                 enabled: true,
                 tree_seed: Some(42),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
@@ -1942,6 +1945,7 @@ mod anticipated_generic_constraint_e2e {
                 cost_scale_factor: None,
             },
             training: TrainingConfig {
+                backward_selection: None,
                 enabled: true,
                 tree_seed: Some(42),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 10 }]),
@@ -2970,6 +2974,7 @@ mod anticipated_commitment_at_cap {
                 cost_scale_factor: None,
             },
             training: TrainingConfig {
+                backward_selection: None,
                 enabled: true,
                 tree_seed: Some(42),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 4 }]),
@@ -3378,6 +3383,7 @@ mod faithful_resolution {
                 cost_scale_factor: None,
             },
             training: TrainingConfig {
+                backward_selection: None,
                 enabled: true,
                 tree_seed: Some(42),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 1 }]),

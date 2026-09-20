@@ -515,6 +515,7 @@ fn minimal_config(forward_passes: u32, max_iterations: u32) -> Config {
             cost_scale_factor: None,
         },
         training: TrainingConfig {
+            backward_selection: None,
             enabled: true,
             tree_seed: Some(42),
             stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
@@ -1459,6 +1460,7 @@ fn study_params_from_config_defaults() {
             cost_scale_factor: None,
         },
         training: TrainingConfig {
+            backward_selection: None,
             enabled: true,
             tree_seed: None,
             stopping_rules: None,
@@ -1526,6 +1528,7 @@ fn study_params_from_config_explicit() {
             cost_scale_factor: None,
         },
         training: TrainingConfig {
+            backward_selection: None,
             enabled: true,
             tree_seed: Some(1234),
             stopping_rules: Some(vec![
@@ -1611,6 +1614,7 @@ fn minimal_prepare_config() -> cobre_io::Config {
             cost_scale_factor: None,
         },
         training: TrainingConfig {
+            backward_selection: None,
             enabled: true,
             tree_seed: None,
             stopping_rules: None,

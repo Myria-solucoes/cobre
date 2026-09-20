@@ -1744,6 +1744,7 @@ mod by_node_scratch {
         );
 
         let mut inputs = BackwardPassInputs {
+            backward_selection: None,
             workspaces: &mut workspace_pool.workspaces,
             basis_store: &mut basis_store,
             ctx: &ctx,
@@ -1880,6 +1881,7 @@ mod by_node_scratch {
         });
 
         let mut inputs = BackwardPassInputs {
+            backward_selection: None,
             workspaces: &mut workspace_pool.workspaces,
             basis_store: &mut basis_store,
             ctx: &ctx,

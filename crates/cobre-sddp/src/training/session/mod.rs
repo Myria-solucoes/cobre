@@ -164,6 +164,13 @@ where
         solver_factory: impl Fn() -> Result<S, SolverError>,
         solver_profiles: SolverProfiles,
     ) -> Result<Self, SddpError> {
+        if config.cut_management.backward_selection.is_some()
+            && (comm.size() != 1 || config.loop_config.training_enumerated)
+        {
+            return Err(SddpError::Validation(
+                "backward_selection requires sampled training with one MPI rank".into(),
+            ));
+        }
         let horizon = training_ctx.horizon;
         let state = training_ctx.state;
         let num_stages = horizon.num_stages();
@@ -1929,6 +1936,7 @@ mod tests {
                 stopping_rules: iteration_limit_rules(limit),
             },
             cut_management: CutManagementConfig {
+                backward_selection: None,
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,

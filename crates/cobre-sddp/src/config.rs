@@ -136,6 +136,8 @@ impl Default for LoopConfig {
 pub struct CutManagementConfig {
     /// Cut selection strategy for deactivating dominated cuts; `None` keeps all cuts active.
     pub cut_selection: Option<CutSelectionStrategy>,
+    /// Optional experimental trial-point budget.
+    pub backward_selection: Option<cobre_io::config::training::TrialPointSelection>,
 
     /// Hard cap on active cuts per stage (cut-selection stage 2); `None` is uncapped.
     /// Cuts from the current iteration are never evicted.
@@ -155,6 +157,7 @@ impl Default for CutManagementConfig {
     fn default() -> Self {
         Self {
             cut_selection: None,
+            backward_selection: None,
             budget: None,
             cut_activity_tolerance: 1e-6,
             warm_start_cuts: 0,

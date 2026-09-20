@@ -88,3 +88,6 @@ case, seed, runtime and iteration limit. Resume uses the existing native policy
 loader; changing model inputs is not a supported continuation. LP bases are
 omitted unless `store_basis` is explicitly enabled. Myria leaves it disabled:
 stored bases can be incompatible with the post-backward LP row shape in 0.15.
+
+Experimental training budgets and isolated runtime comparisons are described in
+[Optimized training](docs/guide/optimized-training.md).

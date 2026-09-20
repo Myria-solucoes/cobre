@@ -111,6 +111,7 @@ pub(crate) struct BroadcastConfig {
     /// Hard cap on active rows per stage; `None` means no cap. Sourced from
     /// `config.training.cut_selection.max_active_per_stage`.
     pub(crate) budget: Option<u32>,
+    pub(crate) backward_selection: Option<cobre_io::config::training::TrialPointSelection>,
     /// Scenario source for the training forward pass, broadcast so non-root
     /// ranks build the stochastic context with matching sampling schemes.
     pub(crate) training_source: ScenarioSource,
@@ -219,6 +220,7 @@ impl BroadcastConfig {
             training_solver_forward: params.training_solver_forward,
             simulation_solver: params.simulation_solver,
             backward_scheduler: params.backward_scheduler.into(),
+            backward_selection: params.backward_selection,
             cost_scale_factor: params.cost_scale_factor,
             boundary: params.boundary,
         })

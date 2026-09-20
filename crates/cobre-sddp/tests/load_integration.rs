@@ -396,6 +396,7 @@ fn test_stochastic_load_training_completes() {
             stopping_rules: iteration_limit(3),
         },
         cut_management: CutManagementConfig {
+            backward_selection: None,
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
@@ -568,6 +569,7 @@ fn test_deterministic_load_training_matches_baseline() {
                 stopping_rules: iteration_limit(3),
             },
             cut_management: CutManagementConfig {
+                backward_selection: None,
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
@@ -655,6 +657,7 @@ fn test_stochastic_load_seed_determinism() {
                 stopping_rules: iteration_limit(3),
             },
             cut_management: CutManagementConfig {
+                backward_selection: None,
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,

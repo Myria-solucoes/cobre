@@ -435,6 +435,7 @@ impl StudySetup {
             policy_path,
             inflow_method,
             cut_selection,
+            backward_selection,
             cut_activity_tolerance,
             budget,
             export_states,
@@ -789,6 +790,7 @@ impl StudySetup {
             policy_path,
             cut_management: CutManagementConfig {
                 cut_selection,
+                backward_selection,
                 budget,
                 cut_activity_tolerance,
                 warm_start_cuts: 0,

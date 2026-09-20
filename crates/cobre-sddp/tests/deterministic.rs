@@ -6216,6 +6216,7 @@ mod chronological_telescoping {
                 cost_scale_factor: None,
             },
             training: TrainingConfig {
+                backward_selection: None,
                 enabled: true,
                 tree_seed: Some(42),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
@@ -6923,6 +6924,7 @@ mod chronological_attribution {
                 cost_scale_factor: None,
             },
             training: TrainingConfig {
+                backward_selection: None,
                 enabled: true,
                 tree_seed: Some(42),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 1 }]),
@@ -8603,6 +8605,7 @@ mod enumerated_external {
         n_scenarios: u32,
     ) -> StudyParams {
         StudyParams {
+            backward_selection: None,
             seed: 42,
             forward_passes: 1,
             training_enumerated: true,
@@ -10252,6 +10255,7 @@ mod enumerated_cvar_gap {
                 cost_scale_factor: Some(1.0),
             },
             training: TrainingConfig {
+                backward_selection: None,
                 enabled: true,
                 tree_seed: Some(42),
                 stopping_rules: Some(vec![

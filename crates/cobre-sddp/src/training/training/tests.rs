@@ -443,6 +443,7 @@ fn ac_train_completes_with_iteration_limit() {
             stopping_rules: iteration_limit_rules(5),
         },
         cut_management: CutManagementConfig {
+            backward_selection: None,
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
@@ -548,6 +549,7 @@ fn ac_train_returns_partial_on_infeasible() {
             stopping_rules: iteration_limit_rules(5),
         },
         cut_management: CutManagementConfig {
+            backward_selection: None,
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
@@ -666,6 +668,7 @@ fn ac_train_emits_correct_event_sequence() {
             stopping_rules: iteration_limit_rules(2),
         },
         cut_management: CutManagementConfig {
+            backward_selection: None,
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
@@ -870,6 +873,7 @@ fn ac_worker_timing_per_worker_event_count_and_setup_invariant() {
             stopping_rules: iteration_limit_rules(1),
         },
         cut_management: CutManagementConfig {
+            backward_selection: None,
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
@@ -1045,6 +1049,7 @@ fn ac_train_result_fields_populated() {
             stopping_rules: iteration_limit_rules(5),
         },
         cut_management: CutManagementConfig {
+            backward_selection: None,
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
@@ -1150,6 +1155,7 @@ fn ac_train_with_no_event_sender() {
             stopping_rules: iteration_limit_rules(2),
         },
         cut_management: CutManagementConfig {
+            backward_selection: None,
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
@@ -1252,6 +1258,7 @@ fn ac_total_time_ms_is_non_negative() {
             stopping_rules: iteration_limit_rules(1),
         },
         cut_management: CutManagementConfig {
+            backward_selection: None,
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
@@ -1362,6 +1369,7 @@ fn cut_selection_none_skips_step() {
             stopping_rules: iteration_limit_rules(5),
         },
         cut_management: CutManagementConfig {
+            backward_selection: None,
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
@@ -1478,6 +1486,7 @@ fn cut_selection_level1_runs_at_frequency() {
             stopping_rules: iteration_limit_rules(5),
         },
         cut_management: CutManagementConfig {
+            backward_selection: None,
             cut_selection: Some(CutSelectionStrategy::Level1 {
                 check_frequency: 3,
                 tie_tolerance: 1e-10,
@@ -1606,6 +1615,7 @@ fn cut_selection_stage0_exempt_preserves_cuts() {
             stopping_rules: iteration_limit_rules(2),
         },
         cut_management: CutManagementConfig {
+            backward_selection: None,
             cut_selection: Some(CutSelectionStrategy::Level1 {
                 check_frequency: 2,
                 tie_tolerance: 1e-10,
@@ -1747,6 +1757,7 @@ fn existing_train_tests_pass_with_none() {
             stopping_rules: iteration_limit_rules(3),
         },
         cut_management: CutManagementConfig {
+            backward_selection: None,
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
@@ -1854,6 +1865,7 @@ fn ac_train_partial_result_on_mid_iteration_failure() {
             stopping_rules: iteration_limit_rules(5),
         },
         cut_management: CutManagementConfig {
+            backward_selection: None,
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
@@ -1982,6 +1994,7 @@ fn start_iteration_resumes_from_offset() {
             stopping_rules: iteration_limit_rules(5),
         },
         cut_management: CutManagementConfig {
+            backward_selection: None,
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
@@ -2089,6 +2102,7 @@ fn start_iteration_at_or_beyond_max_runs_zero_iterations() {
             stopping_rules: iteration_limit_rules(5),
         },
         cut_management: CutManagementConfig {
+            backward_selection: None,
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
@@ -2850,6 +2864,7 @@ fn template_freeze_event_emitted() {
             stopping_rules: iteration_limit_rules(2),
         },
         cut_management: CutManagementConfig {
+            backward_selection: None,
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,

@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Add an opt-in progressive diverse-point budget with exploration, complete audit
+  passes and final refinement for sampled single-rank training.
+- Avoid full violation sorting and unnecessary coefficient gathering in dynamic
+  cut selection; load every eligible missing row on its iteration-limit fallback.
+- Exclude unoccupied cut slots from selection and policy exports. See
+  `docs/guide/optimized-training.md` for configuration and validation limits.
+
+
 ### Added
 
 - Emit the experimental `lb_stability_v1` diagnostic beside the existing

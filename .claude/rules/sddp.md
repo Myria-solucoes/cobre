@@ -1967,3 +1967,21 @@ mass and only the combined upper bound changes the risk measure and can
 invalidate cuts for the intended objective. The scalar and cut paths share
 this contract, pinned by `cvar_mixture_preserves_expectation_floor_in_value_and_cut`
 and `cvar_mixture_matches_primal_tail_formula_and_envelope`.
+
+## Experimental point selection and sparse pools
+
+`training.backward_selection` processes a deterministic subset of sampled trial
+points on a single rank, retaining every opening at each selected point. Full
+periodic passes and the configured refinement restore complete coverage; they do
+not certify policy quality. Original scenario identities still address basis
+windows, while generated cuts use compact node-relative positions within each
+iteration's reserved slot stride. Unwritten slots are not cuts: row selection
+must exclude them even if a zero affine function would dominate real negative
+cuts. Policy export skips those slots and omits cached bases for sparse pools,
+because reload compacts them. `export_excludes_unused_slots_between_selected_iterations`
+pins the export rule.
+
+The dynamic-selection fallback must load all eligible missing rows, including
+rows unviolated before its final solve. Loading only currently violated rows can
+return an infeasible solution for the full pool;
+`fallback_includes_cuts_not_violated_until_reoptimization` pins this contract.

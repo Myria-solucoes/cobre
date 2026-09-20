@@ -57,6 +57,10 @@ pub struct TrainingConfig {
     /// `sampled` arm; absent is a missing-count load error.
     #[serde(default)]
     pub selection: Option<TrainingSelection>,
+
+    /// Experimental point selection; absent preserves exhaustive point processing.
+    #[serde(default)]
+    pub backward_selection: Option<TrialPointSelection>,
 }
 
 /// Training-phase scenario selection and its method-specific parameters
@@ -1054,4 +1058,19 @@ mod tests {
             } if (rt - 0.01).abs() < f64::EPSILON
         ));
     }
+}
+
+/// Experimental diverse-point budget with full audit and refinement iterations.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct TrialPointSelection {
+    /// Initial number of diverse representatives per node; increases toward full coverage.
+    pub initial_points: NonZeroUsize,
+    /// Additional pseudo-random representatives from the remaining points.
+    pub exploration_points: NonZeroUsize,
+    /// Process every point at each multiple of this iteration interval.
+    pub full_every: NonZeroUsize,
+    /// Process every point from this absolute iteration onward.
+    pub full_from_iteration: NonZeroUsize,
 }

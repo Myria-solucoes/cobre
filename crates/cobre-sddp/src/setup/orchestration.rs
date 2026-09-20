@@ -184,6 +184,7 @@ impl StudySetup {
             },
             cut_management: CutManagementConfig {
                 cut_selection: self.cut_management.cut_selection.clone(),
+                backward_selection: self.cut_management.backward_selection,
                 budget: self.cut_management.budget,
                 cut_activity_tolerance: self.cut_management.cut_activity_tolerance,
                 warm_start_cuts: 0,

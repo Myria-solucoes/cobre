@@ -141,6 +141,8 @@ pub struct StudyParams {
     pub inflow_method: InflowNonNegativityMethod,
     /// Optional cut selection strategy (None means cut selection is disabled).
     pub cut_selection: Option<CutSelectionStrategy>,
+    /// Optional experimental trial-point budget.
+    pub backward_selection: Option<cobre_io::config::training::TrialPointSelection>,
     /// Minimum dual multiplier for a cut to count as binding (`0.0` if unset).
     pub cut_activity_tolerance: f64,
     /// Maximum number of active cuts per stage (hard cap on LP size).
@@ -203,6 +205,22 @@ impl StudyParams {
                 limit: u32::try_from(DEFAULT_MAX_ITERATIONS).unwrap_or(u32::MAX),
             }],
         };
+
+        if let Some(selection) = config.training.backward_selection {
+            let budget = rule_configs
+                .iter()
+                .filter_map(|rule| match rule {
+                    StoppingRuleConfig::IterationLimit { limit } => Some(*limit as usize),
+                    _ => None,
+                })
+                .min()
+                .unwrap_or(0);
+            if training_enumerated || selection.full_from_iteration.get() > budget {
+                return Err(SddpError::Validation(
+                    "backward_selection requires sampled training and full_from_iteration within the iteration limit".into(),
+                ));
+            }
+        }
 
         let stopping_rules: Vec<StoppingRule> = rule_configs
             .into_iter()
@@ -326,6 +344,7 @@ impl StudyParams {
             policy_path,
             inflow_method,
             cut_selection,
+            backward_selection: config.training.backward_selection,
             cut_activity_tolerance,
             budget,
             training_solver_backward,
@@ -438,6 +457,7 @@ mod tests {
                 cost_scale_factor: None,
             },
             training: TrainingConfig {
+                backward_selection: None,
                 enabled: true,
                 tree_seed: Some(42),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 1 }]),
@@ -767,6 +787,28 @@ mod tests {
     }
 
     /// `from_config` resolves the forward-pass count from a `sampled` selection.
+    #[test]
+    fn point_budget_requires_reachable_refinement_and_sampled_training() {
+        let mut config = base_test_config();
+        config.training.stopping_rules =
+            Some(vec![StoppingRuleConfig::IterationLimit { limit: 8 }]);
+        config.training.backward_selection = Some(
+            serde_json::from_value(serde_json::json!({
+                "initial_points": 2, "exploration_points": 1,
+                "full_every": 4, "full_from_iteration": 8
+            }))
+            .expect("valid point budget"),
+        );
+        assert!(StudyParams::from_config(&config).is_ok());
+        config.training.stopping_rules =
+            Some(vec![StoppingRuleConfig::IterationLimit { limit: 7 }]);
+        assert!(StudyParams::from_config(&config).is_err());
+        config.training.stopping_rules =
+            Some(vec![StoppingRuleConfig::IterationLimit { limit: 8 }]);
+        config.training.selection = Some(TrainingSelection::Enumerated {});
+        assert!(StudyParams::from_config(&config).is_err());
+    }
+
     #[test]
     fn from_config_resolves_forward_passes_from_selection() {
         let mut via_selection = base_test_config();
