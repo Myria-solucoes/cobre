@@ -227,6 +227,10 @@ pub enum SelectionMethod {
         /// Maximum rows added per lazy-solve round. Must be `>= 1`. Default `10`.
         #[serde(default = "default_max_added_per_round")]
         max_added_per_round: u32,
+        /// Optional ceiling for doubling row additions after each unsuccessful round.
+        /// Must be at least `max_added_per_round`. Absent keeps fixed batches.
+        #[serde(default)]
+        adaptive_max_added_per_round: Option<u32>,
         /// Violation tolerance for accepting a candidate row. Must be `> 0`.
         /// Default `1e-10`.
         #[serde(default = "default_violation_tolerance")]
@@ -585,6 +589,7 @@ mod tests {
                 candidate_recency,
                 max_added_per_round,
                 violation_tolerance,
+                ..
             } => {
                 assert_eq!(*start_iteration, 5);
                 assert_eq!(*seed_window, 0);
@@ -1073,4 +1078,11 @@ pub struct TrialPointSelection {
     pub full_every: NonZeroUsize,
     /// Process every point from this absolute iteration onward.
     pub full_from_iteration: NonZeroUsize,
+    /// Collapse bit-identical complete states within each node and iteration.
+    #[serde(default)]
+    pub deduplicate: bool,
+    /// Grow the next point budget when exploratory rows improve the retained envelope
+    /// by more than this fraction of max(1, absolute row value). Absent disables feedback.
+    #[serde(default)]
+    pub audit_relative_tolerance: Option<f64>,
 }

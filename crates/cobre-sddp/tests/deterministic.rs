@@ -10336,6 +10336,8 @@ mod enumerated_cvar_gap {
         let mut reference: Option<f64> = None;
         for (selected, threads) in [(false, 1), (true, 1), (true, 4)] {
             config.training.backward_selection = selected.then_some(TrialPointSelection {
+                deduplicate: true,
+                audit_relative_tolerance: Some(0.01),
                 initial_points: NonZeroUsize::new(2).unwrap(),
                 exploration_points: NonZeroUsize::new(1).unwrap(),
                 full_every: NonZeroUsize::new(4).unwrap(),

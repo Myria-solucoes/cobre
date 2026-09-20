@@ -35,8 +35,9 @@ use crate::{
 
 use super::{
     SuccessorOutcomes, SuccessorSpec,
+    by_scenario::StageOpeningSolver,
     duals_extraction::extract_duals_from_view,
-    lp_setup::{fill_external_opening_noise, load_backward_lp, patch_opening_bounds},
+    lp_setup::{fill_external_opening_noise, patch_opening_bounds},
     outcome_aggregation::accumulate_opening_outcome,
 };
 
@@ -167,6 +168,11 @@ pub(crate) fn process_stage_backward_by_node<S: SolverInterface + Send>(
         "each child's binding-metadata region [metadata_offset, +populated_count) must fit the \
          flattened total {pop}"
     );
+    let opening_solver = StageOpeningSolver::from_dcs_params(
+        training_ctx
+            .dcs
+            .filter(|params| params.is_active(iteration)),
+    );
     let n_trial = trial_points.len();
     let cursor = ClaimCursor::new(n_trial * n_blocks);
     let tree_view = training_ctx.stochastic.tree_view();
@@ -180,6 +186,7 @@ pub(crate) fn process_stage_backward_by_node<S: SolverInterface + Send>(
         .par_iter_mut()
         .enumerate()
         .map(|(w, ws)| {
+            ws.backward_accum.loaded_child = None;
             while ws.backward_accum.outcomes.len() < n_openings {
                 ws.backward_accum.outcomes.push(BackwardOutcome {
                     intercept: 0.0,
@@ -241,8 +248,7 @@ pub(crate) fn process_stage_backward_by_node<S: SolverInterface + Send>(
                         continue;
                     }
 
-                    ws.solver.reset_solver_state();
-                    load_backward_lp(ws, &child);
+                    opening_solver.prepare(ws, ctx, succ, &child, iteration);
 
                     // Assemble an External child's declared column once for the run
                     // (a single realization, `len == 1`); a Generated child reads the
@@ -281,72 +287,89 @@ pub(crate) fn process_stage_backward_by_node<S: SolverInterface + Send>(
                                 tree_view.opening(s.0, local_omega),
                             )
                         };
-                        patch_opening_bounds(ws, ctx, training_ctx, raw_noise, x_hat, s)?;
-
-                        let mut state_duals =
-                            std::mem::take(&mut ws.backward_accum.state_duals_buf);
-                        let mut cut_duals = std::mem::take(&mut ws.backward_accum.cut_duals_buf);
-                        let mut stats_before =
-                            std::mem::take(&mut ws.backward_accum.stats_before_buf);
-                        ws.solver.statistics_into(&mut stats_before);
-
-                        // Only each child run's first-solved outcome warm-starts from
-                        // the captured `(m, child node)` basis; later outcomes of the
-                        // SAME child warm-continue its retained factorization. A child
-                        // boundary starts a new run: a different LP is loaded, so
-                        // continuing the prior factorization is invalid, not merely
-                        // suboptimal.
-                        let stored = if run_local_idx == 0 {
-                            basis_store.get(m, child.successor_node)
+                        if let StageOpeningSolver::Lazy(params) = &opening_solver {
+                            StageOpeningSolver::solve_lazy(
+                                ws,
+                                ctx,
+                                training_ctx,
+                                succ,
+                                &child,
+                                *params,
+                                raw_noise,
+                                x_hat,
+                                s,
+                                scenario,
+                                iteration,
+                                omega,
+                                run_local_idx != 0,
+                            )?;
                         } else {
-                            None
-                        };
-                        let inputs = StageInputs {
-                            stage_context: ctx,
-                            pool: child.successor_pool,
-                            stored_basis: stored,
-                            stage_index: s,
-                            scenario_index: scenario,
-                            iteration: Some(iteration),
-                            node_id: child.successor_node_id,
-                        };
-                        let view = run_stage_solve(ws, &inputs)?;
-                        let objective = extract_duals_from_view(
-                            &view,
-                            succ.cut_state,
-                            &ctx.template(s).col_scale,
-                            &child,
-                            &mut state_duals,
-                            &mut cut_duals,
-                        );
-                        let _ = view;
-                        ws.backward_accum.state_duals_buf = state_duals;
-                        ws.backward_accum.cut_duals_buf = cut_duals;
+                            patch_opening_bounds(ws, ctx, training_ctx, raw_noise, x_hat, s)?;
 
-                        let mut stats_after =
-                            std::mem::take(&mut ws.backward_accum.stats_after_buf);
-                        ws.solver.statistics_into(&mut stats_after);
-                        // Counters are monotonically increasing (mirrors
-                        // `SolverStatsDelta::from_snapshots`); the running sum below
-                        // saturates against overflow across many iterations.
+                            let mut state_duals =
+                                std::mem::take(&mut ws.backward_accum.state_duals_buf);
+                            let mut cut_duals =
+                                std::mem::take(&mut ws.backward_accum.cut_duals_buf);
+                            let mut stats_before =
+                                std::mem::take(&mut ws.backward_accum.stats_before_buf);
+                            ws.solver.statistics_into(&mut stats_before);
+
+                            // Only each child run's first-solved outcome warm-starts from
+                            // the captured `(m, child node)` basis; later outcomes of the
+                            // SAME child warm-continue its retained factorization. A child
+                            // boundary starts a new run: a different LP is loaded, so
+                            // continuing the prior factorization is invalid, not merely
+                            // suboptimal.
+                            let stored = if run_local_idx == 0 {
+                                basis_store.get(m, child.successor_node)
+                            } else {
+                                None
+                            };
+                            let inputs = StageInputs {
+                                stage_context: ctx,
+                                pool: child.successor_pool,
+                                stored_basis: stored,
+                                stage_index: s,
+                                scenario_index: scenario,
+                                iteration: Some(iteration),
+                                node_id: child.successor_node_id,
+                            };
+                            let view = run_stage_solve(ws, &inputs)?;
+                            let objective = extract_duals_from_view(
+                                &view,
+                                succ.cut_state,
+                                &ctx.template(s).col_scale,
+                                &child,
+                                &mut state_duals,
+                                &mut cut_duals,
+                            );
+                            let _ = view;
+                            ws.backward_accum.state_duals_buf = state_duals;
+                            ws.backward_accum.cut_duals_buf = cut_duals;
+
+                            let mut stats_after =
+                                std::mem::take(&mut ws.backward_accum.stats_after_buf);
+                            ws.solver.statistics_into(&mut stats_after);
+                            accumulate_opening_outcome(
+                                ws,
+                                &child,
+                                succ.cut_state,
+                                omega,
+                                objective,
+                                x_hat,
+                                &stats_before,
+                                &stats_after,
+                            );
+                            ws.backward_accum.stats_before_buf = stats_before;
+                            ws.backward_accum.stats_after_buf = stats_after;
+                        }
                         let opening_simplex_iters =
-                            stats_after.total_iterations - stats_before.total_iterations;
+                            ws.backward_accum.stats_after_buf.total_iterations
+                                - ws.backward_accum.stats_before_buf.total_iterations;
                         ws.backward_accum.block_pivot_sum[b] = ws.backward_accum.block_pivot_sum[b]
                             .saturating_add(opening_simplex_iters);
                         ws.backward_accum.block_pivot_count[b] =
                             ws.backward_accum.block_pivot_count[b].saturating_add(1);
-                        accumulate_opening_outcome(
-                            ws,
-                            &child,
-                            succ.cut_state,
-                            omega,
-                            objective,
-                            x_hat,
-                            &stats_before,
-                            &stats_after,
-                        );
-                        ws.backward_accum.stats_before_buf = stats_before;
-                        ws.backward_accum.stats_after_buf = stats_after;
 
                         // A reused slot's `coefficients` may carry a DIFFERENT prior
                         // stage's `cut_n_state` (a successor disabling a state group

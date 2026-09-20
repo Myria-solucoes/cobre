@@ -837,15 +837,13 @@ mod by_node_scheduler_determinism {
     //! `hardest_first_claim_order_is_result_neutral` is the direct hardest-first-on-vs-off gate.
     //! `by_node_degenerates_on_single_opening` and
     //! `by_node_handles_non_uniform_cut_projection` are the two places a genuinely
-    //! executed by-node run (`process_stage_backward_by_node`'s own claim loop, not the
-    //! DCS bypass below) is compared directly against the by-scenario path's `final_lb`: the
+    //! executed by-node run (`process_stage_backward_by_node`'s own claim loop) is compared directly against the by-scenario path's `final_lb`: the
     //! former on a single-opening deterministic case whose resolved
     //! opening-block count is `1` (a by-scenario-equivalent unit), the latter on a
     //! case whose per-stage cut-state projection dimension varies across
-    //! stages. `by_node_falls_back_to_by_scenario_under_active_dcs` also compares
-    //! two labeled runs, but both execute the SAME by-scenario code path
-    //! under active DCS, so it pins the fallback dispatch rather than the by-node scheduler's
-    //! own arithmetic; `by_node_generates_one_cut_per_trial_state` pins cut-count
+    //! stages. `by_node_active_dcs_matches_reference` also compares
+    //! both schedulers numerically under expectation and `CVaR`, while requiring exact
+    //! equality across worker counts for the by-node path; `by_node_generates_one_cut_per_trial_state` pins cut-count
     //! parity; `by_node_populates_backward_wall_ms` pins the telemetry surface.
     //! The scratch arena's no-alloc property is pinned primarily by
     //! `by_node_scratch`'s `by_node_scratch_capacity_stable_across_training`; the 5-way
@@ -903,6 +901,7 @@ mod by_node_scheduler_determinism {
                 start_iteration: 1,
                 seed_window: 5,
                 candidate_recency: None,
+                adaptive_max_added_per_round: Some(40),
                 max_added_per_round: 10,
                 violation_tolerance: 1e-10,
             });
@@ -1210,26 +1209,48 @@ mod by_node_scheduler_determinism {
         not(feature = "slow-tests"),
         ignore = "slow: run with --features slow-tests"
     )]
-    fn by_node_falls_back_to_by_scenario_under_active_dcs() {
+    fn by_node_active_dcs_matches_reference() {
         let case_dir = fixture_case_dir();
         let stub = StubComm;
-
-        let lb_by_node = train_final_lb(
-            fresh_setup_with_active_dcs(case_dir, BackwardScheduler::ByNode { block_size: None }),
-            1,
-            &stub,
-        );
-        let lb_by_scenario = train_final_lb(
-            fresh_setup_with_active_dcs(case_dir, BackwardScheduler::ByScenario {}),
-            1,
-            &stub,
-        );
-
-        assert_eq!(
-            lb_by_node.to_bits(),
-            lb_by_scenario.to_bits(),
-            "by_node must degenerate to by_scenario bit-for-bit under active DCS"
-        );
+        for cvar in [false, true] {
+            let make = |scheduler| {
+                let mut setup = fresh_setup_with_active_dcs(case_dir, scheduler);
+                if cvar {
+                    setup.set_risk_measures(vec![
+                        RiskMeasure::CVaR {
+                            alpha: 0.5,
+                            lambda: 1.0
+                        };
+                        setup.num_stages()
+                    ]);
+                }
+                setup
+            };
+            let lb_by_node = train_final_lb(
+                make(BackwardScheduler::ByNode { block_size: None }),
+                1,
+                &stub,
+            );
+            for threads in [2, 4] {
+                let parallel = train_final_lb(
+                    make(BackwardScheduler::ByNode { block_size: None }),
+                    threads,
+                    &stub,
+                );
+                assert_eq!(
+                    parallel.to_bits(),
+                    lb_by_node.to_bits(),
+                    "DCS by-node thread invariance, CVaR={cvar}"
+                );
+            }
+            let reference = train_final_lb(make(BackwardScheduler::ByScenario {}), 1, &stub);
+            // Different block warm chains can choose different valid vertices.
+            // Preserve strict worker invariance above; compare schedulers numerically.
+            assert!(
+                (lb_by_node - reference).abs() <= 1e-8 * reference.abs().max(1.0),
+                "DCS schedulers disagree: {lb_by_node} vs {reference}, CVaR={cvar}"
+            );
+        }
     }
 
     #[test]
@@ -2110,9 +2131,8 @@ mod by_node_k_fan_branching {
     //!   plain `cargo test` and to the `mpiexec` world otherwise). Once a multi-rank
     //!   fan makes the by-node cut slots multi-branching, the node-visit-offset slot
     //!   base keeps them collision-free — this is the gate that exercises it.
-    //! - `by_node_falls_back_to_by_scenario_under_active_dcs_on_fan`: an active DCS
-    //!   iteration on a fan takes the by-scenario path exactly as the by-node path
-    //!   does, bit-for-bit.
+    //! - `by_node_active_dcs_matches_reference_on_fan`: an active DCS
+    //!   iteration on a fan integrates every child in either scheduler.
 
     use cobre_comm::{BackendKind, Communicator, LocalBackend, create_communicator};
     use cobre_io::config::BackwardScheduler;
@@ -2268,15 +2288,13 @@ mod by_node_k_fan_branching {
         );
     }
 
-    /// An active DCS iteration on a fan forces the by-scenario path (the by-node
-    /// frozen-LP load is incompatible with DCS's cut-free lazy core), so a
-    /// by-node-configured and a by-scenario-configured DCS run agree bit-for-bit.
+    /// Active DCS integrates all fan successors in either scheduler.
     #[test]
     #[cfg_attr(
         not(feature = "slow-tests"),
         ignore = "slow: run with --features slow-tests"
     )]
-    fn by_node_falls_back_to_by_scenario_under_active_dcs_on_fan() {
+    fn by_node_active_dcs_matches_reference_on_fan() {
         let stub = StubComm;
 
         let mut by_node = dcs_k_fan_setup(3, 6, 25);
@@ -2304,7 +2322,7 @@ mod by_node_k_fan_branching {
         assert_eq!(
             lb_by_node.to_bits(),
             lb_by_scenario.to_bits(),
-            "on a fan under active DCS, by_node must take the by-scenario path bit-for-bit \
+            "DCS scheduler values must agree on this fan \
              ({lb_by_node} vs {lb_by_scenario})"
         );
     }
@@ -3036,7 +3054,7 @@ mod branching_gate_roster {
     //! | By-node-on-branching equivalence | `by_node_k_fan_thread_shape_invariance`, `interior_sibling_generated_fan_by_node_matches_oracle`, `water_binding_external_fan_by_node_matches_extensive_form`, `external_distinct_fan_by_node_matches_by_scenario` | `mpi_wire.rs`, `branching_value_oracle.rs` |
     //! | Rank-shape: genuine 2-rank real MPI | `k_fan_branching_rank_invariance::k_fan_final_lb_bitwise_invariant_across_world_size` | `test_mpi_sync_cuts_invariant.rs` |
     //! | Rank-shape: by-node world-size (real MPI when launched under `mpiexec`, single-rank identity under plain `cargo test`) | `by_node_k_fan_final_lb_bitwise_invariant_across_world_size` | `mpi_wire.rs` |
-    //! | DCS fallback under branching | `by_node_falls_back_to_by_scenario_under_active_dcs_on_fan` | `mpi_wire.rs` |
+    //! | DCS by-node under branching | `by_node_active_dcs_matches_reference_on_fan` | `mpi_wire.rs` |
     //!
     //! # R6 — break-one-obligation verification (real, observed results)
     //!

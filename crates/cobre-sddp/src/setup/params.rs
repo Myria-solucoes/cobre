@@ -179,6 +179,39 @@ pub struct StudyParams {
     pub scalar_parameters: Vec<ScalarParameter>,
 }
 
+fn validate_backward_selection(
+    config: &Config,
+    rule_configs: &[StoppingRuleConfig],
+    training_enumerated: bool,
+) -> Result<(), SddpError> {
+    if let Some(selection) = config.training.backward_selection {
+        if selection
+            .audit_relative_tolerance
+            .is_some_and(|value| !value.is_finite() || value < 0.0)
+        {
+            return Err(SddpError::Validation(
+                "backward_selection.audit_relative_tolerance must be finite and non-negative"
+                    .into(),
+            ));
+        }
+
+        let budget = rule_configs
+            .iter()
+            .filter_map(|rule| match rule {
+                StoppingRuleConfig::IterationLimit { limit } => Some(*limit as usize),
+                _ => None,
+            })
+            .min()
+            .unwrap_or(0);
+        if training_enumerated || selection.full_from_iteration.get() > budget {
+            return Err(SddpError::Validation(
+                    "backward_selection requires sampled training and full_from_iteration within the iteration limit".into(),
+                ));
+        }
+    }
+    Ok(())
+}
+
 impl StudyParams {
     /// Extract study parameters from a validated [`Config`].
     ///
@@ -206,21 +239,7 @@ impl StudyParams {
             }],
         };
 
-        if let Some(selection) = config.training.backward_selection {
-            let budget = rule_configs
-                .iter()
-                .filter_map(|rule| match rule {
-                    StoppingRuleConfig::IterationLimit { limit } => Some(*limit as usize),
-                    _ => None,
-                })
-                .min()
-                .unwrap_or(0);
-            if training_enumerated || selection.full_from_iteration.get() > budget {
-                return Err(SddpError::Validation(
-                    "backward_selection requires sampled training and full_from_iteration within the iteration limit".into(),
-                ));
-            }
-        }
+        validate_backward_selection(config, &rule_configs, training_enumerated)?;
 
         let stopping_rules: Vec<StoppingRule> = rule_configs
             .into_iter()

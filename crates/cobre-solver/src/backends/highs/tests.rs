@@ -1369,3 +1369,31 @@ mod research_tests {
         );
     }
 }
+
+#[test]
+fn reset_loaded_model_preserves_rows_but_discards_previous_solve_history() {
+    let template = make_fixture_stage_template();
+    let rows = make_fixture_row_batch();
+    let mut reused = HighsSolver::new().unwrap();
+    assert!(!reused.reset_loaded_model());
+    reused.load_model(&template);
+    reused.add_rows(&rows);
+    for value in [5.0, 6.0, 4.0, 6.0] {
+        assert!(reused.reset_loaded_model());
+        reused.set_row_bounds(&[0], &[value], &[value]);
+        let result = reused.solve(None).unwrap();
+        let actual = (
+            result.objective,
+            result.primal.to_vec(),
+            result.dual.to_vec(),
+        );
+        let mut fresh = HighsSolver::new().unwrap();
+        fresh.load_model(&template);
+        fresh.add_rows(&rows);
+        fresh.set_row_bounds(&[0], &[value], &[value]);
+        let expected = fresh.solve(None).unwrap();
+        assert_eq!(actual.0, expected.objective);
+        assert_eq!(actual.1, expected.primal);
+        assert_eq!(actual.2, expected.dual);
+    }
+}

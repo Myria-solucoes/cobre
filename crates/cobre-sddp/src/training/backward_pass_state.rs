@@ -1320,22 +1320,6 @@ struct NodeCompute {
     scheduling_ms: u64,
 }
 
-/// Resolve the effective backward thread scheduler for the SAMPLED path
-/// (`compute_one_backward_node`'s only caller): an active Dynamic Cut
-/// Selection iteration always forces the by-scenario path (its cut-free lazy
-/// core is incompatible with the by-node frozen-LP load); otherwise the
-/// configured scheduler is unchanged.
-fn resolve_backward_scheduler(
-    dcs_active: bool,
-    configured: BackwardScheduler,
-) -> BackwardScheduler {
-    if dcs_active {
-        BackwardScheduler::ByScenario {}
-    } else {
-        configured
-    }
-}
-
 /// Flatten node `node_pos`'s successor outcome set
 /// `O(n) = {(m, ψ): m ∈ n⁺, ψ ∈ Ω_m}` into `out`, canonical order (ascending
 /// child node id — `node_graph.successors[node_pos]`'s own invariant — then
@@ -1632,7 +1616,13 @@ fn run_one_backward_level<S: SolverInterface + Send, C: Communicator>(
         let trial_points = &routed_trials[routed_offsets[level_idx]..routed_offsets[level_idx + 1]];
         let mut selected = std::mem::take(&mut state.selection_scratch);
         let points = if let Some(selection) = inputs.backward_selection {
-            selected.select(selection, inputs.iteration, trial_points, inputs.exchange);
+            selected.select(
+                selection,
+                inputs.iteration,
+                node_pos,
+                trial_points,
+                inputs.exchange,
+            );
             selected.points.as_slice()
         } else {
             trial_points
@@ -1645,6 +1635,20 @@ fn run_one_backward_level<S: SolverInterface + Send, C: Communicator>(
             node_visit_offsets[level_idx],
             params,
         )?;
+        selected.audit(
+            inputs
+                .backward_selection
+                .and_then(|s| s.audit_relative_tolerance),
+            super::point_selection::PointAuditContext {
+                node: node_pos,
+                node_id: training_ctx.node_graph.node_ids[node_pos],
+                iteration: inputs.iteration,
+                visit_offset: node_visit_offsets[level_idx],
+                pool: &inputs.fcf.pools[nc.pool_id],
+                projection: &training_ctx.cut_state_layouts[nc.pool_id],
+                states: inputs.exchange,
+            },
+        );
         state.selection_scratch = selected;
         cut_batch_build_ms += nc.cut_batch_build_ms;
         nodes_out.push(nc);
@@ -1855,17 +1859,7 @@ fn compute_one_backward_node<S: SolverInterface + Send, C: Communicator>(
         cut_state: cut_state_projection,
     };
 
-    // `resolve_backward_scheduler` owns the DCS fallback: its cut-free lazy
-    // core is incompatible with the by-node frozen-LP load (sddp.md "By-node
-    // scheduler is warm-start-only").
-    let dcs_active = training_ctx
-        .dcs
-        .filter(|p| p.is_active(inputs.iteration))
-        .is_some();
-    let use_by_node = matches!(
-        resolve_backward_scheduler(dcs_active, state.scheduler),
-        BackwardScheduler::ByNode { .. }
-    );
+    let use_by_node = matches!(state.scheduler, BackwardScheduler::ByNode { .. });
 
     let process_start = Instant::now();
     let (local_solve, parallel_wall_ms): (Result<usize, SddpError>, u64) = if use_by_node {
@@ -2070,6 +2064,7 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
         .zip(basis_slices.into_par_iter())
         .enumerate()
         .map(|(w, (ws, mut basis_slice))| {
+            ws.backward_accum.loaded_child = None;
             // Pre-allocate per-stage buffers. This touches only `ws.backward_accum`,
             // never `ws.solver`: each child's LP load is issued inside
             // `process_by_scenario_backward`, not here.
@@ -4681,31 +4676,6 @@ mod tests {
     }
 
     // ── sampled scheduler resolution ────────────────────────────────────
-
-    #[test]
-    fn resolve_backward_scheduler_dcs_forces_by_scenario_else_keeps_configured() {
-        use cobre_io::config::BackwardScheduler;
-
-        // No active DCS: the configured scheduler passes through unchanged.
-        assert!(matches!(
-            resolve_backward_scheduler(false, BackwardScheduler::ByScenario {}),
-            BackwardScheduler::ByScenario {}
-        ));
-        assert!(matches!(
-            resolve_backward_scheduler(false, BackwardScheduler::ByNode { block_size: None }),
-            BackwardScheduler::ByNode { .. }
-        ));
-        // An active DCS iteration always forces the by-scenario path — its
-        // cut-free lazy core is incompatible with the by-node frozen-LP load.
-        assert!(matches!(
-            resolve_backward_scheduler(true, BackwardScheduler::ByNode { block_size: None }),
-            BackwardScheduler::ByScenario {}
-        ));
-        assert!(matches!(
-            resolve_backward_scheduler(true, BackwardScheduler::ByScenario {}),
-            BackwardScheduler::ByScenario {}
-        ));
-    }
 
     #[test]
     fn by_node_scratch_sizing_follows_configured_scheduler_only() {

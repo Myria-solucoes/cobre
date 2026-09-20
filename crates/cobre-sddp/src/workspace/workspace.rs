@@ -397,6 +397,8 @@ pub struct WorkspaceSizing {
 /// the parallel region sums their contributions.
 #[derive(Default)]
 pub(crate) struct BackwardAccumulators {
+    /// Frozen child currently loaded, valid only within one backward-node dispatch.
+    pub(crate) loaded_child: Option<crate::setup::NodePos>,
     /// Per-opening backward outcomes, grown to the maximum `n_openings` seen.
     pub(crate) outcomes: Vec<BackwardOutcome>,
     /// Per-slot binding count over the node's successor pool regions, concatenated
@@ -487,6 +489,7 @@ impl BackwardAccumulators {
         let mut dcs_solve = DcsSolveScratch::default();
         dcs_solve.reserve(n_state, initial_pool_capacity);
         Self {
+            loaded_child: None,
             outcomes,
             slot_increments: vec![0u64; initial_pool_capacity],
             agg_coefficients: vec![0.0_f64; n_state],

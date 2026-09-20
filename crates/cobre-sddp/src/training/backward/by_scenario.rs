@@ -62,10 +62,9 @@ impl StageOpeningSolver {
         }
     }
 
-    /// Per-CHILD LP load, issued once after `reset_solver_state()` and before that
-    /// child's opening solves; each variant owns its own load. Each child loads ITS
-    /// OWN pool's LP, so a fan's blocks never reuse child 0's LP (the child-0
-    /// collapse). One child ⟹ one load per trial point ⟹ chain byte-parity.
+    /// Prepare an independent per-child solve chain. Frozen matrices may be reused
+    /// within one node dispatch, only after a backend-guaranteed cold reset.
+    /// Child changes and lazy resident sets require a reload.
     ///
     /// - [`StageOpeningSolver::Frozen`]: load the child's frozen all-cuts LP via
     ///   [`load_backward_lp`].
@@ -82,9 +81,17 @@ impl StageOpeningSolver {
     ) {
         match self {
             StageOpeningSolver::Frozen => {
-                load_backward_lp(ws, child);
+                let reuse = ws.backward_accum.loaded_child == Some(child.successor_node)
+                    && ws.solver.reset_loaded_model();
+                if !reuse {
+                    ws.solver.reset_solver_state();
+                    load_backward_lp(ws, child);
+                }
+                ws.backward_accum.loaded_child = Some(child.successor_node);
             }
             StageOpeningSolver::Lazy(params) => {
+                ws.backward_accum.loaded_child = None;
+                ws.solver.reset_solver_state();
                 ws.solver.load_model(ctx.template(succ.successor));
                 build_initial_resident_set(
                     child.successor_pool,
@@ -278,7 +285,7 @@ impl StageOpeningSolver {
     // per-opening scalars (params, raw_noise, x_hat, s, scenario, iteration,
     // omega); no natural grouping reduces caller-side borrows.
     #[allow(clippy::too_many_arguments)]
-    fn solve_lazy<S: SolverInterface + Send>(
+    pub(super) fn solve_lazy<S: SolverInterface + Send>(
         ws: &mut SolverWorkspace<S>,
         ctx: &StageContext<'_>,
         training_ctx: &TrainingContext<'_>,
@@ -440,7 +447,6 @@ pub(crate) fn process_by_scenario_backward<S: SolverInterface + Send>(
         // Fresh cold head per child: each child loads a different LP, so its
         // warm-start chain across its own openings starts clean (CLP determinism).
         // One child ⟹ once per trial point ⟹ chain byte-parity.
-        ws.solver.reset_solver_state();
         opening_solver.prepare(ws, ctx, succ, &child, iteration);
 
         // An External child reads its declared column `eta_slice(s, offset)`

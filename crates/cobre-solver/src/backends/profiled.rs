@@ -128,6 +128,10 @@ impl<S: SolverInterface> SolverInterface for ProfiledSolver<S> {
         self.inner.record_reconstruction_stats();
     }
 
+    fn reset_loaded_model(&mut self) -> bool {
+        self.inner.reset_loaded_model()
+    }
+
     fn reset_solver_state(&mut self) {
         self.inner.reset_solver_state();
     }

@@ -866,6 +866,16 @@
           "additionalProperties": false,
           "description": "Dynamic: a per-solve lazy loop that loads only a small resident subset of\nrows per solve while retaining the full pool.",
           "properties": {
+            "adaptive_max_added_per_round": {
+              "default": null,
+              "description": "Optional ceiling for doubling row additions after each unsuccessful round.\nMust be at least `max_added_per_round`. Absent keeps fixed batches.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "candidate_recency": {
               "default": null,
               "description": "Only rows generated within the last `candidate_recency` iterations are\nscored. `None` (default) = unbounded: every pool row is a candidate,\nwhich preserves exactness. `Some(n)` (must be `>= 1`) makes the loop\ndeliberately inexact — rows older than the window are never added.",
@@ -1318,6 +1328,20 @@
       "additionalProperties": false,
       "description": "Experimental diverse-point budget with full audit and refinement iterations.",
       "properties": {
+        "audit_relative_tolerance": {
+          "default": null,
+          "description": "Grow the next point budget when exploratory rows improve the retained envelope\nby more than this fraction of max(1, absolute row value). Absent disables feedback.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "deduplicate": {
+          "default": false,
+          "description": "Collapse bit-identical complete states within each node and iteration.",
+          "type": "boolean"
+        },
         "exploration_points": {
           "description": "Additional pseudo-random representatives from the remaining points.",
           "format": "uint",

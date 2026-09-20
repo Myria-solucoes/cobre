@@ -6036,6 +6036,7 @@ fn dcs_params(start_iteration: u64) -> DcsParams {
     DcsParams {
         k1: None,
         k2: 2,
+        adaptive_max_added_per_round: None,
         nadic: 10,
         epsilon_viol: 1e-10,
         start_iteration,
@@ -6144,6 +6145,7 @@ fn from_strategy_gates_the_backward_dcs_field() {
     let dynamic = CutSelectionStrategy::Dynamic {
         k1: None,
         k2: 5,
+        adaptive_max_added_per_round: None,
         nadic: 10,
         epsilon_viol: 1e-10,
         start_iteration: 2,
@@ -6167,6 +6169,7 @@ fn dcs_params_k1(start_iteration: u64, k1: Option<u32>) -> DcsParams {
     DcsParams {
         k1,
         k2: 2,
+        adaptive_max_added_per_round: None,
         nadic: 10,
         epsilon_viol: 1e-10,
         start_iteration,

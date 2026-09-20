@@ -542,10 +542,11 @@ is produced. Aggregating the arena in claim/solve-position order, or keying it
 on the claim index instead of `(m, ω)`, is the wrong-but-compiling
 alternative — CVaR's tail weighting is order-sensitive, so it silently breaks
 CVaR reproducibility and declaration-order invariance the same way a
-solve-order-keyed aggregation would break the by-scenario path above. An
-active Dynamic Cut Selection iteration always falls back to the by-scenario
-path: the by-node scheduler's frozen-LP load is incompatible with
-DCS's cut-free lazy core.
+solve-order-keyed aggregation would break the by-scenario path above. Dynamic Cut Selection also supports by-node scheduling: each block starts from
+a fresh cut-free core and metadata seed, then carries its resident set only within
+that block. Frozen LPs may retain their matrix across units for the same child,
+but must clear basis/factorization/pricing history and invalidate the cache at
+each node dispatch. Backends without that reset capability reload the model.
 Read: `training/backward/by_node.rs`
 (`process_stage_backward_by_node`'s claim loop,
 `by_node_finish`'s per-`(m, ω)` arena and ascending-m aggregation),

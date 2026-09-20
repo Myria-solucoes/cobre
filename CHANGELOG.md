@@ -11,6 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Support dynamic cut selection in by-node scheduling and optional adaptive batches.
+- Add complete-state deduplication and exploration-envelope feedback to the
+  experimental point budget, with conservative full coverage after resume.
+- Reuse frozen backward LP matrices within a node dispatch when HiGHS can clear
+  all previous solve history while retaining model data.
+
 - Add an opt-in progressive diverse-point budget with exploration, complete audit
   passes and final refinement for sampled single-rank training.
 - Avoid full violation sorting and unnecessary coefficient gathering in dynamic

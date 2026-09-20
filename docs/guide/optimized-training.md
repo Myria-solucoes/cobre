@@ -32,8 +32,8 @@ violated at the previous solution may bind after reoptimization.
 ```
 
 A finite `candidate_recency` excludes older rows and remains an approximation.
-Dynamic selection uses the by-scenario scheduler; this build does not combine it
-with by-node scheduling. Smaller resident LPs can require more solves, so measure
+Dynamic selection supports both schedulers. Each by-node block starts with its
+own resident set and retains canonical opening aggregation. Smaller resident LPs can require more solves, so measure
 the whole pass rather than assuming that enabling dynamic selection helps.
 
 ## Experimental point budget
@@ -72,9 +72,21 @@ iteration limit.
 
 Every selected point still integrates all successor openings with the configured
 risk measure. Forward trajectories and their statistics are not subsampled.
-Periodic complete passes provide coverage audits; there is no automatic
-non-inferiority certificate or feedback controller that proves omitted cuts were
-unnecessary. Time limits, shutdown, or another stopping rule can interrupt before
+Optional `deduplicate: true` collapses bit-identical complete states within a
+node and iteration, preserving the smallest scenario identity. Full passes cover
+every distinct state when this option is enabled.
+
+Optional `audit_relative_tolerance` (finite, nonnegative) compares exploration
+cuts with the envelope excluding this iteration's exploration cuts, at the probed
+states. Improvement above the tolerance doubles that node's minimum point budget,
+capped by its available distinct states. The denominator is `max(abs(probe_value),
+1)`. All exploration cuts remain in the policy. This local diagnostic does not
+certify policy quality or bound improvement elsewhere. Budget floors grow only;
+they are not checkpointed, so an audited run resumed after iteration 1 processes
+all points conservatively.
+
+Periodic complete passes provide additional coverage; there is no automatic
+non-inferiority certificate. Time limits, shutdown, or another stopping rule can interrupt before
 refinement. Inspect completion before treating a policy as refined.
 
 Unused cut slots stay unoccupied, are excluded from row selection, and are not
@@ -124,9 +136,28 @@ For independent training repetitions, change `--seed` (timing `--repeats` keeps
 that seed fixed). Use `--simulation-scheme out_of_sample` to generate inflows
 outside the training opening set. Keep `--simulation-seed` fixed across arms.
 `--scheduler by_node --block-size 10` supports matched scheduler experiments;
-DCS still uses its by-scenario fallback.
+DCS runs directly in either scheduler.
 
 With `pyarrow` available, summarize an output directory with
 `python3 scripts/benchmarks/summarize.py /absolute/path/to/comparison`.
 The paired cost interval is conditional on one pair of trained policies; it does
 not cover variation between training seeds or certify nested CVaR quality.
+
+## Further preview optimizations
+
+Dynamic selection accepts `adaptive_max_added_per_round`. When provided, it must
+be at least `max_added_per_round`: the initial batch doubles after unsuccessful
+separation rounds up to that ceiling. Candidate eligibility, violation tolerance
+and the complete eligible-row fallback are unchanged. Omit it for fixed batches.
+
+Frozen backward LPs reuse their matrix when consecutive work units on one worker
+use the same child within one node dispatch. HiGHS clears basis, factorization and
+pricing history before each independent unit, then all state/noise bounds are
+patched. The cache is invalidated at every dispatch and child change. DCS retains
+its own resident-set lifecycle. Backends without a model-preserving cold reset
+reload normally. This does not reuse an arbitrary prior point's simplex basis.
+
+Harness flags `--deduplicate`, `--audit-relative-tolerance 0.01` and
+`--adaptive-max-added-per-round 80` enable these optional controls. Record each
+configuration separately: a more conservative audit can sacrifice speed to
+increase coverage.

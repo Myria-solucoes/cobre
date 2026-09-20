@@ -219,6 +219,14 @@ pub trait SolverInterface: Send {
     /// `ClpSimplex` rim/pricing state, leaving stale steepest-edge weights that
     /// make the landed vertex on alternative-optima LPs order-dependent.
     fn reset_solver_state(&mut self) {}
+
+    /// Discard basis, factorization and pricing history while retaining the LP.
+    /// Returns true only when the backend guarantees a cold independent solve.
+    /// Callers must patch every point-dependent bound before solving again.
+    /// Unsupported backends return false and require a full model reload.
+    fn reset_loaded_model(&mut self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]

@@ -368,7 +368,8 @@ fn check_checkpoint_resume(selected: bool) {
         config["training"]["selection"]["forward_passes"] = 8.into();
         config["training"]["backward_selection"] = serde_json::json!({
             "initial_points": 1, "exploration_points": 1,
-            "full_every": 4, "full_from_iteration": 3
+            "deduplicate": true, "audit_relative_tolerance": 0.01,
+            "full_every": 4, "full_from_iteration": 4
         });
         config["training"]["cut_selection"] = serde_json::json!({
             "selection": {"method": "lml1", "check_frequency": 1}

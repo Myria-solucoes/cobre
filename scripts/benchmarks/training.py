@@ -27,6 +27,9 @@ def main():
     parser.add_argument('--simulation-seed', type=int, default=8675309)
     parser.add_argument('--scheduler', choices=['by_scenario', 'by_node'], default='by_scenario')
     parser.add_argument('--block-size', type=int, default=10)
+    parser.add_argument('--deduplicate', action='store_true')
+    parser.add_argument('--audit-relative-tolerance', type=float)
+    parser.add_argument('--adaptive-max-added-per-round', type=int)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=False)
     results = []
@@ -49,6 +52,8 @@ def main():
             config['training']['cut_selection'] = {'selection': (
                 {'method': 'lml1', 'check_frequency': 1} if args.cut_method == 'lml1' else
                 {'method': 'dynamic', 'candidate_recency': None, 'seed_window': 2, 'max_added_per_round': 20})}
+            if args.cut_method == 'dynamic' and arm != 'baseline' and args.adaptive_max_added_per_round:
+                config['training']['cut_selection']['selection']['adaptive_max_added_per_round'] = args.adaptive_max_added_per_round
             if args.cvar:
                 stages = json.loads((case / 'stages.json').read_text())
                 for stage in stages['stages']:
@@ -59,6 +64,7 @@ def main():
                                     'scenario_source': {'seed': args.simulation_seed, 'inflow': {'scheme': args.simulation_scheme}}}
             if arm == 'selected':
                 config['training']['backward_selection'] = {
+                    'deduplicate': args.deduplicate, 'audit_relative_tolerance': args.audit_relative_tolerance,
                     'initial_points': max(1, args.forwards // 4), 'exploration_points': 2,
                     'full_every': 4, 'full_from_iteration': max(2, args.iterations * 2 // 3)}
             (case / 'config.json').write_text(json.dumps(config, indent=2) + '\n')

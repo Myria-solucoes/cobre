@@ -1919,6 +1919,7 @@ fn k_fan_config_dcs(forward_passes: u32, max_iterations: u32) -> Config {
             start_iteration: 1,
             seed_window: 5,
             candidate_recency: None,
+            adaptive_max_added_per_round: None,
             max_added_per_round: 10,
             violation_tolerance: 1e-10,
         }),

@@ -13,6 +13,11 @@ use crate::{
 impl SolverInterface for HighsSolver {
     type Profile = HighsProfile;
 
+    fn reset_loaded_model(&mut self) -> bool {
+        // SAFETY: the handle is live and clearSolver preserves model data.
+        self.has_model && unsafe { ffi::cobre_highs_clear_solver(self.handle) == 0 }
+    }
+
     fn apply_profile(&mut self, profile: &HighsProfile) {
         // SAFETY: `self.handle` is a valid, non-null HiGHS pointer obtained
         // from `cobre_highs_create()`. The option name is a static C string

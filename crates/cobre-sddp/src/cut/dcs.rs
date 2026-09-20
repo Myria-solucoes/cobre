@@ -45,6 +45,9 @@ pub struct DcsParams {
     /// Maximum number of cuts added per inner iteration (`>= 1`).
     pub nadic: u32,
 
+    /// Optional ceiling for deterministic batch growth inside one solve.
+    pub adaptive_max_added_per_round: Option<u32>,
+
     /// Violation tolerance for accepting a candidate cut (`> 0`, and at least
     /// the LP dual-feasibility tolerance).
     pub epsilon_viol: f64,
@@ -62,6 +65,7 @@ impl Default for DcsParams {
         Self {
             k1: None,
             k2: 5,
+            adaptive_max_added_per_round: None,
             nadic: 10,
             epsilon_viol: 1e-10,
             start_iteration: 2,
@@ -82,11 +86,13 @@ impl DcsParams {
                 k1,
                 k2,
                 nadic,
+                adaptive_max_added_per_round,
                 epsilon_viol,
                 start_iteration,
             } => Some(Self {
                 k1: *k1,
                 k2: *k2,
+                adaptive_max_added_per_round: *adaptive_max_added_per_round,
                 nadic: *nadic,
                 epsilon_viol: *epsilon_viol,
                 start_iteration: *start_iteration,
@@ -661,6 +667,7 @@ pub fn lazy_solve_preloaded<S: SolverInterface>(
         }
     };
 
+    let mut round_params = *params;
     for _ in 0..params.max_inner_iterations {
         let t0 = Instant::now();
         let violated = score_violated_candidates(
@@ -670,7 +677,7 @@ pub fn lazy_solve_preloaded<S: SolverInterface>(
             view.primal,
             col_scale,
             &scratch.row_map,
-            params,
+            &round_params,
             current_iteration,
             &mut scratch.scoring,
             &mut scratch.out_selected,
@@ -698,6 +705,9 @@ pub fn lazy_solve_preloaded<S: SolverInterface>(
             &mut scratch.batch,
         );
         view = solver.solve(None).map_err(|e| map_solver_error(e, ctx))?;
+        if let Some(cap) = params.adaptive_max_added_per_round {
+            round_params.nadic = round_params.nadic.saturating_mul(2).min(cap);
+        }
     }
 
     // Nonviolated rows can bind after reoptimization; the fallback loads all eligible rows.
@@ -820,6 +830,7 @@ mod tests {
             DcsParams {
                 k1: None,
                 k2: 5,
+                adaptive_max_added_per_round: None,
                 nadic: 10,
                 epsilon_viol: 1e-10,
                 start_iteration: 2,
@@ -835,6 +846,7 @@ mod tests {
         let strategy = CutSelectionStrategy::Dynamic {
             k1: Some(20),
             k2: 7,
+            adaptive_max_added_per_round: None,
             nadic: 3,
             epsilon_viol: 1e-9,
             start_iteration: 4,
@@ -846,6 +858,7 @@ mod tests {
             DcsParams {
                 k1: Some(20),
                 k2: 7,
+                adaptive_max_added_per_round: None,
                 nadic: 3,
                 epsilon_viol: 1e-9,
                 start_iteration: 4,
@@ -857,6 +870,7 @@ mod tests {
         let strategy_inf = CutSelectionStrategy::Dynamic {
             k1: None,
             k2: 5,
+            adaptive_max_added_per_round: None,
             nadic: 10,
             epsilon_viol: 1e-10,
             start_iteration: 2,
@@ -2412,6 +2426,36 @@ mod tests {
         assert!((result.objective - 1.0).abs() < 1e-8);
         assert!((result.primal[0] - 2.0 / 3.0).abs() < 1e-8);
         assert!(result.primal[LAZY_THETA_COL] + 1e-8 >= result.primal[0]);
+    }
+
+    #[test]
+    fn adaptive_batches_preserve_full_lp_value() {
+        let indexer = lazy_indexer();
+        let pool = make_three_cut_pool();
+        let (expected, _) = solve_all_cuts(&pool, &indexer);
+        for limit in [0, 1, 10] {
+            let mut solver = active_profiled();
+            let core = core_template();
+            solver.load_model(&core);
+            let mut scratch = DcsSolveScratch::default();
+            let mut params = lazy_params(1, limit);
+            params.adaptive_max_added_per_round = Some(8);
+            lazy_solve_preloaded(
+                &mut solver,
+                &core,
+                &pool,
+                &indexer,
+                &cut_state(&indexer),
+                &[],
+                None,
+                &[],
+                &params,
+                &mut scratch,
+                ctx(),
+            )
+            .unwrap();
+            assert!((scratch.result_view().objective - expected).abs() < 1e-8);
+        }
     }
 
     #[test]

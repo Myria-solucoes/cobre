@@ -892,6 +892,7 @@ fn simulation_ctx_propagates_dynamic_dcs_from_setup() {
             start_iteration: 2,
             seed_window: 5,
             candidate_recency: None,
+            adaptive_max_added_per_round: None,
             max_added_per_round: 10,
             violation_tolerance: 1e-10,
         }),
@@ -925,6 +926,7 @@ fn simulation_ctx_propagates_dynamic_dcs_from_setup() {
     let expected = DcsParams {
         k1: None,
         k2: 5,
+        adaptive_max_added_per_round: None,
         nadic: 10,
         epsilon_viol: 1e-10,
         start_iteration: 2,
