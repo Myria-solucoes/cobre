@@ -18,6 +18,8 @@ def main():
     parser.add_argument('--iterations', type=int, default=12)
     parser.add_argument('--forwards', type=int, default=24)
     parser.add_argument('--threads', type=int, default=4)
+    parser.add_argument('--arms', nargs='+', choices=['baseline', 'candidate', 'selected'], default=['baseline', 'candidate', 'selected'])
+    parser.add_argument('--lml1-frequency', type=int, default=1)
     parser.add_argument('--repeats', type=int, default=3)
     parser.add_argument('--timeout', type=int, default=300)
     parser.add_argument('--cut-method', choices=['lml1', 'dynamic'], default='lml1')
@@ -28,13 +30,14 @@ def main():
     parser.add_argument('--scheduler', choices=['by_scenario', 'by_node'], default='by_scenario')
     parser.add_argument('--block-size', type=int, default=10)
     parser.add_argument('--deduplicate', action='store_true')
+    parser.add_argument('--deduplicate-only', action='store_true', help='Process every distinct state in every iteration')
     parser.add_argument('--audit-relative-tolerance', type=float)
     parser.add_argument('--adaptive-max-added-per-round', type=int)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=False)
     results = []
     for repeat in range(args.repeats):
-        arms = ['baseline', 'candidate', 'selected']
+        arms = args.arms.copy()
         if repeat % 2:
             arms.reverse()
         for arm in arms:
@@ -50,7 +53,7 @@ def main():
             config['training']['selection'] = {'method': 'sampled', 'forward_passes': args.forwards}
             config['training']['stopping_rules'] = [{'type': 'iteration_limit', 'limit': args.iterations}]
             config['training']['cut_selection'] = {'selection': (
-                {'method': 'lml1', 'check_frequency': 1} if args.cut_method == 'lml1' else
+                {'method': 'lml1', 'check_frequency': args.lml1_frequency} if args.cut_method == 'lml1' else
                 {'method': 'dynamic', 'candidate_recency': None, 'seed_window': 2, 'max_added_per_round': 20})}
             if args.cut_method == 'dynamic' and arm != 'baseline' and args.adaptive_max_added_per_round:
                 config['training']['cut_selection']['selection']['adaptive_max_added_per_round'] = args.adaptive_max_added_per_round
@@ -67,6 +70,8 @@ def main():
                     'deduplicate': args.deduplicate, 'audit_relative_tolerance': args.audit_relative_tolerance,
                     'initial_points': max(1, args.forwards // 4), 'exploration_points': 2,
                     'full_every': 4, 'full_from_iteration': max(2, args.iterations * 2 // 3)}
+            if arm == 'selected' and args.deduplicate_only:
+                config['training']['backward_selection'].update(deduplicate=True, full_from_iteration=1)
             (case / 'config.json').write_text(json.dumps(config, indent=2) + '\n')
             binary = (args.baseline if arm == 'baseline' else args.candidate).resolve()
             command = [str(binary), 'run', str(case.resolve()), '--output', str((run / 'output').resolve()),

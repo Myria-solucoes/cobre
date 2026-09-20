@@ -1601,6 +1601,7 @@ fn run_one_backward_level<S: SolverInterface + Send, C: Communicator>(
         inputs.comm.size(),
     )?;
 
+    let selection = inputs.backward_selection;
     let node_visit_offsets = std::mem::take(&mut state.node_visit_offsets);
 
     // Reuse the per-level buffers across levels (mem-swapped out so the loop
@@ -1615,7 +1616,7 @@ fn run_one_backward_level<S: SolverInterface + Send, C: Communicator>(
     for (level_idx, &node_pos) in level.iter().enumerate() {
         let trial_points = &routed_trials[routed_offsets[level_idx]..routed_offsets[level_idx + 1]];
         let mut selected = std::mem::take(&mut state.selection_scratch);
-        let points = if let Some(selection) = inputs.backward_selection {
+        let points = if let Some(selection) = selection {
             selected.select(
                 selection,
                 inputs.iteration,
@@ -1636,9 +1637,7 @@ fn run_one_backward_level<S: SolverInterface + Send, C: Communicator>(
             params,
         )?;
         selected.audit(
-            inputs
-                .backward_selection
-                .and_then(|s| s.audit_relative_tolerance),
+            selection.and_then(|s| s.audit_relative_tolerance),
             super::point_selection::PointAuditContext {
                 node: node_pos,
                 node_id: training_ctx.node_graph.node_ids[node_pos],

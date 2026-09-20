@@ -1,0 +1,301 @@
+[
+  {
+    "name": "benchmark-v2-block-10",
+    "run": {
+      "arm": "candidate",
+      "repeat": 0,
+      "wall_seconds": 9.589229514007457,
+      "exit_code": 0,
+      "command": [
+        "/home/jackson/tmp/cobre-optimized-20260920/candidate/cobre-candidate",
+        "run",
+        "/home/jackson/tmp/cobre-optimized-20260920/benchmark-v2-block-10/0-candidate/case",
+        "--output",
+        "/home/jackson/tmp/cobre-optimized-20260920/benchmark-v2-block-10/0-candidate/output",
+        "--threads",
+        "4",
+        "--comm-backend",
+        "local",
+        "--color",
+        "never"
+      ],
+      "binary_sha256": "9bda57b17c432588c51ac075571e2f8b6a8a558adb7ded30c08c7c1300f1cca2"
+    },
+    "training_seconds": 8.621,
+    "lp_solves": 140784,
+    "final_lower_bound": 81623575713.49315,
+    "scheduler": {
+      "backward_scheduler": {
+        "method": "by_node",
+        "block_size": 10
+      }
+    },
+    "cut_selection": {
+      "selection": {
+        "method": "lml1",
+        "check_frequency": 1
+      }
+    }
+  },
+  {
+    "name": "benchmark-v2-block-20",
+    "run": {
+      "arm": "candidate",
+      "repeat": 0,
+      "wall_seconds": 9.487347296002554,
+      "exit_code": 0,
+      "command": [
+        "/home/jackson/tmp/cobre-optimized-20260920/candidate/cobre-candidate",
+        "run",
+        "/home/jackson/tmp/cobre-optimized-20260920/benchmark-v2-block-20/0-candidate/case",
+        "--output",
+        "/home/jackson/tmp/cobre-optimized-20260920/benchmark-v2-block-20/0-candidate/output",
+        "--threads",
+        "4",
+        "--comm-backend",
+        "local",
+        "--color",
+        "never"
+      ],
+      "binary_sha256": "9bda57b17c432588c51ac075571e2f8b6a8a558adb7ded30c08c7c1300f1cca2"
+    },
+    "training_seconds": 8.588,
+    "lp_solves": 140784,
+    "final_lower_bound": 81623575713.49315,
+    "scheduler": {
+      "backward_scheduler": {
+        "method": "by_node",
+        "block_size": 20
+      }
+    },
+    "cut_selection": {
+      "selection": {
+        "method": "lml1",
+        "check_frequency": 1
+      }
+    }
+  },
+  {
+    "name": "benchmark-v2-block-5",
+    "run": {
+      "arm": "candidate",
+      "repeat": 0,
+      "wall_seconds": 9.58372252000845,
+      "exit_code": 0,
+      "command": [
+        "/home/jackson/tmp/cobre-optimized-20260920/candidate/cobre-candidate",
+        "run",
+        "/home/jackson/tmp/cobre-optimized-20260920/benchmark-v2-block-5/0-candidate/case",
+        "--output",
+        "/home/jackson/tmp/cobre-optimized-20260920/benchmark-v2-block-5/0-candidate/output",
+        "--threads",
+        "4",
+        "--comm-backend",
+        "local",
+        "--color",
+        "never"
+      ],
+      "binary_sha256": "9bda57b17c432588c51ac075571e2f8b6a8a558adb7ded30c08c7c1300f1cca2"
+    },
+    "training_seconds": 8.65,
+    "lp_solves": 140784,
+    "final_lower_bound": 81623422604.04884,
+    "scheduler": {
+      "backward_scheduler": {
+        "method": "by_node",
+        "block_size": 5
+      }
+    },
+    "cut_selection": {
+      "selection": {
+        "method": "lml1",
+        "check_frequency": 1
+      }
+    }
+  },
+  {
+    "name": "benchmark-v2-frequency-5",
+    "run": {
+      "arm": "candidate",
+      "repeat": 0,
+      "wall_seconds": 12.043679522001185,
+      "exit_code": 0,
+      "command": [
+        "/home/jackson/tmp/cobre-optimized-20260920/candidate/cobre-candidate",
+        "run",
+        "/home/jackson/tmp/cobre-optimized-20260920/benchmark-v2-frequency-5/0-candidate/case",
+        "--output",
+        "/home/jackson/tmp/cobre-optimized-20260920/benchmark-v2-frequency-5/0-candidate/output",
+        "--threads",
+        "4",
+        "--comm-backend",
+        "local",
+        "--color",
+        "never"
+      ],
+      "binary_sha256": "9bda57b17c432588c51ac075571e2f8b6a8a558adb7ded30c08c7c1300f1cca2"
+    },
+    "training_seconds": 11.117,
+    "lp_solves": 140784,
+    "final_lower_bound": 81624347866.83255,
+    "scheduler": {
+      "backward_scheduler": {
+        "method": "by_scenario"
+      }
+    },
+    "cut_selection": {
+      "selection": {
+        "method": "lml1",
+        "check_frequency": 5
+      }
+    }
+  },
+  {
+    "name": "benchmark-v2-threads-1",
+    "run": {
+      "arm": "candidate",
+      "repeat": 0,
+      "wall_seconds": 31.79462511499878,
+      "exit_code": 0,
+      "command": [
+        "/home/jackson/tmp/cobre-optimized-20260920/candidate/cobre-candidate",
+        "run",
+        "/home/jackson/tmp/cobre-optimized-20260920/benchmark-v2-threads-1/0-candidate/case",
+        "--output",
+        "/home/jackson/tmp/cobre-optimized-20260920/benchmark-v2-threads-1/0-candidate/output",
+        "--threads",
+        "1",
+        "--comm-backend",
+        "local",
+        "--color",
+        "never"
+      ],
+      "binary_sha256": "9bda57b17c432588c51ac075571e2f8b6a8a558adb7ded30c08c7c1300f1cca2"
+    },
+    "training_seconds": 30.672,
+    "lp_solves": 140784,
+    "final_lower_bound": 81623299250.80104,
+    "scheduler": {
+      "backward_scheduler": {
+        "method": "by_scenario"
+      }
+    },
+    "cut_selection": {
+      "selection": {
+        "method": "lml1",
+        "check_frequency": 1
+      }
+    }
+  },
+  {
+    "name": "benchmark-v2-threads-2",
+    "run": {
+      "arm": "candidate",
+      "repeat": 0,
+      "wall_seconds": 16.506628528004512,
+      "exit_code": 0,
+      "command": [
+        "/home/jackson/tmp/cobre-optimized-20260920/candidate/cobre-candidate",
+        "run",
+        "/home/jackson/tmp/cobre-optimized-20260920/benchmark-v2-threads-2/0-candidate/case",
+        "--output",
+        "/home/jackson/tmp/cobre-optimized-20260920/benchmark-v2-threads-2/0-candidate/output",
+        "--threads",
+        "2",
+        "--comm-backend",
+        "local",
+        "--color",
+        "never"
+      ],
+      "binary_sha256": "9bda57b17c432588c51ac075571e2f8b6a8a558adb7ded30c08c7c1300f1cca2"
+    },
+    "training_seconds": 15.605,
+    "lp_solves": 140784,
+    "final_lower_bound": 81623299250.80104,
+    "scheduler": {
+      "backward_scheduler": {
+        "method": "by_scenario"
+      }
+    },
+    "cut_selection": {
+      "selection": {
+        "method": "lml1",
+        "check_frequency": 1
+      }
+    }
+  },
+  {
+    "name": "benchmark-v2-threads-4",
+    "run": {
+      "arm": "candidate",
+      "repeat": 0,
+      "wall_seconds": 9.587266771006398,
+      "exit_code": 0,
+      "command": [
+        "/home/jackson/tmp/cobre-optimized-20260920/candidate/cobre-candidate",
+        "run",
+        "/home/jackson/tmp/cobre-optimized-20260920/benchmark-v2-threads-4/0-candidate/case",
+        "--output",
+        "/home/jackson/tmp/cobre-optimized-20260920/benchmark-v2-threads-4/0-candidate/output",
+        "--threads",
+        "4",
+        "--comm-backend",
+        "local",
+        "--color",
+        "never"
+      ],
+      "binary_sha256": "9bda57b17c432588c51ac075571e2f8b6a8a558adb7ded30c08c7c1300f1cca2"
+    },
+    "training_seconds": 8.699,
+    "lp_solves": 140784,
+    "final_lower_bound": 81623299250.80104,
+    "scheduler": {
+      "backward_scheduler": {
+        "method": "by_scenario"
+      }
+    },
+    "cut_selection": {
+      "selection": {
+        "method": "lml1",
+        "check_frequency": 1
+      }
+    }
+  },
+  {
+    "name": "benchmark-v2-threads-8",
+    "run": {
+      "arm": "candidate",
+      "repeat": 0,
+      "wall_seconds": 5.7782199639768805,
+      "exit_code": 0,
+      "command": [
+        "/home/jackson/tmp/cobre-optimized-20260920/candidate/cobre-candidate",
+        "run",
+        "/home/jackson/tmp/cobre-optimized-20260920/benchmark-v2-threads-8/0-candidate/case",
+        "--output",
+        "/home/jackson/tmp/cobre-optimized-20260920/benchmark-v2-threads-8/0-candidate/output",
+        "--threads",
+        "8",
+        "--comm-backend",
+        "local",
+        "--color",
+        "never"
+      ],
+      "binary_sha256": "9bda57b17c432588c51ac075571e2f8b6a8a558adb7ded30c08c7c1300f1cca2"
+    },
+    "training_seconds": 4.841,
+    "lp_solves": 140784,
+    "final_lower_bound": 81623299250.80104,
+    "scheduler": {
+      "backward_scheduler": {
+        "method": "by_scenario"
+      }
+    },
+    "cut_selection": {
+      "selection": {
+        "method": "lml1",
+        "check_frequency": 1
+      }
+    }
+  }
+]

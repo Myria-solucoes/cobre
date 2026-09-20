@@ -1,0 +1,122 @@
+[
+  {
+    "arm": "baseline",
+    "repeat": 0,
+    "wall_seconds": 40.06359860600787,
+    "exit_code": 0,
+    "command": [
+      "/home/jackson/tmp/cobre-optimized-20260920/cobre-baseline",
+      "run",
+      "/home/jackson/tmp/cobre-optimized-20260920/benchmark-v2-dedup-only/0-baseline/case",
+      "--output",
+      "/home/jackson/tmp/cobre-optimized-20260920/benchmark-v2-dedup-only/0-baseline/output",
+      "--threads",
+      "4",
+      "--comm-backend",
+      "local",
+      "--color",
+      "never"
+    ],
+    "binary_sha256": "e189ddaeb704d24ec02f39df9ffe76458cc74425a74cbef62ddf9e106dd99508"
+  },
+  {
+    "arm": "selected",
+    "repeat": 0,
+    "wall_seconds": 34.05216342100175,
+    "exit_code": 0,
+    "command": [
+      "/home/jackson/tmp/cobre-optimized-20260920/candidate/cobre-candidate",
+      "run",
+      "/home/jackson/tmp/cobre-optimized-20260920/benchmark-v2-dedup-only/0-selected/case",
+      "--output",
+      "/home/jackson/tmp/cobre-optimized-20260920/benchmark-v2-dedup-only/0-selected/output",
+      "--threads",
+      "4",
+      "--comm-backend",
+      "local",
+      "--color",
+      "never"
+    ],
+    "binary_sha256": "9bda57b17c432588c51ac075571e2f8b6a8a558adb7ded30c08c7c1300f1cca2"
+  },
+  {
+    "arm": "selected",
+    "repeat": 1,
+    "wall_seconds": 33.645009508007206,
+    "exit_code": 0,
+    "command": [
+      "/home/jackson/tmp/cobre-optimized-20260920/candidate/cobre-candidate",
+      "run",
+      "/home/jackson/tmp/cobre-optimized-20260920/benchmark-v2-dedup-only/1-selected/case",
+      "--output",
+      "/home/jackson/tmp/cobre-optimized-20260920/benchmark-v2-dedup-only/1-selected/output",
+      "--threads",
+      "4",
+      "--comm-backend",
+      "local",
+      "--color",
+      "never"
+    ],
+    "binary_sha256": "9bda57b17c432588c51ac075571e2f8b6a8a558adb7ded30c08c7c1300f1cca2"
+  },
+  {
+    "arm": "baseline",
+    "repeat": 1,
+    "wall_seconds": 39.36547584302025,
+    "exit_code": 0,
+    "command": [
+      "/home/jackson/tmp/cobre-optimized-20260920/cobre-baseline",
+      "run",
+      "/home/jackson/tmp/cobre-optimized-20260920/benchmark-v2-dedup-only/1-baseline/case",
+      "--output",
+      "/home/jackson/tmp/cobre-optimized-20260920/benchmark-v2-dedup-only/1-baseline/output",
+      "--threads",
+      "4",
+      "--comm-backend",
+      "local",
+      "--color",
+      "never"
+    ],
+    "binary_sha256": "e189ddaeb704d24ec02f39df9ffe76458cc74425a74cbef62ddf9e106dd99508"
+  },
+  {
+    "arm": "baseline",
+    "repeat": 2,
+    "wall_seconds": 38.95952330098953,
+    "exit_code": 0,
+    "command": [
+      "/home/jackson/tmp/cobre-optimized-20260920/cobre-baseline",
+      "run",
+      "/home/jackson/tmp/cobre-optimized-20260920/benchmark-v2-dedup-only/2-baseline/case",
+      "--output",
+      "/home/jackson/tmp/cobre-optimized-20260920/benchmark-v2-dedup-only/2-baseline/output",
+      "--threads",
+      "4",
+      "--comm-backend",
+      "local",
+      "--color",
+      "never"
+    ],
+    "binary_sha256": "e189ddaeb704d24ec02f39df9ffe76458cc74425a74cbef62ddf9e106dd99508"
+  },
+  {
+    "arm": "selected",
+    "repeat": 2,
+    "wall_seconds": 33.68440526098129,
+    "exit_code": 0,
+    "command": [
+      "/home/jackson/tmp/cobre-optimized-20260920/candidate/cobre-candidate",
+      "run",
+      "/home/jackson/tmp/cobre-optimized-20260920/benchmark-v2-dedup-only/2-selected/case",
+      "--output",
+      "/home/jackson/tmp/cobre-optimized-20260920/benchmark-v2-dedup-only/2-selected/output",
+      "--threads",
+      "4",
+      "--comm-backend",
+      "local",
+      "--color",
+      "never"
+    ],
+    "binary_sha256": "9bda57b17c432588c51ac075571e2f8b6a8a558adb7ded30c08c7c1300f1cca2"
+  }
+]

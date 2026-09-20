@@ -161,3 +161,8 @@ Harness flags `--deduplicate`, `--audit-relative-tolerance 0.01` and
 `--adaptive-max-added-per-round 80` enable these optional controls. Record each
 configuration separately: a more conservative audit can sacrifice speed to
 increase coverage.
+
+To retain every distinct state in every iteration, set `deduplicate: true` and
+`full_from_iteration: 1`. This skips duplicate solves without thinning distinct
+states. The harness exposes this comparison as `--deduplicate-only`. It also
+accepts `--arms baseline selected` and `--lml1-frequency 5` for isolated sweeps.
