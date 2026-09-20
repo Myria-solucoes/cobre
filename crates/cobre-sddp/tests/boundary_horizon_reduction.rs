@@ -48,7 +48,9 @@ use cobre_io::config::{
     TrainingSolverConfig, UpperBoundEvaluationConfig,
 };
 use cobre_io::{SEASON_CYCLE_CODE_MONTHLY, encode_slot_date, read_policy_checkpoint};
-use cobre_sddp::orchestration::{CheckpointParams, build_season_manifest, write_checkpoint};
+use cobre_sddp::policy::orchestration::{
+    CheckpointParams, build_season_manifest, write_checkpoint,
+};
 use cobre_sddp::{
     BoundaryLoadRequest, FamilyTally, ValidatedBoundaryCuts, load_boundary_cuts, study_horizon_end,
 };

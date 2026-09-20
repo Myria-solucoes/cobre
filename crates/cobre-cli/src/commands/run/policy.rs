@@ -25,7 +25,7 @@ use cobre_sddp::build_basis_cache_from_checkpoint;
 use cobre_sddp::checkpoint_terminal_cost_scale_factor;
 use cobre_sddp::inject_boundary_cuts;
 use cobre_sddp::load_boundary_cuts;
-use cobre_sddp::orchestration::build_season_manifest;
+use cobre_sddp::policy::orchestration::build_season_manifest;
 use cobre_sddp::rescale_checkpoint_cuts_for_load;
 use cobre_sddp::study_horizon_end;
 use cobre_sddp::validate_policy_load;

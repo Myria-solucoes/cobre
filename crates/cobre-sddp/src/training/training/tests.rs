@@ -446,7 +446,6 @@ fn ac_train_completes_with_iteration_limit() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation; n_stages],
         },
         events: EventConfig {
@@ -553,7 +552,6 @@ fn ac_train_returns_partial_on_infeasible() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation; n_stages],
         },
         events: EventConfig {
@@ -673,7 +671,6 @@ fn ac_train_emits_correct_event_sequence() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation; n_stages],
         },
         events: EventConfig {
@@ -879,7 +876,6 @@ fn ac_worker_timing_per_worker_event_count_and_setup_invariant() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation; n_stages],
         },
         events: EventConfig {
@@ -1056,7 +1052,6 @@ fn ac_train_result_fields_populated() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation; n_stages],
         },
         events: EventConfig {
@@ -1163,7 +1158,6 @@ fn ac_train_with_no_event_sender() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation; n_stages],
         },
         events: EventConfig {
@@ -1267,7 +1261,6 @@ fn ac_total_time_ms_is_non_negative() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation; n_stages],
         },
         events: EventConfig {
@@ -1379,7 +1372,6 @@ fn cut_selection_none_skips_step() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation; n_stages],
         },
         events: EventConfig {
@@ -1500,7 +1492,6 @@ fn cut_selection_level1_runs_at_frequency() {
             }),
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation; n_stages],
         },
         events: EventConfig {
@@ -1630,7 +1621,6 @@ fn cut_selection_stage0_exempt_preserves_cuts() {
             }),
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation; n_stages],
         },
         events: EventConfig {
@@ -1770,7 +1760,6 @@ fn existing_train_tests_pass_with_none() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation; n_stages],
         },
         events: EventConfig {
@@ -1879,7 +1868,6 @@ fn ac_train_partial_result_on_mid_iteration_failure() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation; n_stages],
         },
         events: EventConfig {
@@ -2009,7 +1997,6 @@ fn start_iteration_resumes_from_offset() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation; n_stages],
         },
         events: EventConfig {
@@ -2118,7 +2105,6 @@ fn start_iteration_at_or_beyond_max_runs_zero_iterations() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation; n_stages],
         },
         events: EventConfig {
@@ -2881,7 +2867,6 @@ fn template_freeze_event_emitted() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation; n_stages],
         },
         events: EventConfig {

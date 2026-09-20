@@ -33,8 +33,8 @@ use cobre_sddp::build_evaporation_model_rows;
 use cobre_sddp::build_fixed_delivery_rows;
 use cobre_sddp::build_generic_constraint_echo_rows;
 use cobre_sddp::delta_to_stats_row;
-use cobre_sddp::orchestration::CheckpointParams;
-use cobre_sddp::orchestration::write_checkpoint;
+use cobre_sddp::policy::orchestration::CheckpointParams;
+use cobre_sddp::policy::orchestration::write_checkpoint;
 use cobre_sddp::solver_stats_log_to_rows;
 
 use crate::error::CliError;

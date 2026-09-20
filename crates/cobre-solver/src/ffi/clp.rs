@@ -233,10 +233,8 @@ unsafe extern "C" {
     // C++ class-only knobs (implemented in clp_wrapper_cpp.cpp)
     //
     // These reach methods that exist only on the C++ `ClpSimplex` class and are
-    // not in the CLP C interface: dual-steepest-edge pricing, factorization
-    // frequency, and the hot-start snapshot/restore trio. The `save_stuff` token
-    // is CLP-owned and kept opaque on the Rust side — never dereferenced, always
-    // paired (mark/unmark) on the same model instance.
+    // not in the CLP C interface: dual-steepest-edge pricing and factorization
+    // frequency.
     // ============================================================
 
     /// Select dual-steepest-edge pricing. Wraps
@@ -257,38 +255,6 @@ unsafe extern "C" {
     /// `model` must be a valid, non-null CLP model pointer from
     /// `cobre_clp_create`.
     pub fn cobre_clp_set_factorization_frequency(model: *mut c_void, value: int32_t);
-
-    /// Snapshot the model for hot-started re-solves. Wraps
-    /// `ClpSimplex::markHotStart` and returns the opaque CLP-allocated
-    /// `saveStuff` token.
-    ///
-    /// # Safety
-    ///
-    /// `model` must be a valid, non-null CLP model pointer with a model loaded.
-    /// The returned token is CLP-owned; keep it opaque and release it with
-    /// `cobre_clp_unmark_hot_start` on the same `model`.
-    pub fn cobre_clp_mark_hot_start(model: *mut c_void) -> *mut c_void;
-
-    /// Re-solve the model from the hot-start snapshot. Wraps
-    /// `ClpSimplex::solveFromHotStart` and returns the CLP solve status int
-    /// (0 = optimal; same space as `cobre_clp_status`).
-    ///
-    /// # Safety
-    ///
-    /// `model` must be a valid, non-null CLP model pointer. `save_stuff` must be
-    /// a non-null token from a prior `cobre_clp_mark_hot_start` on this same
-    /// `model`. It is forwarded to CLP unchanged and never dereferenced by Rust.
-    pub fn cobre_clp_solve_from_hot_start(model: *mut c_void, save_stuff: *mut c_void) -> int32_t;
-
-    /// Release a hot-start snapshot, freeing the `saveStuff` token. Wraps
-    /// `ClpSimplex::unmarkHotStart`.
-    ///
-    /// # Safety
-    ///
-    /// `model` must be a valid, non-null CLP model pointer. `save_stuff` must be
-    /// a non-null token from a prior `cobre_clp_mark_hot_start` on this same
-    /// `model`; after this call it is freed and must not be reused.
-    pub fn cobre_clp_unmark_hot_start(model: *mut c_void, save_stuff: *mut c_void);
 
     // ============================================================
     // Version query (no instance required)

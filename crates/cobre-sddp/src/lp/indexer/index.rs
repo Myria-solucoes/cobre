@@ -1,12 +1,12 @@
 //! Base typed vocabulary for LP addresses and state-vector dimensions.
 //!
-//! A bare `usize` does not distinguish an LP column from an LP row, a
-//! state-vector dimension from an LP column, an incoming-state column from
-//! an outgoing-state one, or a block index from any of those — any of those
-//! mismatches still compiles and silently addresses the wrong cell. [`Col`],
-//! [`Row`], and [`StateDim`] make each concern its own type; [`InCol`]/[`OutCol`]
-//! further split the column role the state-path resolvers return, so a render
-//! call site handed an incoming column (or vice versa) is a compile error, not
+//! A bare `usize` does not distinguish a state-vector dimension from an LP
+//! column, an incoming-state column from an outgoing-state one, or a block
+//! index from any of those — any of those mismatches still compiles and
+//! silently addresses the wrong cell. [`StateDim`] makes the state-vector
+//! dimension its own type; [`InCol`]/[`OutCol`] split the column role the
+//! state-path resolvers return, so a render call site handed an incoming
+//! column (or vice versa) is a compile error, not
 //! a silently wrong cut coefficient — on the paths that consume the typed
 //! resolvers (the cut pin/extract/render hot path, simulation extraction, and
 //! the policy manifest); a consumer indexing a raw buffer through
@@ -22,49 +22,6 @@
 //! boundary. Every type is `#[repr(transparent)]` and extracts its raw
 //! `usize` via `get()` for the solver-FFI seam, which stays `usize`-only per
 //! the infra-genericity rule.
-
-/// A generic LP column index — the solver-FFI seam type (`set_col_bounds`,
-/// CSC/CSR column indices) when no incoming/outgoing role applies.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(transparent)]
-pub struct Col(usize);
-
-impl Col {
-    /// Wrap a raw LP column index.
-    #[inline]
-    #[must_use]
-    pub fn new(col: usize) -> Self {
-        Self(col)
-    }
-
-    /// Extract the raw LP column index for the solver-FFI seam.
-    #[inline]
-    #[must_use]
-    pub fn get(self) -> usize {
-        self.0
-    }
-}
-
-/// A generic LP row index.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(transparent)]
-pub struct Row(usize);
-
-impl Row {
-    /// Wrap a raw LP row index.
-    #[inline]
-    #[must_use]
-    pub fn new(row: usize) -> Self {
-        Self(row)
-    }
-
-    /// Extract the raw LP row index for the solver-FFI seam.
-    #[inline]
-    #[must_use]
-    pub fn get(self) -> usize {
-        self.0
-    }
-}
 
 /// A state-vector dimension index `j ∈ [0, n_state)` — not an LP address;
 /// resolve it through the owning state layout's resolver before indexing an
@@ -247,7 +204,7 @@ impl Boundary {
 
 #[cfg(test)]
 mod tests {
-    use super::{BlockIdx, Boundary, Col, CutSlot, InCol, OutCol, Row, StateDim};
+    use super::{BlockIdx, Boundary, CutSlot, InCol, OutCol, StateDim};
 
     #[test]
     fn boundary_from_index_classifies_endpoints_and_interior() {
@@ -257,12 +214,6 @@ mod tests {
         for k in 1..K {
             assert_eq!(Boundary::from_index(k, K), Boundary::Interior(k));
         }
-    }
-
-    #[test]
-    fn col_is_zero_cost_and_round_trips() {
-        assert_eq!(std::mem::size_of::<Col>(), std::mem::size_of::<usize>());
-        assert_eq!(Col::new(42).get(), 42);
     }
 
     #[test]
@@ -278,12 +229,6 @@ mod tests {
             std::mem::size_of::<usize>()
         );
         assert_eq!(BlockIdx::new(2).get(), 2);
-    }
-
-    #[test]
-    fn row_is_zero_cost_and_round_trips() {
-        assert_eq!(std::mem::size_of::<Row>(), std::mem::size_of::<usize>());
-        assert_eq!(Row::new(7).get(), 7);
     }
 
     #[test]
@@ -305,12 +250,6 @@ mod tests {
     fn out_col_is_zero_cost_and_round_trips() {
         assert_eq!(std::mem::size_of::<OutCol>(), std::mem::size_of::<usize>());
         assert_eq!(OutCol::new(9).get(), 9);
-    }
-
-    #[test]
-    fn col_equality_is_value_based_not_identity() {
-        assert_eq!(Col::new(3), Col::new(3));
-        assert_ne!(Col::new(3), Col::new(4));
     }
 
     /// `InCol`/`OutCol` are distinct types even when constructed from the same

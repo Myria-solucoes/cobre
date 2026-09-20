@@ -412,7 +412,6 @@ fn test_stochastic_load_training_completes() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: risk_measures.clone(),
         },
         events: EventConfig {
@@ -588,7 +587,6 @@ fn test_deterministic_load_training_matches_baseline() {
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                warm_start_cuts: 0,
                 risk_measures: risk_measures.clone(),
             },
             events: EventConfig {
@@ -675,7 +673,6 @@ fn test_stochastic_load_seed_determinism() {
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                warm_start_cuts: 0,
                 risk_measures: risk_measures.clone(),
             },
             events: EventConfig {

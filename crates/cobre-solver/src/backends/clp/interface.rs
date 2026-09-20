@@ -76,11 +76,6 @@ impl SolverInterface for ClpSolver {
             // determinism degrades but the run continues.
             return;
         }
-        // Release any hot-start snapshot bound to the OLD handle before it is
-        // destroyed — the `saveStuff` token belongs to the old model.
-        if !self.hot_start_token.is_null() {
-            self.unmark_hot_start();
-        }
         // SAFETY: `self.handle` is the valid handle from construction (or a prior
         // reset); `cobre_clp_destroy` frees it. It is immediately replaced by the
         // freshly created, non-null `new_handle` before any further use.
@@ -122,17 +117,6 @@ impl SolverInterface for ClpSolver {
             "num_nz {} overflows i32: LP exceeds CLP API limit",
             template.num_nz
         );
-        // Release any active hot-start snapshot before replacing the model — the
-        // saveStuff belongs to the old model's factorization and is invalid after
-        // Clp_loadProblem, so releasing before reload keeps `Drop` from unmarking
-        // a stale token after the swap. (A *solve* after a
-        // reload-following-a-hot-start stays unsafe at the CLP level — vendored
-        // CLP leaves `ClpSimplex::factorization_` dangling and `Clp_loadProblem`
-        // does not heal the rim — but no persistent-solver path reloads after
-        // marking.)
-        if !self.hot_start_token.is_null() {
-            self.unmark_hot_start();
-        }
         // Rationale: the values below were asserted to fit in i32 above.
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         let num_col = template.num_cols as i32;
@@ -203,12 +187,6 @@ impl SolverInterface for ClpSolver {
     /// not the FFI call. The native append preserves CLP's persistent simplex
     /// basis (no full rebuild).
     ///
-    /// A non-empty append **releases any captured hot-start snapshot**: the
-    /// saveStuff pins the pre-append factorization/rim and is stale once the row
-    /// dimension changes (mirrors the guard in [`Self::load_model`]). An empty
-    /// batch (`num_rows == 0`) makes no structural change and leaves an active
-    /// snapshot intact.
-    ///
     /// # Panics
     ///
     /// Panics if `rows.num_rows` or the batch nnz does not fit in `i32`.
@@ -234,10 +212,6 @@ impl SolverInterface for ClpSolver {
                 "malformed RowBatch: num_rows is 0 but col_indices has {new_nz} entries"
             );
             return;
-        }
-
-        if !self.hot_start_token.is_null() {
-            self.unmark_hot_start();
         }
 
         // `per_col_count[c]` is the number of batch entries in column `c`.

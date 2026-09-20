@@ -259,6 +259,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `config_overrides={"simulation": {"enabled": False}}` to `cobre.run.run`, or
   construct a `Study` and call `train()` without `simulate()`.
 
+- **BREAKING — six unused or superseded Rust-API surfaces are removed from
+  `cobre-sddp` and `cobre-solver`.** No deck, output file, schema or
+  checkpoint format changed:
+  - `CutManagementConfig::warm_start_cuts` is removed; the field had no
+    reader and always held `0`. Per-pool warm-start capacity is unaffected.
+  - The `Col` and `Row` indexer newtypes are removed; the `InCol`, `OutCol`
+    and `StateDim` role types are unchanged.
+  - `FphaRowRange` is removed; `EvaporationIndices` is unchanged.
+  - The crate-root `cobre_sddp::orchestration` re-export is removed; the
+    same items are now reached at `cobre_sddp::policy::orchestration` —
+    only the path changed.
+  - The superseded cut-sync methods `sync_cuts`, `pack_local_records` and
+    `sync_packed_records` are removed; the live cut-exchange path
+    `sync_level_records` is unchanged.
+  - The CLP hot-start acquire/release FFI surface — the C shim's `mark`,
+    `solve` and `unmark` functions and their `ClpSolver` wrappers — is
+    removed. It guarded a basis-invalidation path that never fired; no
+    solver behaviour changes.
+
 ### Fixed
 
 - **`cobre validate` and `cobre.io.validate` now reject a boundary-configured

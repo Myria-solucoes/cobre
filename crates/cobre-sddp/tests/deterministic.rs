@@ -5964,7 +5964,7 @@ mod chronological_telescoping {
 
     use cobre_io::{PolicyCheckpoint, read_policy_checkpoint};
     use cobre_sddp::FutureCostFunction;
-    use cobre_sddp::orchestration::{CheckpointParams, write_checkpoint};
+    use cobre_sddp::policy::orchestration::{CheckpointParams, write_checkpoint};
     use cobre_sddp::policy_export::build_stage_cut_records;
     use tempfile::TempDir;
 
@@ -6655,7 +6655,7 @@ mod season_descriptor_checkpoint_round_trip {
     use cobre_solver::ActiveSolver;
 
     use cobre_io::{SEASON_CYCLE_CODE_MONTHLY, read_policy_checkpoint};
-    use cobre_sddp::orchestration::{CheckpointParams, write_checkpoint};
+    use cobre_sddp::policy::orchestration::{CheckpointParams, write_checkpoint};
     use tempfile::TempDir;
 
     use super::common::builders::{
@@ -7044,7 +7044,9 @@ mod boundary_season_gate_round_trip {
     };
     use cobre_solver::ActiveSolver;
 
-    use cobre_sddp::orchestration::{CheckpointParams, build_season_manifest, write_checkpoint};
+    use cobre_sddp::policy::orchestration::{
+        CheckpointParams, build_season_manifest, write_checkpoint,
+    };
     use cobre_sddp::{BoundaryLoadRequest, load_boundary_cuts, study_horizon_end};
     use tempfile::TempDir;
 
@@ -7413,7 +7415,7 @@ mod transit_arrival_interval_checkpoint_round_trip {
     use cobre_solver::ActiveSolver;
 
     use cobre_io::{StageCutsReadResult, StateFamily, read_policy_checkpoint};
-    use cobre_sddp::orchestration::{CheckpointParams, write_checkpoint};
+    use cobre_sddp::policy::orchestration::{CheckpointParams, write_checkpoint};
     use tempfile::TempDir;
 
     use super::common::builders::{

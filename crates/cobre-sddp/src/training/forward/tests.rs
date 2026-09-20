@@ -648,7 +648,6 @@ fn ac_two_scenarios_three_stages_fixed_solution() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation],
         },
         events: EventConfig {
@@ -783,7 +782,6 @@ fn ac_infeasible_at_stage_1_scenario_0_returns_infeasible_error() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation],
         },
         events: EventConfig {
@@ -922,7 +920,6 @@ fn cost_statistics_accumulated_correctly() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation],
         },
         events: EventConfig {
@@ -1536,7 +1533,6 @@ fn run_one_iteration(
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation],
         },
         events: EventConfig {
@@ -2370,7 +2366,6 @@ fn none_method_unchanged_with_truncation_code_present() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation],
         },
         events: EventConfig {

@@ -625,7 +625,6 @@ fn train_simulate_write_cycle() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: fx.risk_measures.clone(),
         },
         events: EventConfig {
@@ -1444,7 +1443,6 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation; n_stages],
         },
         events: EventConfig {
@@ -1635,7 +1633,6 @@ fn enumerated_census_k1_matches_sampled_single_scenario() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: fx.risk_measures.clone(),
         },
         events: EventConfig {

@@ -1907,7 +1907,6 @@ mod tests {
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                warm_start_cuts: 0,
                 risk_measures: vec![RiskMeasure::Expectation; n_stages],
             },
             events: EventConfig {

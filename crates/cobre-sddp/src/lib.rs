@@ -67,7 +67,7 @@ pub use cut::{basis_reconstruct, cut_selection, cut_sync, dcs};
 pub(crate) use lp::generic_constraints;
 pub use lp::indexer;
 
-pub use policy::{orchestration, policy_export, resolved_parameters, scaling_report};
+pub use policy::{policy_export, resolved_parameters, scaling_report};
 
 // `hydro_models::prepare_hydro_models_from_artifacts` is intentionally absent
 // from the curated re-export — this shim is its sole resolution path.

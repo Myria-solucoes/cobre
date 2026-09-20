@@ -807,7 +807,6 @@ impl StudySetup {
                 cut_selection,
                 budget,
                 cut_activity_tolerance,
-                warm_start_cuts: 0,
                 risk_measures,
             },
             events: EventParams { export_states },

@@ -47,10 +47,9 @@
 //!   `is_anticipated_decision_active`), taking `state: &`[`StateSpace`]
 //!   rather than living as methods on it — column geometry and temporal
 //!   gating are separate concerns.
-//! - `layout` — the per-stage geometry satellite types [`EvaporationIndices`]
-//!   and [`FphaRowRange`] (locating one hydro's evaporation columns/row and FPHA
-//!   row block within a stage LP).
-//! - `index` — the base typed vocabulary [`Col`]/[`Row`]/[`StateDim`] and the
+//! - `layout` — the per-stage geometry satellite type [`EvaporationIndices`]
+//!   (locating one hydro's evaporation columns/row within a stage LP).
+//! - `index` — the base typed vocabulary [`StateDim`] and the
 //!   [`InCol`]/[`OutCol`] incoming/outgoing column-role split. Every
 //!   `StateSpace`/`CutStateProjection` incoming and outgoing resolver, plus
 //!   [`CutStateProjection::render_pairs`], resolves through it. [`BlockIdx`]
@@ -116,8 +115,8 @@ pub use entity_index::{
     HydroCell, HydroSys, LineSys, ThermalSys,
 };
 pub use hydro_cell::HydroCellIndex;
-pub use index::{BlockIdx, Boundary, Col, CutSlot, InCol, OutCol, Row, StateDim};
-pub use layout::{EvaporationIndices, FphaRowRange};
+pub use index::{BlockIdx, Boundary, CutSlot, InCol, OutCol, StateDim};
+pub use layout::EvaporationIndices;
 pub(crate) use range_cursor::RangeCursor;
 pub use state_space::StateSpace;
 pub(crate) use state_space::{REGION_ORDER, StateRegion};

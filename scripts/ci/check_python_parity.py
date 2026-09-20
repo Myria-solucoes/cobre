@@ -3,7 +3,7 @@
 
 Parses both the CLI `run` module (`crates/cobre-cli/src/`, a directory) and
 `crates/cobre-python/src/` for calls to writers from `cobre_io` and
-`cobre_sddp::orchestration`. Resolves bare imported calls back to their
+`cobre_sddp::policy::orchestration`. Resolves bare imported calls back to their
 canonical names through `use` statements, then compares the two sets.
 
 Usage:
@@ -29,7 +29,7 @@ NORMALISE: dict[str, str] = {
 
 
 def parse_imports(text: str) -> dict[str, str]:
-    """Parse `use` statements from cobre_io/cobre_sddp::orchestration into a local_name -> canonical_name map.
+    """Parse `use` statements from cobre_io/cobre_sddp::policy::orchestration into a local_name -> canonical_name map.
 
     Handles single-line, multi-line brace groups, nested {}, and `as` aliases.
     """
@@ -54,6 +54,7 @@ def parse_imports(text: str) -> dict[str, str]:
             if not (
                 "use cobre_io::" in statement
                 or "use cobre_sddp::orchestration::" in statement
+                or "use cobre_sddp::policy::orchestration::" in statement
             ):
                 continue
 
@@ -121,7 +122,7 @@ def _extract_from_text(text: str, names: set[str], import_map: dict[str, str]) -
 
         # Match fully-qualified calls.
         for match in re.finditer(
-            r"(?:cobre_io|cobre_sddp::orchestration)::([\w:]+::)*(write_\w+|export_\w+)\s*\(",
+            r"(?:cobre_io|cobre_sddp::(?:policy::)?orchestration)::([\w:]+::)*(write_\w+|export_\w+)\s*\(",
             line,
         ):
             name = match.group(2)

@@ -144,10 +144,6 @@ pub struct CutManagementConfig {
     /// Activity (dual-value) threshold below which a cut is a deactivation candidate.
     pub cut_activity_tolerance: f64,
 
-    /// Warm-start cut count, inert (no production reader): cut-pool capacity is
-    /// owned per pool by `pool_capacity`'s `warm_start_count`, not by this field.
-    pub warm_start_cuts: u32,
-
     /// Per-stage backward-pass risk measures; length must equal `num_stages`.
     pub risk_measures: Vec<RiskMeasure>,
 }
@@ -158,7 +154,6 @@ impl Default for CutManagementConfig {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 1e-6,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation],
         }
     }
@@ -288,23 +283,6 @@ mod tests {
         assert_eq!(config_some.events.checkpoint_interval, Some(10));
     }
 
-    #[test]
-    fn warm_start_cuts_field_accessible() {
-        let config = TrainingConfig {
-            loop_config: LoopConfig {
-                forward_passes: 1,
-                max_iterations: 10,
-                ..LoopConfig::default()
-            },
-            cut_management: CutManagementConfig {
-                warm_start_cuts: 500,
-                ..CutManagementConfig::default()
-            },
-            events: EventConfig::default(),
-        };
-        assert_eq!(config.cut_management.warm_start_cuts, 500);
-    }
-
     // ── Event sender ─────────────────────────────────────────────────────────
 
     #[test]
@@ -327,7 +305,6 @@ mod tests {
                 ..LoopConfig::default()
             },
             cut_management: CutManagementConfig {
-                warm_start_cuts: 100,
                 cut_activity_tolerance: 1e-6,
                 ..CutManagementConfig::default()
             },

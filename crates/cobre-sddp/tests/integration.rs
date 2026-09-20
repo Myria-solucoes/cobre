@@ -599,7 +599,6 @@ fn run_one_deterministic_pass(
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                warm_start_cuts: 0,
                 risk_measures: fx.risk_measures.clone(),
             },
             events: EventConfig {
@@ -661,7 +660,6 @@ fn train_converges_with_mock_solver() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: fx.risk_measures.clone(),
         },
         events: EventConfig {
@@ -783,7 +781,6 @@ fn train_lb_monotonically_nondecreasing() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: fx.risk_measures.clone(),
         },
         events: EventConfig {
@@ -894,7 +891,6 @@ fn train_emits_correct_event_sequence() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: fx.risk_measures.clone(),
         },
         events: EventConfig {
@@ -1042,7 +1038,6 @@ fn train_stops_at_iteration_limit() {
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                warm_start_cuts: 0,
                 risk_measures: fx.risk_measures.clone(),
             },
             events: EventConfig {
@@ -1146,7 +1141,6 @@ fn train_stops_on_graceful_shutdown() {
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                warm_start_cuts: 0,
                 risk_measures: fx.risk_measures.clone(),
             },
             events: EventConfig {
@@ -1240,7 +1234,6 @@ fn train_propagates_infeasible_error() {
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                warm_start_cuts: 0,
                 risk_measures: fx.risk_measures.clone(),
             },
             events: EventConfig {
@@ -1324,7 +1317,6 @@ fn d17_level1_cut_selection_convergence() {
             }),
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: fx.risk_measures.clone(),
         },
         events: EventConfig {
@@ -1517,7 +1509,6 @@ fn d17_level1_cut_selection_reconstruction() {
                 }),
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                warm_start_cuts: 0,
                 risk_measures: fx.risk_measures.clone(),
             },
             events: EventConfig {
@@ -1602,7 +1593,6 @@ fn d18_lml1_cut_selection_convergence() {
             }),
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: fx.risk_measures.clone(),
         },
         events: EventConfig {
@@ -1837,7 +1827,6 @@ fn frozen_backward_pass_smoke_test() {
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                warm_start_cuts: 0,
                 risk_measures: fx.risk_measures.clone(),
             },
             events: EventConfig {

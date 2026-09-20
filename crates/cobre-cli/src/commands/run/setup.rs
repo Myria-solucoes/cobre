@@ -27,7 +27,7 @@ use cobre_sddp::EstimationPath;
 use cobre_sddp::HydroFitTimings;
 use cobre_sddp::build_provenance_report;
 use cobre_sddp::hydro_models::prepare_hydro_models_from_artifacts;
-use cobre_sddp::orchestration::export_stochastic_artifacts;
+use cobre_sddp::policy::orchestration::export_stochastic_artifacts;
 use cobre_sddp::reconcile_global_ok;
 use cobre_sddp::{
     EstimationReport, PrepareHydroModelsResult, PrepareStochasticResult, StudySetup,

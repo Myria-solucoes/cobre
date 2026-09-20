@@ -36,10 +36,11 @@ use clap::Args;
 use cobre_core::{ScalarParameter, System};
 use cobre_io::{BoundaryPolicy, Config, LoadError, ValidationReport, validate_case_with_artifacts};
 use cobre_sddp::hydro_models::prepare_hydro_models_from_artifacts;
+use cobre_sddp::policy::orchestration;
 use cobre_sddp::validate_phases::{PrepPhase, prep_phase_metadata};
 use cobre_sddp::{
     BoundaryLoadRequest, BoundaryReconciliationReport, PrepareHydroModelsResult, SddpError,
-    StudyParams, StudySetup, load_boundary_cuts, orchestration, prepare_stochastic,
+    StudyParams, StudySetup, load_boundary_cuts, prepare_stochastic,
     resolve_boundary_state_requirements, study_horizon_end, validate_generic_constraint_parameters,
 };
 use cobre_stochastic::StochasticContext;

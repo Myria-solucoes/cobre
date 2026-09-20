@@ -559,12 +559,8 @@ mod policy_entity_manifest {
 
     use cobre_core::scenario::ScenarioSource;
     use cobre_io::StateFamily;
-    use cobre_sddp::{
-        StudySetup,
-        hydro_models::prepare_hydro_models,
-        orchestration::{CheckpointParams, write_checkpoint},
-        setup::prepare_stochastic,
-    };
+    use cobre_sddp::policy::orchestration::{CheckpointParams, write_checkpoint};
+    use cobre_sddp::{StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic};
     use cobre_solver::ActiveSolver;
 
     use super::common::StubComm;

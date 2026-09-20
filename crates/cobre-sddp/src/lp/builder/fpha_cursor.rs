@@ -36,7 +36,7 @@ pub(super) struct FphaVisit {
 /// row-ascending only because cells are visited in ascending order with
 /// `blk`/plane innermost. Nesting `blk` outside `cell` would revisit an earlier
 /// cell's row range after a later cell's, tripping `assemble_csc`'s
-/// row-sortedness assertion. Matches `FphaRowRange::start`.
+/// row-sortedness assertion. Matches `StageLayout::row_fpha_start`.
 ///
 /// The closure is a monomorphised `FnMut` borrowing its target buffer (no
 /// `Box<dyn>`, no intermediate `Vec`), so the build allocates nothing and the
