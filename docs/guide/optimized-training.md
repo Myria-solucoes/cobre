@@ -119,3 +119,14 @@ The `Release Myria runtime` workflow accepts `prerelease=true` when publishing a
 opt-in runtime. It creates a prerelease without changing GitHub's latest release.
 The runtime tag must be new. Keep the platform's recommended runtime unchanged
 when registering the preview's CLI and Python artifacts.
+
+For independent training repetitions, change `--seed` (timing `--repeats` keeps
+that seed fixed). Use `--simulation-scheme out_of_sample` to generate inflows
+outside the training opening set. Keep `--simulation-seed` fixed across arms.
+`--scheduler by_node --block-size 10` supports matched scheduler experiments;
+DCS still uses its by-scenario fallback.
+
+With `pyarrow` available, summarize an output directory with
+`python3 scripts/benchmarks/summarize.py /absolute/path/to/comparison`.
+The paired cost interval is conditional on one pair of trained policies; it does
+not cover variation between training seeds or certify nested CVaR quality.

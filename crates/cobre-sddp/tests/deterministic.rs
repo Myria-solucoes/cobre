@@ -10325,6 +10325,47 @@ mod enumerated_cvar_gap {
         );
     }
 
+    #[test]
+    fn selected_sampled_cvar_refines_to_full_point_value_across_threads() {
+        use cobre_io::config::training::TrialPointSelection;
+        use std::num::NonZeroUsize;
+        let mut config = enumerated_gap_config();
+        config.training.selection = Some(TrainingSelection::Sampled { forward_passes: 16 });
+        config.training.stopping_rules =
+            Some(vec![StoppingRuleConfig::IterationLimit { limit: 20 }]);
+        let mut reference: Option<f64> = None;
+        for (selected, threads) in [(false, 1), (true, 1), (true, 4)] {
+            config.training.backward_selection = selected.then_some(TrialPointSelection {
+                initial_points: NonZeroUsize::new(2).unwrap(),
+                exploration_points: NonZeroUsize::new(1).unwrap(),
+                full_every: NonZeroUsize::new(4).unwrap(),
+                full_from_iteration: NonZeroUsize::new(12).unwrap(),
+            });
+            let mut setup = build_setup_in_code(build_system(&[CVAR, CVAR]), &config);
+            let mut solver = ActiveSolver::new().unwrap();
+            let outcome = setup
+                .train(
+                    &mut solver,
+                    &StubComm,
+                    threads,
+                    ActiveSolver::new,
+                    None,
+                    None,
+                )
+                .unwrap();
+            assert!(outcome.error.is_none(), "{:?}", outcome.error);
+            let lb = outcome.result.final_lb;
+            if let Some(expected) = reference {
+                assert!(
+                    (lb - expected).abs() <= 1e-4 + 1e-6 * lb.abs(),
+                    "refined CVaR value differs: {lb} vs {expected}, threads={threads}"
+                );
+            } else {
+                reference = Some(lb);
+            }
+        }
+    }
+
     /// A gap rule under enumerated forwards but a NON-UNIFORM measure (stage 0
     /// expectation, stage 1 CVaR) stays rejected: the static path-cost bound has
     /// no single measure to apply.

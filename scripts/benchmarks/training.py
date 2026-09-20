@@ -22,6 +22,11 @@ def main():
     parser.add_argument('--timeout', type=int, default=300)
     parser.add_argument('--cut-method', choices=['lml1', 'dynamic'], default='lml1')
     parser.add_argument('--cvar', action='store_true')
+    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--simulation-scheme', choices=['in_sample', 'out_of_sample'], default='in_sample')
+    parser.add_argument('--simulation-seed', type=int, default=8675309)
+    parser.add_argument('--scheduler', choices=['by_scenario', 'by_node'], default='by_scenario')
+    parser.add_argument('--block-size', type=int, default=10)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=False)
     results = []
@@ -34,6 +39,11 @@ def main():
             case = run / 'case'
             shutil.copytree(args.case, case, ignore=shutil.ignore_patterns('output'))
             config = json.loads((case / 'config.json').read_text())
+            config['training']['tree_seed'] = args.seed
+            config['training'].setdefault('scenario_source', {})['seed'] = args.seed
+            config['training']['parallelism'] = {'backward_scheduler': (
+                {'method': 'by_node', 'block_size': args.block_size} if args.scheduler == 'by_node' else
+                {'method': 'by_scenario'})}
             config['training']['selection'] = {'method': 'sampled', 'forward_passes': args.forwards}
             config['training']['stopping_rules'] = [{'type': 'iteration_limit', 'limit': args.iterations}]
             config['training']['cut_selection'] = {'selection': (
@@ -46,7 +56,7 @@ def main():
                 (case / 'stages.json').write_text(json.dumps(stages, indent=2) + '\n')
             config['training'].pop('backward_selection', None)
             config['simulation'] = {'enabled': True, 'selection': {'method': 'sampled', 'num_scenarios': 256},
-                                    'scenario_source': {'seed': 8675309, 'inflow': {'scheme': 'in_sample'}}}
+                                    'scenario_source': {'seed': args.simulation_seed, 'inflow': {'scheme': args.simulation_scheme}}}
             if arm == 'selected':
                 config['training']['backward_selection'] = {
                     'initial_points': max(1, args.forwards // 4), 'exploration_points': 2,

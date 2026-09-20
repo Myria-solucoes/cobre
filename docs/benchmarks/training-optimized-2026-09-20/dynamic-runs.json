@@ -1,0 +1,182 @@
+[
+  {
+    "arm": "baseline",
+    "repeat": 0,
+    "wall_seconds": 27.72179372998653,
+    "exit_code": 0,
+    "command": [
+      "/bench/cobre-baseline",
+      "run",
+      "/bench/benchmark-dynamic/0-baseline/case",
+      "--output",
+      "/bench/benchmark-dynamic/0-baseline/output",
+      "--threads",
+      "4",
+      "--comm-backend",
+      "local",
+      "--color",
+      "never"
+    ],
+    "binary_sha256": "e189ddaeb704d24ec02f39df9ffe76458cc74425a74cbef62ddf9e106dd99508"
+  },
+  {
+    "arm": "candidate",
+    "repeat": 0,
+    "wall_seconds": 28.08254219702212,
+    "exit_code": 0,
+    "command": [
+      "/bench/candidate/cobre-candidate",
+      "run",
+      "/bench/benchmark-dynamic/0-candidate/case",
+      "--output",
+      "/bench/benchmark-dynamic/0-candidate/output",
+      "--threads",
+      "4",
+      "--comm-backend",
+      "local",
+      "--color",
+      "never"
+    ],
+    "binary_sha256": "2c6b67a32d0e561914b7dfaf9ec4757124efc5e8f360b22eecb828bc22e962d4"
+  },
+  {
+    "arm": "selected",
+    "repeat": 0,
+    "wall_seconds": 24.472604465001496,
+    "exit_code": 0,
+    "command": [
+      "/bench/candidate/cobre-candidate",
+      "run",
+      "/bench/benchmark-dynamic/0-selected/case",
+      "--output",
+      "/bench/benchmark-dynamic/0-selected/output",
+      "--threads",
+      "4",
+      "--comm-backend",
+      "local",
+      "--color",
+      "never"
+    ],
+    "binary_sha256": "2c6b67a32d0e561914b7dfaf9ec4757124efc5e8f360b22eecb828bc22e962d4"
+  },
+  {
+    "arm": "selected",
+    "repeat": 1,
+    "wall_seconds": 24.421782805991825,
+    "exit_code": 0,
+    "command": [
+      "/bench/candidate/cobre-candidate",
+      "run",
+      "/bench/benchmark-dynamic/1-selected/case",
+      "--output",
+      "/bench/benchmark-dynamic/1-selected/output",
+      "--threads",
+      "4",
+      "--comm-backend",
+      "local",
+      "--color",
+      "never"
+    ],
+    "binary_sha256": "2c6b67a32d0e561914b7dfaf9ec4757124efc5e8f360b22eecb828bc22e962d4"
+  },
+  {
+    "arm": "candidate",
+    "repeat": 1,
+    "wall_seconds": 27.630945451004663,
+    "exit_code": 0,
+    "command": [
+      "/bench/candidate/cobre-candidate",
+      "run",
+      "/bench/benchmark-dynamic/1-candidate/case",
+      "--output",
+      "/bench/benchmark-dynamic/1-candidate/output",
+      "--threads",
+      "4",
+      "--comm-backend",
+      "local",
+      "--color",
+      "never"
+    ],
+    "binary_sha256": "2c6b67a32d0e561914b7dfaf9ec4757124efc5e8f360b22eecb828bc22e962d4"
+  },
+  {
+    "arm": "baseline",
+    "repeat": 1,
+    "wall_seconds": 27.377676596021047,
+    "exit_code": 0,
+    "command": [
+      "/bench/cobre-baseline",
+      "run",
+      "/bench/benchmark-dynamic/1-baseline/case",
+      "--output",
+      "/bench/benchmark-dynamic/1-baseline/output",
+      "--threads",
+      "4",
+      "--comm-backend",
+      "local",
+      "--color",
+      "never"
+    ],
+    "binary_sha256": "e189ddaeb704d24ec02f39df9ffe76458cc74425a74cbef62ddf9e106dd99508"
+  },
+  {
+    "arm": "baseline",
+    "repeat": 2,
+    "wall_seconds": 27.532394100999227,
+    "exit_code": 0,
+    "command": [
+      "/bench/cobre-baseline",
+      "run",
+      "/bench/benchmark-dynamic/2-baseline/case",
+      "--output",
+      "/bench/benchmark-dynamic/2-baseline/output",
+      "--threads",
+      "4",
+      "--comm-backend",
+      "local",
+      "--color",
+      "never"
+    ],
+    "binary_sha256": "e189ddaeb704d24ec02f39df9ffe76458cc74425a74cbef62ddf9e106dd99508"
+  },
+  {
+    "arm": "candidate",
+    "repeat": 2,
+    "wall_seconds": 27.53440020699054,
+    "exit_code": 0,
+    "command": [
+      "/bench/candidate/cobre-candidate",
+      "run",
+      "/bench/benchmark-dynamic/2-candidate/case",
+      "--output",
+      "/bench/benchmark-dynamic/2-candidate/output",
+      "--threads",
+      "4",
+      "--comm-backend",
+      "local",
+      "--color",
+      "never"
+    ],
+    "binary_sha256": "2c6b67a32d0e561914b7dfaf9ec4757124efc5e8f360b22eecb828bc22e962d4"
+  },
+  {
+    "arm": "selected",
+    "repeat": 2,
+    "wall_seconds": 24.377946950000478,
+    "exit_code": 0,
+    "command": [
+      "/bench/candidate/cobre-candidate",
+      "run",
+      "/bench/benchmark-dynamic/2-selected/case",
+      "--output",
+      "/bench/benchmark-dynamic/2-selected/output",
+      "--threads",
+      "4",
+      "--comm-backend",
+      "local",
+      "--color",
+      "never"
+    ],
+    "binary_sha256": "2c6b67a32d0e561914b7dfaf9ec4757124efc5e8f360b22eecb828bc22e962d4"
+  }
+]
