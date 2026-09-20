@@ -56,14 +56,23 @@ pub(crate) enum BroadcastStoppingMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum BroadcastBackwardScheduler {
     ByScenario,
-    ByNode { block_size: Option<NonZeroUsize> },
+    ByNode {
+        block_size: Option<NonZeroUsize>,
+        point_block_size: Option<NonZeroUsize>,
+    },
 }
 
 impl From<BackwardScheduler> for BroadcastBackwardScheduler {
     fn from(value: BackwardScheduler) -> Self {
         match value {
             BackwardScheduler::ByScenario {} => Self::ByScenario,
-            BackwardScheduler::ByNode { block_size } => Self::ByNode { block_size },
+            BackwardScheduler::ByNode {
+                block_size,
+                point_block_size,
+            } => Self::ByNode {
+                block_size,
+                point_block_size,
+            },
         }
     }
 }
@@ -72,7 +81,13 @@ impl From<BroadcastBackwardScheduler> for BackwardScheduler {
     fn from(value: BroadcastBackwardScheduler) -> Self {
         match value {
             BroadcastBackwardScheduler::ByScenario => Self::ByScenario {},
-            BroadcastBackwardScheduler::ByNode { block_size } => Self::ByNode { block_size },
+            BroadcastBackwardScheduler::ByNode {
+                block_size,
+                point_block_size,
+            } => Self::ByNode {
+                block_size,
+                point_block_size,
+            },
         }
     }
 }
@@ -834,7 +849,7 @@ mod tests {
         let json = r#"{
             "training": {
                 "parallelism": {
-                    "backward_scheduler": { "method": "by_node", "block_size": 4 }
+                    "backward_scheduler": { "method": "by_node", "block_size": 4, "point_block_size": 3 }
                 }
             }
         }"#;
@@ -850,7 +865,8 @@ mod tests {
         assert_eq!(
             decoded.backward_scheduler,
             BroadcastBackwardScheduler::ByNode {
-                block_size: NonZeroUsize::new(4)
+                block_size: NonZeroUsize::new(4),
+                point_block_size: NonZeroUsize::new(3)
             }
         );
     }

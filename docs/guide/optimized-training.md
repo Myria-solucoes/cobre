@@ -139,6 +139,29 @@ stopping rules can terminate before refinement; verify the completed iterations.
 A smaller population changes statistical precision and the learned policy, so
 full refinement alone is not a guarantee of equivalent policy quality.
 
+## Experimental cross-point basis reuse
+
+Source builds can set `training.parallelism.backward_scheduler` to
+`{"method": "by_node", "block_size": 5, "point_block_size": 4}`. The point
+block defaults to one, preserving independent per-point warm chains. Values above
+one currently require sampled training with one MPI rank; worker threads remain
+configurable. This option is not in the published opt.2 runtime.
+
+Within each node, points are ordered by nearest complete state after coordinate
+range normalization, then divided into fixed groups. For each successor child,
+the solver visits points in alternating directions across successive openings,
+retaining its basis and factorization within that group. Group boundaries reset
+solver history; successor boundaries load the appropriate child's LP. DCS carries
+its resident set only within the group and still checks the configured eligible
+cuts. Every point/opening outcome is recorded at its original canonical index;
+CVaR aggregation retains the complete successor distribution.
+
+This changes warm-start trajectories and may change optimal dual vertices.
+Compact local tests found about 7.5% lower median training time against by-scenario,
+with changed storage and policy metrics. Full-case and multi-seed validation remain
+pending. A larger group can reduce parallel work availability and is not inherently
+faster; keep this option experimental. See the version-three benchmark report.
+
 ## Reproducible compact comparisons
 
 Run benchmarks serially on an otherwise idle machine. Both executables should

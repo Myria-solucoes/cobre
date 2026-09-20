@@ -425,6 +425,9 @@ pub enum BackwardScheduler {
         /// `min(|Ω_s|, block_size)`.
         #[serde(default)]
         block_size: Option<NonZeroUsize>,
+        /// Trial points per independent warm-start chain. Absent means one.
+        #[serde(default)]
+        point_block_size: Option<NonZeroUsize>,
     },
 }
 
@@ -842,14 +845,15 @@ mod tests {
             "selection": { "method": "sampled", "forward_passes": 4 },
             "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
             "parallelism": {
-                "backward_scheduler": { "method": "by_node", "block_size": 4 }
+                "backward_scheduler": { "method": "by_node", "block_size": 4, "point_block_size": 3 }
             }
         }"#;
         let cfg: TrainingConfig = serde_json::from_str(json).unwrap();
         assert_eq!(
             cfg.parallelism.backward_scheduler,
             BackwardScheduler::ByNode {
-                block_size: NonZeroUsize::new(4)
+                block_size: NonZeroUsize::new(4),
+                point_block_size: NonZeroUsize::new(3)
             }
         );
     }
@@ -868,7 +872,10 @@ mod tests {
         let cfg: TrainingConfig = serde_json::from_str(json).unwrap();
         assert_eq!(
             cfg.parallelism.backward_scheduler,
-            BackwardScheduler::ByNode { block_size: None }
+            BackwardScheduler::ByNode {
+                block_size: None,
+                point_block_size: None
+            }
         );
     }
 

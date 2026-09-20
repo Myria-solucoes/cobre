@@ -74,8 +74,9 @@ mod replicated;
 mod tests;
 
 pub(crate) use by_node::{
-    OpeningOutcome, by_node_block_count, by_node_finish, hardest_first_block_order,
-    identity_block_order, merge_block_pivots, process_stage_backward_by_node, resolve_block_size,
+    ByNodeWorkLayout, OpeningOutcome, by_node_block_count, by_node_finish,
+    hardest_first_block_order, identity_block_order, merge_block_pivots, order_nearby_points,
+    process_stage_backward_by_node, resolve_block_size,
 };
 pub(crate) use by_scenario::{StageOpeningSolver, process_by_scenario_backward};
 pub(crate) use duals_extraction::extract_state_duals_only;

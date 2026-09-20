@@ -34,6 +34,16 @@
             "method": {
               "const": "by_node",
               "type": "string"
+            },
+            "point_block_size": {
+              "default": null,
+              "description": "Trial points per independent warm-start chain. Absent means one.",
+              "format": "uint",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
             }
           },
           "required": [

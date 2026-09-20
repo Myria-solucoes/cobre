@@ -171,6 +171,17 @@ where
                 "backward_selection requires sampled training with one MPI rank".into(),
             ));
         }
+        if let cobre_io::config::BackwardScheduler::ByNode {
+            point_block_size: Some(size),
+            ..
+        } = solver_profiles.backward_scheduler
+            && size.get() > 1
+            && (comm.size() != 1 || config.loop_config.training_enumerated)
+        {
+            return Err(SddpError::Validation(
+                "point_block_size > 1 requires sampled training with one MPI rank".into(),
+            ));
+        }
         let horizon = training_ctx.horizon;
         if let Some(schedule) = config.loop_config.forward_schedule
             && (config.loop_config.training_enumerated

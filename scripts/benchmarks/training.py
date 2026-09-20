@@ -36,7 +36,9 @@ def main():
     parser.add_argument('--simulation-scenarios', type=int, default=256,
                         help='Common evaluation scenarios; zero disables simulation for profiling')
     parser.add_argument('--scheduler', choices=['by_scenario', 'by_node'], default='by_scenario')
+    parser.add_argument('--baseline-scheduler', choices=['by_scenario', 'by_node'], help='Override reference scheduler for comparisons across methods')
     parser.add_argument('--block-size', type=int, default=10)
+    parser.add_argument('--point-block-size', type=int, help='Candidate-only cross-point warm chain, requires by_node')
     parser.add_argument('--deduplicate', action='store_true')
     parser.add_argument('--deduplicate-only', action='store_true', help='Process every distinct state in every iteration')
     parser.add_argument('--audit-relative-tolerance', type=float)
@@ -46,6 +48,8 @@ def main():
         parser.error('--simulation-scenarios must be nonnegative')
     if args.threads < 1 or (args.candidate_threads is not None and args.candidate_threads < 1):
         parser.error('thread counts must be positive')
+    if args.point_block_size is not None and (args.point_block_size < 1 or args.scheduler != 'by_node'):
+        parser.error('--point-block-size requires by_node and a positive integer')
     args.output.mkdir(parents=True, exist_ok=False)
     results = []
     for repeat in range(args.repeats):
@@ -59,9 +63,12 @@ def main():
             config = json.loads((case / 'config.json').read_text())
             config['training']['tree_seed'] = args.seed
             config['training'].setdefault('scenario_source', {})['seed'] = args.seed
+            scheduler = args.baseline_scheduler if arm == 'baseline' and args.baseline_scheduler else args.scheduler
             config['training']['parallelism'] = {'backward_scheduler': (
-                {'method': 'by_node', 'block_size': args.block_size} if args.scheduler == 'by_node' else
+                {'method': 'by_node', 'block_size': args.block_size} if scheduler == 'by_node' else
                 {'method': 'by_scenario'})}
+            if arm != 'baseline' and args.point_block_size is not None:
+                config['training']['parallelism']['backward_scheduler']['point_block_size'] = args.point_block_size
             config['training']['selection'] = {'method': 'sampled', 'forward_passes': args.forwards}
             config['training'].pop('forward_schedule', None)
             if arm != 'baseline' and args.forward_initial is not None:

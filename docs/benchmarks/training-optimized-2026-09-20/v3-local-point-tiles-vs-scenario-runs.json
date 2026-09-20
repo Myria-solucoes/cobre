@@ -1,0 +1,128 @@
+[
+  {
+    "arm": "baseline",
+    "repeat": 0,
+    "threads": 4,
+    "wall_seconds": 22.511043249978684,
+    "exit_code": 0,
+    "command": [
+      "/private/tmp/cobre-progressive-reference",
+      "run",
+      "/private/tmp/cobre-point-tiles-vs-scenario-40x96/0-baseline/case",
+      "--output",
+      "/private/tmp/cobre-point-tiles-vs-scenario-40x96/0-baseline/output",
+      "--threads",
+      "4",
+      "--comm-backend",
+      "local",
+      "--color",
+      "never"
+    ],
+    "binary_sha256": "26bc734436794ccd780831eb4f628d363553482a31cd60a80b0761c79d378671"
+  },
+  {
+    "arm": "candidate",
+    "repeat": 0,
+    "threads": 4,
+    "wall_seconds": 20.68423391599208,
+    "exit_code": 0,
+    "command": [
+      "/private/tmp/cobre-optimized-local-target/release/cobre",
+      "run",
+      "/private/tmp/cobre-point-tiles-vs-scenario-40x96/0-candidate/case",
+      "--output",
+      "/private/tmp/cobre-point-tiles-vs-scenario-40x96/0-candidate/output",
+      "--threads",
+      "4",
+      "--comm-backend",
+      "local",
+      "--color",
+      "never"
+    ],
+    "binary_sha256": "7e2421302be6949d39c8a782db0b2b90fe8bed3fe760b8722f3259059345e524"
+  },
+  {
+    "arm": "candidate",
+    "repeat": 1,
+    "threads": 4,
+    "wall_seconds": 22.517454124987125,
+    "exit_code": 0,
+    "command": [
+      "/private/tmp/cobre-optimized-local-target/release/cobre",
+      "run",
+      "/private/tmp/cobre-point-tiles-vs-scenario-40x96/1-candidate/case",
+      "--output",
+      "/private/tmp/cobre-point-tiles-vs-scenario-40x96/1-candidate/output",
+      "--threads",
+      "4",
+      "--comm-backend",
+      "local",
+      "--color",
+      "never"
+    ],
+    "binary_sha256": "7e2421302be6949d39c8a782db0b2b90fe8bed3fe760b8722f3259059345e524"
+  },
+  {
+    "arm": "baseline",
+    "repeat": 1,
+    "threads": 4,
+    "wall_seconds": 24.2483063749969,
+    "exit_code": 0,
+    "command": [
+      "/private/tmp/cobre-progressive-reference",
+      "run",
+      "/private/tmp/cobre-point-tiles-vs-scenario-40x96/1-baseline/case",
+      "--output",
+      "/private/tmp/cobre-point-tiles-vs-scenario-40x96/1-baseline/output",
+      "--threads",
+      "4",
+      "--comm-backend",
+      "local",
+      "--color",
+      "never"
+    ],
+    "binary_sha256": "26bc734436794ccd780831eb4f628d363553482a31cd60a80b0761c79d378671"
+  },
+  {
+    "arm": "baseline",
+    "repeat": 2,
+    "threads": 4,
+    "wall_seconds": 25.29090487502981,
+    "exit_code": 0,
+    "command": [
+      "/private/tmp/cobre-progressive-reference",
+      "run",
+      "/private/tmp/cobre-point-tiles-vs-scenario-40x96/2-baseline/case",
+      "--output",
+      "/private/tmp/cobre-point-tiles-vs-scenario-40x96/2-baseline/output",
+      "--threads",
+      "4",
+      "--comm-backend",
+      "local",
+      "--color",
+      "never"
+    ],
+    "binary_sha256": "26bc734436794ccd780831eb4f628d363553482a31cd60a80b0761c79d378671"
+  },
+  {
+    "arm": "candidate",
+    "repeat": 2,
+    "threads": 4,
+    "wall_seconds": 24.184909374976996,
+    "exit_code": 0,
+    "command": [
+      "/private/tmp/cobre-optimized-local-target/release/cobre",
+      "run",
+      "/private/tmp/cobre-point-tiles-vs-scenario-40x96/2-candidate/case",
+      "--output",
+      "/private/tmp/cobre-point-tiles-vs-scenario-40x96/2-candidate/output",
+      "--threads",
+      "4",
+      "--comm-backend",
+      "local",
+      "--color",
+      "never"
+    ],
+    "binary_sha256": "7e2421302be6949d39c8a782db0b2b90fe8bed3fe760b8722f3259059345e524"
+  }
+]

@@ -529,6 +529,8 @@ impl BackwardAccumulators {
 /// (sddp.md "By-node scheduler is warm-start-only").
 #[derive(Default)]
 pub(crate) struct ByNodeScratch {
+    pub(crate) point_order: Vec<usize>,
+    pub(crate) state_ranges: Vec<(f64, f64)>,
     /// Per-`(m, ω)` outcome arena, addressed `arena[m * n_openings + omega]` for
     /// the CURRENT stage's `n_openings` — a prefix of the full
     /// `max_local_fwd * bwd_max_openings`-outcome allocation; a stage with fewer
@@ -607,6 +609,8 @@ impl ByNodeScratch {
             .collect();
         Self {
             arena,
+            point_order: Vec::with_capacity(max_local_fwd),
+            state_ranges: vec![(0.0, 0.0); n_state],
             risk_scratch: RiskMeasureScratch::new(),
             coeffs_buf: vec![0.0_f64; n_state],
             block_pivots: vec![(0u64, 0u64); row_axis_len * bwd_max_openings],

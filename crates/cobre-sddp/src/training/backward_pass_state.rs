@@ -1863,9 +1863,22 @@ fn compute_one_backward_node<S: SolverInterface + Send, C: Communicator>(
     let process_start = Instant::now();
     let (local_solve, parallel_wall_ms): (Result<usize, SddpError>, u64) = if use_by_node {
         let configured_block_size = match state.scheduler {
-            BackwardScheduler::ByNode { block_size } => block_size,
+            BackwardScheduler::ByNode { block_size, .. } => block_size,
             BackwardScheduler::ByScenario {} => None,
         };
+        let point_block_size = match state.scheduler {
+            BackwardScheduler::ByNode {
+                point_block_size, ..
+            } => point_block_size.map_or(1, std::num::NonZeroUsize::get),
+            BackwardScheduler::ByScenario {} => 1,
+        };
+        super::backward::order_nearby_points(
+            &mut state.by_node_scratch,
+            trial_points,
+            inputs.exchange,
+            params.my_rank,
+            point_block_size > 1,
+        );
         let block_size = resolve_block_size(n_openings, configured_block_size);
         let n_blocks = by_node_block_count(n_openings, block_size);
         if state.hardest_first_claim_order {
@@ -1896,8 +1909,12 @@ fn compute_one_backward_node<S: SolverInterface + Send, C: Communicator>(
             &succ_spec,
             &outcomes,
             &*inputs.basis_store,
-            block_size,
-            &state.by_node_scratch.block_order[..n_blocks],
+            &super::backward::ByNodeWorkLayout {
+                opening_block_size: block_size,
+                point_block_size,
+                point_order: &state.by_node_scratch.point_order,
+                block_order: &state.by_node_scratch.block_order[..n_blocks],
+            },
         );
         #[allow(clippy::cast_possible_truncation)]
         let elapsed_ms = process_start.elapsed().as_millis() as u64;
@@ -4686,7 +4703,10 @@ mod tests {
 
         // set_scheduler(ByNode) sizes it.
         let mut by_node_only = BackwardPassState::new(1, 1, 4, 0, 2, 3, 5);
-        by_node_only.set_scheduler(BackwardScheduler::ByNode { block_size: None });
+        by_node_only.set_scheduler(BackwardScheduler::ByNode {
+            block_size: None,
+            point_block_size: None,
+        });
         assert!(by_node_only.by_node_scratch_arena_capacity() > 0);
 
         // set_scheduler(ByScenario) keeps it empty.

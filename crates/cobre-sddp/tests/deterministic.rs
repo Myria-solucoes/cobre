@@ -8708,8 +8708,10 @@ mod enumerated_external {
     /// LB==UB as the by-scenario path.
     #[test]
     fn enumerated_external_chain_lb_equals_ub_by_node() {
-        let (lb, ub) =
-            train_final_bounds(cobre_io::config::BackwardScheduler::ByNode { block_size: None });
+        let (lb, ub) = train_final_bounds(cobre_io::config::BackwardScheduler::ByNode {
+            block_size: None,
+            point_block_size: None,
+        });
         assert!(
             (ub - lb).abs() < 1e-6,
             "by-node enumerated-external forward≡backward must converge LB==UB: \

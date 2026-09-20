@@ -111,3 +111,61 @@ repetition. Paired mean-cost differences were -0.1103% and -0.0035%; the latter'
 add to earlier percentages. They support proceeding to larger-case validation;
 mean cost checks alone do not certify preservation of nested CVaR policy quality.
 No full-case speedup, operational non-inferiority or released feature is claimed.
+
+## Cross-point basis prototype
+
+The working source adds optional `by_node.point_block_size`, default one. Groups
+use a deterministic nearest-neighbor ordering of the full state normalized by
+coordinate ranges, then a serpentine point/opening traversal. A group and each
+successor child begin an independent solver chain. Within that chain frozen
+solves retain basis/factorization and DCS retains its fully checked resident set.
+Original point/opening indices still own the arena and canonical risk aggregation.
+The initial implementation rejects multiple MPI ranks and enumerated training.
+
+The expanded local `mpi_wire` suite passes all 43 tests, including a new DCS fan
+comparison against the one-point reference and worker invariance. The progressive
+shape matrix now covers both independent and three-point chains, with a partial
+last group, DCS on/off and nonuniform state dimensions. Postcard carries the new
+parameter; its round-trip test passes. Schema regeneration succeeds and Clippy
+reports the same 14 existing warnings, no additional warning.
+
+A separate three-repeat 4REE/CVaR comparison completed with fixed 96 forwards,
+40 iterations, four workers, five-opening blocks, 256 common out-of-sample paths:
+reference independent-point chains versus candidate four-point chains. Median training fell from 25.292 to 23.185 seconds (8.33%), but ranges overlap:
+reference 22.162–25.437 s, candidate 22.134–23.247 s. Backward pivots fell from
+972,809 to 641,457 (-34.1%); backward solve time barely changed in the first
+repetition. Both arms solved 468,880 LPs and generated 42,240 cuts. Mean evaluation
+cost changed -0.0817%, with paired 95% interval [-0.1614%, -0.0020%]; terminal
+storage changed from 2,686.04 to 2,638.09 hm3. These results support further
+experiments, not a robust end-to-end speedup claim against the faster by-scenario
+scheduler. Binary SHA-256 values:
+
+- Reference: `26bc734436794ccd780831eb4f628d363553482a31cd60a80b0761c79d378671`.
+- Candidate: `7e2421302be6949d39c8a782db0b2b90fe8bed3fe760b8722f3259059345e524`.
+
+The reference includes progressive-population support but the schedule is absent
+in both arms, isolating cross-point reuse. No stable runtime has been changed.
+
+### Comparison against by-scenario
+
+A second three-repeat comparison used the by-scenario reference versus two-point
+chains with ten-opening blocks. Both arms kept 96 forward points and 40 iterations;
+all other settings and common evaluation paths were unchanged. Training medians
+were 23.127 → 21.384 seconds (-7.54%). Each paired repetition improved, although
+this remains a small local-machine sample. Backward pivots fell 946,471 → 738,413
+(-22.0%), and first-repeat cumulative backward solve time 66.023 → 59.675 seconds.
+Both arms solved 468,880 LPs and generated 42,240 cuts.
+
+Mean simulated cost changed -0.1903%, paired 95% interval [-0.2688%, -0.1118%].
+Mean deficit changed 6,688,324.58 → 6,609,650.99 MWh and terminal storage
+2,796.19 → 2,624.61 hm3. Lower mean cost and lower storage do not certify nested
+risk non-inferiority. Keep the setting experimental and validate larger cases and
+multiple training seeds before recommendation. The nearby-state unit test also
+passes, checking normalization under changed coordinate units, deterministic
+ordering of duplicate states, canonical positions and buffer-capacity reuse.
+
+The full 112-stage converted round-1687 case is now under a separate local short
+comparison: two iterations/eight forwards, by-scenario four-worker reference,
+eight-worker candidate, then eight-worker complete-state deduplication. Simulation
+is disabled; this is a timing/solver-work diagnostic, not a trained-policy quality
+gate. The original risk/input files are retained. Manager SSH is still pending.

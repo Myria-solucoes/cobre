@@ -1997,3 +1997,14 @@ The dynamic-selection fallback must load all eligible missing rows, including
 rows unviolated before its final solve. Loading only currently violated rows can
 return an infeasible solution for the full pool;
 `fallback_includes_cuts_not_violated_until_reoptimization` pins this contract.
+
+## Cross-point warm chains have fixed boundaries
+
+`by_node.point_block_size > 1` groups nearest full states independently of worker
+count. Canonical trial positions survive ordering and the serpentine solve order:
+write the arena by original `(trial_pos, omega)`, never by sorted position. Each
+child/group head resets history; subsequent points may carry basis/factorization
+only within that same child/group. Canonical all-opening risk aggregation remains
+unchanged. Multi-rank and enumerated use are rejected for this experimental mode.
+Pinned by `progressive_forward_schedulers_cover_nonuniform_states_and_dcs`, which
+also covers an uneven final point group, DCS and nonuniform state projections.

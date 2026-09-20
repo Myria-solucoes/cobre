@@ -125,7 +125,10 @@ fn train_bounds_scheduler(setup: &mut StudySetup, scheduler: BackwardScheduler) 
     train_bounds_threads(setup, 1)
 }
 
-const BY_NODE: BackwardScheduler = BackwardScheduler::ByNode { block_size: None };
+const BY_NODE: BackwardScheduler = BackwardScheduler::ByNode {
+    block_size: None,
+    point_block_size: None,
+};
 
 /// Train `setup` single-rank and additionally return the backward phase's total
 /// LP solves and warm-basis offers from `solver_stats_log` — the runtime signal

@@ -988,7 +988,13 @@ mod by_node_scheduler_determinism {
     /// `by_node_degenerates_on_single_opening`), so at least one
     /// stage's resolved block count must reach `>= 2`.
     fn assert_has_multi_block_stage(case_dir: &Path) {
-        let probe = fresh_setup(case_dir, BackwardScheduler::ByNode { block_size: None });
+        let probe = fresh_setup(
+            case_dir,
+            BackwardScheduler::ByNode {
+                block_size: None,
+                point_block_size: None,
+            },
+        );
         let tree_view = probe.stochastic.tree_view();
         let has_multi_block_stage = (0..probe.num_stages())
             .any(|stage| resolved_block_count(tree_view.n_openings(stage)) >= 2);
@@ -1024,7 +1030,13 @@ mod by_node_scheduler_determinism {
         comm: &impl Communicator,
         risk_measures: Option<Vec<RiskMeasure>>,
     ) -> f64 {
-        let mut setup = fresh_setup(case_dir, BackwardScheduler::ByNode { block_size: None });
+        let mut setup = fresh_setup(
+            case_dir,
+            BackwardScheduler::ByNode {
+                block_size: None,
+                point_block_size: None,
+            },
+        );
         if let Some(risk_measures) = risk_measures {
             setup.set_risk_measures(risk_measures);
         }
@@ -1082,8 +1094,14 @@ mod by_node_scheduler_determinism {
     )]
     fn by_node_scheduler_determinism_cvar() {
         let case_dir = fixture_case_dir();
-        let num_stages =
-            fresh_setup(case_dir, BackwardScheduler::ByNode { block_size: None }).num_stages();
+        let num_stages = fresh_setup(
+            case_dir,
+            BackwardScheduler::ByNode {
+                block_size: None,
+                point_block_size: None,
+            },
+        )
+        .num_stages();
         let risk_measures = vec![
             RiskMeasure::CVaR {
                 alpha: 0.5,
@@ -1113,8 +1131,13 @@ mod by_node_scheduler_determinism {
 
         let lb_hardest_first_on = run_shape(case_dir, 4, &stub, None);
 
-        let mut setup_hardest_first_off =
-            fresh_setup(case_dir, BackwardScheduler::ByNode { block_size: None });
+        let mut setup_hardest_first_off = fresh_setup(
+            case_dir,
+            BackwardScheduler::ByNode {
+                block_size: None,
+                point_block_size: None,
+            },
+        );
         setup_hardest_first_off.set_hardest_first_claim_order(false);
         let lb_hardest_first_off = train_final_lb(setup_hardest_first_off, 4, &stub);
 
@@ -1147,7 +1170,13 @@ mod by_node_scheduler_determinism {
         let stub = StubComm;
 
         let lb_by_node = train_final_lb(
-            fresh_setup(case_dir, BackwardScheduler::ByNode { block_size: None }),
+            fresh_setup(
+                case_dir,
+                BackwardScheduler::ByNode {
+                    block_size: None,
+                    point_block_size: None,
+                },
+            ),
             1,
             &stub,
         );
@@ -1186,7 +1215,13 @@ mod by_node_scheduler_determinism {
         let stub = StubComm;
 
         let lb_by_node = train_final_lb(
-            fresh_setup(case_dir, BackwardScheduler::ByNode { block_size: None }),
+            fresh_setup(
+                case_dir,
+                BackwardScheduler::ByNode {
+                    block_size: None,
+                    point_block_size: None,
+                },
+            ),
             1,
             &stub,
         );
@@ -1210,7 +1245,14 @@ mod by_node_scheduler_determinism {
         for case_dir in [fixture_case_dir(), non_uniform_cut_projection_case_dir()] {
             for scheduler in [
                 BackwardScheduler::ByScenario {},
-                BackwardScheduler::ByNode { block_size: None },
+                BackwardScheduler::ByNode {
+                    block_size: None,
+                    point_block_size: None,
+                },
+                BackwardScheduler::ByNode {
+                    block_size: None,
+                    point_block_size: std::num::NonZeroUsize::new(3),
+                },
             ] {
                 for dynamic in [false, true] {
                     let mut reference = None;
@@ -1297,13 +1339,19 @@ mod by_node_scheduler_determinism {
                 setup
             };
             let lb_by_node = train_final_lb(
-                make(BackwardScheduler::ByNode { block_size: None }),
+                make(BackwardScheduler::ByNode {
+                    block_size: None,
+                    point_block_size: None,
+                }),
                 1,
                 &stub,
             );
             for threads in [2, 4] {
                 let parallel = train_final_lb(
-                    make(BackwardScheduler::ByNode { block_size: None }),
+                    make(BackwardScheduler::ByNode {
+                        block_size: None,
+                        point_block_size: None,
+                    }),
                     threads,
                     &stub,
                 );
@@ -1333,7 +1381,13 @@ mod by_node_scheduler_determinism {
         let stub = StubComm;
 
         let rows_by_node = train_rows_generated(
-            fresh_setup_one_iteration(case_dir, BackwardScheduler::ByNode { block_size: None }),
+            fresh_setup_one_iteration(
+                case_dir,
+                BackwardScheduler::ByNode {
+                    block_size: None,
+                    point_block_size: None,
+                },
+            ),
             &stub,
         );
         let rows_by_scenario = train_rows_generated(
@@ -1360,8 +1414,13 @@ mod by_node_scheduler_determinism {
     fn by_node_populates_backward_wall_ms() {
         let case_dir = fixture_case_dir();
         let stub = StubComm;
-        let mut setup =
-            fresh_setup_one_iteration(case_dir, BackwardScheduler::ByNode { block_size: None });
+        let mut setup = fresh_setup_one_iteration(
+            case_dir,
+            BackwardScheduler::ByNode {
+                block_size: None,
+                point_block_size: None,
+            },
+        );
         let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
         let (event_tx, event_rx) = mpsc::channel::<TrainingEvent>();
         let outcome = setup
@@ -1697,7 +1756,10 @@ mod by_node_scratch {
             num_stages,
         );
 
-        state.set_scheduler(BackwardScheduler::ByNode { block_size: None });
+        state.set_scheduler(BackwardScheduler::ByNode {
+            block_size: None,
+            point_block_size: None,
+        });
 
         let arena = state.by_node_scratch_arena();
         assert_eq!(
@@ -1827,6 +1889,7 @@ mod by_node_scratch {
             BackwardPassState::new(1, 1, n_openings, n_state, local_count, n_state, n_stages);
         state.set_scheduler(BackwardScheduler::ByNode {
             block_size: NonZeroUsize::new(1),
+            point_block_size: None,
         });
         let capacity_after_set_scheduler = state.by_node_scratch_arena_capacity();
         assert!(
@@ -1969,6 +2032,7 @@ mod by_node_scratch {
             BackwardPassState::new(1, 1, n_openings, n_state, local_count, n_state, n_stages);
         state.set_scheduler(BackwardScheduler::ByNode {
             block_size: NonZeroUsize::new(1),
+            point_block_size: None,
         });
 
         let mut inputs = BackwardPassInputs {
@@ -2215,7 +2279,10 @@ mod by_node_k_fan_branching {
     const K: usize = 8;
     const FORWARD_PASSES: u32 = 6;
     const MAX_ITERATIONS: u32 = 3;
-    const BY_NODE: BackwardScheduler = BackwardScheduler::ByNode { block_size: None };
+    const BY_NODE: BackwardScheduler = BackwardScheduler::ByNode {
+        block_size: None,
+        point_block_size: None,
+    };
 
     /// Train a fresh by-node-forced K-fan at world size `comm.size()` and
     /// `n_threads`, returning the converged `(final_lb, final_ub, final_ub_std)`.
@@ -2395,6 +2462,34 @@ mod by_node_k_fan_branching {
             "DCS scheduler values must agree on this fan \
              ({lb_by_node} vs {lb_by_scenario})"
         );
+    }
+    #[test]
+    fn cross_point_dcs_fan_is_thread_invariant_and_matches_reference_value() {
+        let run = |points, threads| {
+            let mut fixture = dcs_k_fan_setup(3, 7, 25);
+            fixture.setup.set_scheduler(BackwardScheduler::ByNode {
+                block_size: std::num::NonZeroUsize::new(2),
+                point_block_size: std::num::NonZeroUsize::new(points),
+            });
+            let mut solver = ActiveSolver::new().unwrap();
+            let outcome = fixture
+                .setup
+                .train(
+                    &mut solver,
+                    &StubComm,
+                    threads,
+                    ActiveSolver::new,
+                    None,
+                    None,
+                )
+                .unwrap();
+            assert!(outcome.error.is_none());
+            outcome.result.final_lb
+        };
+        let reference = run(1, 1);
+        let tiled = run(3, 1);
+        assert!((reference - tiled).abs() <= 1e-8 * reference.abs().max(1.0));
+        assert_eq!(tiled.to_bits(), run(3, 4).to_bits());
     }
 }
 
@@ -2895,7 +2990,10 @@ mod non_uniform_branching_projection {
     /// `interior_sibling_generated_fan_value_matches_oracle`'s `k_fan_setup(k, 6,
     /// 25)`.
     const MAX_ITERATIONS_ORACLE: u32 = 25;
-    const BY_NODE: BackwardScheduler = BackwardScheduler::ByNode { block_size: None };
+    const BY_NODE: BackwardScheduler = BackwardScheduler::ByNode {
+        block_size: None,
+        point_block_size: None,
+    };
 
     /// Relative + absolute LP tolerance for the oracle-vs-engine value
     /// comparison, identical to `branching_value_oracle.rs`'s `close` (a value
