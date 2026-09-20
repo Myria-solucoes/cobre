@@ -43,7 +43,7 @@ pub(crate) struct PyEntitySlot {
 
 impl From<&PyEntitySlot> for EntitySlot {
     fn from(slot: &PyEntitySlot) -> Self {
-        let converted = match StateFamily::from_code(slot.entity_type) {
+        match StateFamily::from_code(slot.entity_type) {
             Some(StateFamily::HydroStorage) => Self::storage(slot.entity_id, slot.was_active),
             Some(StateFamily::HydroInflowLag) => {
                 Self::inflow_lag(slot.entity_id, slot.subindex, slot.was_active)
@@ -63,10 +63,9 @@ impl From<&PyEntitySlot> for EntitySlot {
                 interval_start: ENTITY_SLOT_DATE_SENTINEL,
                 interval_end: ENTITY_SLOT_DATE_SENTINEL,
             },
-        };
-        converted
-            .with_reference_date(slot.reference_date)
-            .with_interval(slot.interval_start, slot.interval_end)
+        }
+        .with_reference_date(slot.reference_date)
+        .with_interval(slot.interval_start, slot.interval_end)
     }
 }
 

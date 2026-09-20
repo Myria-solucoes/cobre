@@ -37,6 +37,9 @@ pub fn export(output_dir: PathBuf) -> PyResult<usize> {
         SchemaExportError::Generation(e) => {
             PyValueError::new_err(format!("schema generation failed: {e}"))
         }
+        SchemaExportError::Serialization { filename, source } => PyValueError::new_err(format!(
+            "serialization error for schema {filename}: {source}"
+        )),
         SchemaExportError::Io { path, source } => {
             PyOSError::new_err(format!("{}: {source}", path.display()))
         }

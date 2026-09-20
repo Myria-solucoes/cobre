@@ -59,14 +59,16 @@ fn execute_export(args: &ExportArgs) -> Result<(), CliError> {
         SchemaExportError::Generation(e) => CliError::Internal {
             message: format!("schema generation failed: {e}"),
         },
+        SchemaExportError::Serialization { filename, source } => CliError::Internal {
+            message: format!("serialization error for schema {filename}: {source}"),
+        },
         SchemaExportError::Io { path, source } => CliError::Io {
             source,
             context: path.display().to_string(),
         },
     })?;
 
-    let stderr = Term::stderr();
-    let _ = stderr.write_line(&format!(
+    let _ = Term::stderr().write_line(&format!(
         "Exported {count} schema files to {}",
         output_dir.display()
     ));

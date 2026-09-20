@@ -35,9 +35,12 @@ use cobre_core::TrainingEvent;
 
 use crate::convert::pydict_to_json_map;
 use crate::errors::{
-    CONFIG_OVERRIDE_ERROR_PREFIX, CONFIG_PARSE_ERROR_PREFIX, CONFIG_READ_ERROR_PREFIX, ErrorSource,
+    BOUNDARY_CUT_ERROR_PREFIX, CONFIG_OVERRIDE_ERROR_PREFIX, CONFIG_PARSE_ERROR_PREFIX,
+    CONFIG_READ_ERROR_PREFIX, ErrorSource, HYDRO_MODEL_PREPROCESSING_ERROR_PREFIX,
     INTERNAL_ERROR_PREFIX, OUTPUT_WRITE_ERROR_PREFIX, POLICY_CHECKPOINT_ERROR_PREFIX,
-    POLICY_VALIDATION_ERROR_PREFIX, SIMULATION_ERROR_PREFIX, TRAINING_ERROR_PREFIX, convert_error,
+    POLICY_VALIDATION_ERROR_PREFIX, SCENARIO_SOURCE_ERROR_PREFIX, SIMULATION_ERROR_PREFIX,
+    SIMULATION_WRITER_INIT_ERROR_PREFIX, STOCHASTIC_PREPROCESSING_ERROR_PREFIX,
+    TRAINING_ERROR_PREFIX, convert_error,
 };
 use cobre_io::LoadError;
 
@@ -687,7 +690,7 @@ pub(crate) fn run_simulation_phase_py(
 
     let sim_writer =
         SimulationParquetWriter::new(output_dir, system, &ParquetWriterConfig::default())
-            .map_err(|e| format!("simulation writer initialisation error: {e}"))?;
+            .map_err(|e| format!("{SIMULATION_WRITER_INIT_ERROR_PREFIX}: {e}"))?;
 
     let drain_handle = std::thread::spawn(move || {
         let mut writer = sim_writer;
@@ -936,7 +939,7 @@ pub(crate) fn build_study_setup(
 
     let training_source = config
         .training_scenario_source(&case_dir.join("config.json"))
-        .map_err(|e| format!("scenario source error: {e}"))?;
+        .map_err(|e| format!("{SCENARIO_SOURCE_ERROR_PREFIX}: {e}"))?;
 
     let stochastic_start = std::time::Instant::now();
     let result = prepare_stochastic(
@@ -947,7 +950,7 @@ pub(crate) fn build_study_setup(
         &training_source,
         boundary_requirements.inflow_lag_depth(),
     )
-    .map_err(|e| format!("stochastic preprocessing error: {e}"))?;
+    .map_err(|e| format!("{STOCHASTIC_PREPROCESSING_ERROR_PREFIX}: {e}"))?;
     timings.stochastic_fit_seconds = stochastic_start.elapsed().as_secs_f64();
     let system = result.system;
     let estimation_report = result.estimation_report;
@@ -960,13 +963,13 @@ pub(crate) fn build_study_setup(
         config.exports.fpha_deviation_points,
         Some(&mut hydro_timings),
     )
-    .map_err(|e| format!("hydro model preprocessing error: {e}"))?;
+    .map_err(|e| format!("{HYDRO_MODEL_PREPROCESSING_ERROR_PREFIX}: {e}"))?;
     timings.production_fit_seconds = hydro_timings.production_fit_seconds;
     timings.evaporation_fit_seconds = hydro_timings.evaporation_fit_seconds;
 
     let simulation_source = config
         .simulation_scenario_source(&case_dir.join("config.json"))
-        .map_err(|e| format!("scenario source error: {e}"))?;
+        .map_err(|e| format!("{SCENARIO_SOURCE_ERROR_PREFIX}: {e}"))?;
     let mut construction =
         StudyParams::from_config(&config, Vec::new()).map_err(|e| e.to_string())?;
     construction.boundary = boundary_requirements;
@@ -1277,7 +1280,7 @@ pub(crate) fn apply_training_policy_mode(
     // terminal pool.
     if let Some(ref bp) = config.policy.boundary {
         let recon = reconcile_boundary_policy(setup, system, bp, case_dir)
-            .map_err(|e| format!("boundary cut error: {e}"))?;
+            .map_err(|e| format!("{BOUNDARY_CUT_ERROR_PREFIX}: {e}"))?;
         inject_boundary_cuts(setup, &recon.cuts);
         let cut_count = recon.cuts.len();
         eprintln!(
@@ -1456,6 +1459,18 @@ pub(crate) fn run_via_study(
             hydro_models: Some(study.hydro_models_summary().clone()),
             provenance: Some(study.provenance().clone()),
         }),
+    }
+}
+
+/// Convert an `Option<T>` into a Python dict, or `None` when absent.
+fn optional_summary_dict<'py, T>(
+    py: Python<'py>,
+    value: Option<&T>,
+    to_dict: impl FnOnce(Python<'py>, &T) -> PyResult<Bound<'py, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    match value {
+        Some(v) => Ok(to_dict(py, v)?.into()),
+        None => Ok(py.None()),
     }
 }
 
@@ -1697,26 +1712,22 @@ pub fn run(
                 },
             )?;
 
-            let stochastic_val = if let Some(stoch) = &summary.stochastic {
-                stochastic_summary_to_dict(py, stoch)?.into()
-            } else {
-                py.None()
-            };
-            dict.set_item("stochastic", stochastic_val)?;
-
-            let hydro_val = if let Some(hydro) = &summary.hydro_models {
-                hydro_model_summary_to_dict(py, hydro)?.into()
-            } else {
-                py.None()
-            };
-            dict.set_item("hydro_models", hydro_val)?;
-
-            let provenance_val = if let Some(prov) = &summary.provenance {
-                provenance_to_dict(py, prov)?.into()
-            } else {
-                py.None()
-            };
-            dict.set_item("provenance", provenance_val)?;
+            dict.set_item(
+                "stochastic",
+                optional_summary_dict(py, summary.stochastic.as_ref(), stochastic_summary_to_dict)?,
+            )?;
+            dict.set_item(
+                "hydro_models",
+                optional_summary_dict(
+                    py,
+                    summary.hydro_models.as_ref(),
+                    hydro_model_summary_to_dict,
+                )?,
+            )?;
+            dict.set_item(
+                "provenance",
+                optional_summary_dict(py, summary.provenance.as_ref(), provenance_to_dict)?,
+            )?;
 
             Ok(dict.into())
         }

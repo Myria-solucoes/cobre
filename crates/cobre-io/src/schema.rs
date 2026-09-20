@@ -164,13 +164,21 @@ pub enum SchemaExportError {
     #[error("schema generation failed: {0}")]
     Generation(#[source] Error),
 
-    /// The output directory could not be created, a schema failed to serialize
-    /// to text, or a schema file could not be written.
+    /// A generated schema value could not be serialized to JSON text.
+    #[error("serialization error for schema {filename}: {source}")]
+    Serialization {
+        /// Name of the schema file being serialized.
+        filename: String,
+        /// Underlying serialization error.
+        source: Error,
+    },
+
+    /// The output directory could not be created or a schema file could not be written.
     #[error("I/O error exporting schema to {path}: {source}")]
     Io {
         /// Path to the directory or file involved in the failure.
         path: PathBuf,
-        /// Underlying I/O error (a serialize failure is wrapped via `io::Error::other`).
+        /// Underlying I/O error.
         source: io::Error,
     },
 }
@@ -202,8 +210,12 @@ pub fn export_schemas(output_dir: &Path) -> Result<usize, SchemaExportError> {
 
     for (filename, value) in schemas {
         let dest = output_dir.join(&filename);
-        let content = serde_json::to_string_pretty(&value)
-            .map_err(|e| SchemaExportError::io(&dest, io::Error::other(e)))?;
+        let content = serde_json::to_string_pretty(&value).map_err(|source| {
+            SchemaExportError::Serialization {
+                filename: filename.clone(),
+                source,
+            }
+        })?;
         std::fs::write(&dest, content).map_err(|source| SchemaExportError::io(&dest, source))?;
     }
 

@@ -639,7 +639,7 @@ fn fit_computed_planes_per_stage(
             // Rationale: plane counts are bounded by max_planes_per_hydro (default
             // <= 30), far below i32::MAX, so truncation and wrap are unreachable.
             #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-            export_rows.push(cobre_io::FphaHyperplaneRow {
+            export_rows.push(FphaHyperplaneRow {
                 hydro_id: hydro.id,
                 stage_id: Some(stage.id),
                 plane_id: plane_id as i32,

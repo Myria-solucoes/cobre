@@ -279,8 +279,26 @@ pub(crate) const INTERNAL_ERROR_PREFIX: &str = "internal error";
 
 /// Prefix minted for training-phase failures. Unrecognized by the classifier
 /// below (it falls through to `SolverError`, same as today); named here so the
-/// run-path minter shares one owning constant with the other prefixes.
+/// run-path minter shares one owning constant with the other prefixes. The
+/// remaining run-path phase prefixes below are classifier-unrecognized for the
+/// same reason and are named on the same rationale.
 pub(crate) const TRAINING_ERROR_PREFIX: &str = "training error";
+
+/// Prefix minted for simulation-writer initialisation failures.
+pub(crate) const SIMULATION_WRITER_INIT_ERROR_PREFIX: &str =
+    "simulation writer initialisation error";
+
+/// Prefix minted for scenario-source construction failures.
+pub(crate) const SCENARIO_SOURCE_ERROR_PREFIX: &str = "scenario source error";
+
+/// Prefix minted for stochastic-preprocessing failures.
+pub(crate) const STOCHASTIC_PREPROCESSING_ERROR_PREFIX: &str = "stochastic preprocessing error";
+
+/// Prefix minted for hydro-model-preprocessing failures.
+pub(crate) const HYDRO_MODEL_PREPROCESSING_ERROR_PREFIX: &str = "hydro model preprocessing error";
+
+/// Prefix minted for boundary-cut load failures.
+pub(crate) const BOUNDARY_CUT_ERROR_PREFIX: &str = "boundary cut error";
 
 /// Map a string-prefixed run/study message to its typed class.
 fn message_prefix_to_pyerr(py: Python<'_>, msg: &str) -> PyErr {

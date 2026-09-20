@@ -18,7 +18,7 @@ use cobre_sddp::{BoundaryReconciliationReport, HydroModelSummary, ModelProvenanc
 /// The exact lines `print_hydro_model_summary` writes, one per `stderr` line.
 fn hydro_model_summary_lines(summary: &HydroModelSummary) -> Vec<String> {
     vec![
-        format!("{}", console::style("Hydro models").bold()),
+        console::style("Hydro models").bold().to_string(),
         format!("  Production:    {}", format_production_line(summary)),
         format!("  Evaporation:   {}", format_evaporation_line(summary)),
     ]
@@ -114,7 +114,7 @@ pub fn print_execution_topology(
         "rayon threads"
     };
 
-    let _ = stderr.write_line(&format!("{}", console::style("Execution").bold()));
+    let _ = stderr.write_line(&console::style("Execution").bold().to_string());
 
     let solver_line = match solver_version {
         Some(v) => format!("{solver_name} {v}"),
@@ -215,7 +215,7 @@ fn format_evaporation_line(summary: &HydroModelSummary) -> String {
 /// The exact lines `print_setup_summary` writes, one per `stderr` line.
 fn setup_summary_lines(timings: &SetupTimings) -> Vec<String> {
     vec![
-        format!("{}", console::style("Setup").bold()),
+        console::style("Setup").bold().to_string(),
         format!(
             "  Load:            {}",
             format_split_duration(timings.load_seconds)
@@ -261,7 +261,7 @@ fn provenance_ar_detail(report: &ModelProvenanceReport) -> String {
 fn provenance_summary_lines(report: &ModelProvenanceReport) -> Vec<String> {
     let ar_detail = provenance_ar_detail(report);
     vec![
-        format!("{}", console::style("Model provenance").bold()),
+        console::style("Model provenance").bold().to_string(),
         format!("  Estimation path: {}", report.inflow.estimation_path),
         format!("  Seasonal stats:  {}", report.inflow.seasonal_stats_source),
         format!(
@@ -305,7 +305,7 @@ fn boundary_summary_lines(
     report: &BoundaryReconciliationReport,
 ) -> Vec<String> {
     vec![
-        format!("{}", console::style("Boundary policy").bold()),
+        console::style("Boundary policy").bold().to_string(),
         format!("  Cuts loaded:    {loaded} (priced at {boundary_date})"),
         format!("  Source:         {}", path.display()),
         format!(

@@ -107,16 +107,14 @@ pub(super) fn write_training_outputs(args: &WriteTrainingArgs<'_>) -> Result<(),
 
     // Off by default, so a default run writes no file and stays byte-identical;
     // mirror on the Python side: `write_fpha_deviation_points_if_any`.
-    if args.config.exports.fpha_deviation_points {
-        let deviation_point_rows = args.setup.hydro_models.fpha_deviation_point_rows.as_slice();
-        if !deviation_point_rows.is_empty() {
-            let deviation_points_path = args
-                .output_dir
-                .join("hydro_models")
-                .join("fpha_deviation_points.parquet");
-            write_fpha_deviation_points(&deviation_points_path, deviation_point_rows)
-                .map_err(CliError::from)?;
-        }
+    let deviation_point_rows = args.setup.hydro_models.fpha_deviation_point_rows.as_slice();
+    if args.config.exports.fpha_deviation_points && !deviation_point_rows.is_empty() {
+        let deviation_points_path = args
+            .output_dir
+            .join("hydro_models")
+            .join("fpha_deviation_points.parquet");
+        write_fpha_deviation_points(&deviation_points_path, deviation_point_rows)
+            .map_err(CliError::from)?;
     }
 
     // No generic constraint writes no file, so a default run stays byte-identical;

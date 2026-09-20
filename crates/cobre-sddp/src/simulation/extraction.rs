@@ -613,6 +613,14 @@ pub struct SolutionView<'a> {
 /// Unit cancellation: `hm³ × 10⁶ m³/hm³ ÷ 3600 s/h × MW/(m³/s) = MWh`.
 pub const ENERGY_FACTOR_MWH_PER_HM3_PER_MW_PER_M3S: f64 = 1.0e6 / 3600.0;
 
+/// `(storage - v_min) * rho_acum * ENERGY_FACTOR` — stored energy above the
+/// minimum operable volume, shared by the no-turbine and per-block hydro
+/// extraction sites.
+#[inline]
+fn stored_energy_mwh(storage_hm3: f64, v_min_hm3: f64, rho_acum: f64) -> f64 {
+    (storage_hm3 - v_min_hm3) * rho_acum * ENERGY_FACTOR_MWH_PER_HM3_PER_MW_PER_M3S
+}
+
 /// Extraction parameters bundled for a single stage.
 ///
 /// **Per-stage geometry contract.** Every block-major equipment read must take its
@@ -848,12 +856,8 @@ fn extract_hydro_no_turbine(
         equivalent_productivity_mw_per_m3s: ctx.equivalent_productivity_mw_per_m3s,
         accumulated_productivity_mw_per_m3s: ctx.accumulated_productivity_mw_per_m3s,
         incremental_inflow_energy_mw: ctx.incremental_inflow_energy_mw,
-        stored_energy_initial_mwh: (ctx.storage_initial - ctx.v_min)
-            * ctx.rho_acum
-            * ENERGY_FACTOR_MWH_PER_HM3_PER_MW_PER_M3S,
-        stored_energy_final_mwh: (ctx.storage_final - ctx.v_min)
-            * ctx.rho_acum
-            * ENERGY_FACTOR_MWH_PER_HM3_PER_MW_PER_M3S,
+        stored_energy_initial_mwh: stored_energy_mwh(ctx.storage_initial, ctx.v_min, ctx.rho_acum),
+        stored_energy_final_mwh: stored_energy_mwh(ctx.storage_final, ctx.v_min, ctx.rho_acum),
         spillage_cost: 0.0,
         water_value_per_hm3: ctx.water_value,
         storage_binding_code: 0,
@@ -1091,10 +1095,8 @@ fn extract_hydro_per_block<'a>(
             }
             BlockMode::Parallel => (ctx.storage_initial, ctx.storage_final),
         };
-        let stored_energy_initial_mwh =
-            (storage_initial - ctx.v_min) * ctx.rho_acum * ENERGY_FACTOR_MWH_PER_HM3_PER_MW_PER_M3S;
-        let stored_energy_final_mwh =
-            (storage_final - ctx.v_min) * ctx.rho_acum * ENERGY_FACTOR_MWH_PER_HM3_PER_MW_PER_M3S;
+        let stored_energy_initial_mwh = stored_energy_mwh(storage_initial, ctx.v_min, ctx.rho_acum);
+        let stored_energy_final_mwh = stored_energy_mwh(storage_final, ctx.v_min, ctx.rho_acum);
 
         // Chronological block `b` reports its own block's evaporation triple
         // (`evap_indices[local * n_blks + b]`); parallel keeps the stage-level block-0

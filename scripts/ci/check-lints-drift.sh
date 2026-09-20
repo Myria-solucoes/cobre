@@ -1,4 +1,16 @@
 #!/usr/bin/env bash
+#
+# check-lints-drift.sh — Per-crate lint-table drift gate.
+#
+# The workspace default forbids unsafe code, so the four crates that need it for
+# FFI/PyO3 (cobre-solver, cobre-comm, cobre-sddp, cobre-python) cannot use
+# `[lints] workspace = true` and instead hand-replicate the full
+# `[workspace.lints.*]` tables with `unsafe_code = "allow"`. Those copies can
+# silently drift from the workspace tables. This gate asserts each override
+# crate's `[lints.rust]`/`[lints.clippy]` matches `[workspace.lints.*]`
+# byte-for-byte, allowing exactly one difference — `unsafe_code` ("forbid" in
+# the workspace vs "allow" in the crate). Any other delta exits non-zero naming
+# the crate and lint. All other crates must use `[lints] workspace = true`.
 
 set -euo pipefail
 

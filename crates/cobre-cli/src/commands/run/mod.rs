@@ -314,9 +314,10 @@ pub(super) fn build_distribution_info(
 }
 
 /// Total parallelism as thread count times participating rank count.
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub(super) fn compute_parallelism(n_threads: usize, comm_size: usize) -> u32 {
-    (n_threads as u32).saturating_mul(comm_size as u32)
+    u32::try_from(n_threads)
+        .unwrap_or(u32::MAX)
+        .saturating_mul(u32::try_from(comm_size).unwrap_or(u32::MAX))
 }
 
 /// Map per-host rank assignments into [`cobre_io::HostLayout`] carriers,

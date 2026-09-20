@@ -72,18 +72,18 @@ pub(super) fn run_training_phase(
 
     let (event_tx, event_rx) = mpsc::channel::<TrainingEvent>();
 
-    let quiet_rx: Option<mpsc::Receiver<TrainingEvent>>;
-    let progress_handle = if ctx.quiet {
-        quiet_rx = Some(event_rx);
-        None
+    let (progress_handle, quiet_rx) = if ctx.quiet {
+        (None, Some(event_rx))
     } else {
-        quiet_rx = None;
-        Some(run_progress_thread(
-            event_rx,
-            ctx.render_mode,
-            setup.loop_params.max_iterations,
-            ctx.term_width,
-        ))
+        (
+            Some(run_progress_thread(
+                event_rx,
+                ctx.render_mode,
+                setup.loop_params.max_iterations,
+                ctx.term_width,
+            )),
+            None,
+        )
     };
 
     let training_outcome = match setup.train(
