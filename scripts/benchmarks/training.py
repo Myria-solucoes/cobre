@@ -18,6 +18,8 @@ def main():
     parser.add_argument('--iterations', type=int, default=12)
     parser.add_argument('--forwards', type=int, default=24)
     parser.add_argument('--threads', type=int, default=4)
+    parser.add_argument('--candidate-threads', type=int,
+                        help='Override worker count for candidate/selected arms only')
     parser.add_argument('--arms', nargs='+', choices=['baseline', 'candidate', 'selected'], default=['baseline', 'candidate', 'selected'])
     parser.add_argument('--lml1-frequency', type=int, default=1)
     parser.add_argument('--repeats', type=int, default=3)
@@ -27,6 +29,8 @@ def main():
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--simulation-scheme', choices=['in_sample', 'out_of_sample'], default='in_sample')
     parser.add_argument('--simulation-seed', type=int, default=8675309)
+    parser.add_argument('--simulation-scenarios', type=int, default=256,
+                        help='Common evaluation scenarios; zero disables simulation for profiling')
     parser.add_argument('--scheduler', choices=['by_scenario', 'by_node'], default='by_scenario')
     parser.add_argument('--block-size', type=int, default=10)
     parser.add_argument('--deduplicate', action='store_true')
@@ -34,6 +38,10 @@ def main():
     parser.add_argument('--audit-relative-tolerance', type=float)
     parser.add_argument('--adaptive-max-added-per-round', type=int)
     args = parser.parse_args()
+    if args.simulation_scenarios < 0:
+        parser.error('--simulation-scenarios must be nonnegative')
+    if args.threads < 1 or (args.candidate_threads is not None and args.candidate_threads < 1):
+        parser.error('thread counts must be positive')
     args.output.mkdir(parents=True, exist_ok=False)
     results = []
     for repeat in range(args.repeats):
@@ -63,7 +71,8 @@ def main():
                     stage['risk_measure'] = {'cvar': {'alpha': 0.15, 'lambda': 0.4}}
                 (case / 'stages.json').write_text(json.dumps(stages, indent=2) + '\n')
             config['training'].pop('backward_selection', None)
-            config['simulation'] = {'enabled': True, 'selection': {'method': 'sampled', 'num_scenarios': 256},
+            config['simulation'] = {'enabled': args.simulation_scenarios > 0,
+                                    'selection': {'method': 'sampled', 'num_scenarios': max(1, args.simulation_scenarios)},
                                     'scenario_source': {'seed': args.simulation_seed, 'inflow': {'scheme': args.simulation_scheme}}}
             if arm == 'selected':
                 config['training']['backward_selection'] = {
@@ -74,8 +83,9 @@ def main():
                 config['training']['backward_selection'].update(deduplicate=True, full_from_iteration=1)
             (case / 'config.json').write_text(json.dumps(config, indent=2) + '\n')
             binary = (args.baseline if arm == 'baseline' else args.candidate).resolve()
+            threads = args.threads if arm == 'baseline' else (args.candidate_threads or args.threads)
             command = [str(binary), 'run', str(case.resolve()), '--output', str((run / 'output').resolve()),
-                       '--threads', str(args.threads), '--comm-backend', 'local', '--color', 'never']
+                       '--threads', str(threads), '--comm-backend', 'local', '--color', 'never']
             start = time.monotonic()
             with (run / 'stdout.log').open('w') as stdout, (run / 'stderr.log').open('w') as stderr:
                 try:
@@ -83,7 +93,8 @@ def main():
                     code = result.returncode
                 except subprocess.TimeoutExpired:
                     code = 124
-            results.append({'arm': arm, 'repeat': repeat, 'wall_seconds': time.monotonic()-start,
+            results.append({'arm': arm, 'repeat': repeat, 'threads': threads,
+                            'wall_seconds': time.monotonic()-start,
                             'exit_code': code, 'command': command,
                             'binary_sha256': hashlib.sha256(binary.read_bytes()).hexdigest()})
             (args.output / 'results.json').write_text(json.dumps(results, indent=2) + '\n')

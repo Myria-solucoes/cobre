@@ -109,6 +109,18 @@ case, freezes configuration, uses a separate simulation seed, alternates arm
 order, applies a timeout and records binary hashes, commands, exit codes and wall
 time. It never edits the source case or an installed runtime.
 
+Use `--candidate-threads 8 --threads 4` to compare a combined runtime/configuration
+change against a four-worker baseline. That measures the combination, not the
+code change alone. `--simulation-scenarios N` sets the common evaluation size;
+zero disables simulation for calibration or profiling and provides no policy
+quality evidence. Omitting `--cvar` preserves each stage's input risk measure.
+
+The summary includes first-repeat solver counters by phase and the ten stages
+with the largest cumulative solver time. These times sum work across workers;
+they are not elapsed training time. The summarizer verifies the telemetry's LP
+count against metadata before reporting it. Profile instrumented runs separately
+from timing repetitions, and build with `--profile profiling` for function symbols.
+
 ```sh
 python3 scripts/benchmarks/training.py \
   --baseline /absolute/path/to/cobre-baseline \
