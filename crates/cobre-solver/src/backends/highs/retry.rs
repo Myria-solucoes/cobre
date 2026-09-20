@@ -43,10 +43,7 @@ impl HighsSolver {
         let retry_start = Instant::now();
         let mut retry_attempts: u64 = 0;
         let mut terminal_err: Option<SolverError> = None;
-        let mut found_optimal = false;
-        let mut optimal_time = 0.0_f64;
-        let mut optimal_iterations: u64 = 0;
-        let mut optimal_level = 0_u32;
+        let mut outcome: Option<RetryOutcome> = None;
 
         for level in 0..num_retry_levels {
             if retry_start.elapsed().as_secs_f64() >= overall_budget {
@@ -66,10 +63,12 @@ impl HighsSolver {
                 #[allow(clippy::cast_sign_loss)]
                 let iters =
                     unsafe { ffi::cobre_highs_get_simplex_iteration_count(self.handle) } as u64;
-                found_optimal = true;
-                optimal_time = retry_time;
-                optimal_iterations = iters;
-                optimal_level = level;
+                outcome = Some(RetryOutcome {
+                    attempts: retry_attempts,
+                    solve_time: retry_time,
+                    iterations: iters,
+                    level,
+                });
                 break;
             }
 
@@ -104,13 +103,8 @@ impl HighsSolver {
             ffi::cobre_highs_set_int_option(self.handle, c"user_bound_scale".as_ptr(), 0);
         }
 
-        if found_optimal {
-            return Ok(RetryOutcome {
-                attempts: retry_attempts,
-                solve_time: optimal_time,
-                iterations: optimal_iterations,
-                level: optimal_level,
-            });
+        if let Some(outcome) = outcome {
+            return Ok(outcome);
         }
 
         Err((

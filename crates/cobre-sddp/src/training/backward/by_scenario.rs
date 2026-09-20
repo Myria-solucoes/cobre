@@ -596,19 +596,9 @@ pub(crate) fn by_scenario_finish<S: SolverInterface>(
     staged_cuts_buf: &mut Vec<(usize, StagedCut)>,
 ) -> Result<usize, SddpError> {
     staged_cuts_buf.clear();
-    let mut worker_failure: Option<SddpError> = None;
     for worker_result in worker_staged {
-        match worker_result {
-            Ok((w, cuts)) => staged_cuts_buf.extend(cuts.into_iter().map(|cut| (w, cut))),
-            Err(e) => {
-                worker_failure = Some(e);
-                break;
-            }
-        }
-    }
-
-    if let Some(e) = worker_failure {
-        return Err(e);
+        let (w, cuts) = worker_result?;
+        staged_cuts_buf.extend(cuts.into_iter().map(|cut| (w, cut)));
     }
     // `trial_state_idx` is the SOLE sort key: globally unique across workers
     // (disjoint contiguous partitions), so the merge order is identical regardless

@@ -29,11 +29,6 @@ pub const CLP_STATUS_ERRORS: i32 = 4;
 // `Clp_getRowStatus`, per `ClpSimplex.hpp`)
 // ============================================================
 
-// Interpreted in both directions — `basis_status.rs`'s `to_clp_code`/
-// `from_clp_code` match on these names, and `ClpSolver`'s cold-basis reset
-// writes two of them directly — so each code is named here, the one owner,
-// rather than a bare numeral duplicated at every site.
-
 /// `ClpSimplex.hpp` status `0` — free (superbasic at value zero).
 pub const CLP_BASIS_FREE: i32 = 0;
 /// `ClpSimplex.hpp` status `1` — basic.

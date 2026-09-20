@@ -2,8 +2,8 @@
 //!
 //! One printing function per run phase, each emitting its section independently
 //! so the caller can place it at the right point in the execution flow. Every
-//! `print_*` writer ignores write errors (fire-and-forget) and shares its exact
-//! rendered lines with tests through a private `*_lines`/`*_line` helper, so
+//! `print_*` writer ignores write errors (fire-and-forget); most also share their
+//! exact rendered lines with tests through a private `*_lines`/`*_line` helper, so
 //! tests assert on the same code path production prints from.
 
 use chrono::NaiveDate;

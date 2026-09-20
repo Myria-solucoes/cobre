@@ -206,7 +206,7 @@ The CLI forwards the active backend to both `cobre-solver` and `cobre-sddp`, so 
 takes one backend at a time — not `--all-features` (see
 [Solver Backend Selection](#solver-backend-selection)). Integration tests exercise
 the binary via `assert_cmd`, organized by subcommand
-(`tests/cli_run.rs`, `tests/cli_validate.rs`, `tests/cli_e2e_run_end_block.rs`,
+(`tests/cli_run.rs`, `tests/cli_validate.rs`,
 `tests/cli_smoke.rs`). Each verifies exit codes, output, and file creation.
 
 ### Testing cobre-python

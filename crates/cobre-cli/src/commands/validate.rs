@@ -557,14 +557,9 @@ mod tests {
 
     fn make_report() -> ValidationReport {
         ValidationReport {
-            error_count: 1,
+            error_count: 0,
             warning_count: 1,
-            errors: vec![ReportEntry {
-                kind: "FileNotFound".to_string(),
-                file: "system/hydros.json".to_string(),
-                entity: Some("hydro_42".to_string()),
-                message: "required file is missing".to_string(),
-            }],
+            errors: Vec::new(),
             warnings: vec![ReportEntry {
                 kind: "UnusedEntity".to_string(),
                 file: "system/thermals.json".to_string(),
@@ -603,6 +598,26 @@ mod tests {
         assert!(
             output.contains("0 errors") && output.contains("1 warnings"),
             "expected summary header with counts, got: {output}"
+        );
+    }
+
+    #[test]
+    fn report_lines_entity_present_renders_file_and_entity() {
+        let report = ValidationReport {
+            error_count: 0,
+            warning_count: 1,
+            errors: Vec::new(),
+            warnings: vec![ReportEntry {
+                kind: "UnusedEntity".to_string(),
+                file: "system/buses.json".to_string(),
+                entity: Some("bus_01".to_string()),
+                message: "bus is unreferenced".to_string(),
+            }],
+        };
+        let output = report_lines(&report, &PathBuf::from("/case/dir")).join("\n");
+        assert!(
+            output.contains("system/buses.json (bus_01)"),
+            "entity-present location must render 'file (entity)', got: {output}"
         );
     }
 }
