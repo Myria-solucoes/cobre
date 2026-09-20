@@ -27,7 +27,7 @@
 //! in Rust, so this partition is an audited, re-runnable manual enumeration,
 //! not a mechanically-provable one.
 
-use cobre_sddp::lp_builder::DeliveryRing;
+use cobre_sddp::lp::builder::DeliveryRing;
 
 #[test]
 fn depth_one_emit_shift_rows_never_writes_an_in_col_entry() {

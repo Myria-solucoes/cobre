@@ -13,8 +13,8 @@ use crate::{
     context::StageContext,
     cut::pool::CutPool,
     error::SddpError,
-    indexer::StateSpace,
-    lp_builder::StateBox,
+    lp::builder::StateBox,
+    lp::indexer::StateSpace,
     noise::{DownstreamAccumState, LagAccumState, accumulate_and_shift_lag_state},
     setup::{NodeId, StageIdx},
     workspace::{CapturedBasis, SolverWorkspace},
@@ -353,7 +353,7 @@ mod tests {
         SddpError,
         context::StageContext,
         cut::pool::CutPool,
-        lp_builder::{PatchBuffer, StateBox},
+        lp::builder::{PatchBuffer, StateBox},
         noise::{DownstreamAccumState, LagAccumState, accumulate_and_shift_lag_state},
         setup::{NodeId, StageIdx},
         test_support::state_layout_with_transit_buckets,
@@ -994,7 +994,7 @@ mod tests {
     /// `N=1, L=1, B=1, A=1, K_max=1` layout: `n_state = 4`
     /// (storage, lag0, `bucket_out`, `commit_out`), mirroring the
     /// `transit_bucket_copy_gap` fixture shape.
-    fn seam_layout() -> crate::indexer::StateSpace {
+    fn seam_layout() -> crate::lp::indexer::StateSpace {
         state_layout_with_transit_buckets(1, 1, 1, vec![(0, 0)], 1, 1, vec![1])
     }
 

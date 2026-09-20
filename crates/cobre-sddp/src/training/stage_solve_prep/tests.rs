@@ -24,9 +24,9 @@ use super::{InflowNoise, LoadNoise, StageSolvePrep, StageSolvePrepParams, StateS
 use crate::{
     context::{StageContext, TrainingContext},
     horizon_mode::HorizonMode,
-    indexer::StudyDimensions,
     inflow_method::InflowNonNegativityMethod,
-    lp_builder::{PatchBuffer, StateBox},
+    lp::builder::{PatchBuffer, StateBox},
+    lp::indexer::StudyDimensions,
     noise::{
         NcsNoiseOffsets, build_dense_ncs_col_indices, gather_dense_ncs_bounds,
         transform_inflow_noise, transform_ncs_noise,

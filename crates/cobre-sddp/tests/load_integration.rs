@@ -37,7 +37,7 @@ use cobre_sddp::{
     horizon_mode::HorizonMode,
     indexer::{CutStateProjection, StateSpace, StudyDimensions},
     inflow_method::InflowNonNegativityMethod,
-    lp_builder::StateBox,
+    lp::builder::StateBox,
     risk_measure::RiskMeasure,
     train,
 };

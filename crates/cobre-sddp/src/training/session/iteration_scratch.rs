@@ -12,7 +12,7 @@ use crate::{
     context::StageContext,
     cut::CutRowMap,
     lower_bound::LbEvalScratch,
-    lp_builder::PatchBuffer,
+    lp::builder::PatchBuffer,
     setup::{NodeId, node_graph::StageIdx},
     solver_stats::SolverStatsDelta,
     trajectory::TrajectoryRecord,

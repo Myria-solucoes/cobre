@@ -11,16 +11,6 @@ use crate::{
     types::{SolutionView, SolverError, SolverStatistics},
 };
 
-/// CLP basis status code for a column resting at its lower bound (nonbasic).
-///
-/// Status codes follow `ClpSimplex.hpp`: `0 = free, 1 = basic, 2 = atUpper,
-/// 3 = atLower, 4 = superbasic, 5 = fixed`.
-const CLP_BASIS_AT_LOWER: i32 = 3;
-
-/// CLP basis status code for a basic variable (see [`CLP_BASIS_AT_LOWER`] for the
-/// full enum).
-const CLP_BASIS_BASIC: i32 = 1;
-
 /// CLP LP solver backend.
 ///
 /// Owns an opaque CLP model handle plus pre-allocated, reusable buffers resized
@@ -273,10 +263,10 @@ impl ClpSolver {
     ///
     /// After a failed `Clp_dual` the model retains CLP's failed internal basis;
     /// re-solving on it can inherit the bad state, so each escalation rung first
-    /// drives every structural column nonbasic ([`CLP_BASIS_AT_LOWER`]) and every
-    /// row slack basic ([`CLP_BASIS_BASIC`]). Fully deterministic — the same
-    /// status codes are written every time — so it cannot perturb bit-for-bit
-    /// reproducibility.
+    /// drives every structural column nonbasic ([`clp_ffi::CLP_BASIS_AT_LOWER`])
+    /// and every row slack basic ([`clp_ffi::CLP_BASIS_BASIC`]). Fully
+    /// deterministic — the same status codes are written every time — so it
+    /// cannot perturb bit-for-bit reproducibility.
     pub(super) fn reset_cold_basis(&mut self) {
         // Rationale: indices bounded by `num_cols`/`num_rows`, asserted to fit in
         // i32 by `load_model`; the casts cannot truncate or wrap.
@@ -287,7 +277,11 @@ impl ClpSolver {
             // `0..num_cols`, a valid column sequence index, and fits in i32. The
             // setter writes a single status byte; no aliasing.
             unsafe {
-                clp_ffi::cobre_clp_set_column_status(self.handle, c as i32, CLP_BASIS_AT_LOWER);
+                clp_ffi::cobre_clp_set_column_status(
+                    self.handle,
+                    c as i32,
+                    clp_ffi::CLP_BASIS_AT_LOWER,
+                );
             }
         }
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -296,7 +290,7 @@ impl ClpSolver {
             // loaded; `r` is in `0..num_rows`, a valid row sequence index, and
             // fits in i32. The setter writes a single status byte; no aliasing.
             unsafe {
-                clp_ffi::cobre_clp_set_row_status(self.handle, r as i32, CLP_BASIS_BASIC);
+                clp_ffi::cobre_clp_set_row_status(self.handle, r as i32, clp_ffi::CLP_BASIS_BASIC);
             }
         }
     }

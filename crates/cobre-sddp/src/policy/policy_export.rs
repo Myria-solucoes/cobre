@@ -28,9 +28,9 @@ use cobre_io::output::policy::{
 
 use crate::SddpError;
 use crate::cut::FutureCostFunction;
-use crate::indexer::{CutSlot, CutStateProjection, StateRegion, StateSpace};
 use crate::lead_time::PointResolution;
-use crate::lp_builder::delivery_ring::DeliveryRing;
+use crate::lp::builder::delivery_ring::DeliveryRing;
+use crate::lp::indexer::{CutSlot, CutStateProjection, StateRegion, StateSpace};
 use crate::setup::{NodeGraph, NodePos, extended_delivery_stages, post_study_delivery_calendar};
 use crate::training::TrainingResult;
 
@@ -845,8 +845,8 @@ mod tests {
         EntitySlot, HashMap, StateFamily, build_stage_entity_manifest, build_stage_states_payloads,
         modular_delivery_target, reachable_delivery_target, reserve_boundary_inflow_lag_slots,
     };
-    use crate::indexer::{CutStateProjection, StateSpace};
     use crate::lead_time::{AnticipatedResolution, DeliveryAxis, LeadTime};
+    use crate::lp::indexer::{CutStateProjection, StateSpace};
     use crate::setup::{
         NodeGraph, NodeId, NodeOpenings, NodePos, NodeRuntime, NodeSuccessor, OpeningSource,
         StageIdx, extended_delivery_stages, post_study_delivery_calendar, year_month_day_anchor,

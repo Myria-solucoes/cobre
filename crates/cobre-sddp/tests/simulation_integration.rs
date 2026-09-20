@@ -58,7 +58,7 @@ use cobre_sddp::{
     horizon_mode::HorizonMode,
     indexer::{CutStateProjection, StateSpace, StudyDimensions},
     inflow_method::InflowNonNegativityMethod,
-    lp_builder::{PatchBuffer, StateBox},
+    lp::builder::{PatchBuffer, StateBox},
     risk_measure::RiskMeasure,
     setup::{
         SimulationEnumeratedRequest, StudySetup,

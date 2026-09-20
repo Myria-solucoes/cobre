@@ -25,12 +25,12 @@ use cobre_core::EntityId;
 use cobre_core::HydroPastDefluence;
 
 use crate::energy_conversion::EnergyConversionSet;
-use crate::indexer::{
+use crate::lp::builder::{GenericConstraintRowEntry, StageGeometry};
+use crate::lp::indexer::{
     AnticipatedLocal, BlockGrid, BlockIdx, Boundary, EvapLocal, FillingTargetLocal, FloorLocal,
     FphaLocal, HydroCell, HydroCellIndex, HydroSys, StateSpace, StudyDimensions,
     anticipated_resolution_for, is_anticipated_decision_active_for_delivery,
 };
-use crate::lp_builder::{GenericConstraintRowEntry, StageGeometry};
 use crate::setup::NodeId;
 use crate::simulation::types::{
     ScenarioCategoryCosts, SimulationAnticipatedLaneResult, SimulationBusResult,
@@ -262,10 +262,10 @@ fn compute_anticipated_committed_mw(
     let local_idx = lookup.thermal_is_anticipated[thermal_local]?;
     // Ring buffer lives in the stage-invariant state region, so the base is the
     // role-(a) `StateSpace`, not the geometry indexer.
-    let slot_offset = spec
+    let col = spec
         .state
-        .commitment_hold_in_study_offset(local_idx.get(), spec.stage_index);
-    let col = spec.state.commit_in.start + slot_offset;
+        .commitment_hold_incoming_col(local_idx.get(), spec.stage_index)
+        .get();
     debug_assert!(
         col < view.primal.len(),
         "commitment-hold maturing-slot col {col} out of primal bounds {}",
@@ -282,7 +282,7 @@ fn compute_anticipated_committed_mw(
 /// empty at every non-decider stage. `deposited_decision_mw` reads the plant's
 /// ring decision column (`geometry.anticipated_decision.start + local`);
 /// `carried_committed_mw` reads the ring slot the target lands in
-/// (`commit_out.start + commitment_hold_in_study_offset(local, m)`) — the SAME
+/// ([`StateSpace::commitment_hold_outgoing_col`]) — the SAME
 /// slot the deposit latches (`fill_anticipated_state_out_def_entries`), so the
 /// deposit row pins the two equal at the decider stage. `delivery_dates` is the
 /// extended delivery-stage anchor array indexed by delivery target `m` (study
@@ -312,8 +312,7 @@ pub(crate) fn extract_anticipated_lanes(
                 continue;
             }
             let decision_col = spec.geometry.anticipated_decision.start + local;
-            let carried_col =
-                state.commit_out.start + state.commitment_hold_in_study_offset(local, m);
+            let carried_col = state.commitment_hold_outgoing_col(local, m).get();
             debug_assert!(
                 decision_col < view.primal.len() && carried_col < view.primal.len(),
                 "anticipated-lane ring cols {decision_col}/{carried_col} out of primal bounds {}",

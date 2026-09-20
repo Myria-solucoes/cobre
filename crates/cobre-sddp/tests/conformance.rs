@@ -27,7 +27,7 @@
 use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
 use cobre_core::BlockMode;
 use cobre_sddp::indexer::{HydroSys, StorageBoundaryGrid};
-use cobre_sddp::lp_builder::StageGeometry;
+use cobre_sddp::lp::builder::StageGeometry;
 use cobre_sddp::{FutureCostFunction, SyncResult};
 use cobre_solver::{
     Basis, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
@@ -778,7 +778,7 @@ mod lb_conformance {
         indexer::{StateSpace, StudyDimensions},
         inflow_method::InflowNonNegativityMethod,
         lower_bound::{LbEvalScratch, LbEvalScratchBundle, evaluate_lower_bound},
-        lp_builder::PatchBuffer,
+        lp::builder::PatchBuffer,
         risk_measure::RiskMeasure,
         test_support::cut_state_projection,
         workspace::{ScratchBuffers, WorkspaceSizing},

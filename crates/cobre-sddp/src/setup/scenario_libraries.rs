@@ -19,7 +19,7 @@ use cobre_stochastic::{
 };
 
 use crate::SddpError;
-use crate::lp_builder::models_from_normal;
+use crate::lp::builder::models_from_normal;
 
 /// Build and validate a [`HistoricalScenarioLibrary`] for inflow.
 ///

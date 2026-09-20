@@ -2,13 +2,13 @@
 
 use cobre_core::{EntityId, HorizonGraph, Stage, System};
 
-use crate::indexer::StateSpace;
+use crate::lp::builder::{self, StageTemplates};
+use crate::lp::indexer::StateSpace;
 use crate::scaling_report::ScalingReport;
 use crate::scaling_report::{
     LpDimensions, StageScalingReport, build_scaling_report, compute_coefficient_range,
     summarize_scale_factors,
 };
-use crate::{lp_builder, lp_builder::StageTemplates};
 
 /// Compute per-stage one-step discount factors from study stages and a policy graph.
 ///
@@ -155,7 +155,7 @@ pub(crate) fn postprocess_templates(
         .collect();
 
     for stage_idx in 0..stage_templates.templates.len() {
-        let state_box = lp_builder::build_state_box(
+        let state_box = builder::build_state_box(
             &stage_templates.templates[stage_idx],
             state_layout,
             stage_idx,
@@ -176,18 +176,18 @@ pub(crate) fn postprocess_templates(
         let pre_scaling = compute_coefficient_range(tmpl);
 
         let mut col_scale =
-            lp_builder::compute_col_scale(tmpl.num_cols, &tmpl.col_starts, &tmpl.values);
-        lp_builder::apply_commitment_hold_col_scale_unscale(&mut col_scale, state_layout);
-        lp_builder::apply_col_scale(tmpl, &col_scale);
+            builder::compute_col_scale(tmpl.num_cols, &tmpl.col_starts, &tmpl.values);
+        builder::apply_commitment_hold_col_scale_unscale(&mut col_scale, state_layout);
+        builder::apply_col_scale(tmpl, &col_scale);
         tmpl.col_scale.clone_from(&col_scale);
-        let row_scale = lp_builder::compute_row_scale(
+        let row_scale = builder::compute_row_scale(
             tmpl.num_rows,
             tmpl.num_cols,
             &tmpl.col_starts,
             &tmpl.row_indices,
             &tmpl.values,
         );
-        lp_builder::apply_row_scale(tmpl, &row_scale);
+        builder::apply_row_scale(tmpl, &row_scale);
         tmpl.row_scale.clone_from(&row_scale);
 
         let post_scaling = compute_coefficient_range(tmpl);
@@ -237,8 +237,8 @@ mod tests {
         compute_cumulative_discount_factors, compute_per_stage_discount_factors,
         postprocess_templates,
     };
-    use crate::indexer::StateSpace;
-    use crate::lp_builder::{StageGeometry, StageTemplates};
+    use crate::lp::builder::{StageGeometry, StageTemplates};
+    use crate::lp::indexer::StateSpace;
     use crate::test_support::state_layout_full;
     use chrono::NaiveDate;
     use cobre_core::temporal::{

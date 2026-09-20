@@ -11,9 +11,10 @@ use cobre_solver::SolverInterface;
 use crate::{
     SddpError,
     context::{StageContext, TrainingContext},
+    cut::FutureCostFunction,
     dcs::{DcsParams, DcsSolveContext, build_initial_resident_set, lazy_solve_preloaded},
     risk_measure::RiskMeasure,
-    setup::node_graph::{OpeningSource, StageIdx},
+    setup::node_graph::{NodeId, OpeningSource, StageIdx},
     stage_solve::{StageInputs, run_stage_solve},
     state_exchange::ExchangeBuffers,
     workspace::{BasisStoreSliceMut, SolverWorkspace},
@@ -26,8 +27,8 @@ use super::{
         fill_external_opening_noise, load_backward_lp, patch_opening_bounds, resolve_backward_basis,
     },
     outcome_aggregation::{
-        accumulate_dcs_binding_counts, accumulate_opening_outcome, save_basis_at_omega_zero,
-        write_opening_outcome,
+        accumulate_dcs_binding_counts, accumulate_opening_outcome, fold_slot_increments_into_sync,
+        save_basis_at_omega_zero, write_opening_outcome,
     },
 };
 
@@ -557,17 +558,78 @@ pub(crate) fn process_by_scenario_backward<S: SolverInterface + Send>(
     );
     #[allow(clippy::cast_possible_truncation)]
     let forward_pass_index = node_relative_index as u32;
-    let pop = ws.backward_accum.slot_increments.len();
-    for slot in 0..pop {
-        let count = ws.backward_accum.slot_increments[slot];
-        if count > 0 {
-            ws.backward_accum.metadata_sync_contribution[slot] += count;
-        }
-    }
+    fold_slot_increments_into_sync(
+        &ws.backward_accum.slot_increments,
+        &mut ws.backward_accum.metadata_sync_contribution,
+        outcomes.total_metadata_len(),
+    );
     Ok(StagedCut {
         trial_state_idx: m,
         intercept: agg_intercept,
         coefficients_range,
         forward_pass_index,
     })
+}
+
+/// Merge each worker's staged cuts into `staged_cuts_buf`, order them by trial
+/// state, and commit one cut per trial point to the FCF. `trial_state_idx` is
+/// globally unique across workers, so the committed order — and thus the cut
+/// set — is independent of worker count and completion order. `staged_cuts_buf`
+/// is the caller-owned scratch (`BackwardPassState::staged_cuts_buf`), cleared
+/// and reused, never reallocated on the hot path.
+///
+/// # Errors
+/// Returns the first failing worker's [`SddpError`]; on error no cut is committed.
+// Rationale: disjoint borrows (worker_staged, workspaces, fcf, the staged-cut
+// scratch) plus the node/pool/iteration commit scalars; a struct would add
+// indirection without reducing the caller's borrow count.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn by_scenario_finish<S: SolverInterface>(
+    worker_staged: Vec<Result<(usize, Vec<StagedCut>), SddpError>>,
+    workspaces: &[SolverWorkspace<S>],
+    trial_points: &[usize],
+    cut_n_state: usize,
+    fcf: &mut FutureCostFunction,
+    node_id: NodeId,
+    pool: usize,
+    iteration: u64,
+    staged_cuts_buf: &mut Vec<(usize, StagedCut)>,
+) -> Result<usize, SddpError> {
+    staged_cuts_buf.clear();
+    let mut worker_failure: Option<SddpError> = None;
+    for worker_result in worker_staged {
+        match worker_result {
+            Ok((w, cuts)) => staged_cuts_buf.extend(cuts.into_iter().map(|cut| (w, cut))),
+            Err(e) => {
+                worker_failure = Some(e);
+                break;
+            }
+        }
+    }
+
+    if let Some(e) = worker_failure {
+        return Err(e);
+    }
+    // `trial_state_idx` is the SOLE sort key: globally unique across workers
+    // (disjoint contiguous partitions), so the merge order is identical regardless
+    // of worker index.
+    staged_cuts_buf.sort_by_key(|(_, cut)| cut.trial_state_idx);
+    debug_assert_eq!(staged_cuts_buf.len(), trial_points.len());
+    for (w, cut) in &*staged_cuts_buf {
+        let range = cut.coefficients_range.clone();
+        let arena = &workspaces[*w].backward_accum.agg_arena;
+        debug_assert!(
+            range.len() == cut_n_state && range.end <= arena.len(),
+            "coefficients_range must span exactly the pool's cut n_state and lie within the worker arena"
+        );
+        fcf.add_cut(
+            node_id,
+            pool,
+            iteration,
+            cut.forward_pass_index,
+            cut.intercept,
+            &arena[range],
+        );
+    }
+    Ok(staged_cuts_buf.len())
 }

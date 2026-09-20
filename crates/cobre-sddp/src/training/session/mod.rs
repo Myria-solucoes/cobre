@@ -7,7 +7,7 @@ use cobre_comm::CommError::CollectiveFailed;
 use cobre_solver::SolverError;
 use cobre_solver::freeze_rows_into_template;
 
-use crate::indexer::CutSlot;
+use crate::lp::indexer::CutSlot;
 
 use crate::cut_selection::CutSelectionStrategy::Dominated;
 use crate::cut_selection::CutSelectionStrategy::Dynamic;
@@ -1552,9 +1552,9 @@ mod tests {
         cut::fcf::FutureCostFunction,
         error::SddpError,
         horizon_mode::HorizonMode,
-        indexer::{CutStateProjection, StateSpace, StudyDimensions},
         inflow_method::InflowNonNegativityMethod,
-        lp_builder::StateBox,
+        lp::builder::StateBox,
+        lp::indexer::{CutStateProjection, StateSpace, StudyDimensions},
         risk_measure::RiskMeasure,
         setup::node_graph::StageIdx,
         setup::{

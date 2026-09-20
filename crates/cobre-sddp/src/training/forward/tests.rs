@@ -33,9 +33,9 @@ use crate::{
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
     horizon_mode::HorizonMode,
-    indexer::StateSpace,
     inflow_method::InflowNonNegativityMethod,
-    lp_builder::PatchBuffer,
+    lp::builder::PatchBuffer,
+    lp::indexer::StateSpace,
     risk_measure::RiskMeasure,
     setup::{NodeId, NodePos},
     test_support::{self, permissive_state_boxes},
@@ -3536,7 +3536,7 @@ mod dcs_forward {
 
     use crate::DEFAULT_COST_SCALE_FACTOR;
     use crate::inflow_method::InflowNonNegativityMethod;
-    use crate::lp_builder::{PatchBuffer, StateBox};
+    use crate::lp::builder::{PatchBuffer, StateBox};
     use crate::setup::{NodeId, NodePos, StageIdx};
     use crate::test_support;
     use crate::trajectory::TrajectoryRecord;
@@ -3985,7 +3985,7 @@ mod transit_bucket_copy_gap {
     use crate::cut::FutureCostFunction;
     use crate::horizon_mode::HorizonMode;
     use crate::inflow_method::InflowNonNegativityMethod;
-    use crate::lp_builder::{PatchBuffer, StageGeometry, StateBox};
+    use crate::lp::builder::{PatchBuffer, StageGeometry, StateBox};
     use crate::setup::{NodeId, NodePos, StageIdx};
     use crate::test_support;
     use crate::trajectory::TrajectoryRecord;

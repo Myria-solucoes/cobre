@@ -26,19 +26,6 @@ impl ExecutionTopology {
         self.hosts.len()
     }
 
-    /// Returns `true` if all hosts have the same number of ranks.
-    ///
-    /// Returns `true` for empty host lists (vacuously homogeneous) and for
-    /// single-host deployments.
-    #[must_use]
-    pub fn is_homogeneous(&self) -> bool {
-        let mut iter = self.hosts.iter().map(|h| h.ranks.len());
-        match iter.next() {
-            None => true,
-            Some(first) => iter.all(|n| n == first),
-        }
-    }
-
     /// Hostname of the first (or only) host.
     ///
     /// Returns `"unknown"` if the host list is empty.
@@ -120,30 +107,6 @@ mod tests {
     fn test_num_hosts_multiple() {
         let topo = make_topology(&[4, 4]);
         assert_eq!(topo.num_hosts(), 2);
-    }
-
-    #[test]
-    fn test_is_homogeneous_empty() {
-        let topo = make_topology(&[]);
-        assert!(topo.is_homogeneous());
-    }
-
-    #[test]
-    fn test_is_homogeneous_single_host() {
-        let topo = make_topology(&[4]);
-        assert!(topo.is_homogeneous());
-    }
-
-    #[test]
-    fn test_is_homogeneous_equal_rank_counts() {
-        let topo = make_topology(&[4, 4]);
-        assert!(topo.is_homogeneous());
-    }
-
-    #[test]
-    fn test_is_homogeneous_unequal_rank_counts() {
-        let topo = make_topology(&[4, 3]);
-        assert!(!topo.is_homogeneous());
     }
 
     #[test]

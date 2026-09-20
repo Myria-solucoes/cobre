@@ -18,9 +18,9 @@ use cobre_stochastic::{ClassSampleRequest, ForwardNoiseTables, ForwardSampler, S
 use crate::energy_conversion::EnergyConversionSet;
 use crate::error::SddpError::Infeasible;
 use crate::error::SddpError::Solver;
-use crate::indexer::StudyDimensions;
-use crate::lp_builder::GenericConstraintRowEntry;
-use crate::lp_builder::StageGeometry;
+use crate::lp::builder::GenericConstraintRowEntry;
+use crate::lp::builder::StageGeometry;
+use crate::lp::indexer::StudyDimensions;
 use crate::noise::DownstreamAccumState;
 use crate::noise::LagAccumState;
 use crate::stage_solve::StageInputs;
@@ -32,7 +32,7 @@ use crate::{
     FutureCostFunction, SddpError,
     context::{StageContext, TrainingContext},
     dcs::{DcsSolveContext, build_initial_resident_set, lazy_solve_preloaded},
-    indexer::{HydroCellIndex, StateSpace},
+    lp::indexer::{HydroCellIndex, StateSpace},
     setup::node_graph::{NodeId, NodePos, StageIdx, Traversal, advance_sampled_node},
     simulation::{
         config::SimulationConfig,

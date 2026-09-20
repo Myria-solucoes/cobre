@@ -13,12 +13,16 @@ use assert_cmd::prelude::*;
 use predicates::prelude::*;
 use tempfile::TempDir;
 
+mod common;
+use common::PENALTIES_JSON;
+
 fn cobre() -> Command {
     Command::new(assert_cmd::cargo::cargo_bin!("cobre"))
 }
 
-// Minimal valid-case fixture, duplicated (not shared) with cli_run.rs to keep
-// this test module self-contained.
+// Minimal valid-case fixture; only the penalties config is shared (via
+// `common`) — the rest is duplicated with cli_run.rs to keep this test
+// module self-contained.
 
 const CONFIG_JSON: &str = r#"{
     "training": {
@@ -28,31 +32,6 @@ const CONFIG_JSON: &str = r#"{
         ],
         "scenario_source": { "inflow": { "scheme": "in_sample" }, "seed": 42 }
     }
-}"#;
-
-const PENALTIES_JSON: &str = r#"{
-    "bus": {
-        "deficit_segments": [
-            { "depth_mw": 500.0, "cost": 1000.0 },
-            { "depth_mw": null,  "cost": 5000.0 }
-        ],
-        "excess_cost": 100.0
-    },
-    "line": { "exchange_cost": 2.0 },
-    "hydro": {
-        "spillage_cost": 0.01,
-        "turbined_cost": 0.05,
-        "diversion_cost": 0.1,
-        "storage_violation_below_cost": 10000.0,
-        "filling_target_violation_cost": 50000.0,
-        "turbined_violation_below_cost": 500.0,
-        "outflow_violation_below_cost": 500.0,
-        "outflow_violation_above_cost": 500.0,
-        "generation_violation_below_cost": 1000.0,
-        "evaporation_violation_cost": 5000.0,
-        "water_withdrawal_violation_cost": 1000.0
-    },
-    "non_controllable_source": { "curtailment_cost": 0.005 }
 }"#;
 
 const STAGES_JSON: &str = r#"{

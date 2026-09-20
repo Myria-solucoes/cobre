@@ -49,7 +49,7 @@ use cobre_sddp::{
     hydro_models::PrepareHydroModelsResult,
     indexer::{CutStateProjection, StateSpace, StudyDimensions},
     inflow_method::InflowNonNegativityMethod,
-    lp_builder::{PatchBuffer, StageGeometry, StateBox, build_stage_templates_resolving_layout},
+    lp::builder::{PatchBuffer, StageGeometry, StateBox, build_stage_templates_resolving_layout},
     risk_measure::RiskMeasure,
     setup::node_graph::Traversal,
     simulate,

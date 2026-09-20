@@ -2,11 +2,9 @@
 //!
 //! One printing function per run phase, each emitting its section independently
 //! so the caller can place it at the right point in the execution flow. Every
-//! `print_*` writer ignores write errors (fire-and-forget). Most pair with a
-//! `format_*_string` returning the same content for tests; `print_training_summary`,
-//! `print_simulation_summary`, and `print_output_path` instead share their exact
-//! rendered lines with tests through a private `*_lines`/`*_line` helper, so tests
-//! assert on the same code path production prints from.
+//! `print_*` writer ignores write errors (fire-and-forget) and shares its exact
+//! rendered lines with tests through a private `*_lines`/`*_line` helper, so
+//! tests assert on the same code path production prints from.
 
 use chrono::NaiveDate;
 use cobre_comm::ExecutionTopology;
@@ -25,17 +23,20 @@ pub use cobre_sddp::{
     ModelProvenanceReport, ProvenanceSource,
 };
 
+/// The exact lines `print_hydro_model_summary` writes, one per `stderr` line.
+fn hydro_model_summary_lines(summary: &HydroModelSummary) -> Vec<String> {
+    vec![
+        format!("{}", console::style("Hydro models").bold()),
+        format!("  Production:    {}", format_production_line(summary)),
+        format!("  Evaporation:   {}", format_evaporation_line(summary)),
+    ]
+}
+
 /// Print the hydro model preprocessing summary to `stderr`.
 pub fn print_hydro_model_summary(stderr: &Term, summary: &HydroModelSummary) {
-    let _ = stderr.write_line(&format!("{}", console::style("Hydro models").bold()));
-    let _ = stderr.write_line(&format!(
-        "  Production:    {}",
-        format_production_line(summary)
-    ));
-    let _ = stderr.write_line(&format!(
-        "  Evaporation:   {}",
-        format_evaporation_line(summary)
-    ));
+    for line in hydro_model_summary_lines(summary) {
+        let _ = stderr.write_line(&line);
+    }
 }
 
 /// Format a sorted list of rank indices into a compact range string.
@@ -219,73 +220,38 @@ fn format_evaporation_line(summary: &HydroModelSummary) -> String {
     )
 }
 
-/// Render the hydro model preprocessing summary as a plain-text `String`.
-#[cfg(test)]
-pub fn format_hydro_model_summary_string(summary: &HydroModelSummary) -> String {
-    let mut lines: Vec<String> = Vec::new();
-    lines.push("Hydro models".to_string());
-    lines.push(format!(
-        "  Production:    {}",
-        format_production_line(summary)
-    ));
-    lines.push(format!(
-        "  Evaporation:   {}",
-        format_evaporation_line(summary)
-    ));
-    lines.join("\n")
+/// The exact lines `print_setup_summary` writes, one per `stderr` line.
+fn setup_summary_lines(timings: &SetupTimings) -> Vec<String> {
+    vec![
+        format!("{}", console::style("Setup").bold()),
+        format!(
+            "  Load:            {}",
+            format_split_duration(timings.load_seconds)
+        ),
+        format!(
+            "  Stochastic fit:  {}",
+            format_split_duration(timings.stochastic_fit_seconds)
+        ),
+        format!(
+            "  Production fit:  {}",
+            format_split_duration(timings.production_fit_seconds)
+        ),
+        format!(
+            "  Evaporation fit: {}",
+            format_split_duration(timings.evaporation_fit_seconds)
+        ),
+        format!(
+            "  Broadcast:       {}",
+            format_split_duration(timings.broadcast_seconds)
+        ),
+    ]
 }
 
 /// Print the per-phase setup timing summary to `stderr`.
 pub fn print_setup_summary(stderr: &Term, timings: &SetupTimings) {
-    let _ = stderr.write_line(&format!("{}", console::style("Setup").bold()));
-    let _ = stderr.write_line(&format!(
-        "  Load:            {}",
-        format_split_duration(timings.load_seconds)
-    ));
-    let _ = stderr.write_line(&format!(
-        "  Stochastic fit:  {}",
-        format_split_duration(timings.stochastic_fit_seconds)
-    ));
-    let _ = stderr.write_line(&format!(
-        "  Production fit:  {}",
-        format_split_duration(timings.production_fit_seconds)
-    ));
-    let _ = stderr.write_line(&format!(
-        "  Evaporation fit: {}",
-        format_split_duration(timings.evaporation_fit_seconds)
-    ));
-    let _ = stderr.write_line(&format!(
-        "  Broadcast:       {}",
-        format_split_duration(timings.broadcast_seconds)
-    ));
-}
-
-/// Render the per-phase setup timing summary as a plain-text `String`.
-#[cfg(test)]
-pub fn format_setup_summary_string(timings: &SetupTimings) -> String {
-    let mut lines: Vec<String> = Vec::new();
-    lines.push("Setup".to_string());
-    lines.push(format!(
-        "  Load:            {}",
-        format_split_duration(timings.load_seconds)
-    ));
-    lines.push(format!(
-        "  Stochastic fit:  {}",
-        format_split_duration(timings.stochastic_fit_seconds)
-    ));
-    lines.push(format!(
-        "  Production fit:  {}",
-        format_split_duration(timings.production_fit_seconds)
-    ));
-    lines.push(format!(
-        "  Evaporation fit: {}",
-        format_split_duration(timings.evaporation_fit_seconds)
-    ));
-    lines.push(format!(
-        "  Broadcast:       {}",
-        format_split_duration(timings.broadcast_seconds)
-    ));
-    lines.join("\n")
+    for line in setup_summary_lines(timings) {
+        let _ = stderr.write_line(&line);
+    }
 }
 
 /// Format the AR detail parenthetical for the provenance summary line.
@@ -299,59 +265,27 @@ fn provenance_ar_detail(report: &ModelProvenanceReport) -> String {
     }
 }
 
-/// Print the model provenance summary to `stderr`.
-pub fn print_provenance_summary(stderr: &Term, report: &ModelProvenanceReport) {
-    let _ = stderr.write_line(&format!("{}", console::style("Model provenance").bold()));
-    let _ = stderr.write_line(&format!(
-        "  Estimation path: {}",
-        report.inflow.estimation_path
-    ));
-    let _ = stderr.write_line(&format!(
-        "  Seasonal stats:  {}",
-        report.inflow.seasonal_stats_source
-    ));
+/// The exact lines `print_provenance_summary` writes, one per `stderr` line.
+fn provenance_summary_lines(report: &ModelProvenanceReport) -> Vec<String> {
     let ar_detail = provenance_ar_detail(report);
-    let _ = stderr.write_line(&format!(
-        "  AR coefficients: {}{}",
-        report.inflow.ar_coefficients_source, ar_detail
-    ));
-    let _ = stderr.write_line(&format!(
-        "  Correlation:     {}",
-        report.inflow.correlation_source
-    ));
-    let _ = stderr.write_line(&format!(
-        "  Opening tree:    {}",
-        report.inflow.opening_tree_source
-    ));
+    vec![
+        format!("{}", console::style("Model provenance").bold()),
+        format!("  Estimation path: {}", report.inflow.estimation_path),
+        format!("  Seasonal stats:  {}", report.inflow.seasonal_stats_source),
+        format!(
+            "  AR coefficients: {}{}",
+            report.inflow.ar_coefficients_source, ar_detail
+        ),
+        format!("  Correlation:     {}", report.inflow.correlation_source),
+        format!("  Opening tree:    {}", report.inflow.opening_tree_source),
+    ]
 }
 
-/// Render the model provenance summary as a plain-text `String`.
-#[cfg(test)]
-pub fn format_provenance_summary_string(report: &ModelProvenanceReport) -> String {
-    let mut lines: Vec<String> = Vec::new();
-    lines.push("Model provenance".to_string());
-    lines.push(format!(
-        "  Estimation path: {}",
-        report.inflow.estimation_path
-    ));
-    lines.push(format!(
-        "  Seasonal stats:  {}",
-        report.inflow.seasonal_stats_source
-    ));
-    let ar_detail = provenance_ar_detail(report);
-    lines.push(format!(
-        "  AR coefficients: {}{}",
-        report.inflow.ar_coefficients_source, ar_detail
-    ));
-    lines.push(format!(
-        "  Correlation:     {}",
-        report.inflow.correlation_source
-    ));
-    lines.push(format!(
-        "  Opening tree:    {}",
-        report.inflow.opening_tree_source
-    ));
-    lines.join("\n")
+/// Print the model provenance summary to `stderr`.
+pub fn print_provenance_summary(stderr: &Term, report: &ModelProvenanceReport) {
+    for line in provenance_summary_lines(report) {
+        let _ = stderr.write_line(&line);
+    }
 }
 
 /// The `Reconciliation:` row's value: the four-total tally with a compact
@@ -371,6 +305,24 @@ fn format_boundary_reconciliation_row(report: &BoundaryReconciliationReport) -> 
     )
 }
 
+/// The exact lines `print_boundary_summary` writes, one per `stderr` line.
+fn boundary_summary_lines(
+    loaded: usize,
+    boundary_date: NaiveDate,
+    path: &Path,
+    report: &BoundaryReconciliationReport,
+) -> Vec<String> {
+    vec![
+        format!("{}", console::style("Boundary policy").bold()),
+        format!("  Cuts loaded:    {loaded} (priced at {boundary_date})"),
+        format!("  Source:         {}", path.display()),
+        format!(
+            "  Reconciliation: {}",
+            format_boundary_reconciliation_row(report)
+        ),
+    ]
+}
+
 /// Print the boundary-policy load summary to `stderr`.
 pub fn print_boundary_summary(
     stderr: &Term,
@@ -379,36 +331,9 @@ pub fn print_boundary_summary(
     path: &Path,
     report: &BoundaryReconciliationReport,
 ) {
-    let _ = stderr.write_line(&format!("{}", console::style("Boundary policy").bold()));
-    let _ = stderr.write_line(&format!(
-        "  Cuts loaded:    {loaded} (priced at {boundary_date})"
-    ));
-    let _ = stderr.write_line(&format!("  Source:         {}", path.display()));
-    let _ = stderr.write_line(&format!(
-        "  Reconciliation: {}",
-        format_boundary_reconciliation_row(report)
-    ));
-}
-
-/// Render the boundary-policy load summary as a plain-text `String`.
-#[cfg(test)]
-pub fn format_boundary_summary_string(
-    loaded: usize,
-    boundary_date: NaiveDate,
-    path: &Path,
-    report: &BoundaryReconciliationReport,
-) -> String {
-    let mut lines: Vec<String> = Vec::new();
-    lines.push("Boundary policy".to_string());
-    lines.push(format!(
-        "  Cuts loaded:    {loaded} (priced at {boundary_date})"
-    ));
-    lines.push(format!("  Source:         {}", path.display()));
-    lines.push(format!(
-        "  Reconciliation: {}",
-        format_boundary_reconciliation_row(report)
-    ));
-    lines.join("\n")
+    for line in boundary_summary_lines(loaded, boundary_date, path, report) {
+        let _ = stderr.write_line(&line);
+    }
 }
 
 fn fmt_sci(v: f64) -> String {
@@ -1535,7 +1460,7 @@ mod tests {
 
     // ── HydroModelSummary tests ────────────────────────────────────────────
 
-    use super::{HydroModelSummary, format_hydro_model_summary_string, print_hydro_model_summary};
+    use super::{HydroModelSummary, hydro_model_summary_lines, print_hydro_model_summary};
     use cobre_core::EntityId;
     use cobre_sddp::{FphaHydroDetail, ProductionModelSource};
 
@@ -1596,7 +1521,7 @@ mod tests {
     #[test]
     fn format_hydro_model_summary_with_fpha_contains_key_terms() {
         let summary = make_hydro_model_summary_mixed();
-        let s = format_hydro_model_summary_string(&summary);
+        let s = hydro_model_summary_lines(&summary).join("\n");
 
         assert!(
             s.contains("2 FPHA"),
@@ -1624,7 +1549,7 @@ mod tests {
     #[test]
     fn format_hydro_model_summary_without_fpha_contains_constant_not_fpha() {
         let summary = make_hydro_model_summary_all_constant();
-        let s = format_hydro_model_summary_string(&summary);
+        let s = hydro_model_summary_lines(&summary).join("\n");
 
         assert!(
             s.contains("constant"),
@@ -1663,7 +1588,7 @@ mod tests {
             n_user_supplied_ref: 0,
             n_default_midpoint_ref: 0,
         };
-        let s = format_hydro_model_summary_string(&summary);
+        let s = hydro_model_summary_lines(&summary).join("\n");
 
         assert!(
             s.contains("2 FPHA"),
@@ -1691,7 +1616,7 @@ mod tests {
     #[test]
     fn format_hydro_model_summary_contains_header() {
         let summary = make_hydro_model_summary_mixed();
-        let s = format_hydro_model_summary_string(&summary);
+        let s = hydro_model_summary_lines(&summary).join("\n");
 
         assert!(
             s.contains("Hydro models"),
@@ -1703,7 +1628,7 @@ mod tests {
     #[test]
     fn format_hydro_model_summary_mixed_production_line() {
         let summary = make_hydro_model_summary_mixed();
-        let s = format_hydro_model_summary_string(&summary);
+        let s = hydro_model_summary_lines(&summary).join("\n");
 
         assert!(
             s.contains("10"),
@@ -1719,7 +1644,7 @@ mod tests {
     #[test]
     fn format_hydro_model_summary_all_fpha_counts_only() {
         let summary = make_hydro_model_summary_all_fpha();
-        let s = format_hydro_model_summary_string(&summary);
+        let s = hydro_model_summary_lines(&summary).join("\n");
 
         assert!(
             s.contains("165 FPHA"),
@@ -1754,7 +1679,7 @@ mod tests {
             n_user_supplied_ref: 1,
             n_default_midpoint_ref: 0,
         };
-        let s = format_hydro_model_summary_string(&summary);
+        let s = hydro_model_summary_lines(&summary).join("\n");
 
         assert!(
             s.contains("1 linearized"),
@@ -1777,7 +1702,7 @@ mod tests {
     #[test]
     fn format_hydro_model_summary_plural_evaporation() {
         let summary = make_hydro_model_summary_mixed();
-        let s = format_hydro_model_summary_string(&summary);
+        let s = hydro_model_summary_lines(&summary).join("\n");
 
         assert!(
             s.contains("3 linearized"),
@@ -1819,7 +1744,7 @@ mod tests {
             n_user_supplied_ref: 0,
             n_default_midpoint_ref: 2,
         };
-        let s = format_hydro_model_summary_string(&summary);
+        let s = hydro_model_summary_lines(&summary).join("\n");
         assert!(
             s.contains("2 linearized"),
             "all-midpoint must contain '2 linearized', got: {s}"
@@ -1847,7 +1772,7 @@ mod tests {
             n_user_supplied_ref: 3,
             n_default_midpoint_ref: 0,
         };
-        let s = format_hydro_model_summary_string(&summary);
+        let s = hydro_model_summary_lines(&summary).join("\n");
         assert!(
             !s.contains("v_ref"),
             "evaporation reference qualifier 'v_ref' must be relocated out of the display, got: {s}"
@@ -1879,7 +1804,7 @@ mod tests {
             n_user_supplied_ref: 2,
             n_default_midpoint_ref: 1,
         };
-        let s = format_hydro_model_summary_string(&summary);
+        let s = hydro_model_summary_lines(&summary).join("\n");
         assert!(
             !s.contains("v_ref"),
             "evaporation reference qualifier 'v_ref' must be relocated out of the display, got: {s}"
@@ -1902,7 +1827,7 @@ mod tests {
     #[test]
     fn test_evaporation_line_no_evaporation() {
         let summary = make_hydro_model_summary_all_constant();
-        let s = format_hydro_model_summary_string(&summary);
+        let s = hydro_model_summary_lines(&summary).join("\n");
         assert!(
             !s.contains("v_ref"),
             "zero-evaporation must NOT contain 'v_ref', got: {s}"
@@ -1915,7 +1840,7 @@ mod tests {
 
     // ── SetupTimings tests ─────────────────────────────────────────────────
 
-    use super::{SetupTimings, format_setup_summary_string, print_setup_summary};
+    use super::{SetupTimings, print_setup_summary, setup_summary_lines};
 
     fn make_setup_timings() -> SetupTimings {
         SetupTimings {
@@ -1931,7 +1856,7 @@ mod tests {
     #[test]
     fn format_setup_summary_contains_phase_labels() {
         let timings = make_setup_timings();
-        let s = format_setup_summary_string(&timings);
+        let s = setup_summary_lines(&timings).join("\n");
 
         assert!(
             s.contains("Setup"),
@@ -1969,7 +1894,7 @@ mod tests {
 
     use super::{
         HydroProductionProvenance, InflowProvenance, ModelProvenanceReport, ProvenanceSource,
-        format_provenance_summary_string, print_provenance_summary,
+        print_provenance_summary, provenance_summary_lines,
     };
 
     fn make_provenance_report_full_estimation() -> ModelProvenanceReport {
@@ -2023,7 +1948,7 @@ mod tests {
     #[test]
     fn format_provenance_summary_contains_all_section_keys() {
         let report = make_provenance_report_full_estimation();
-        let s = format_provenance_summary_string(&report);
+        let s = provenance_summary_lines(&report).join("\n");
         assert!(
             s.contains("Model provenance"),
             "output must contain header 'Model provenance', got: {s}"
@@ -2053,7 +1978,7 @@ mod tests {
     #[test]
     fn format_provenance_summary_full_estimation_includes_ar_detail() {
         let report = make_provenance_report_full_estimation();
-        let s = format_provenance_summary_string(&report);
+        let s = provenance_summary_lines(&report).join("\n");
         assert!(
             s.contains("full_estimation"),
             "output must contain 'full_estimation' estimation path, got: {s}"
@@ -2067,7 +1992,7 @@ mod tests {
     #[test]
     fn format_provenance_summary_deterministic_no_ar_detail() {
         let report = make_provenance_report_deterministic();
-        let s = format_provenance_summary_string(&report);
+        let s = provenance_summary_lines(&report).join("\n");
         assert!(
             s.contains("deterministic"),
             "output must contain 'deterministic' estimation path, got: {s}"
@@ -2099,7 +2024,7 @@ mod tests {
             },
             hydro_production: HydroProductionProvenance::default(),
         };
-        let s = format_provenance_summary_string(&report);
+        let s = provenance_summary_lines(&report).join("\n");
         assert!(
             s.contains("user_file"),
             "output must contain 'user_file' for UserFile source, got: {s}"
@@ -2141,7 +2066,7 @@ mod tests {
             n_evaporation_ref_user_supplied: 4,
             n_evaporation_ref_default_midpoint: 3,
         });
-        let s = format_provenance_summary_string(&report);
+        let s = provenance_summary_lines(&report).join("\n");
         assert!(s.contains("Model provenance"), "got: {s}");
         assert!(s.contains("Estimation path:"), "got: {s}");
         assert!(
@@ -2169,9 +2094,7 @@ mod tests {
 
     use chrono::NaiveDate;
 
-    use super::{
-        BoundaryReconciliationReport, format_boundary_summary_string, print_boundary_summary,
-    };
+    use super::{BoundaryReconciliationReport, boundary_summary_lines, print_boundary_summary};
     use cobre_sddp::{AnticipatedCoverage, FamilyTally};
 
     fn make_reconciled_boundary_report() -> BoundaryReconciliationReport {
@@ -2204,12 +2127,8 @@ mod tests {
     fn format_boundary_summary_reconciled_renders_house_style() {
         let report = make_reconciled_boundary_report();
         let boundary_date = NaiveDate::from_ymd_opt(2031, 12, 1).unwrap();
-        let s = format_boundary_summary_string(
-            10_000,
-            boundary_date,
-            Path::new("/case/boundary"),
-            &report,
-        );
+        let s = boundary_summary_lines(10_000, boundary_date, Path::new("/case/boundary"), &report)
+            .join("\n");
 
         assert!(
             s.contains("Boundary policy"),
@@ -2233,12 +2152,8 @@ mod tests {
     fn format_boundary_summary_dimension_only_renders_notice() {
         let report = BoundaryReconciliationReport::default();
         let boundary_date = NaiveDate::from_ymd_opt(2030, 2, 1).unwrap();
-        let s = format_boundary_summary_string(
-            500,
-            boundary_date,
-            Path::new("/case/boundary"),
-            &report,
-        );
+        let s = boundary_summary_lines(500, boundary_date, Path::new("/case/boundary"), &report)
+            .join("\n");
 
         assert!(
             s.contains("Reconciliation: dimension-only load (entity manifest absent)"),
@@ -2258,12 +2173,8 @@ mod tests {
             &report,
         );
 
-        let s = format_boundary_summary_string(
-            10_000,
-            boundary_date,
-            Path::new("/case/boundary"),
-            &report,
-        );
+        let s = boundary_summary_lines(10_000, boundary_date, Path::new("/case/boundary"), &report)
+            .join("\n");
         assert!(
             s.contains("2031-12-01"),
             "the rendered line must contain the ISO date: {s}"

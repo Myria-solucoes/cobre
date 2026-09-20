@@ -19,7 +19,7 @@ use crate::{
     energy_conversion::EnergyConversionSet,
     horizon_mode::HorizonMode,
     inflow_method::InflowNonNegativityMethod,
-    lp_builder::PatchBuffer,
+    lp::builder::PatchBuffer,
     setup::node_graph::Traversal,
     simulation::{
         config::SimulationConfig,
@@ -1946,7 +1946,7 @@ mod dcs_simulation {
     use crate::setup::NodePos;
 
     use crate::inflow_method::InflowNonNegativityMethod;
-    use crate::lp_builder::{PatchBuffer, StageGeometry, StateBox};
+    use crate::lp::builder::{PatchBuffer, StageGeometry, StateBox};
     use crate::setup::NodeId;
     use crate::setup::node_graph::StageIdx;
     use crate::simulation::types::{SimulationCostResult, SimulationStageResult};
@@ -2380,9 +2380,9 @@ mod anticipated_ring_matches_forward_propagation {
     use crate::cut::FutureCostFunction;
     use crate::energy_conversion::EnergyConversionSet;
     use crate::horizon_mode::HorizonMode;
-    use crate::indexer::StateSpace;
     use crate::inflow_method::InflowNonNegativityMethod;
-    use crate::lp_builder::{PatchBuffer, StateBox};
+    use crate::lp::builder::{PatchBuffer, StateBox};
+    use crate::lp::indexer::StateSpace;
     use crate::setup::NodeId;
     use crate::setup::NodePos;
     use crate::setup::node_graph::StageIdx;

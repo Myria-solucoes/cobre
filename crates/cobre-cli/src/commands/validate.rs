@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 use chrono::NaiveDate;
 use clap::Args;
 use cobre_core::{ScalarParameter, System};
-use cobre_io::{BoundaryPolicy, Config, LoadError, validate_case_with_artifacts};
+use cobre_io::{BoundaryPolicy, Config, LoadError, ValidationReport, validate_case_with_artifacts};
 use cobre_sddp::hydro_models::prepare_hydro_models_from_artifacts;
 use cobre_sddp::validate_phases::{PrepPhase, prep_phase_metadata};
 use cobre_sddp::{
@@ -140,6 +140,33 @@ fn format_constraint_description(
     for line in error_lines {
         let _ = term.write_line(&format!("{} {line}", style("error:").red().bold()));
     }
+}
+
+/// The `Validation: ... warnings` header plus one `warning:` line per entry;
+/// empty when `report.warning_count` is zero. `report.error_count` is always
+/// zero here — [`validate_case_with_artifacts`] returns `Err` on any error.
+fn report_lines(report: &ValidationReport, case_dir: &Path) -> Vec<String> {
+    if report.warning_count == 0 {
+        return Vec::new();
+    }
+    let mut lines = vec![format!(
+        "Validation: 0 errors, {} warnings in {}",
+        report.warning_count,
+        case_dir.display()
+    )];
+    for entry in &report.warnings {
+        let location = if let Some(entity) = &entry.entity {
+            format!("{} ({})", entry.file, entity)
+        } else {
+            entry.file.clone()
+        };
+        lines.push(format!(
+            "{} {location}: {}",
+            style("warning:").yellow().bold(),
+            entry.message
+        ));
+    }
+    lines
 }
 
 /// Compute a pre-solver preparation error's stable phase kind (the same
@@ -480,24 +507,8 @@ pub fn execute(args: ValidateArgs) -> Result<(), CliError> {
             prepared.system.n_thermals(),
             prepared.system.n_lines(),
         ));
-        if report.warning_count > 0 {
-            let _ = stdout.write_line(&format!(
-                "Validation: 0 errors, {} warnings in {}",
-                report.warning_count,
-                args.case_dir.display()
-            ));
-            for entry in &report.warnings {
-                let location = if let Some(entity) = &entry.entity {
-                    format!("{} ({})", entry.file, entity)
-                } else {
-                    entry.file.clone()
-                };
-                let _ = stdout.write_line(&format!(
-                    "{} {location}: {}",
-                    style("warning:").yellow().bold(),
-                    entry.message
-                ));
-            }
+        for line in report_lines(&report, &args.case_dir) {
+            let _ = stdout.write_line(&line);
         }
     }
 
@@ -542,35 +553,7 @@ pub fn execute(args: ValidateArgs) -> Result<(), CliError> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use std::fmt::Write as _;
-
     use cobre_io::{ReportEntry, ValidationReport};
-
-    fn format_report_to_string(report: &ValidationReport, path: &Path) -> String {
-        let mut out = String::new();
-        let _ = writeln!(
-            out,
-            "Validation: {} errors, {} warnings in {}",
-            report.error_count,
-            report.warning_count,
-            path.display()
-        );
-        for entry in &report.errors {
-            let _ = writeln!(out, "error: {}", format_entry(entry));
-        }
-        for entry in &report.warnings {
-            let _ = writeln!(out, "warning: {}", format_entry(entry));
-        }
-        out
-    }
-
-    fn format_entry(entry: &ReportEntry) -> String {
-        if let Some(entity) = &entry.entity {
-            format!("{}: {} ({})", entry.file, entry.message, entity)
-        } else {
-            format!("{}: {}", entry.file, entry.message)
-        }
-    }
 
     fn make_report() -> ValidationReport {
         ValidationReport {
@@ -594,19 +577,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn format_report_contains_error_label() {
-        let path = PathBuf::from("/case/dir");
-        let output = format_report_to_string(&make_report(), &path);
-        assert!(
-            output.contains("error:"),
-            "expected 'error:' in output, got: {output}"
-        );
-    }
-
-    #[test]
     fn format_report_contains_warning_label() {
         let path = PathBuf::from("/case/dir");
-        let output = format_report_to_string(&make_report(), &path);
+        let output = report_lines(&make_report(), &path).join("\n");
         assert!(
             output.contains("warning:"),
             "expected 'warning:' in output, got: {output}"
@@ -616,58 +589,20 @@ mod tests {
     #[test]
     fn format_report_contains_file_path() {
         let path = PathBuf::from("/case/dir");
-        let output = format_report_to_string(&make_report(), &path);
+        let output = report_lines(&make_report(), &path).join("\n");
         assert!(
-            output.contains("system/hydros.json"),
+            output.contains("system/thermals.json"),
             "expected file path in output, got: {output}"
-        );
-    }
-
-    #[test]
-    fn format_report_contains_error_message() {
-        let path = PathBuf::from("/case/dir");
-        let output = format_report_to_string(&make_report(), &path);
-        assert!(
-            output.contains("required file is missing"),
-            "expected error message in output, got: {output}"
         );
     }
 
     #[test]
     fn format_report_summary_header_present() {
         let path = PathBuf::from("/case/dir");
-        let output = format_report_to_string(&make_report(), &path);
+        let output = report_lines(&make_report(), &path).join("\n");
         assert!(
-            output.contains("1 errors") && output.contains("1 warnings"),
+            output.contains("0 errors") && output.contains("1 warnings"),
             "expected summary header with counts, got: {output}"
         );
-    }
-
-    #[test]
-    fn format_entry_with_entity() {
-        let entry = ReportEntry {
-            kind: "FileNotFound".to_string(),
-            file: "system/buses.json".to_string(),
-            entity: Some("bus_01".to_string()),
-            message: "missing required field".to_string(),
-        };
-        let result = format_entry(&entry);
-        assert!(result.contains("system/buses.json"), "{result}");
-        assert!(result.contains("missing required field"), "{result}");
-        assert!(result.contains("bus_01"), "{result}");
-    }
-
-    #[test]
-    fn format_entry_without_entity() {
-        let entry = ReportEntry {
-            kind: "FileNotFound".to_string(),
-            file: "system/buses.json".to_string(),
-            entity: None,
-            message: "missing required field".to_string(),
-        };
-        let result = format_entry(&entry);
-        assert!(result.contains("system/buses.json"), "{result}");
-        assert!(result.contains("missing required field"), "{result}");
-        assert!(!result.contains("(None)"), "{result}");
     }
 }

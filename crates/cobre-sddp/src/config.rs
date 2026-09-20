@@ -144,7 +144,8 @@ pub struct CutManagementConfig {
     /// Activity (dual-value) threshold below which a cut is a deactivation candidate.
     pub cut_activity_tolerance: f64,
 
-    /// Cuts pre-loaded from a warm-start policy; contributes to cut-pool capacity.
+    /// Warm-start cut count, inert (no production reader): cut-pool capacity is
+    /// owned per pool by `pool_capacity`'s `warm_start_count`, not by this field.
     pub warm_start_cuts: u32,
 
     /// Per-stage backward-pass risk measures; length must equal `num_stages`.

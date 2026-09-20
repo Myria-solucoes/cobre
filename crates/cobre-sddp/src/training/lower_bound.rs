@@ -21,7 +21,7 @@ use crate::{
     cut::row::build_cut_row_batch_into,
     error::SddpError,
     inflow_method::InflowNonNegativityMethod,
-    lp_builder::PatchBuffer,
+    lp::builder::PatchBuffer,
     noise::compute_effective_eta,
     rank_reconcile::reconcile_error_flag,
     risk_measure::RiskMeasure,
@@ -520,9 +520,9 @@ mod tests {
         cut::FutureCostFunction,
         error::SddpError,
         horizon_mode::HorizonMode,
-        indexer::{CutStateProjection, StateSpace, StudyDimensions},
         inflow_method::InflowNonNegativityMethod,
-        lp_builder::{PatchBuffer, StateBox},
+        lp::builder::{PatchBuffer, StateBox},
+        lp::indexer::{CutStateProjection, StateSpace, StudyDimensions},
         risk_measure::RiskMeasure,
         setup::node_graph::StageIdx,
         setup::{
@@ -2729,7 +2729,7 @@ mod tests {
     /// filling structure arrives ONLY via the loaded template and the `noise_scale`
     /// vector, never via a hand-written per-opening patch.
     ///
-    /// Modeled on the `lp_builder_never_references_dual_extraction` guard: a
+    /// Modeled on the `builder_never_references_dual_extraction` guard: a
     /// future "simplification" that hand-wires a filling patch into `lb_init_rank0`
     /// / `lb_evaluate_stage_0` (mirroring the NCS per-opening patch, which filling
     /// does NOT need because it is stage-deterministic) would re-introduce the

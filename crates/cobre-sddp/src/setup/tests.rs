@@ -4,8 +4,8 @@ use super::{
 };
 use crate::SddpError;
 use crate::hydro_models::{PrepareHydroModelsResult, ProductionModelSet, ResolvedProductionModel};
-use crate::indexer::StateSpace;
-use crate::lp_builder::M3S_TO_HM3;
+use crate::lp::builder::M3S_TO_HM3;
+use crate::lp::indexer::StateSpace;
 use crate::test_support;
 use cobre_stochastic::ExternalScenarioLibrary;
 use cobre_stochastic::season_cast::StageCalendar;

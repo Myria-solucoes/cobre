@@ -83,7 +83,7 @@ pub struct StateSpace {
 
     /// Commitment-hold INCOMING slots, the same layout as [`Self::commit_out`],
     /// pinned via [`StateSpace::state_to_lp_incoming_column`]. The slot
-    /// maturing this stage is also read directly by [`crate::lp_builder`]'s
+    /// maturing this stage is also read directly by [`crate::lp::builder`]'s
     /// commitment-fishing row fill.
     pub commit_in: Range<usize>,
 
@@ -519,7 +519,7 @@ impl StateSpace {
     /// pinned to `lb = ub = v` via `set_col_bounds` (never an equality/fixing
     /// row; the LP has no state-fixing row range). The returned columns are
     /// exactly those
-    /// [`fill_col_state_patches`](crate::lp_builder::PatchBuffer::fill_col_state_patches)
+    /// [`fill_col_state_patches`](crate::lp::builder::PatchBuffer::fill_col_state_patches)
     /// writes, in state-vector order; the backward pass reads
     /// `view.reduced_costs[col]` at them for the cut subgradient, one per
     /// component `j ∈ [0, n_state)`.
@@ -632,6 +632,27 @@ impl StateSpace {
     pub(crate) fn bucket_outgoing_col(&self, b: usize) -> OutCol {
         debug_assert!(b < self.n_buckets);
         self.state_to_lp_column(StateDim::new(self.state_dim_bucket_range().start + b))
+    }
+
+    fn commitment_hold_state_dim(&self, plant: usize, m: usize) -> StateDim {
+        StateDim::new(
+            self.state_dim_commitment_hold_range().start
+                + self.commitment_hold_in_study_offset(plant, m),
+        )
+    }
+
+    /// Incoming (pinned) commitment-hold column for anticipated-local `plant`'s
+    /// delivery target `m`.
+    #[must_use]
+    pub(crate) fn commitment_hold_incoming_col(&self, plant: usize, m: usize) -> InCol {
+        self.state_to_lp_incoming_column(self.commitment_hold_state_dim(plant, m))
+    }
+
+    /// Outgoing commitment-hold column for anticipated-local `plant`'s delivery
+    /// target `m`.
+    #[must_use]
+    pub(crate) fn commitment_hold_outgoing_col(&self, plant: usize, m: usize) -> OutCol {
+        self.state_to_lp_column(self.commitment_hold_state_dim(plant, m))
     }
 
     /// The delivery-axis stage count: `self.n_delivery`, maxed against
@@ -1763,6 +1784,32 @@ mod tests {
                 idx.bucket_outgoing_col(b).get(),
                 idx.transit_buckets_out.start + b
             );
+        }
+    }
+
+    /// The two commitment-hold column resolvers resolve to the exact columns the
+    /// extraction sites recomposed by hand — `commit_in.start + offset` (incoming,
+    /// pinned) and `commit_out.start + offset` (outgoing) — for every ring-member
+    /// delivery target, the byte-neutrality pin for that migration.
+    #[test]
+    fn commitment_hold_col_accessors_match_extraction_recomposition() {
+        let mut idx =
+            finalized_with_transit_buckets(3, 2, 2, vec![(0, 1), (0, 2)], 2, 4, vec![1, 2]);
+        idx.set_anticipated_resolution(two_plant_resolution_with_fixed_window(4, 3, 4));
+        for plant in 0..idx.n_anticipated {
+            for m in 0..idx.k_max {
+                let offset = idx.commitment_hold_in_study_offset(plant, m);
+                assert_eq!(
+                    idx.commitment_hold_incoming_col(plant, m).get(),
+                    idx.commit_in.start + offset,
+                    "plant {plant}, m {m}: incoming resolver must match commit_in.start + offset"
+                );
+                assert_eq!(
+                    idx.commitment_hold_outgoing_col(plant, m).get(),
+                    idx.commit_out.start + offset,
+                    "plant {plant}, m {m}: outgoing resolver must match commit_out.start + offset"
+                );
+            }
         }
     }
 

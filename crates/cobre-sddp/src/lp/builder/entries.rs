@@ -8318,7 +8318,7 @@ mod pumping_water_tests {
     /// The forbidden symbol is assembled from chars so this guard's own source text
     /// does not contain the literal (which would make the test flag itself).
     #[test]
-    fn lp_builder_never_references_dual_extraction() {
+    fn builder_never_references_dual_extraction() {
         use std::path::Path;
         // The dual-extraction symbol, assembled from fragments so the needle is
         // absent from this file's own bytes (else the guard would flag itself).

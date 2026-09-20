@@ -83,8 +83,8 @@ impl BlockGrid {
     /// FPHA-plane address: `fpha_block_start + blk * n_planes + p_idx`.
     ///
     /// Block OUTER (stride `n_planes`), plane INNER — the OPPOSITE nesting of
-    /// [`flat`](Self::flat). Advance the per-hydro base with
-    /// [`advance_fpha_base`](Self::advance_fpha_base) after each hydro.
+    /// [`flat`](Self::flat). Advance the base with
+    /// [`advance_fpha_base`](Self::advance_fpha_base) after each cell.
     // Rationale: `self` is unused because this shape's stride is the per-hydro
     // `n_planes` (passed in), not a grid constant. It stays an instance method,
     // not an associated fn, so all three shapes share the uniform `grid.shape(..)`
@@ -103,8 +103,8 @@ impl BlockGrid {
         fpha_block_start + blk * n_planes + p_idx
     }
 
-    /// Advance the FPHA per-hydro base by one hydro's `n_blks * n_planes` row
-    /// block (`n_planes` is caller-supplied, since plane counts vary per hydro).
+    /// Advance the FPHA row-block base past one cell's `n_blks * n_planes` rows
+    /// (`n_planes` is caller-supplied, since plane counts vary per hydro).
     #[inline]
     #[must_use]
     pub fn advance_fpha_base(&self, fpha_block_start: usize, n_planes: usize) -> usize {
@@ -146,7 +146,7 @@ mod tests {
     #[test]
     fn fpha_base_advance() {
         let grid = BlockGrid::new(3, 1);
-        // 100 + 3 * 5 = 115 — the next hydro's fpha_block_start.
+        // 100 + 3 * 5 = 115 — the next cell's fpha_block_start.
         assert_eq!(grid.advance_fpha_base(100, 5), 115);
     }
 

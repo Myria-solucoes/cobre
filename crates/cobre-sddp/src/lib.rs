@@ -63,8 +63,7 @@ pub use convergence::{risk_measure, stopping_rule};
 
 pub use cut::{basis_reconstruct, cut_selection, cut_sync, dcs};
 
-// `lp_builder` aliases `lp::builder`; `generic_constraints` stays `pub(crate)`.
-pub use lp::builder as lp_builder;
+// `generic_constraints` stays `pub(crate)`.
 pub(crate) use lp::generic_constraints;
 pub use lp::indexer;
 
@@ -133,7 +132,7 @@ pub use production::hydro_models::{
 };
 // ── inflow_method ─────────────────────────────────────────────────────────────
 pub use stochastic::inflow_method::InflowNonNegativityMethod;
-// ── lp_builder ────────────────────────────────────────────────────────────────
+// ── lp::builder ───────────────────────────────────────────────────────────────
 #[cfg(any(test, feature = "test-support"))]
 pub use lp::builder::build_stage_templates_resolving_layout;
 pub use lp::builder::{StageTemplates, build_stage_templates};

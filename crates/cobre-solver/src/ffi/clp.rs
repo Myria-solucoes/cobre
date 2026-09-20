@@ -24,11 +24,28 @@ pub const CLP_STATUS_STOPPED: i32 = 3;
 /// `Clp_status` == 4 — stopped due to errors.
 pub const CLP_STATUS_ERRORS: i32 = 4;
 
-// Per-element basis status codes (`Clp_getColumnStatus` / `Clp_getRowStatus`,
-// per `ClpSimplex.hpp`): 0 free, 1 basic, 2 at-upper, 3 at-lower, 4 superbasic,
-// 5 fixed. These are round-tripped verbatim as raw `i32` (see `ClpSolver`'s
-// basis capture/install paths) and never compared against named constants, so
-// no symbolic definitions are kept here.
+// ============================================================
+// CLP per-element basis-status codes (`Clp_getColumnStatus` /
+// `Clp_getRowStatus`, per `ClpSimplex.hpp`)
+// ============================================================
+
+// Interpreted in both directions — `basis_status.rs`'s `to_clp_code`/
+// `from_clp_code` match on these names, and `ClpSolver`'s cold-basis reset
+// writes two of them directly — so each code is named here, the one owner,
+// rather than a bare numeral duplicated at every site.
+
+/// `ClpSimplex.hpp` status `0` — free (superbasic at value zero).
+pub const CLP_BASIS_FREE: i32 = 0;
+/// `ClpSimplex.hpp` status `1` — basic.
+pub const CLP_BASIS_BASIC: i32 = 1;
+/// `ClpSimplex.hpp` status `2` — at its upper bound (nonbasic).
+pub const CLP_BASIS_AT_UPPER: i32 = 2;
+/// `ClpSimplex.hpp` status `3` — at its lower bound (nonbasic).
+pub const CLP_BASIS_AT_LOWER: i32 = 3;
+/// `ClpSimplex.hpp` status `4` — superbasic (nonbasic, at neither bound).
+pub const CLP_BASIS_SUPERBASIC: i32 = 4;
+/// `ClpSimplex.hpp` status `5` — fixed (nonbasic, lower bound == upper bound).
+pub const CLP_BASIS_FIXED: i32 = 5;
 
 unsafe extern "C" {
     // ============================================================
@@ -292,7 +309,7 @@ unsafe extern "C" {
     pub fn cobre_clp_version_release() -> int32_t;
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "clp"))]
 mod tests {
     use super::{
         CLP_STATUS_OPTIMAL, cobre_clp_create, cobre_clp_destroy, cobre_clp_dual,

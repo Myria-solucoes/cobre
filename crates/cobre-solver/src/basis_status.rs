@@ -6,6 +6,10 @@
 //! A `HIGHS_BASIS_STATUS_*` value and a CLP per-element status code are never
 //! interchangeable even when they share a numeral.
 
+use crate::ffi::clp::{
+    CLP_BASIS_AT_LOWER, CLP_BASIS_AT_UPPER, CLP_BASIS_BASIC, CLP_BASIS_FIXED, CLP_BASIS_FREE,
+    CLP_BASIS_SUPERBASIC,
+};
 use crate::ffi::highs::{
     HIGHS_BASIS_STATUS_BASIC, HIGHS_BASIS_STATUS_LOWER, HIGHS_BASIS_STATUS_NONBASIC,
     HIGHS_BASIS_STATUS_UPPER, HIGHS_BASIS_STATUS_ZERO,
@@ -59,34 +63,33 @@ impl BasisStatus {
         }
     }
 
-    /// Maps to the native CLP per-element basis-status code (`ffi::clp`
-    /// header: `0 free, 1 basic, 2 at-upper, 3 at-lower, 4 superbasic,
-    /// 5 fixed`); `Nonbasic` folds onto the `superbasic` code, since CLP has
-    /// no distinct representation for it.
+    /// Maps to the native `CLP_BASIS_*` code (`ffi::clp`); `Nonbasic` folds
+    /// onto the `CLP_BASIS_SUPERBASIC` code, since CLP has no distinct
+    /// representation for it.
     #[must_use]
     pub fn to_clp_code(self) -> i32 {
         match self {
-            Self::Zero => 0,
-            Self::Basic => 1,
-            Self::Upper => 2,
-            Self::Lower => 3,
-            Self::Superbasic | Self::Nonbasic => 4,
-            Self::Fixed => 5,
+            Self::Zero => CLP_BASIS_FREE,
+            Self::Basic => CLP_BASIS_BASIC,
+            Self::Upper => CLP_BASIS_AT_UPPER,
+            Self::Lower => CLP_BASIS_AT_LOWER,
+            Self::Superbasic | Self::Nonbasic => CLP_BASIS_SUPERBASIC,
+            Self::Fixed => CLP_BASIS_FIXED,
         }
     }
 
     /// Maps a CLP native per-element basis-status code to the canonical
-    /// status, falling back to [`Self::Nonbasic`] for any code outside
-    /// `0..=5`.
+    /// status, falling back to [`Self::Nonbasic`] for any code outside the
+    /// `CLP_BASIS_*` range.
     #[must_use]
     pub fn from_clp_code(code: i32) -> Self {
         match code {
-            0 => Self::Zero,
-            1 => Self::Basic,
-            2 => Self::Upper,
-            3 => Self::Lower,
-            4 => Self::Superbasic,
-            5 => Self::Fixed,
+            CLP_BASIS_FREE => Self::Zero,
+            CLP_BASIS_BASIC => Self::Basic,
+            CLP_BASIS_AT_UPPER => Self::Upper,
+            CLP_BASIS_AT_LOWER => Self::Lower,
+            CLP_BASIS_SUPERBASIC => Self::Superbasic,
+            CLP_BASIS_FIXED => Self::Fixed,
             _ => Self::Nonbasic,
         }
     }

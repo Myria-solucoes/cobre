@@ -71,9 +71,10 @@ impl ClpSolver {
     /// declares a feasible LP `PRIMAL_INFEASIBLE` (or stops short).
     ///
     /// CLP's bare dual simplex can spuriously report `PRIMAL_INFEASIBLE` on
-    /// numerically delicate deep-stage LPs that are in fact feasible (proven:
-    /// the failing stage moves with tolerances, disappears under the primal
-    /// simplex, and the identical LP solves cleanly in `HiGHS`). This ladder
+    /// numerically delicate LPs late in a long solve sequence that are in fact
+    /// feasible (proven: the failing LP moves with tolerances, disappears
+    /// under the primal simplex, and the identical LP solves cleanly in
+    /// `HiGHS`). This ladder
     /// re-solves the SAME already-loaded model with progressively stronger
     /// settings (`RUNGS`), stopping at the first rung that returns OPTIMAL; every
     /// rung first resets to a clean all-slack cold basis ([`Self::escalate_run`])

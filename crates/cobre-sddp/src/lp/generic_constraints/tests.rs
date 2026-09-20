@@ -17,10 +17,10 @@ use super::{
     contract_family_slot, resolve_variable_ref, variable_ref_is_block_independent,
 };
 use crate::hydro_models::{FphaPlane, ProductionModelSet, ResolvedProductionModel};
-use crate::indexer::{
+use crate::lp::builder::StageGeometry;
+use crate::lp::indexer::{
     Boundary, HydroCell, HydroCellIndex, HydroSys, StateSpace, StorageBoundaryGrid,
 };
-use crate::lp_builder::StageGeometry;
 use crate::test_support::{
     GeometryDims, geometry, geometry_hydro, geometry_hydro_with_groups, identity_hydro_cell_index,
     make_unit_group,

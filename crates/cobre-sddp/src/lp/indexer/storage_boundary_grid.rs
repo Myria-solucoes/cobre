@@ -3,7 +3,7 @@
 //! formula beside [`BlockGrid`](super::BlockGrid).
 //!
 //! Every `block_storage_col` copy (`StageLayout`, [`StageGeometry`
-//! ](crate::lp_builder::StageGeometry), the generic-constraint resolver) delegates
+//! ](crate::lp::builder::StageGeometry), the generic-constraint resolver) delegates
 //! to [`StorageBoundaryGrid::col`] rather than re-deriving the endpoint/interior
 //! split — the wrong-but-compiling alternative is a hand-rolled copy of the match
 //! whose arm order silently drifts from the others. The [`Boundary`](super::Boundary)

@@ -20,7 +20,7 @@ use crate::setup::template_postprocess::{
 
 use super::layout::{ResolvedTables, StageLayout, TemplateBuildCtx};
 use super::{GenericConstraintRowEntry, M3S_TO_HM3, StateBox, columns, entries, rows, scaling};
-use crate::indexer::{
+use crate::lp::indexer::{
     Boundary, EvaporationIndices, HydroCellIndex, HydroSys, StateSpace, StorageBoundaryGrid,
     ThermalSys,
 };
@@ -353,7 +353,7 @@ impl StageGeometry {
     /// Storage column at chronological `boundary` for hydro `h`, so the
     /// simulation read-path resolves per-block boundaries without a
     /// `StageLayout`; delegates to
-    /// [`StorageBoundaryGrid::col`](crate::indexer::StorageBoundaryGrid::col),
+    /// [`StorageBoundaryGrid::col`](crate::lp::indexer::StorageBoundaryGrid::col),
     /// the single owner of the endpoints-vs-interior split.
     #[inline]
     #[must_use]
@@ -687,7 +687,7 @@ fn load_models_from_normal(
 /// use cobre_sddp::InflowNonNegativityMethod;
 /// use cobre_sddp::hydro_models::PrepareHydroModelsResult;
 /// use cobre_sddp::indexer::{HydroCellIndex, StateSpace};
-/// use cobre_sddp::lp_builder::build_stage_templates;
+/// use cobre_sddp::lp::builder::build_stage_templates;
 /// use cobre_sddp::resolved_parameters::ResolvedParameters;
 /// use cobre_stochastic::par::precompute::PrecomputedPar;
 ///

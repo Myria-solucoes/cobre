@@ -24,13 +24,13 @@ use cobre_stochastic::par::precompute::PrecomputedPar;
 
 use crate::energy_conversion::EnergyConversionSet;
 use crate::hydro_models::{EvaporationModelSet, ProductionModelSet};
-use crate::indexer::{
+use crate::lead_time::{AnticipatedResolution, PointResolution};
+use crate::lp::builder::{
+    GenericConstraintRowEntry, ResolvedTables, StageGeometry, StageLayout, TemplateBuildCtx,
+};
+use crate::lp::indexer::{
     FillingTargetLocal, FloorLocal, FphaLocal, HydroCellIndex, HydroSys, StateSpace,
     StudyDimensions,
-};
-use crate::lead_time::{AnticipatedResolution, PointResolution};
-use crate::lp_builder::{
-    GenericConstraintRowEntry, ResolvedTables, StageGeometry, StageLayout, TemplateBuildCtx,
 };
 use crate::resolved_parameters::ResolvedParameters;
 use crate::setup::PostStudyResolved;
@@ -5329,7 +5329,7 @@ fn entity_counts_1_hydro() -> EntityCounts {
 /// spillage `[t0 + K, t0 + 2K)`, then `K` evaporation triples. In parallel mode the
 /// interior family is empty and turbine begins at 4.
 fn single_hydro_block_geometry(block_mode: BlockMode, k: usize) -> StageGeometry {
-    use crate::indexer::{EvaporationIndices, StorageBoundaryGrid};
+    use crate::lp::indexer::{EvaporationIndices, StorageBoundaryGrid};
     let n_interior = match block_mode {
         BlockMode::Chronological => k - 1,
         BlockMode::Parallel => 0,

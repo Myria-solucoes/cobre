@@ -12,8 +12,8 @@ use cobre_solver::SolverInterface;
 
 use crate::{
     context::{StageContext, TrainingContext},
-    indexer::BlockGrid,
-    lp_builder::{PatchBuffer, StateBox},
+    lp::builder::{PatchBuffer, StateBox},
+    lp::indexer::BlockGrid,
     noise::{
         NcsNoiseOffsets, apply_ncs_col_bounds, transform_inflow_noise, transform_load_noise,
         transform_ncs_noise,

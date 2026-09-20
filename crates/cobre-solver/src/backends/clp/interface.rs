@@ -63,7 +63,7 @@ impl SolverInterface for ClpSolver {
     /// `Clp_loadProblem` swaps the model data but does NOT heal the
     /// `ClpSimplex`-level rim/pricing state, so stale steepest-edge reference
     /// weights persist and make the landed vertex on alternative-optima LPs
-    /// depend on the order a worker processed prior scenarios — breaking
+    /// depend on which models this handle solved before it — breaking
     /// thread/rank-count determinism. Recreating the `ClpSimplex` discards that
     /// state entirely; the cached profile is re-applied so configuration
     /// survives the swap.
@@ -597,8 +597,8 @@ impl SolverInterface for ClpSolver {
     /// Extracts the current simplex basis into `out`, element-by-element.
     ///
     /// CLP reports basis status one element at a time (no bulk array in the
-    /// wrapper). Each native `CLP_BASIS_*` code is mapped via `from_clp_code`
-    /// into the canonical status stored in `out`.
+    /// wrapper). Each native `CLP_BASIS_*` code is mapped via
+    /// [`BasisStatus::from_clp_code`] into the canonical status stored in `out`.
     ///
     /// # Panics
     ///

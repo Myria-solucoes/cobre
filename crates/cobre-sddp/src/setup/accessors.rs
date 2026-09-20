@@ -59,11 +59,6 @@ impl StudySetup {
         self.events.export_states = export;
     }
 
-    /// Set the active-cut budget cap per stage.
-    pub fn set_budget(&mut self, budget: Option<u32>) {
-        self.cut_management.budget = budget;
-    }
-
     /// Test-support hook: override the per-stage backward-pass risk measures
     /// (`length` must equal `num_stages`), e.g. to swap `Expectation` for
     /// `CVaR { alpha, lambda }` without a config file exposing it per case.

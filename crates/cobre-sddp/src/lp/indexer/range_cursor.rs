@@ -1,5 +1,5 @@
 //! The [`RangeCursor`] running column/row offset allocator shared by
-//! [`StageLayout::new`](crate::lp_builder::StageLayout)'s per-stage equipment
+//! [`StageLayout::new`](crate::lp::builder::StageLayout)'s per-stage equipment
 //! column/row chains and [`StateSpace::new`](super::StateSpace)'s
 //! stage-invariant state-vector chain.
 

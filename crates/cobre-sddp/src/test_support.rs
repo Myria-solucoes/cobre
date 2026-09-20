@@ -51,14 +51,14 @@ use crate::hydro_models::{
     EvaporationModel, EvaporationModelSet, FphaPlane, PrepareHydroModelsResult, ProductionModelSet,
     ResolvedProductionModel,
 };
-use crate::indexer::{
-    CutStateProjection, HydroCellIndex, StateDim, StateSpace, StudyDimensions, ThermalSys,
-};
 use crate::lead_time::AnticipatedResolution;
 #[cfg(test)]
-use crate::lp_builder::StateBox;
-use crate::lp_builder::{
+use crate::lp::builder::StateBox;
+use crate::lp::builder::{
     PatchBuffer, ResolvedTables, StageGeometry, StageLayout, TemplateBuildCtx,
+};
+use crate::lp::indexer::{
+    CutStateProjection, HydroCellIndex, StateDim, StateSpace, StudyDimensions, ThermalSys,
 };
 use crate::noise::{DownstreamAccumState, LagAccumState};
 use crate::policy::policy_load::{
@@ -270,7 +270,7 @@ pub fn make_unit_group(
 /// evaporation membership filters never drop a caller-requested index regardless
 /// of `stage.id`. Declares its mirror unit group before return — `geometry` never
 /// mutates the collected `Vec`, so the return is the finalization boundary — and
-/// stays `pub(crate)` for `indexer::hydro_cell`'s identity test, which needs these
+/// stays `pub(crate)` for `lp::indexer::hydro_cell`'s identity test, which needs these
 /// exact hydros.
 pub(crate) fn geometry_hydro(idx: usize) -> Hydro {
     let id = EntityId(i32::try_from(idx).unwrap_or(i32::MAX));

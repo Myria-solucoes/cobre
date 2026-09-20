@@ -101,10 +101,12 @@ use crate::{
     error::SddpError,
     horizon_mode::HorizonMode,
     hydro_models::PrepareHydroModelsResult,
-    indexer::{AnticipatedLocal, CutStateProjection, HydroCellIndex, StateSpace, StudyDimensions},
     inflow_method::InflowNonNegativityMethod,
     lead_time::{AnticipatedResolution, DeliveryAxis, LeadTime, PointResolution, SpreadResolution},
-    lp_builder::{M3S_TO_HM3, StateBox, build_stage_templates},
+    lp::builder::{M3S_TO_HM3, StateBox, build_stage_templates},
+    lp::indexer::{
+        AnticipatedLocal, CutStateProjection, HydroCellIndex, StateSpace, StudyDimensions,
+    },
     risk_measure::{RiskMeasure, uniform_effective_measure},
     simulation::EntityCounts,
     simulation::extraction::TransitSeedArc,
@@ -1542,7 +1544,7 @@ impl PostStudyResolved {
 /// `last_real_cumulative` and `last_real_per_stage` are the study's own last
 /// cumulative and per-stage discount factors — [`crate::StageTemplates::
 /// cumulative_discount_factors`]/[`crate::StageTemplates::discount_factors`]'s
-/// last entries, or (`crate::lp_builder::build_stage_templates`'s own
+/// last entries, or (`crate::lp::builder::build_stage_templates`'s own
 /// `TemplateBuildCtx` build) the identical values computed from the same
 /// `compute_per_stage_discount_factors`/`compute_cumulative_discount_factors`
 /// pair before those output slices exist. The first post-study cumulative
@@ -1699,7 +1701,7 @@ fn delivery_stage_durations(mut study_durations: Vec<f64>, system: &System) -> V
 ///
 /// The sole `resolve_point` consumer (via [`AnticipatedResolution::resolve`]).
 /// Warn-free: [`resolve_anticipated_commitments`] wraps this with the setup-time
-/// `K = 0` advisory; [`crate::lp_builder::build_stage_templates`] calls this core
+/// `K = 0` advisory; [`crate::lp::builder::build_stage_templates`] calls this core
 /// directly to attach an identical resolution onto its own `StateSpace` — the
 /// same accepted redundant-but-deterministic recompute this crate already
 /// applies to the bucket topology, not a second advisory emission. Returns the
@@ -1711,7 +1713,7 @@ fn delivery_stage_durations(mut study_durations: Vec<f64>, system: &System) -> V
 /// The delivery axis is EXTENDED: `n_delivery = n_stages + n_post` while
 /// `n_decision` stays `n_stages` (decisions are only ever made in-study), so a
 /// `LeadTime` plant's resolution can target a post-study delivery. Widening
-/// this site alone is a half-switch — [`crate::indexer::anticipated_gate::anticipated_resolution_for`]'s
+/// this site alone is a half-switch — [`crate::lp::indexer::anticipated_gate::anticipated_resolution_for`]'s
 /// fixture fallback must widen in lockstep or the two resolution paths desync
 /// the moment a study declares `post_study_stages`.
 pub(crate) fn resolve_anticipated_commitments_core(
@@ -1778,7 +1780,7 @@ pub(crate) fn resolve_anticipated_commitments_core(
 
 /// [`resolve_anticipated_commitments_core`] plus the setup-time `K = 0`
 /// advisory ([`warn_on_sub_stage_lead`]) — the single owner of that advisory.
-/// Every other caller (e.g. [`crate::lp_builder::build_stage_templates`]) uses
+/// Every other caller (e.g. [`crate::lp::builder::build_stage_templates`]) uses
 /// the core directly so the advisory never double-emits.
 pub(crate) fn resolve_anticipated_commitments(
     system: &System,

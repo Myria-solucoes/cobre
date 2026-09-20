@@ -55,7 +55,9 @@
 use cobre_solver::{RowBatch, StageTemplate};
 
 use crate::{
-    cut::pool::CutPool,
+    context::{StageContext, TrainingContext},
+    cut::{FutureCostFunction, pool::CutPool},
+    forward::build_delta_cut_row_batch_into,
     indexer::CutStateProjection,
     setup::node_graph::{NodeId, NodeOpenings, NodePos, StageIdx},
     solver_stats::SolverStatsDelta,
@@ -77,7 +79,9 @@ pub(crate) use by_node::{
     OpeningOutcome, by_node_block_count, by_node_finish, hardest_first_block_order,
     identity_block_order, merge_block_pivots, process_stage_backward_by_node, resolve_block_size,
 };
-pub(crate) use by_scenario::{StageOpeningSolver, process_by_scenario_backward};
+pub(crate) use by_scenario::{
+    StageOpeningSolver, by_scenario_finish, process_by_scenario_backward,
+};
 pub(crate) use duals_extraction::extract_state_duals_only;
 pub(crate) use lp_setup::fill_external_opening_noise;
 pub(crate) use replicated::{ReplicatedScratch, run_backward_node_replicated};
@@ -360,5 +364,71 @@ impl<'a> SuccessorOutcomes<'a> {
             openings: e.openings,
             outcome_range: e.outcome_range.clone(),
         }
+    }
+}
+
+/// Reify the node's successor outcome set into the caller-owned `meta_buf` /
+/// `active_slots_buf`: one [`SuccessorEntry`] per successor child in canonical
+/// order (ascending child node id, then within-child ω), each child's delta cut
+/// batch built against its own pool.
+///
+/// Backs [`SuccessorOutcomes`]; the own-pool `num_cuts_at_successor` and per-child
+/// `metadata_offset` non-overlap invariants are documented on [`SuccessorEntry`].
+/// Child order and offset accumulation are load-bearing — the flattened outcome
+/// weights align to this exact order.
+pub(crate) fn reify_successor_outcomes(
+    meta_buf: &mut Vec<SuccessorEntry>,
+    active_slots_buf: &mut Vec<usize>,
+    ctx: &StageContext<'_>,
+    training_ctx: &TrainingContext<'_>,
+    fcf: &FutureCostFunction,
+    cut_batches: &mut [RowBatch],
+    frozen: &[StageTemplate],
+    node_pos: NodePos,
+    iteration: u64,
+) {
+    let node_graph = training_ctx.node_graph;
+    let successor_stage = node_graph.nodes[node_pos].stage.next();
+    let template_num_rows = ctx.template(successor_stage).num_rows;
+    let cut_state = training_ctx.state;
+
+    meta_buf.clear();
+    active_slots_buf.clear();
+    let mut outcome_offset = 0usize;
+    let mut metadata_offset = 0usize;
+    for succ_edge in &node_graph.successors[node_pos] {
+        let child_node = succ_edge.child;
+        let child_pool = node_graph.nodes[child_node].pool_id;
+        let child_openings = node_graph.nodes[child_node].openings;
+        let child_cut_layout = &training_ctx.cut_state_layouts[child_pool];
+        build_delta_cut_row_batch_into(
+            &mut cut_batches[child_pool],
+            fcf,
+            child_pool,
+            cut_state,
+            child_cut_layout,
+            &ctx.template(successor_stage).col_scale,
+            iteration,
+        );
+        let num_cuts_at_successor =
+            (frozen[child_pool].num_rows - template_num_rows) + cut_batches[child_pool].num_rows;
+        let slots_start = active_slots_buf.len();
+        active_slots_buf.extend(fcf.active_cuts(child_pool).map(|(slot, _, _)| slot));
+        let slots_end = active_slots_buf.len();
+        let populated_count = fcf.pools[child_pool].populated();
+        let outcome_len = child_openings.len;
+        meta_buf.push(SuccessorEntry {
+            successor_node: child_node,
+            successor_node_id: node_graph.node_ids[child_node],
+            pool_id: child_pool,
+            num_cuts_at_successor,
+            populated_count,
+            active_slots: slots_start..slots_end,
+            metadata_offset,
+            openings: child_openings,
+            outcome_range: outcome_offset..outcome_offset + outcome_len,
+        });
+        outcome_offset += outcome_len;
+        metadata_offset += populated_count;
     }
 }

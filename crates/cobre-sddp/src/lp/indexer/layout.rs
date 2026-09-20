@@ -1,12 +1,15 @@
 //! Per-stage geometry satellite types: [`EvaporationIndices`] and
 //! [`FphaRowRange`].
 //!
-//! Each locates a single hydro's evaporation columns/row or FPHA row block
-//! within one stage LP. They are produced by the per-stage
-//! [`StageLayout`](crate::lp_builder) and carried on its
-//! [`StageGeometry`](crate::lp_builder::StageGeometry) snapshot; the role-(a)
-//! state-vector concern lives on [`StateSpace`](super::StateSpace) and the
-//! non-state study shape on [`StudyDimensions`](super::StudyDimensions).
+//! [`EvaporationIndices`] locates a single hydro's evaporation columns and row
+//! within one stage LP; the per-stage [`StageLayout`](crate::lp::builder)
+//! produces it and carries it on its
+//! [`StageGeometry`](crate::lp::builder::StageGeometry) snapshot as
+//! `evap_indices`. [`FphaRowRange`] would locate a block of FPHA hyperplane
+//! rows, but no production code constructs or reads it; `StageGeometry` carries
+//! the stage's FPHA rows as its plain `fpha` field (a `Range<usize>`) instead.
+//! The role-(a) state-vector concern lives on [`StateSpace`](super::StateSpace)
+//! and the non-state study shape on [`StudyDimensions`](super::StudyDimensions).
 
 /// Column and row indices for one evaporation constraint.
 ///

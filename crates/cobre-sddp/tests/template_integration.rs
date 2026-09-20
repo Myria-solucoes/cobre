@@ -40,7 +40,7 @@ use cobre_sddp::{
     },
     indexer::{BlockGrid, StateSpace},
     inflow_method::InflowNonNegativityMethod,
-    lp_builder::PatchBuffer,
+    lp::builder::PatchBuffer,
     resolved_parameters::ResolvedParameters,
 };
 
@@ -49,10 +49,10 @@ use common::builders::{
     BusSpec, HydroSpec, StageSpec, ThermalSpec, make_bus, make_hydro, make_stage, make_thermal,
 };
 
-/// LP objective cost scale factor. Matches `cobre_sddp::lp_builder::COST_SCALE_FACTOR`.
+/// LP objective cost scale factor. Matches `cobre_sddp::lp::builder::COST_SCALE_FACTOR`.
 const COST_SCALE_FACTOR: f64 = 1_000_000.0;
 
-/// Evaporation flow safety margin multiplier. Matches `cobre_sddp::lp_builder::EVAPORATION_FLOW_SAFETY_MARGIN`.
+/// Evaporation flow safety margin multiplier. Matches `cobre_sddp::lp::builder::EVAPORATION_FLOW_SAFETY_MARGIN`.
 const EVAPORATION_FLOW_SAFETY_MARGIN: f64 = 2.0;
 
 fn default_production(system: &cobre_core::System) -> ProductionModelSet {

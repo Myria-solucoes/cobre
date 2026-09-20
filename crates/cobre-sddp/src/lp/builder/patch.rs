@@ -1,5 +1,5 @@
 use super::state_box::StateBox;
-use crate::indexer::{BlockGrid, BlockIdx, StateDim, StateSpace};
+use crate::lp::indexer::{BlockGrid, BlockIdx, StateDim, StateSpace};
 
 /// Pre-allocated row-bound and column-bound patch arrays for one SDDP stage LP solve.
 ///
@@ -88,7 +88,7 @@ impl PatchBuffer {
     /// # Examples
     ///
     /// ```
-    /// use cobre_sddp::lp_builder::PatchBuffer;
+    /// use cobre_sddp::lp::builder::PatchBuffer;
     ///
     /// // 3-hydro AR(2) system, no stochastic load, no buckets, no anticipated thermals
     /// // Row capacity = N + M*B + N = 3 + 0 + 3 = 6
@@ -431,7 +431,7 @@ impl PatchBuffer {
 )]
 mod tests {
     use super::{PatchBuffer, StateBox};
-    use crate::indexer::{BlockGrid, StateSpace};
+    use crate::lp::indexer::{BlockGrid, StateSpace};
     use crate::test_support::{state_layout, state_layout_full, state_layout_with_transit_buckets};
 
     /// Convenience: make a role-(a) state layout without repeating N/L everywhere.

@@ -109,7 +109,7 @@ mod d38_dead_volume_filling_simulation {
     /// `H4`'s stage-0 seed (hm³), mirroring `initial_conditions.json`.
     const H4_SEED_HM3: f64 = 100.0;
 
-    /// m³/s → hm³ per hour. Mirrors `crate::lp_builder::M3S_TO_HM3` (a private const
+    /// m³/s → hm³ per hour. Mirrors `crate::lp::builder::M3S_TO_HM3` (a private const
     /// not exported to integration tests). `ζ = total_stage_hours · M3S_TO_HM3`.
     const M3S_TO_HM3: f64 = 3_600.0 / 1_000_000.0;
     /// Every stage in `stages.json` totals 720 h, so `ζ` is uniform.
@@ -656,7 +656,7 @@ mod d40_filling_cascade_simulation {
     /// `H_ctrl`'s stage-0 seed (hm³), mirroring `initial_conditions.json`.
     const H_CTRL_SEED_HM3: f64 = 100.0;
 
-    /// m³/s → hm³ per hour. Mirrors `crate::lp_builder::M3S_TO_HM3` (a private const
+    /// m³/s → hm³ per hour. Mirrors `crate::lp::builder::M3S_TO_HM3` (a private const
     /// not exported to integration tests). `ζ = total_stage_hours · M3S_TO_HM3`.
     const M3S_TO_HM3: f64 = 3_600.0 / 1_000_000.0;
     /// Every stage in `stages.json` totals 720 h, so `ζ` is uniform.
@@ -1108,7 +1108,7 @@ mod prefilling_spillage_frozen {
     /// `scenarios/inflow_seasonal_stats.parquet`, hydro 2.
     const H3_INCR_M3S: f64 = 20.0;
 
-    /// m³/s → hm³ per hour. Mirrors `crate::lp_builder::M3S_TO_HM3` (private). Stages
+    /// m³/s → hm³ per hour. Mirrors `crate::lp::builder::M3S_TO_HM3` (private). Stages
     /// 0 and 1 are single FLAT blocks totalling 720 h, so `ζ = 720 · M3S_TO_HM3`.
     const M3S_TO_HM3: f64 = 3_600.0 / 1_000_000.0;
     const STAGE_HOURS: f64 = 720.0;
@@ -2396,7 +2396,7 @@ mod d42_nonfilling_hydro_commissioning {
     const H_NEW_SEED_HM3: f64 = 50.0;
     const H_TAIL_SEED_HM3: f64 = 30.0;
 
-    /// m³/s → hm³ per hour. Mirrors `crate::lp_builder::M3S_TO_HM3` (private). `ζ =
+    /// m³/s → hm³ per hour. Mirrors `crate::lp::builder::M3S_TO_HM3` (private). `ζ =
     /// total_stage_hours · M3S_TO_HM3`; every stage totals 720 h.
     const M3S_TO_HM3: f64 = 3_600.0 / 1_000_000.0;
     const STAGE_HOURS: f64 = 720.0;

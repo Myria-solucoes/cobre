@@ -790,7 +790,7 @@ mod determinism {
         horizon_mode::HorizonMode,
         indexer::{CutStateProjection, StateSpace, StudyDimensions},
         inflow_method::InflowNonNegativityMethod,
-        lp_builder::{PatchBuffer, StateBox},
+        lp::builder::{PatchBuffer, StateBox},
         risk_measure::RiskMeasure,
         setup::node_graph::Traversal,
         simulate,

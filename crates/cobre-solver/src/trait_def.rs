@@ -92,7 +92,8 @@ pub trait SolverInterface: Send {
     /// Solve the LP currently loaded on the backend.
     ///
     /// Hot-path method encapsulating internal retry logic and optional warm-start.
-    /// Requires [`Self::load_model`] called first and scenario patches applied.
+    /// Requires [`Self::load_model`] called first and any pending row/column
+    /// bound updates applied.
     /// The returned [`SolutionView`] borrows solver-internal buffers and is valid
     /// until the next `&mut self` call. Call [`SolutionView::to_owned`] when the
     /// solution must outlive the borrow.
@@ -117,9 +118,9 @@ pub trait SolverInterface: Send {
     /// `Basis` via `solve(Some(&b))`.
     ///
     /// `HighsSolver` retains its internal simplex basis and factorization across
-    /// consecutive `solve` calls — the primary warm-start mechanism for
-    /// backward-pass workloads where the LP shape is constant across trial points
-    /// at the same (stage, opening).
+    /// consecutive `solve` calls — the primary warm-start mechanism when a
+    /// handle solves a long sequence of same-shape LPs that differ only in
+    /// bounds or objective.
     ///
     /// # Errors
     ///
@@ -204,14 +205,14 @@ pub trait SolverInterface: Send {
     fn record_reconstruction_stats(&mut self) {}
 
     /// Reset the solver's internal working state to a clean baseline between
-    /// independent solve sequences (e.g. at simulation/forward scenario
-    /// boundaries), discarding any simplex state — factorization and, crucially,
-    /// the pricing/edge-weight reference frame — carried over from prior solves.
+    /// independent solve sequences (e.g. between unrelated batches of models on
+    /// the same handle), discarding any simplex state — factorization and,
+    /// crucially, the pricing/edge-weight reference frame — carried over from
+    /// prior solves.
     ///
     /// This is a **determinism** hook, not a performance one: it ensures a
-    /// scenario's result cannot depend on which scenarios a worker happened to
-    /// process before it, so output stays bit-identical across thread/rank
-    /// counts.
+    /// solve's result cannot depend on which models the same handle solved
+    /// before it, so output stays bit-identical across thread/rank counts.
     ///
     /// Default: no-op. `HighsSolver` rebuilds its full solver state on every
     /// `load_model` (`Highs_passLp`), so it is already order-independent. The

@@ -13,7 +13,7 @@ use crate::SddpError;
 use crate::SddpError::Validation;
 use crate::backward::{OpeningOutcome, StagedCut};
 use crate::dcs::DcsSolveScratch;
-use crate::lp_builder::PatchBuffer;
+use crate::lp::builder::PatchBuffer;
 use crate::risk_measure::{BackwardOutcome, RiskMeasureScratch};
 use crate::setup::{NodeId, NodePos};
 use crate::solve::partition;

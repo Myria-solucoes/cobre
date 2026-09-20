@@ -1338,7 +1338,7 @@ mod by_node_scratch {
         forward::EnumeratedForwardScratch,
         horizon_mode::HorizonMode,
         inflow_method::InflowNonNegativityMethod,
-        lp_builder::StateBox,
+        lp::builder::StateBox,
         risk_measure::RiskMeasure,
         setup::Traversal,
         test_support::{

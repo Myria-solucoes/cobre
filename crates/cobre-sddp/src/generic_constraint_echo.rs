@@ -12,7 +12,7 @@ use cobre_io::GenericConstraintEchoRow;
 
 use crate::ResolvedParameters;
 use crate::StudySetup;
-use crate::lp_builder::GenericConstraintRowEntry;
+use crate::lp::builder::GenericConstraintRowEntry;
 
 /// Build the resolved generic-constraint echo rows for `setup`/`system` in
 /// canonical `(constraint, stage, block, term)` order.

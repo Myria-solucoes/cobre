@@ -168,26 +168,7 @@ impl HighsSolver {
             2 => unsafe {
                 ffi::cobre_highs_set_int_option(self.handle, c"simplex_strategy".as_ptr(), 1);
             },
-            // Applied value = max(1e-8, profile_value): a looser profile is
-            // preserved while a tighter one falls back to the level's default.
-            3 => {
-                let primal = f64::max(1e-8, self.current_profile.primal_feasibility_tolerance);
-                let dual = f64::max(1e-8, self.current_profile.dual_feasibility_tolerance);
-                // SAFETY: handle is valid non-null HiGHS pointer; option names
-                // are static C string literals; no retained pointers.
-                unsafe {
-                    ffi::cobre_highs_set_double_option(
-                        self.handle,
-                        c"primal_feasibility_tolerance".as_ptr(),
-                        primal,
-                    );
-                    ffi::cobre_highs_set_double_option(
-                        self.handle,
-                        c"dual_feasibility_tolerance".as_ptr(),
-                        dual,
-                    );
-                }
-            }
+            3 => self.apply_feasibility_tolerances(1e-8),
             4 => unsafe {
                 ffi::cobre_highs_set_string_option(
                     self.handle,
@@ -219,24 +200,7 @@ impl HighsSolver {
             6 => unsafe {
                 ffi::cobre_highs_set_int_option(self.handle, c"simplex_strategy".as_ptr(), 1);
             },
-            7 => {
-                let primal = f64::max(1e-8, self.current_profile.primal_feasibility_tolerance);
-                let dual = f64::max(1e-8, self.current_profile.dual_feasibility_tolerance);
-                // SAFETY: handle is valid non-null HiGHS pointer; option names
-                // are static C string literals; no retained pointers.
-                unsafe {
-                    ffi::cobre_highs_set_double_option(
-                        self.handle,
-                        c"primal_feasibility_tolerance".as_ptr(),
-                        primal,
-                    );
-                    ffi::cobre_highs_set_double_option(
-                        self.handle,
-                        c"dual_feasibility_tolerance".as_ptr(),
-                        dual,
-                    );
-                }
-            }
+            7 => self.apply_feasibility_tolerances(1e-8),
             8 => unsafe {
                 ffi::cobre_highs_set_int_option(self.handle, c"user_objective_scale".as_ptr(), -10);
             },
@@ -246,8 +210,6 @@ impl HighsSolver {
                 ffi::cobre_highs_set_int_option(self.handle, c"user_bound_scale".as_ptr(), -5);
             },
             10 => {
-                let primal = f64::max(1e-7, self.current_profile.primal_feasibility_tolerance);
-                let dual = f64::max(1e-7, self.current_profile.dual_feasibility_tolerance);
                 // SAFETY: handle is valid non-null HiGHS pointer; option names
                 // are static C string literals; no retained pointers.
                 unsafe {
@@ -257,21 +219,10 @@ impl HighsSolver {
                         -13,
                     );
                     ffi::cobre_highs_set_int_option(self.handle, c"user_bound_scale".as_ptr(), -8);
-                    ffi::cobre_highs_set_double_option(
-                        self.handle,
-                        c"primal_feasibility_tolerance".as_ptr(),
-                        primal,
-                    );
-                    ffi::cobre_highs_set_double_option(
-                        self.handle,
-                        c"dual_feasibility_tolerance".as_ptr(),
-                        dual,
-                    );
                 }
+                self.apply_feasibility_tolerances(1e-7);
             }
             11 => {
-                let primal = f64::max(1e-7, self.current_profile.primal_feasibility_tolerance);
-                let dual = f64::max(1e-7, self.current_profile.dual_feasibility_tolerance);
                 // SAFETY: handle is valid non-null HiGHS pointer; option names
                 // are static C string literals; no retained pointers.
                 unsafe {
@@ -286,19 +237,31 @@ impl HighsSolver {
                         -10,
                     );
                     ffi::cobre_highs_set_int_option(self.handle, c"user_bound_scale".as_ptr(), -5);
-                    ffi::cobre_highs_set_double_option(
-                        self.handle,
-                        c"primal_feasibility_tolerance".as_ptr(),
-                        primal,
-                    );
-                    ffi::cobre_highs_set_double_option(
-                        self.handle,
-                        c"dual_feasibility_tolerance".as_ptr(),
-                        dual,
-                    );
                 }
+                self.apply_feasibility_tolerances(1e-7);
             }
             _ => unreachable!(),
+        }
+    }
+
+    // Applied value = max(floor, profile_value): a looser profile is
+    // preserved while a tighter one falls back to the level's floor.
+    fn apply_feasibility_tolerances(&mut self, floor: f64) {
+        let primal = f64::max(floor, self.current_profile.primal_feasibility_tolerance);
+        let dual = f64::max(floor, self.current_profile.dual_feasibility_tolerance);
+        // SAFETY: handle is valid non-null HiGHS pointer; option names
+        // are static C string literals; no retained pointers.
+        unsafe {
+            ffi::cobre_highs_set_double_option(
+                self.handle,
+                c"primal_feasibility_tolerance".as_ptr(),
+                primal,
+            );
+            ffi::cobre_highs_set_double_option(
+                self.handle,
+                c"dual_feasibility_tolerance".as_ptr(),
+                dual,
+            );
         }
     }
 }

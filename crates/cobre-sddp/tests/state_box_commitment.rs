@@ -1,5 +1,5 @@
 //! Integration coverage for the commitment-hold family of
-//! `crate::lp_builder::state_box::build_state_box` — the one family a hand-built
+//! `crate::lp::builder::state_box::build_state_box` — the one family a hand-built
 //! layout cannot cover, since the delivery-stage resolution needs the full
 //! `StudySetup` construction pipeline.
 

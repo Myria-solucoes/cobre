@@ -24,6 +24,76 @@
 
 mod common;
 
+use cobre_core::HydroPenalties;
+use cobre_io::config::{
+    Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
+    InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig, RowSelectionConfig,
+    SimulationConfig as IoSimulationConfig, StoppingRuleConfig, TrainingConfig,
+    TrainingSolverConfig, UpperBoundEvaluationConfig,
+};
+use cobre_io::config::{SimulationSelection, TrainingSelection};
+
+fn default_hydro_penalties() -> HydroPenalties {
+    HydroPenalties {
+        spillage_cost: 0.01,
+        diversion_cost: 0.0,
+        turbined_cost: 0.0,
+        storage_violation_below_cost: 500.0,
+        filling_target_violation_cost: 0.0,
+        turbined_violation_below_cost: 0.0,
+        outflow_violation_below_cost: 0.0,
+        outflow_violation_above_cost: 0.0,
+        generation_violation_below_cost: 0.0,
+        evaporation_violation_cost: 0.0,
+        water_withdrawal_violation_cost: 0.0,
+        water_withdrawal_violation_pos_cost: 0.0,
+        water_withdrawal_violation_neg_cost: 0.0,
+        evaporation_violation_pos_cost: 0.0,
+        evaporation_violation_neg_cost: 0.0,
+        inflow_nonnegativity_cost: 1000.0,
+    }
+}
+
+/// Build a [`Config`] for `iterations`-iteration training and 1-scenario
+/// deterministic simulation. More iterations let cuts sharpen so the cut
+/// gradients at the anticipated-state columns drive `d_t` to load level at
+/// every active stage.
+fn build_config(iterations: usize) -> Config {
+    Config {
+        schema: None,
+        modeling: ModelingConfig {
+            inflow_non_negativity: InflowNonNegativityConfig {
+                method: CfgInflowMethod::Penalty,
+            },
+
+            cost_scale_factor: None,
+        },
+        training: TrainingConfig {
+            enabled: true,
+            tree_seed: Some(42),
+            stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
+                limit: iterations as u32,
+            }]),
+            stopping_mode: cobre_io::config::StoppingMode::Any,
+            cut_selection: RowSelectionConfig::default(),
+            solver: TrainingSolverConfig::default(),
+            parallelism: cobre_io::config::ParallelismConfig::default(),
+            scenario_source: None,
+            selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
+        },
+        upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
+        policy: PolicyConfig::default(),
+        simulation: IoSimulationConfig {
+            enabled: true,
+            io_channel_capacity: 8,
+            selection: Some(SimulationSelection::Sampled { num_scenarios: 1 }),
+            ..IoSimulationConfig::default()
+        },
+        exports: ExportsConfig::default(),
+        estimation: EstimationConfig::default(),
+    }
+}
+
 mod anticipated_backward_cut {
     //! Analytical verification of backward-pass cut-coefficient extraction for an
     //! anticipated thermal across lead_stages K = 1, 2, 3. Each K's closed-form
@@ -1231,13 +1301,6 @@ mod anticipated_pre_horizon_seed_delivery {
         PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
         ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
     };
-    use cobre_io::config::{
-        Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
-        InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
-        RowSelectionConfig, SimulationConfig as IoSimulationConfig, StoppingRuleConfig,
-        TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
-    };
-    use cobre_io::config::{SimulationSelection, TrainingSelection};
 
     use super::common::build_setup_in_code;
     use super::common::builders::{
@@ -1490,27 +1553,6 @@ mod anticipated_pre_horizon_seed_delivery {
             }
         }
 
-        fn default_hydro_penalties() -> HydroPenalties {
-            HydroPenalties {
-                spillage_cost: 0.01,
-                diversion_cost: 0.0,
-                turbined_cost: 0.0,
-                storage_violation_below_cost: 500.0,
-                filling_target_violation_cost: 0.0,
-                turbined_violation_below_cost: 0.0,
-                outflow_violation_below_cost: 0.0,
-                outflow_violation_above_cost: 0.0,
-                generation_violation_below_cost: 0.0,
-                evaporation_violation_cost: 0.0,
-                water_withdrawal_violation_cost: 0.0,
-                water_withdrawal_violation_pos_cost: 0.0,
-                water_withdrawal_violation_neg_cost: 0.0,
-                evaporation_violation_pos_cost: 0.0,
-                evaporation_violation_neg_cost: 0.0,
-                inflow_nonnegativity_cost: 1000.0,
-            }
-        }
-
         // The padding region [n_stages, n_stages + k) is the delivery-stage axis read
         // by `fill_anticipated_columns`; it must carry per-thermal costs so the
         // decision column's objective coefficient is non-zero.
@@ -1568,7 +1610,7 @@ mod anticipated_pre_horizon_seed_delivery {
                 n_stages,
             },
             &PenaltiesDefaults {
-                hydro: default_hydro_penalties(),
+                hydro: super::default_hydro_penalties(),
                 bus: BusStagePenalties { excess_cost: 0.0 },
                 line: LineStagePenalties { exchange_cost: 0.0 },
                 ncs: NcsStagePenalties {
@@ -1625,46 +1667,6 @@ mod anticipated_pre_horizon_seed_delivery {
     }
 
     // ---------------------------------------------------------------------------
-    // Config builder
-    // ---------------------------------------------------------------------------
-
-    fn build_config(iterations: usize) -> Config {
-        Config {
-            schema: None,
-            modeling: ModelingConfig {
-                inflow_non_negativity: InflowNonNegativityConfig {
-                    method: CfgInflowMethod::Penalty,
-                },
-
-                cost_scale_factor: None,
-            },
-            training: TrainingConfig {
-                enabled: true,
-                tree_seed: Some(42),
-                stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
-                    limit: iterations as u32,
-                }]),
-                stopping_mode: cobre_io::config::StoppingMode::Any,
-                cut_selection: RowSelectionConfig::default(),
-                solver: TrainingSolverConfig::default(),
-                parallelism: cobre_io::config::ParallelismConfig::default(),
-                scenario_source: None,
-                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
-            },
-            upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
-            policy: PolicyConfig::default(),
-            simulation: IoSimulationConfig {
-                enabled: true,
-                io_channel_capacity: 8,
-                selection: Some(SimulationSelection::Sampled { num_scenarios: 1 }),
-                ..IoSimulationConfig::default()
-            },
-            exports: ExportsConfig::default(),
-            estimation: EstimationConfig::default(),
-        }
-    }
-
-    // ---------------------------------------------------------------------------
     // Tests
     // ---------------------------------------------------------------------------
 
@@ -1691,7 +1693,7 @@ mod anticipated_pre_horizon_seed_delivery {
             STAGE_0_BACKUP_COST_USD + MAX_DECISION_COST_USD + COST_TOLERANCE_USD;
 
         let system = build_system(&FIXTURE_K1);
-        let config = build_config(FIXTURE_K1.iterations);
+        let config = super::build_config(FIXTURE_K1.iterations);
         let mut setup = build_setup_in_code(system, &config);
 
         // One iteration suffices: the fishing equality pins the seed regardless of cut
@@ -1863,7 +1865,7 @@ mod anticipated_pre_horizon_seed_delivery {
             + COST_TOLERANCE_USD;
 
         let system = build_system(&FIXTURE_K2);
-        let config = build_config(FIXTURE_K2.iterations);
+        let config = super::build_config(FIXTURE_K2.iterations);
         let mut setup = build_setup_in_code(system, &config);
 
         // 5 iterations: after 1, stage-1 decisions are too loose to satisfy the cost
@@ -2066,7 +2068,7 @@ mod anticipated_pre_horizon_seed_delivery {
             + COST_TOLERANCE_USD;
 
         let system = build_system(&FIXTURE_K3);
-        let config = build_config(FIXTURE_K3.iterations);
+        let config = super::build_config(FIXTURE_K3.iterations);
         let mut setup = build_setup_in_code(system, &config);
 
         // 5 iterations let cuts sharpen so stage-2 decisions reach max_gen, covering
@@ -2238,13 +2240,6 @@ mod anticipated_d_t_saturation {
         PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
         ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
     };
-    use cobre_io::config::{
-        Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
-        InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
-        RowSelectionConfig, SimulationConfig as IoSimulationConfig, StoppingRuleConfig,
-        TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
-    };
-    use cobre_io::config::{SimulationSelection, TrainingSelection};
 
     use super::common::build_setup_in_code;
     use super::common::builders::{
@@ -2487,27 +2482,6 @@ mod anticipated_d_t_saturation {
             }
         }
 
-        fn default_hydro_penalties() -> HydroPenalties {
-            HydroPenalties {
-                spillage_cost: 0.01,
-                diversion_cost: 0.0,
-                turbined_cost: 0.0,
-                storage_violation_below_cost: 500.0,
-                filling_target_violation_cost: 0.0,
-                turbined_violation_below_cost: 0.0,
-                outflow_violation_below_cost: 0.0,
-                outflow_violation_above_cost: 0.0,
-                generation_violation_below_cost: 0.0,
-                evaporation_violation_cost: 0.0,
-                water_withdrawal_violation_cost: 0.0,
-                water_withdrawal_violation_pos_cost: 0.0,
-                water_withdrawal_violation_neg_cost: 0.0,
-                evaporation_violation_pos_cost: 0.0,
-                evaporation_violation_neg_cost: 0.0,
-                inflow_nonnegativity_cost: 1000.0,
-            }
-        }
-
         // The per-thermal costs must be patched afterwards (ResolvedBounds::new takes
         // one default for ALL thermals) so the objective distinguishes the cheap
         // anticipated thermal from the expensive backup. The patch must extend over the
@@ -2564,7 +2538,7 @@ mod anticipated_d_t_saturation {
                 n_stages,
             },
             &PenaltiesDefaults {
-                hydro: default_hydro_penalties(),
+                hydro: super::default_hydro_penalties(),
                 bus: BusStagePenalties { excess_cost: 0.0 },
                 line: LineStagePenalties { exchange_cost: 0.0 },
                 ncs: NcsStagePenalties {
@@ -2609,50 +2583,6 @@ mod anticipated_d_t_saturation {
     }
 
     // ---------------------------------------------------------------------------
-    // Config builder
-    // ---------------------------------------------------------------------------
-
-    /// Build a [`Config`] for `iterations`-iteration training and 1-scenario
-    /// deterministic simulation. More iterations let cuts sharpen so the cut
-    /// gradients at the anticipated-state columns drive `d_t` to load level at every
-    /// active stage; K=3's longer propagation chain needs more than K=2.
-    fn build_config(iterations: usize) -> Config {
-        Config {
-            schema: None,
-            modeling: ModelingConfig {
-                inflow_non_negativity: InflowNonNegativityConfig {
-                    method: CfgInflowMethod::Penalty,
-                },
-
-                cost_scale_factor: None,
-            },
-            training: TrainingConfig {
-                enabled: true,
-                tree_seed: Some(42),
-                stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
-                    limit: iterations as u32,
-                }]),
-                stopping_mode: cobre_io::config::StoppingMode::Any,
-                cut_selection: RowSelectionConfig::default(),
-                solver: TrainingSolverConfig::default(),
-                parallelism: cobre_io::config::ParallelismConfig::default(),
-                scenario_source: None,
-                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
-            },
-            upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
-            policy: PolicyConfig::default(),
-            simulation: IoSimulationConfig {
-                enabled: true,
-                io_channel_capacity: 8,
-                selection: Some(SimulationSelection::Sampled { num_scenarios: 1 }),
-                ..IoSimulationConfig::default()
-            },
-            exports: ExportsConfig::default(),
-            estimation: EstimationConfig::default(),
-        }
-    }
-
-    // ---------------------------------------------------------------------------
     // Tests
     // ---------------------------------------------------------------------------
 
@@ -2681,7 +2611,7 @@ mod anticipated_d_t_saturation {
         let inactive_stages: Vec<usize> = (0..n_stages).filter(|&t| t + k >= n_stages).collect();
 
         let system = build_system(&FIXTURE_K2);
-        let config = build_config(FIXTURE_K2.iterations);
+        let config = super::build_config(FIXTURE_K2.iterations);
         let mut setup = build_setup_in_code(system, &config);
         let scenario_results = run_simulation(&mut setup, FIXTURE_K2.iterations);
 
@@ -2771,7 +2701,7 @@ mod anticipated_d_t_saturation {
         let committed_stages: Vec<usize> = (0..n_stages).filter(|&t| t >= k).collect();
 
         let system = build_system(&FIXTURE_K3);
-        let config = build_config(FIXTURE_K3.iterations);
+        let config = super::build_config(FIXTURE_K3.iterations);
         let mut setup = build_setup_in_code(system, &config);
         let scenario_results = run_simulation(&mut setup, FIXTURE_K3.iterations);
 
@@ -3088,27 +3018,6 @@ mod anticipated_forward_pass {
             }
         }
 
-        fn default_hydro_penalties() -> HydroPenalties {
-            HydroPenalties {
-                spillage_cost: 0.01,
-                diversion_cost: 0.0,
-                turbined_cost: 0.0,
-                storage_violation_below_cost: 500.0,
-                filling_target_violation_cost: 0.0,
-                turbined_violation_below_cost: 0.0,
-                outflow_violation_below_cost: 0.0,
-                outflow_violation_above_cost: 0.0,
-                generation_violation_below_cost: 0.0,
-                evaporation_violation_cost: 0.0,
-                water_withdrawal_violation_cost: 0.0,
-                water_withdrawal_violation_pos_cost: 0.0,
-                water_withdrawal_violation_neg_cost: 0.0,
-                evaporation_violation_pos_cost: 0.0,
-                evaporation_violation_neg_cost: 0.0,
-                inflow_nonnegativity_cost: 1000.0,
-            }
-        }
-
         let bounds = ResolvedBounds::new(
             &BoundsCountsSpec {
                 n_hydros: 1,
@@ -3152,7 +3061,7 @@ mod anticipated_forward_pass {
                 n_stages: n_st,
             },
             &PenaltiesDefaults {
-                hydro: default_hydro_penalties(),
+                hydro: super::default_hydro_penalties(),
                 bus: BusStagePenalties { excess_cost: 0.0 },
                 line: LineStagePenalties { exchange_cost: 0.0 },
                 ncs: NcsStagePenalties {
@@ -4558,27 +4467,6 @@ mod anticipated_numerical_reconciliation_k2 {
             }
         }
 
-        fn default_hydro_penalties() -> HydroPenalties {
-            HydroPenalties {
-                spillage_cost: 0.01,
-                diversion_cost: 0.0,
-                turbined_cost: 0.0,
-                storage_violation_below_cost: 500.0,
-                filling_target_violation_cost: 0.0,
-                turbined_violation_below_cost: 0.0,
-                outflow_violation_below_cost: 0.0,
-                outflow_violation_above_cost: 0.0,
-                generation_violation_below_cost: 0.0,
-                evaporation_violation_cost: 0.0,
-                water_withdrawal_violation_cost: 0.0,
-                water_withdrawal_violation_pos_cost: 0.0,
-                water_withdrawal_violation_neg_cost: 0.0,
-                evaporation_violation_pos_cost: 0.0,
-                evaporation_violation_neg_cost: 0.0,
-                inflow_nonnegativity_cost: 1000.0,
-            }
-        }
-
         // The padding region [n_stages, n_stages + k) is the delivery-stage axis
         // read by `fill_anticipated_columns`; it must carry the
         // per-thermal cost so the decision column's objective coefficient is
@@ -4635,7 +4523,7 @@ mod anticipated_numerical_reconciliation_k2 {
                 n_stages,
             },
             &PenaltiesDefaults {
-                hydro: default_hydro_penalties(),
+                hydro: super::default_hydro_penalties(),
                 bus: BusStagePenalties { excess_cost: 0.0 },
                 line: LineStagePenalties { exchange_cost: 0.0 },
                 ncs: NcsStagePenalties {
@@ -5129,27 +5017,6 @@ mod anticipated_bridge_st_cruz_nova_k1 {
             }
         }
 
-        fn default_hydro_penalties() -> HydroPenalties {
-            HydroPenalties {
-                spillage_cost: 0.01,
-                diversion_cost: 0.0,
-                turbined_cost: 0.0,
-                storage_violation_below_cost: 500.0,
-                filling_target_violation_cost: 0.0,
-                turbined_violation_below_cost: 0.0,
-                outflow_violation_below_cost: 0.0,
-                outflow_violation_above_cost: 0.0,
-                generation_violation_below_cost: 0.0,
-                evaporation_violation_cost: 0.0,
-                water_withdrawal_violation_cost: 0.0,
-                water_withdrawal_violation_pos_cost: 0.0,
-                water_withdrawal_violation_neg_cost: 0.0,
-                evaporation_violation_pos_cost: 0.0,
-                evaporation_violation_neg_cost: 0.0,
-                inflow_nonnegativity_cost: 1000.0,
-            }
-        }
-
         // The padding region [n_stages, n_stages + k) is the delivery-stage axis
         // read by `fill_anticipated_columns`; it must carry per-thermal
         // costs so the decision column's objective coefficient is non-zero.
@@ -5207,7 +5074,7 @@ mod anticipated_bridge_st_cruz_nova_k1 {
                 n_stages,
             },
             &PenaltiesDefaults {
-                hydro: default_hydro_penalties(),
+                hydro: super::default_hydro_penalties(),
                 bus: BusStagePenalties { excess_cost: 0.0 },
                 line: LineStagePenalties { exchange_cost: 0.0 },
                 ncs: NcsStagePenalties {
@@ -5675,27 +5542,6 @@ mod anticipated_convergence_slow {
             }
         }
 
-        fn default_hydro_penalties() -> HydroPenalties {
-            HydroPenalties {
-                spillage_cost: 0.01,
-                diversion_cost: 0.0,
-                turbined_cost: 0.0,
-                storage_violation_below_cost: 500.0,
-                filling_target_violation_cost: 0.0,
-                turbined_violation_below_cost: 0.0,
-                outflow_violation_below_cost: 0.0,
-                outflow_violation_above_cost: 0.0,
-                generation_violation_below_cost: 0.0,
-                evaporation_violation_cost: 0.0,
-                water_withdrawal_violation_cost: 0.0,
-                water_withdrawal_violation_pos_cost: 0.0,
-                water_withdrawal_violation_neg_cost: 0.0,
-                evaporation_violation_pos_cost: 0.0,
-                evaporation_violation_neg_cost: 0.0,
-                inflow_nonnegativity_cost: 1000.0,
-            }
-        }
-
         let bounds = ResolvedBounds::new(
             &BoundsCountsSpec {
                 n_hydros: 1,
@@ -5739,7 +5585,7 @@ mod anticipated_convergence_slow {
                 n_stages: n_st,
             },
             &PenaltiesDefaults {
-                hydro: default_hydro_penalties(),
+                hydro: super::default_hydro_penalties(),
                 bus: BusStagePenalties { excess_cost: 0.0 },
                 line: LineStagePenalties { exchange_cost: 0.0 },
                 ncs: NcsStagePenalties {
@@ -5962,13 +5808,6 @@ mod a1b_value_cut_identity_anchor {
         PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
         ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
     };
-    use cobre_io::config::{
-        Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
-        InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
-        RowSelectionConfig, SimulationConfig as IoSimulationConfig, StoppingRuleConfig,
-        TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
-    };
-    use cobre_io::config::{SimulationSelection, TrainingSelection};
     use cobre_sddp::{SimulationScenarioResult, StudySetup};
     use cobre_solver::ActiveSolver;
 
@@ -6232,42 +6071,6 @@ mod a1b_value_cut_identity_anchor {
             .expect("build_system: valid")
     }
 
-    fn build_config(iterations: usize) -> Config {
-        Config {
-            schema: None,
-            modeling: ModelingConfig {
-                inflow_non_negativity: InflowNonNegativityConfig {
-                    method: CfgInflowMethod::Penalty,
-                },
-
-                cost_scale_factor: None,
-            },
-            training: TrainingConfig {
-                enabled: true,
-                tree_seed: Some(42),
-                stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
-                    limit: iterations as u32,
-                }]),
-                stopping_mode: cobre_io::config::StoppingMode::Any,
-                cut_selection: RowSelectionConfig::default(),
-                solver: TrainingSolverConfig::default(),
-                parallelism: cobre_io::config::ParallelismConfig::default(),
-                scenario_source: None,
-                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
-            },
-            upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
-            policy: PolicyConfig::default(),
-            simulation: IoSimulationConfig {
-                enabled: true,
-                io_channel_capacity: 8,
-                selection: Some(SimulationSelection::Sampled { num_scenarios: 1 }),
-                ..IoSimulationConfig::default()
-            },
-            exports: ExportsConfig::default(),
-            estimation: EstimationConfig::default(),
-        }
-    }
-
     /// Converged run outputs for the two-mode identity comparison.
     struct RunOutputs {
         final_lb: f64,
@@ -6394,11 +6197,11 @@ mod a1b_value_cut_identity_anchor {
     fn a1b_lead_time_equals_lead_stages_uniform_calendar() {
         let mut setup_stages = build_setup_in_code(
             build_system(AnticipatedConfig::LeadStages(1)),
-            &build_config(ITERATIONS),
+            &super::build_config(ITERATIONS),
         );
         let mut setup_time = build_setup_in_code(
             build_system(AnticipatedConfig::LeadTime(STAGE_HOURS)),
-            &build_config(ITERATIONS),
+            &super::build_config(ITERATIONS),
         );
 
         let (k_max_stages, n_ant_stages) = {

@@ -8,9 +8,9 @@ use cobre_stochastic::{ExternalScenarioLibrary, HistoricalScenarioLibrary, Stoch
 use crate::{
     dcs::DcsParams,
     horizon_mode::HorizonMode,
-    indexer::{CutStateProjection, StateSpace, StudyDimensions},
     inflow_method::InflowNonNegativityMethod,
-    lp_builder::{StageGeometry, StateBox},
+    lp::builder::{StageGeometry, StateBox},
+    lp::indexer::{CutStateProjection, StateSpace, StudyDimensions},
     setup::node_graph::{NodeGraph, StageIdx},
 };
 
@@ -39,7 +39,7 @@ pub struct StageContext<'a> {
     /// Hydro plants with LP variables.
     pub n_hydros: usize,
     /// Resolved objective cost-scale factor (`modeling.cost_scale_factor`),
-    /// mirroring [`StageTemplates::cost_scale_factor`](crate::lp_builder::StageTemplates::cost_scale_factor).
+    /// mirroring [`StageTemplates::cost_scale_factor`](crate::lp::builder::StageTemplates::cost_scale_factor).
     /// Multiplies a scaled-objective quantity back to currency units at the
     /// stage-cost / immediate-cost reporting boundary.
     pub cost_scale_factor: f64,

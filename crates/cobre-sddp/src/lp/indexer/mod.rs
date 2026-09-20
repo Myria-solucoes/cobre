@@ -2,7 +2,7 @@
 //!
 //! The state-vector column layout is owned by [`StateSpace`]; the per-stage
 //! equipment column/row geometry is owned by
-//! [`StageLayout`](crate::lp_builder)/[`StageGeometry`](crate::lp_builder::StageGeometry);
+//! [`StageLayout`](crate::lp::builder)/[`StageGeometry`](crate::lp::builder::StageGeometry);
 //! the non-state study shape is owned by [`StudyDimensions`]. The authoritative
 //! ranges live on the owning types.
 //!
@@ -17,7 +17,7 @@
 //! The equipment, slack, generic-constraint, and filling-phase column and row
 //! ranges that follow `theta` — allocated in that equipment -> slack ->
 //! generic -> filling family order — are owned entirely by
-//! [`StageLayout`](crate::lp_builder).
+//! [`StageLayout`](crate::lp::builder).
 //!
 //! The `anticipated_decision` block is stage-level (one column per anticipated
 //! plant, NOT per-block) and has length `A = n_anticipated`. The block collapses
@@ -37,7 +37,7 @@
 //! row 0.
 //!
 //! The per-solve patch sequence layered on top of this geometry is documented in
-//! [`crate::lp_builder`].
+//! [`crate::lp::builder`].
 //!
 //! # Submodule layout
 //!
@@ -62,7 +62,7 @@
 //!   its three shape methods ([`BlockGrid::flat`], [`BlockGrid::fpha_plane`],
 //!   [`BlockGrid::deficit`]).
 //! - `range_cursor` — the `RangeCursor` running column/row offset allocator
-//!   shared by [`StageLayout`](crate::lp_builder)'s per-stage equipment chains
+//!   shared by [`StageLayout`](crate::lp::builder)'s per-stage equipment chains
 //!   and [`StateSpace`]'s stage-invariant state-vector chain.
 //! - `storage_boundary_grid` — the [`StorageBoundaryGrid`] typed
 //!   storage-boundary address primitive ([`StorageBoundaryGrid::col`]), the

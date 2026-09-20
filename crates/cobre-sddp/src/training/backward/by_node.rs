@@ -37,7 +37,7 @@ use super::{
     SuccessorOutcomes, SuccessorSpec,
     duals_extraction::extract_duals_from_view,
     lp_setup::{fill_external_opening_noise, load_backward_lp, patch_opening_bounds},
-    outcome_aggregation::accumulate_opening_outcome,
+    outcome_aggregation::{accumulate_opening_outcome, fold_slot_increments_into_sync},
 };
 
 /// One solved (trial point, opening) outcome produced by an opening-block unit.
@@ -384,12 +384,11 @@ pub(crate) fn process_stage_backward_by_node<S: SolverInterface + Send>(
                 }
             }
 
-            for slot in 0..pop {
-                let increment = ws.backward_accum.slot_increments[slot];
-                if increment > 0 {
-                    ws.backward_accum.metadata_sync_contribution[slot] += increment;
-                }
-            }
+            fold_slot_increments_into_sync(
+                &ws.backward_accum.slot_increments,
+                &mut ws.backward_accum.metadata_sync_contribution,
+                pop,
+            );
 
             ws.worker_timing_buf.backward_wall_ms +=
                 worker_stage_wall_start.elapsed().as_secs_f64() * 1_000.0;
