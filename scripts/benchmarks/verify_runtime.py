@@ -65,9 +65,9 @@ def main():
                 assert result['iterations'] == 4, result
                 assert math.isclose(result['lower_bound'], cli_lb, rel_tol=1e-8), (result, cli_lb)
             assert py_results[0]['lower_bound'] == py_results[1]['lower_bound'], py_results
-            invalid = cobre.io.validate(str(case), config_overrides={
-                'training': {'forward_schedule': {'initial_passes': 9, 'growth_interval': 1,
-                                                   'full_from_iteration': 4}}})
+            invalid_training = json.loads((case / 'config.json').read_text())['training']
+            invalid_training['forward_schedule']['initial_passes'] = 9
+            invalid = cobre.io.validate(str(case), config_overrides={'training': invalid_training})
             assert not invalid['valid'], invalid
             assert any('forward_schedule' in error.get('message', '') for error in invalid['errors']), invalid
             results.append({'dynamic': dynamic, 'cli_lower_bound': cli_lb,
