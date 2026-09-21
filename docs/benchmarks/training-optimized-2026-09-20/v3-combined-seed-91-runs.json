@@ -1,0 +1,44 @@
+[
+  {
+    "arm": "baseline",
+    "repeat": 0,
+    "threads": 4,
+    "wall_seconds": 22.610172832966782,
+    "exit_code": 0,
+    "command": [
+      "/private/tmp/cobre-progressive-reference",
+      "run",
+      "/private/tmp/cobre-combined-opt3-seed-91/0-baseline/case",
+      "--output",
+      "/private/tmp/cobre-combined-opt3-seed-91/0-baseline/output",
+      "--threads",
+      "4",
+      "--comm-backend",
+      "local",
+      "--color",
+      "never"
+    ],
+    "binary_sha256": "26bc734436794ccd780831eb4f628d363553482a31cd60a80b0761c79d378671"
+  },
+  {
+    "arm": "selected",
+    "repeat": 0,
+    "threads": 8,
+    "wall_seconds": 9.70423795899842,
+    "exit_code": 0,
+    "command": [
+      "/private/tmp/cobre-optimized-local-target/release/cobre",
+      "run",
+      "/private/tmp/cobre-combined-opt3-seed-91/0-selected/case",
+      "--output",
+      "/private/tmp/cobre-combined-opt3-seed-91/0-selected/output",
+      "--threads",
+      "8",
+      "--comm-backend",
+      "local",
+      "--color",
+      "never"
+    ],
+    "binary_sha256": "7e2421302be6949d39c8a782db0b2b90fe8bed3fe760b8722f3259059345e524"
+  }
+]

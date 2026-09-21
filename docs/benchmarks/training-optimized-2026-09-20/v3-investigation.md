@@ -240,7 +240,66 @@ non-inferiority tests.
 An initial local x86_64 emulation check failed with illegal instruction. A control
 with the published opt.2 CLI failed identically (exit 132); this VirtualApple CPU
 exposes no AVX2/FMA, which `.cargo/config.toml` requests for both builds. Native
-x86_64 package execution therefore still needs its own check. The release workflow
+x86_64 package execution required the separate check reported below. The release workflow
 now has a read-only `validate_only` mode for existing optimized releases, using
 native x86_64/ARM64 runners, digest verification and the reusable artifact check;
 it does not publish or replace release assets.
+
+Native artifact verification passed on both Linux architectures in
+[run 35546083787](https://github.com/Myria-solucoes/cobre/actions/runs/35546083787).
+The publishing job was skipped. The initial verification run exposed a probe
+construction mistake: Python overrides replace the full training section, so the
+invalid-schedule probe initially removed selection. The corrected probe preserves
+training and changes only the initial population; it now verifies the intended
+`forward_schedule` error. No runtime artifact was changed.
+
+## Aggressive combined configuration: quality tradeoff
+
+The combined experiment uses eight workers, 12 initial forwards doubling every
+eight iterations with full population by 27, audited/deduplicated backward
+selection and two-point/ten-opening warm chains. Reference is four-worker
+by-scenario with all 96 points for all 40 iterations. CVaR remains alpha 0.15,
+lambda 0.4, with 1,024 common out-of-sample evaluation paths per trained pair.
+Seed 42 has three timing repetitions; the other seeds have one each.
+
+| Training seed | Reference | Combined | Reduction | Paired mean cost change | Mean deficit change |
+|---|---:|---:|---:|---:|---:|
+| 42 | 17.472 s | 5.624 s | 67.81% | +0.1112% | +2.1244% |
+| 7 | 19.751 s | 7.452 s | 62.27% | -0.0180% | +0.2188% |
+| 91 | 19.322 s | 6.673 s | 65.46% | +0.0061% | +0.0825% |
+
+Seed 42's paired cost interval is [+0.0483%, +0.1742%], excluding zero; its mean
+terminal storage changes 2,820.218 → 2,704.567 hm3. The speedup is real in this
+compact experiment, but the observed cost/deficit tradeoff prevents describing
+this combination as preserving quality. Mean cost is not the nested CVaR
+objective, and no nested-risk superiority/inferiority claim is made. Do not adopt
+this aggressive combination solely for its time reduction. A more conservative
+ramp (24 initial, full by 17), all backward points and independent chains is being
+compared next at eight workers, using the same evaluation protocol.
+
+## Conservative combined configuration
+
+The follow-up retains every backward point and independent by-scenario chains,
+uses eight workers, and starts with 24 forwards, doubling every eight iterations
+and reaching 96 by iteration 17. The reference uses four workers and 96 forwards
+throughout. All other protocol settings match the aggressive comparison above,
+including 1,024 common out-of-sample paths; seed 42 has three timing repetitions,
+seeds 7 and 91 one each. Training performs 351,760 LPs versus 468,880 (-24.98%).
+
+| Training seed | Reference | Conservative | Reduction | Paired mean cost change | Mean deficit change |
+|---|---:|---:|---:|---:|---:|
+| 42 | 18.426 s | 10.272 s | 44.25% | -0.0175% | -0.0202% |
+| 7 | 21.202 s | 10.910 s | 48.54% | -0.0264% | +0.3946% |
+| 91 | 19.854 s | 10.122 s | 49.02% | -0.0016% | +0.0465% |
+
+Paired mean-cost 95% intervals are respectively [-0.0617%, +0.0268%],
+[-0.0459%, -0.0068%], and [-0.0150%, +0.0119%]. These intervals are conditional
+on each trained pair and do not include training uncertainty. Terminal storage
+changes 2,820.218 → 2,703.666 hm3, 2,911.040 → 2,931.077 hm3, and
+2,959.577 → 2,965.520 hm3. The first seed therefore still ends with less water;
+seed 7 has more deficit despite lower mean cost. This is a more promising speed/
+quality tradeoff than the aggressive combination, but it is not a certificate
+of operational or nested-CVaR non-inferiority. Retain fixed population as the
+default and validate risk and individual-reservoir trajectories before promotion.
+These are local measurements; manager validation remains pending SSH access.
+Evidence: `v3-conservative-combined-seed-*-{runs,summary}.json`.
