@@ -8,12 +8,124 @@ Run with (from the repo root):
 """
 
 import pathlib
+import shutil
+import struct
 import sys
+from typing import Any
 
 import pytest
 
 
 MISSING_CASE = "/tmp/nonexistent_cobre_case_xzy123"
+
+
+@pytest.fixture(scope="module")
+def policy_checkpoint(tmp_path_factory: pytest.TempPathFactory) -> pathlib.Path:
+    import cobre.run
+
+    output = tmp_path_factory.mktemp("checkpoint-error-source")
+    cobre.run.run(
+        "examples/1dtoy",
+        output_dir=str(output),
+        threads=1,
+        config_overrides={
+            "training.stopping_rules": [{"type": "iteration_limit", "limit": 2}],
+            "simulation.enabled": False,
+        },
+    )
+    return output
+
+
+@pytest.mark.parametrize(
+    ("entry_point", "fault"),
+    [
+        (entry, fault)
+        for entry in (
+            "results", "study_load", "run_simulation", "run_warm_start",
+            "study_warm_start", "run_resume", "study_resume",
+        )
+        for fault in (
+            "missing_directory", "missing_manifest", "unsupported_version",
+            "corrupt_manifest", "manifest_is_directory", "incompatible_dimension",
+        )
+        if not (entry == "results" and fault == "incompatible_dimension")
+    ],
+)
+def test_checkpoint_errors_preserve_kind_across_entry_points(
+    tmp_path: pathlib.Path, policy_checkpoint: pathlib.Path,
+    entry_point: str, fault: str,
+) -> None:
+    import cobre
+    import cobre.errors
+    import cobre.results
+    import cobre.run
+
+    policy_dir = tmp_path / "policy"
+    if fault != "missing_directory":
+        shutil.copytree(policy_checkpoint / "policy", policy_dir)
+    if fault == "missing_manifest":
+        (policy_dir / "manifest.bin").unlink()
+    elif fault == "manifest_is_directory":
+        (policy_dir / "manifest.bin").unlink()
+        (policy_dir / "manifest.bin").mkdir()
+    elif fault == "corrupt_manifest":
+        (policy_dir / "manifest.bin").write_bytes(b"invalid checkpoint")
+    elif fault == "unsupported_version":
+        path = policy_dir / "manifest.bin"
+        data = bytearray(path.read_bytes())
+        table = struct.unpack_from("<I", data, 0)[0]
+        vtable = table - struct.unpack_from("<i", data, table)[0]
+        version_offset = struct.unpack_from("<H", data, vtable + 4)[0]
+        assert version_offset != 0
+        struct.pack_into("<I", data, table + version_offset, 999)
+        path.write_bytes(data)
+    elif fault == "incompatible_dimension":
+        checkpoint = cobre.results.load_policy(str(tmp_path))
+        for stage in checkpoint["stage_cuts"]:
+            stage["state_dimension"] += 1
+            stage["entity_manifest"] = []
+            for cut in stage["cuts"]:
+                cut["coefficients"].append(0.0)
+        cobre.write_policy_checkpoint(
+            str(policy_dir), checkpoint["stage_cuts"], checkpoint["metadata"],
+        )
+        # The artifact is readable; only loading it against this study rejects it.
+        cobre.results.load_policy(str(tmp_path))
+
+    expected = (
+        FileNotFoundError if fault.startswith("missing_")
+        else cobre.errors.PolicyIncompatibleError if fault == "incompatible_dimension"
+        else cobre.errors.CaseIoError if fault == "manifest_is_directory"
+        else cobre.errors.OutputError
+    )
+    overrides: dict[str, Any] = {"simulation.enabled": False}
+    if entry_point == "run_simulation":
+        overrides = {"training.enabled": False, "simulation.enabled": True}
+    elif entry_point.endswith("warm_start"):
+        overrides["policy.mode"] = "warm_start"
+    elif entry_point.endswith("resume"):
+        overrides["policy.mode"] = "resume"
+
+    with pytest.raises(expected) as caught:
+        if entry_point == "results":
+            cobre.results.load_policy(str(tmp_path))
+        elif entry_point.startswith("run_"):
+            cobre.run.run("examples/1dtoy", output_dir=str(tmp_path),
+                          threads=1, config_overrides=overrides)
+        else:
+            study = cobre.Study("examples/1dtoy", output_dir=str(tmp_path),
+                                threads=1, config_overrides=overrides)
+            if entry_point == "study_load":
+                study.load_policy()
+            else:
+                study.train()
+    assert type(caught.value) is expected
+    if fault == "incompatible_dimension":
+        message = str(caught.value)
+        assert "state_dimension" in message
+        assert "policy has" in message and "system has" in message
+    elif fault == "unsupported_version":
+        assert "format_version 999" in str(caught.value)
 
 
 def test_errors_importable_and_subclass_builtins() -> None:

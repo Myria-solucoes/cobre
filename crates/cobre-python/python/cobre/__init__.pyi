@@ -58,7 +58,14 @@ class Study:
     def load_policy(
         self,
         output_dir: Optional[Union[str, Path]] = None,
-    ) -> "Policy": ...
+    ) -> "Policy":
+        """Load a checkpoint and validate compatibility with this study.
+
+        Raises FileNotFoundError for missing checkpoint files, OutputError for
+        corrupt/unsupported formats, CaseIoError for other I/O failures, and
+        PolicyIncompatibleError for incompatible dimensions, counts or identity.
+        """
+        ...
     def simulate(
         self,
         policy: "Policy",

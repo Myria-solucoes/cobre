@@ -18,6 +18,10 @@ def load_policy(
 ) -> Any:
     """Load a policy checkpoint, returning a dict with "metadata" and "stage_cuts".
 
+    Raises FileNotFoundError for missing checkpoint files, OutputError for
+    corrupt/unsupported formats, and CaseIoError for other I/O failures.
+    This reads the artifact without checking compatibility with a study.
+
     metadata["season_manifest"] is always present with keys:
     - "cycle_code": int (0 monthly / 1 weekly / 2 custom / 255 absent)
     - "n_seasons": int

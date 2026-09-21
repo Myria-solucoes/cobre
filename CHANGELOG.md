@@ -280,6 +280,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Python checkpoint reads now preserve error types across `cobre.results.load_policy`,
+  `run` (warm-start, resume and simulation-only) and `Study`: missing files raise
+  `FileNotFoundError`, corrupt/unsupported formats raise `OutputError`, and other
+  I/O failures raise `CaseIoError`, instead of becoming `SolverError` in run/Study.
+- Full-FCF compatibility checks now construct `LoadError::PolicyIncompatible`
+  through `SddpError::Io`, retaining the failing check and both values for state
+  dimension, stage/pool counts, graph topology and entity identity. Python maps
+  these failures to `PolicyIncompatibleError`; CLI validation exit code 1 is retained.
+
 - **`cobre validate` and `cobre.io.validate` now reject a boundary-configured
   study whose scalar-parameter table has a genuine gap, instead of silently
   passing.** Both entry points build the study against the loaded

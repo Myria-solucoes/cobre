@@ -300,7 +300,7 @@ def test_repeated_simulate_one_policy(tmp_path: pathlib.Path) -> None:
 
 
 def test_load_policy_missing_dir_raises(tmp_path: pathlib.Path) -> None:
-    """load_policy() with no prior training raises RuntimeError.
+    """load_policy() with no prior training raises FileNotFoundError.
 
     The error message must mention the missing policy directory so callers can
     diagnose a simulation-only request against an untrained output dir.
@@ -309,7 +309,7 @@ def test_load_policy_missing_dir_raises(tmp_path: pathlib.Path) -> None:
 
     study = cobre.Study(VALID_CASE, output_dir=str(tmp_path))
 
-    with pytest.raises(RuntimeError, match="Policy directory not found"):
+    with pytest.raises(FileNotFoundError, match="policy"):
         study.load_policy()
 
 
