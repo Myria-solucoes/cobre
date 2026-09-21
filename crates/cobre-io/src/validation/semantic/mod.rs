@@ -70,6 +70,7 @@
 //! |48 | *(retired — number never reused)* | — | — |
 //! |49 | Bound-override row `stage_id` a member of the declared study stage id set (never a `[0, n)` position test), across all six bound families (thermal, hydro, line, pumping, contract, hydro unit group); NCS keeps its Layer-3 referential stage check | `constraints/*_bounds.parquet` | `BusinessRuleViolation` |
 //! |50 | A hydro declaring `evaporation_coefficients_mm` has geometry rows in `hydro_geometry.parquet` (area-volume curve, required for evaporation linearization) | `system/hydros.json` | `BusinessRuleViolation` |
+//! |51 | Explicit `spillage_discretization_points` is reserved and has no effect | `system/hydro_production_models.json` | `ModelQuality` (warning) |
 //!
 //! A hydro unit group bounds row's `block_id` range and duplicate-row keying
 //! are covered by rules 35 and 36 above; a row referencing a non-existent
@@ -168,6 +169,7 @@ pub(crate) fn validate_semantic_hydro_thermal(data: &ParsedData, ctx: &mut Valid
     hydro::check_geometry_monotonicity(data, ctx);
     hydro::check_evaporation_geometry_coverage(data, ctx);
     hydro::check_fpha_constraints(data, ctx);
+    hydro::warn_unused_spillage_discretization(data, ctx);
     hydro::check_hydro_unit_groups(data, ctx);
     thermal::check_thermal_generation_bounds(data, ctx);
     thermal::check_anticipated_thermals(data, ctx);

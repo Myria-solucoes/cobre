@@ -537,6 +537,39 @@ pub(super) fn check_evaporation_geometry_coverage(data: &ParsedData, ctx: &mut V
     }
 }
 
+pub(super) fn warn_unused_spillage_discretization(data: &ParsedData, ctx: &mut ValidationContext) {
+    use crate::extensions::SelectionMode;
+
+    for config in &data.production_models {
+        let mut warn = |layout: &crate::extensions::FphaColumnLayout, entry: String| {
+            if let Some(value) = layout.spillage_discretization_points {
+                ctx.add_warning(
+                    ErrorKind::ModelQuality,
+                    "system/hydro_production_models.json",
+                    Some(format!("hydro_id={}, {entry}", config.hydro_id.0)),
+                    format!("spillage_discretization_points={value} is reserved and has no effect; computed hyperplanes use volume and turbine flow at zero spillage. Omit this parameter"),
+                );
+            }
+        };
+        match &config.selection_mode {
+            SelectionMode::StageRanges { ranges } => {
+                for range in ranges {
+                    if let Some(layout) = &range.fpha_config {
+                        warn(layout, format!("start_stage_id={}", range.start_stage_id));
+                    }
+                }
+            }
+            SelectionMode::Seasonal { seasons, .. } => {
+                for season in seasons {
+                    if let Some(layout) = &season.fpha_config {
+                        warn(layout, format!("season_id={}", season.season_id));
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Rules 11-12: every (hydro, stage) has at least 1 FPHA plane, and each
 /// plane's `gamma_v >= 0` / `gamma_s <= 0`.
 pub(super) fn check_fpha_constraints(data: &ParsedData, ctx: &mut ValidationContext) {
@@ -774,6 +807,68 @@ mod tests {
     use cobre_core::DiversionChannel;
 
     // ── Cascade acyclicity tests ───────────────────────────────────────────────
+
+    #[test]
+    fn explicit_spillage_discretization_warns_for_both_selection_modes() {
+        use crate::extensions::{
+            FphaColumnLayout, ProductionModelConfig, SeasonConfig, SelectionMode, StageRange,
+        };
+        for source in ["computed", "precomputed"] {
+            for points in [None, Some(5), Some(10)] {
+                let layout = FphaColumnLayout {
+                    source: source.into(),
+                    volume_discretization_points: None,
+                    turbine_discretization_points: None,
+                    spillage_discretization_points: points,
+                    max_planes_per_hydro: None,
+                    fitting_window: None,
+                };
+                for selection_mode in [
+                    SelectionMode::StageRanges {
+                        ranges: vec![StageRange {
+                            start_stage_id: 0,
+                            end_stage_id: None,
+                            model: "fpha".into(),
+                            fpha_config: Some(layout.clone()),
+                            reference_volume: None,
+                            productivity_mw_per_m3s: None,
+                        }],
+                    },
+                    SelectionMode::Seasonal {
+                        default_model: "constant_productivity".into(),
+                        seasons: vec![SeasonConfig {
+                            season_id: 0,
+                            model: "fpha".into(),
+                            fpha_config: Some(layout.clone()),
+                            reference_volume: None,
+                            productivity_mw_per_m3s: None,
+                        }],
+                    },
+                ] {
+                    let mut data =
+                        make_data(vec![], vec![], vec![], make_stages(vec![0]), vec![], vec![]);
+                    data.production_models.push(ProductionModelConfig {
+                        hydro_id: cobre_core::EntityId(7),
+                        selection_mode,
+                    });
+                    let mut ctx = ValidationContext::new();
+                    validate_semantic_hydro_thermal(&data, &mut ctx);
+                    let warnings = ctx.warnings();
+                    assert_eq!(warnings.len(), usize::from(points.is_some()));
+                    assert!(ctx.errors().is_empty());
+                    for warning in warnings {
+                        assert_eq!(warning.kind, ErrorKind::ModelQuality);
+                        assert_eq!(
+                            warning.file,
+                            std::path::Path::new("system/hydro_production_models.json")
+                        );
+                        assert!(warning.entity.as_ref().unwrap().contains("hydro_id=7"));
+                        assert!(warning.message.contains("has no effect"));
+                    }
+                }
+            }
+        }
+    }
 
     /// Given an acyclic cascade A -> B -> C (all have downstream_id pointing to next),
     /// no errors are produced.
