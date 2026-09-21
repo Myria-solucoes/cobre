@@ -103,8 +103,9 @@ bound is not a quality certificate.
 
 ## Experimental progressive trajectories
 
-This option requires a source build containing `forward_schedule`; the published
-`opt.2` runtime does not accept it. Validation of this new option is in progress.
+This option is available in the `v0.15.0-myria.opt.3` preview; the older
+`opt.2` runtime does not accept it. Native Linux x86_64 and ARM64 CLI/Python
+artifact checks passed. Operational policy validation remains pending.
 
 ```json
 {
@@ -141,7 +142,7 @@ full refinement alone is not a guarantee of equivalent policy quality.
 
 ## Experimental cross-point basis reuse
 
-Source builds can set `training.parallelism.backward_scheduler` to
+The `opt.3` preview can set `training.parallelism.backward_scheduler` to
 `{"method": "by_node", "block_size": 5, "point_block_size": 4}`. The point
 block defaults to one, preserving independent per-point warm chains. Values above
 one currently require sampled training with one MPI rank; worker threads remain
@@ -158,9 +159,37 @@ CVaR aggregation retains the complete successor distribution.
 
 This changes warm-start trajectories and may change optimal dual vertices.
 Compact local tests found about 7.5% lower median training time against by-scenario,
-with changed storage and policy metrics. Full-case and multi-seed validation remain
-pending. A larger group can reduce parallel work availability and is not inherently
-faster; keep this option experimental. See the version-three benchmark report.
+with changed storage and policy metrics. In a short full 112-stage round-1687
+comparison, two-point/ten-opening groups instead increased training time by 32.65%
+against eight-worker by-scenario and increased backward simplex iterations. Do not
+adopt grouping for that case on the strength of compact results. A larger group
+can reduce parallel work availability and is not inherently faster; keep this
+option experimental. See the version-three benchmark report.
+
+## Choosing a configuration from the measured evidence
+
+Keep fixed population, all backward points and independent chains as the starting
+configuration. In the short round-1687 local comparison, increasing four to eight
+workers reduced training time 38.44% with identical exported cut files; exact
+state deduplication removed no work. This is a short-run observation, not a
+server capacity recommendation or converged-policy validation.
+
+For a compact experimental comparison, eight workers with 24 initial forwards,
+doubling every eight iterations to 96 by iteration 17, and all backward points
+reduced training time 44–49% against four-worker fixed population over three
+training seeds. Mean cost stayed close, but deficit and terminal storage changed.
+It is a candidate for further validation, not a quality-preserving preset.
+
+The more aggressive combination of progressive population, audited point
+selection and grouped bases reduced time 62–68%, but one seed increased mean
+cost 0.1112% and deficit 2.1244%. Do not infer that individually promising options
+remain acceptable when combined. Evaluate common out-of-sample paths, multiple
+training seeds, deficit and individual reservoir trajectories, and the configured
+nested risk objective before promoting an experimental configuration.
+
+All these percentages are local measurements with different protocols and must
+not be added. Reproducible inputs, repetitions, intervals and limitations are in
+[the version-three investigation](../benchmarks/training-optimized-2026-09-20/v3-investigation.md).
 
 ## Reproducible compact comparisons
 
