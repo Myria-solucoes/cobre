@@ -478,18 +478,6 @@ mod tests {
             filling_min_rate_m3s: 0.0,
             water_withdrawal_m3s: 0.0,
         };
-        let zero_block = HydroBlockBounds {
-            min_turbined_m3s: 0.0,
-            max_turbined_m3s: 0.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            min_generation_mw: 0.0,
-            max_generation_mw: 0.0,
-            min_diversion_m3s: None,
-            max_diversion_m3s: None,
-            min_spillage_m3s: None,
-            max_spillage_m3s: None,
-        };
         let mut bounds = ResolvedBounds::new(
             &BoundsCountsSpec {
                 n_hydros: ranges.len(),
@@ -502,7 +490,7 @@ mod tests {
             },
             &BoundsDefaults {
                 hydro: zero_stage,
-                hydro_block: zero_block,
+                hydro_block: HydroBlockBounds::default(),
                 thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
                 thermal_block: ThermalBlockBounds {
                     min_generation_mw: 0.0,

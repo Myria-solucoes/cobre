@@ -1583,11 +1583,12 @@ mod tests {
     // physical-bounds source, and declaration-order invariance.
     // -------------------------------------------------------------------------
 
-    /// A `ResolvedBounds` whose hydro storage range varies by stage and by
-    /// hydro — proves a `MaxStoredEnergy` resolution tracks `system.bounds()`
-    /// rather than a stage-invariant field.
-    fn make_varying_bounds(n_hydros: usize, n_stages: usize) -> ResolvedBounds {
-        let mut bounds = ResolvedBounds::new(
+    /// Zero-valued `ResolvedBounds` sized for `n_hydros` x `n_stages`, every
+    /// axis at its zero default — [`make_varying_bounds`] and
+    /// `max_stored_energy_is_invariant_to_hydro_declaration_order`'s per-order
+    /// fixture both mutate only the hydro storage cells they need.
+    fn zero_resolved_bounds(n_hydros: usize, n_stages: usize) -> ResolvedBounds {
+        ResolvedBounds::new(
             &BoundsCountsSpec {
                 n_hydros,
                 n_thermals: 0,
@@ -1624,7 +1625,14 @@ mod tests {
                     price_per_mwh: 0.0,
                 },
             },
-        );
+        )
+    }
+
+    /// A `ResolvedBounds` whose hydro storage range varies by stage and by
+    /// hydro — proves a `MaxStoredEnergy` resolution tracks `system.bounds()`
+    /// rather than a stage-invariant field.
+    fn make_varying_bounds(n_hydros: usize, n_stages: usize) -> ResolvedBounds {
+        let mut bounds = zero_resolved_bounds(n_hydros, n_stages);
         for h in 0..n_hydros {
             for t in 0..n_stages {
                 let cell = bounds.hydro_bounds_mut(h, t);
@@ -1773,44 +1781,7 @@ mod tests {
                 EnergyConversionSet::new(per_hydro_stage, accumulated, n_hydros, n_stages)
                     .with_integrated(integrated_equivalent, integrated_accumulated);
 
-            let mut bounds = ResolvedBounds::new(
-                &BoundsCountsSpec {
-                    n_hydros,
-                    n_thermals: 0,
-                    n_lines: 0,
-                    n_pumping: 0,
-                    n_contracts: 0,
-                    n_stages,
-                    k_max: 0,
-                },
-                &BoundsDefaults {
-                    hydro: HydroStageBounds {
-                        min_storage_hm3: 0.0,
-                        max_storage_hm3: 0.0,
-                        filling_min_rate_m3s: 0.0,
-                        water_withdrawal_m3s: 0.0,
-                    },
-                    hydro_block: HydroBlockBounds::default(),
-                    thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
-                    thermal_block: ThermalBlockBounds {
-                        min_generation_mw: 0.0,
-                        max_generation_mw: 0.0,
-                    },
-                    line_block: LineBlockBounds {
-                        direct_mw: 0.0,
-                        reverse_mw: 0.0,
-                    },
-                    pumping_block: PumpingBlockBounds {
-                        min_flow_m3s: 0.0,
-                        max_flow_m3s: 0.0,
-                    },
-                    contract_block: ContractBlockBounds {
-                        min_mw: 0.0,
-                        max_mw: 0.0,
-                        price_per_mwh: 0.0,
-                    },
-                },
-            );
+            let mut bounds = zero_resolved_bounds(n_hydros, n_stages);
             for (pos, &id) in order.iter().enumerate() {
                 for t in 0..n_stages {
                     let cell = bounds.hydro_bounds_mut(pos, t);
