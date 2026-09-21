@@ -12,11 +12,11 @@ use chrono::NaiveDate;
 use cobre_core::{
     AffineBound, Block, BlockMode, BoundsCountsSpec, BoundsDefaults, CascadeTopology,
     ConstraintExpression, ContractBlockBounds, EntityId, FillingConfig, GenericConstraint, Hydro,
-    HydroBlockBounds, HydroGenerationModel, HydroStageBounds, LineBlockBounds, NoiseMethod,
-    PumpingBlockBounds, PumpingStation, ResolvedBounds, ResolvedGenericConstraintBounds,
-    ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties,
-    ScenarioSourceConfig, SlackConfig, Stage, StageRiskConfig, StageStateConfig,
-    ThermalBlockBounds, ThermalStageBounds,
+    HydroBlockBounds, HydroGenerationModel, HydroStageBounds, LineBlockBounds, LinearTerm,
+    NoiseMethod, PumpingBlockBounds, PumpingStation, ResolvedBounds,
+    ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors,
+    ResolvedPenalties, ScenarioSourceConfig, SlackConfig, Stage, StageRiskConfig, StageStateConfig,
+    ThermalBlockBounds, ThermalStageBounds, VariableRef,
 };
 use cobre_stochastic::par::precompute::PrecomputedPar;
 
@@ -536,6 +536,460 @@ fn fold_endpoint_equals_normalized_folds_both_endpoints() {
         Some(52.0),
         "upper endpoint folds against its own base"
     );
+}
+
+// ── useful_volume_bound_shift (via `enumerate_generic_constraint_rows`) ────
+
+/// One `ResolvedGenericConstraintBounds::new` raw row, constraint id fixed by the
+/// caller: `(stage_id, block_id, bound_lower, bound_upper)`.
+type RawBoundRow = (i32, Option<i32>, Option<f64>, Option<f64>);
+
+/// Owns a `TemplateBuildCtx` whose generic constraints reference
+/// `HydroUsefulVolume{Initial,Final}` terms. The fold reads only `hydro_pos` and
+/// `resolved.bounds`, so — like `PumpingFixtures` — `hydros`/`n_hydros` stay
+/// empty/zero; every hydro-count-driven column/row family in `StageLayout::new`
+/// then allocates zero entries, leaving only the generic-constraint row family
+/// under test.
+struct UsefulVolumeFixtures {
+    par_lp: PrecomputedPar,
+    cascade: CascadeTopology,
+    hydro_cell_index: HydroCellIndex,
+    bounds: ResolvedBounds,
+    penalties: ResolvedPenalties,
+    resolved_generic_bounds: ResolvedGenericConstraintBounds,
+    resolved_load_factors: ResolvedLoadFactors,
+    resolved_ncs_bounds: ResolvedNcsBounds,
+    resolved_ncs_factors: ResolvedNcsFactors,
+    resolved_parameters: ResolvedParameters,
+    production_models: ProductionModelSet,
+    evaporation_models: EvaporationModelSet,
+    hydro_pos: BTreeMap<EntityId, usize>,
+    generic_constraints: Vec<GenericConstraint>,
+}
+
+impl UsefulVolumeFixtures {
+    /// `n_hydros` hydros at ids `1..=n_hydros` (positions `0..n_hydros`), `n_stages`
+    /// stages, every `min_storage_hm3` defaulted to `0.0` — set per test via
+    /// `bounds.hydro_bounds_mut`.
+    fn new(n_hydros: usize, n_stages: usize) -> Self {
+        let hydro_pos = (0..n_hydros)
+            .map(|i| (EntityId(i32::try_from(i + 1).expect("small test id")), i))
+            .collect();
+        Self {
+            par_lp: PrecomputedPar::default(),
+            cascade: CascadeTopology::build(&[]),
+            hydro_cell_index: HydroCellIndex::build(&[]),
+            bounds: ResolvedBounds::new(
+                &BoundsCountsSpec {
+                    n_hydros,
+                    n_thermals: 0,
+                    n_lines: 0,
+                    n_pumping: 0,
+                    n_contracts: 0,
+                    n_stages,
+                    k_max: 0,
+                },
+                &BoundsDefaults {
+                    hydro: HydroStageBounds {
+                        min_storage_hm3: 0.0,
+                        max_storage_hm3: 0.0,
+                        filling_min_rate_m3s: 0.0,
+                        water_withdrawal_m3s: 0.0,
+                    },
+                    hydro_block: HydroBlockBounds::default(),
+                    thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+                    thermal_block: ThermalBlockBounds {
+                        min_generation_mw: 0.0,
+                        max_generation_mw: 0.0,
+                    },
+                    line_block: LineBlockBounds {
+                        direct_mw: 0.0,
+                        reverse_mw: 0.0,
+                    },
+                    pumping_block: PumpingBlockBounds {
+                        min_flow_m3s: 0.0,
+                        max_flow_m3s: 0.0,
+                    },
+                    contract_block: ContractBlockBounds {
+                        min_mw: 0.0,
+                        max_mw: 0.0,
+                        price_per_mwh: 0.0,
+                    },
+                },
+            ),
+            penalties: ResolvedPenalties::empty(),
+            resolved_generic_bounds: ResolvedGenericConstraintBounds::empty(),
+            resolved_load_factors: ResolvedLoadFactors::empty(),
+            resolved_ncs_bounds: ResolvedNcsBounds::empty(),
+            resolved_ncs_factors: ResolvedNcsFactors::empty(),
+            resolved_parameters: ResolvedParameters {
+                per_param: vec![],
+                id_to_slot: vec![],
+                cost_scale_factor: 1_000_000.0,
+            },
+            production_models: ProductionModelSet::new(vec![], 0, 1),
+            evaporation_models: EvaporationModelSet::new(vec![]),
+            hydro_pos,
+            generic_constraints: Vec::new(),
+        }
+    }
+
+    /// Install one generic constraint (id 5) with the given expression `terms` and
+    /// resolved bound rows (`(stage_id, block_id, bound_lower, bound_upper)`).
+    fn install_constraint(&mut self, terms: Vec<LinearTerm>, raw_bounds: Vec<RawBoundRow>) {
+        self.generic_constraints = vec![GenericConstraint {
+            id: EntityId(5),
+            name: "useful_volume".to_string(),
+            description: None,
+            expression: ConstraintExpression { terms },
+            slack: SlackConfig {
+                enabled: false,
+                penalty: None,
+            },
+            bound_lower_affine: None,
+            bound_upper_affine: None,
+        }];
+        let id_map: HashMap<i32, usize> = [(5, 0)].into_iter().collect();
+        self.resolved_generic_bounds = ResolvedGenericConstraintBounds::new(
+            &id_map,
+            raw_bounds
+                .into_iter()
+                .map(|(stage_id, block_id, lo, hi)| (5i32, stage_id, block_id, lo, hi)),
+        );
+    }
+
+    fn make_ctx(&self) -> TemplateBuildCtx<'_> {
+        let n_stages = self.bounds.n_stages();
+        TemplateBuildCtx {
+            hydros: &[],
+            thermals: &[],
+            lines: &[],
+            buses: &[],
+            load_models: &[],
+            cascade: &self.cascade,
+            hydro_cell_index: &self.hydro_cell_index,
+            resolved: ResolvedTables {
+                bounds: &self.bounds,
+                penalties: &self.penalties,
+                resolved_generic_bounds: &self.resolved_generic_bounds,
+                resolved_load_factors: &self.resolved_load_factors,
+                resolved_ncs_bounds: &self.resolved_ncs_bounds,
+                resolved_ncs_factors: &self.resolved_ncs_factors,
+                resolved_parameters: &self.resolved_parameters,
+            },
+            hydro_pos: self.hydro_pos.clone(),
+            thermal_pos: BTreeMap::new(),
+            line_pos: BTreeMap::new(),
+            bus_pos: BTreeMap::new(),
+            par_lp: &self.par_lp,
+            production_models: &self.production_models,
+            evaporation_models: &self.evaporation_models,
+            generic_constraints: &self.generic_constraints,
+            non_controllable_sources: &[],
+            pumping_stations: &[],
+            pumping_pos: BTreeMap::new(),
+            n_pumping: 0,
+            contracts: &[],
+            contract_pos: BTreeMap::new(),
+            n_contract_import: 0,
+            n_contract_export: 0,
+            diversion_upstream: HashMap::new(),
+            arc_stage_weights: HashMap::new(),
+            arc_spread_chrono: HashMap::new(),
+            arc_arrival_density: HashMap::new(),
+            per_stage_mask: Vec::new(),
+            post_study_resolved: PostStudyResolved::default(),
+            n_hydros: 0,
+            n_thermals: 0,
+            n_lines: 0,
+            n_buses: 0,
+            max_par_order: 0,
+            n_anticipated: 0,
+            k_max: 0,
+            anticipated_lead_stages: vec![],
+            anticipated_thermal_indices: vec![],
+            anticipated_windows: vec![],
+            anticipated_resolution: AnticipatedResolution::default(),
+            study_stage_ids: (0..i32::try_from(n_stages).unwrap_or(0)).collect(),
+            delivery_stage_ids: (0..i32::try_from(n_stages).unwrap_or(0)).collect(),
+            has_penalty: false,
+            delivery_cumulative_discount_factors: vec![1.0; n_stages],
+            delivery_total_hours: vec![744.0; n_stages],
+            filling_v_target: BTreeMap::new(),
+        }
+    }
+}
+
+/// AC1: `1.0 * hydro_useful_volume_final(h) >= B` resolves to `B + 1.0*V_lo(h,t)`.
+#[test]
+fn useful_volume_single_term_lower_bound_folds_v_lo() {
+    let mut fixtures = UsefulVolumeFixtures::new(1, 1);
+    let h = EntityId(1);
+    fixtures.bounds.hydro_bounds_mut(0, 0).min_storage_hm3 = 12.5;
+    fixtures.install_constraint(
+        vec![LinearTerm::literal(
+            1.0,
+            VariableRef::HydroUsefulVolumeFinal {
+                hydro_id: h,
+                block_id: None,
+            },
+        )],
+        vec![(0, None, Some(20.0), None)],
+    );
+    let ctx = fixtures.make_ctx();
+    let state = state_layout_for(&ctx);
+    let stage = minimal_stage();
+    let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+    assert_eq!(layout.generic_constraint_rows.len(), 1);
+    let row = &layout.generic_constraint_rows[0];
+    assert_eq!(
+        row.bound_lower.expect("lower present").to_bits(),
+        32.5_f64.to_bits(),
+        "B + 1.0 * V_lo = 20.0 + 12.5"
+    );
+    assert_eq!(row.bound_upper, None);
+}
+
+/// AC2: `c1*ufv(h1) + c2*ufv(h2) >= B` resolves to `B + c1*V_lo(h1,t) + c2*V_lo(h2,t)`.
+#[test]
+fn useful_volume_multi_term_lower_bound_sums_each_hydros_v_lo() {
+    let mut fixtures = UsefulVolumeFixtures::new(2, 1);
+    let h1 = EntityId(1);
+    let h2 = EntityId(2);
+    fixtures.bounds.hydro_bounds_mut(0, 0).min_storage_hm3 = 10.0;
+    fixtures.bounds.hydro_bounds_mut(1, 0).min_storage_hm3 = 4.0;
+    fixtures.install_constraint(
+        vec![
+            LinearTerm::literal(
+                2.0,
+                VariableRef::HydroUsefulVolumeFinal {
+                    hydro_id: h1,
+                    block_id: None,
+                },
+            ),
+            LinearTerm::literal(
+                3.0,
+                VariableRef::HydroUsefulVolumeFinal {
+                    hydro_id: h2,
+                    block_id: None,
+                },
+            ),
+        ],
+        vec![(0, None, Some(50.0), None)],
+    );
+    let ctx = fixtures.make_ctx();
+    let state = state_layout_for(&ctx);
+    let stage = minimal_stage();
+    let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+    assert_eq!(layout.generic_constraint_rows.len(), 1);
+    let row = &layout.generic_constraint_rows[0];
+    assert_eq!(
+        row.bound_lower.expect("lower present").to_bits(),
+        82.0_f64.to_bits(),
+        "50 + 2*10 + 3*4 = 82"
+    );
+}
+
+/// AC4: a constraint with no useful-volume term is bit-identical to the pre-fold
+/// value — proven with a `-0.0` endpoint, since `-0.0 + 0.0` would flip the sign
+/// bit, catching an implementation that always adds the (possibly zero) shift.
+#[test]
+fn useful_volume_fold_inert_for_non_useful_volume_constraint() {
+    let mut fixtures = UsefulVolumeFixtures::new(1, 1);
+    fixtures.bounds.hydro_bounds_mut(0, 0).min_storage_hm3 = 99.0;
+    fixtures.install_constraint(vec![], vec![(0, None, Some(-0.0), None)]);
+    let ctx = fixtures.make_ctx();
+    let state = state_layout_for(&ctx);
+    let stage = minimal_stage();
+    let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+    let row = &layout.generic_constraint_rows[0];
+    assert_eq!(
+        row.bound_lower.expect("lower present").to_bits(),
+        (-0.0_f64).to_bits(),
+        "no useful-volume term: the endpoint must not even add 0.0"
+    );
+}
+
+/// Orchestrator clarification: the fold shifts only the endpoint(s)
+/// `fold_endpoint` already resolved to `Some`; an untargeted `None` endpoint
+/// stays `None`. Also exercises `HydroUsefulVolumeInitial` on an upper-bounded
+/// constraint (the endpoint-symmetry requirement).
+#[test]
+fn useful_volume_fold_leaves_untargeted_lower_endpoint_as_none() {
+    let mut fixtures = UsefulVolumeFixtures::new(1, 1);
+    let h = EntityId(1);
+    fixtures.bounds.hydro_bounds_mut(0, 0).min_storage_hm3 = 7.0;
+    fixtures.install_constraint(
+        vec![LinearTerm::literal(
+            1.0,
+            VariableRef::HydroUsefulVolumeInitial {
+                hydro_id: h,
+                block_id: None,
+            },
+        )],
+        vec![(0, None, None, Some(40.0))],
+    );
+    let ctx = fixtures.make_ctx();
+    let state = state_layout_for(&ctx);
+    let stage = minimal_stage();
+    let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+    let row = &layout.generic_constraint_rows[0];
+    assert_eq!(
+        row.bound_lower, None,
+        "untargeted lower endpoint stays None"
+    );
+    assert_eq!(
+        row.bound_upper.expect("upper present").to_bits(),
+        47.0_f64.to_bits(),
+        "40 + 1.0 * 7.0 = 47"
+    );
+}
+
+/// The fold does not defeat the stage-level collapse: a block-independent
+/// useful-volume expression still resolves to one stage-level row across
+/// `n_blks` blocks, carrying the correctly folded value.
+#[test]
+fn useful_volume_fold_collapses_block_independent_expression_to_one_row() {
+    let mut fixtures = UsefulVolumeFixtures::new(1, 1);
+    let h = EntityId(1);
+    fixtures.bounds.hydro_bounds_mut(0, 0).min_storage_hm3 = 5.0;
+    fixtures.install_constraint(
+        vec![LinearTerm::literal(
+            1.0,
+            VariableRef::HydroUsefulVolumeFinal {
+                hydro_id: h,
+                block_id: None,
+            },
+        )],
+        vec![(0, None, Some(10.0), None)],
+    );
+    let ctx = fixtures.make_ctx();
+    let state = state_layout_for(&ctx);
+    let stage = stage_with_blocks(BlockMode::Parallel, 3);
+    let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+    assert_eq!(
+        layout.generic_constraint_rows.len(),
+        1,
+        "block-independent useful-volume term must still collapse to one stage-level row"
+    );
+    let row = &layout.generic_constraint_rows[0];
+    assert!(row.is_stage_level);
+    assert_eq!(
+        row.bound_lower.expect("lower present").to_bits(),
+        15.0_f64.to_bits(),
+        "10 + 1.0*5.0 = 15"
+    );
+}
+
+/// C5: the fold reads the resolved `(hydro, stage)` dead volume, so the same
+/// constraint folds differently at different stages — never a per-block value.
+#[test]
+fn useful_volume_fold_uses_per_stage_resolved_v_lo() {
+    let mut fixtures = UsefulVolumeFixtures::new(1, 2);
+    let h = EntityId(1);
+    fixtures.bounds.hydro_bounds_mut(0, 0).min_storage_hm3 = 5.0;
+    fixtures.bounds.hydro_bounds_mut(0, 1).min_storage_hm3 = 8.0;
+    fixtures.install_constraint(
+        vec![LinearTerm::literal(
+            1.0,
+            VariableRef::HydroUsefulVolumeFinal {
+                hydro_id: h,
+                block_id: None,
+            },
+        )],
+        vec![(0, None, Some(10.0), None), (1, None, Some(10.0), None)],
+    );
+    let ctx = fixtures.make_ctx();
+    let state = state_layout_for(&ctx);
+
+    let stage0 = stage_with_id(0);
+    let layout0 = StageLayout::new(&ctx, &state, &stage0, 0);
+    assert_eq!(
+        layout0.generic_constraint_rows[0]
+            .bound_lower
+            .expect("present")
+            .to_bits(),
+        15.0_f64.to_bits(),
+        "stage 0: 10 + 5.0"
+    );
+
+    let stage1 = stage_with_id(1);
+    let layout1 = StageLayout::new(&ctx, &state, &stage1, 1);
+    assert_eq!(
+        layout1.generic_constraint_rows[0]
+            .bound_lower
+            .expect("present")
+            .to_bits(),
+        18.0_f64.to_bits(),
+        "stage 1: 10 + 8.0"
+    );
+}
+
+/// The fold uses the EFFECTIVE coefficient `resolved_coeff * term.scale` — the
+/// same value `fill_generic_constraint_entries` prices the storage column at
+/// (`resolve_variable_ref` resolves a useful-volume variant at multiplier
+/// `1.0`), not the raw resolved coefficient alone.
+#[test]
+fn useful_volume_fold_effective_coefficient_includes_term_scale() {
+    let mut fixtures = UsefulVolumeFixtures::new(1, 1);
+    let h = EntityId(1);
+    fixtures.bounds.hydro_bounds_mut(0, 0).min_storage_hm3 = 3.0;
+    fixtures.resolved_parameters = ResolvedParameters {
+        per_param: vec![vec![vec![4.0]]],
+        id_to_slot: vec![(9, 0)],
+        cost_scale_factor: 1_000_000.0,
+    };
+    fixtures.install_constraint(
+        vec![LinearTerm::parameter(
+            EntityId(9),
+            2.5,
+            VariableRef::HydroUsefulVolumeFinal {
+                hydro_id: h,
+                block_id: None,
+            },
+        )],
+        vec![(0, None, Some(1.0), None)],
+    );
+    let ctx = fixtures.make_ctx();
+    let state = state_layout_for(&ctx);
+    let stage = minimal_stage();
+    let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+    let row = &layout.generic_constraint_rows[0];
+    assert_eq!(
+        row.bound_lower.expect("lower present").to_bits(),
+        31.0_f64.to_bits(),
+        "1.0 + (4.0 resolved * 2.5 scale) * 3.0 V_lo = 1 + 10*3 = 31"
+    );
+}
+
+/// Referential validation (`validate_variable_ref_entity`) guarantees every
+/// useful-volume `hydro_id` resolves in `hydro_pos`; a miss fires the same
+/// test-loud, production-safe `debug_assert!` `ResolvedParameters::get` uses
+/// for its own unreachable-post-validation misses.
+#[test]
+#[should_panic(expected = "useful-volume term references unknown hydro")]
+fn useful_volume_fold_unresolvable_hydro_id_fires_debug_assert() {
+    let mut fixtures = UsefulVolumeFixtures::new(0, 1);
+    fixtures.install_constraint(
+        vec![LinearTerm::literal(
+            1.0,
+            VariableRef::HydroUsefulVolumeFinal {
+                hydro_id: EntityId(99),
+                block_id: None,
+            },
+        )],
+        vec![(0, None, Some(1.0), None)],
+    );
+    let ctx = fixtures.make_ctx();
+    let state = state_layout_for(&ctx);
+    let stage = minimal_stage();
+    let _ = StageLayout::new(&ctx, &state, &stage, 0);
 }
 
 // ── storage_internal interior-boundary sizing ────────────────────────────

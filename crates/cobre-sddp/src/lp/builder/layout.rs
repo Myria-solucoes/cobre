@@ -7,6 +7,7 @@ use cobre_core::{
     EnergyContract, EntityId, GenericConstraint, Hydro, Line, LoadModel, NonControllableSource,
     PumpingStation, ResolvedBounds, ResolvedGenericConstraintBounds, ResolvedLoadFactors,
     ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, SlackConfig, Stage, Thermal,
+    VariableRef,
 };
 use cobre_stochastic::par::precompute::PrecomputedPar;
 
@@ -1043,6 +1044,55 @@ fn fold_endpoint(
     }
 }
 
+/// Sum of `resolved_coeff * V_lo` over `constraint`'s `HydroUsefulVolume{Initial,
+/// Final}` terms, or `None` when none are present (the no-term path must leave the
+/// folded endpoints untouched, never add `0.0`). A useful-volume term resolves to
+/// the absolute storage column, so its dead volume shifts onto the bound instead of
+/// the column; `V_lo` is the per-stage resolved `HydroStageBounds.min_storage_hm3`,
+/// never a per-block or raw entity-level value.
+fn useful_volume_bound_shift(
+    constraint: &GenericConstraint,
+    ctx: &TemplateBuildCtx<'_>,
+    stage_idx: usize,
+    block_idx: usize,
+) -> Option<f64> {
+    let resolved_parameters = ctx.resolved.resolved_parameters;
+    let mut shift = 0.0;
+    let mut found = false;
+    for term in &constraint.expression.terms {
+        let (VariableRef::HydroUsefulVolumeInitial { hydro_id, .. }
+        | VariableRef::HydroUsefulVolumeFinal { hydro_id, .. }) = term.variable
+        else {
+            continue;
+        };
+        found = true;
+        // A dangling hydro_id is unreachable past referential validation
+        // (`validate_variable_ref_entity`); mirrors `ResolvedParameters::get`'s
+        // test-loud, production-safe miss handling.
+        let Some(&h_idx) = ctx.hydro_pos.get(&hydro_id) else {
+            debug_assert!(
+                false,
+                "generic constraint {:?} useful-volume term references unknown hydro {hydro_id:?}",
+                constraint.id
+            );
+            continue;
+        };
+        let coef = match term.coefficient {
+            CoefficientRef::Literal(v) => v,
+            CoefficientRef::Parameter(param_id) => {
+                resolved_parameters.get(param_id, stage_idx, block_idx)
+            }
+        };
+        let v_lo = ctx
+            .resolved
+            .bounds
+            .hydro_bounds(h_idx, stage_idx)
+            .min_storage_hm3;
+        shift += coef * term.scale * v_lo;
+    }
+    found.then_some(shift)
+}
+
 /// Whether either affine bound on `constraint` references a block-varying
 /// (`PerStageBlock`) parameter. When true, the stage-level collapse is suppressed:
 /// a single collapsed row would resolve one arbitrary block's bound value, losing
@@ -1108,20 +1158,26 @@ fn enumerate_generic_constraint_rows(
             for block_idx in block_start..block_start + block_count {
                 // The folded pair drives both the row bound and, below, the
                 // two-sided slack shape.
-                let effective_lower = fold_endpoint(
+                let mut effective_lower = fold_endpoint(
                     entry.bound_lower,
                     constraint.bound_lower_affine.as_ref(),
                     resolved_parameters,
                     stage_idx,
                     block_idx,
                 );
-                let effective_upper = fold_endpoint(
+                let mut effective_upper = fold_endpoint(
                     entry.bound_upper,
                     constraint.bound_upper_affine.as_ref(),
                     resolved_parameters,
                     stage_idx,
                     block_idx,
                 );
+                if let Some(shift) =
+                    useful_volume_bound_shift(constraint, ctx, stage_idx, block_idx)
+                {
+                    effective_lower = effective_lower.map(|v| v + shift);
+                    effective_upper = effective_upper.map(|v| v + shift);
+                }
                 let (slack_plus_col, slack_minus_col) = allocate_generic_slack_cols(
                     &constraint.slack,
                     effective_lower,

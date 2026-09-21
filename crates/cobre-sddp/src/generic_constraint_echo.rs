@@ -294,6 +294,14 @@ fn render_variable(v: &VariableRef) -> (&'static str, String) {
             "hydro_storage_final",
             format!("id={}, block={}", hydro_id.0, block_label(block_id)),
         ),
+        VariableRef::HydroUsefulVolumeInitial { hydro_id, block_id } => (
+            "hydro_useful_volume_initial",
+            format!("id={}, block={}", hydro_id.0, block_label(block_id)),
+        ),
+        VariableRef::HydroUsefulVolumeFinal { hydro_id, block_id } => (
+            "hydro_useful_volume_final",
+            format!("id={}, block={}", hydro_id.0, block_label(block_id)),
+        ),
     };
     (kind, format!("{kind}({args})"))
 }
@@ -639,5 +647,19 @@ mod tests {
             bus_id: Some(EntityId(1)),
         });
         assert_eq!(r, "hydro_generation(id=66, bus=1, block=2)");
+
+        let (kind, r) = render_variable(&VariableRef::HydroUsefulVolumeInitial {
+            hydro_id: EntityId(66),
+            block_id: None,
+        });
+        assert_eq!(kind, "hydro_useful_volume_initial");
+        assert_eq!(r, "hydro_useful_volume_initial(id=66, block=all)");
+
+        let (kind, r) = render_variable(&VariableRef::HydroUsefulVolumeFinal {
+            hydro_id: EntityId(66),
+            block_id: Some(2),
+        });
+        assert_eq!(kind, "hydro_useful_volume_final");
+        assert_eq!(r, "hydro_useful_volume_final(id=66, block=2)");
     }
 }

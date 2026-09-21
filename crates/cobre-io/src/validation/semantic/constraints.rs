@@ -97,27 +97,11 @@ fn validate_block_ref(
     block_mode: BlockMode,
     ctx: &mut ValidationContext,
 ) {
+    if let Some((accessor, storage)) = storage_boundary_ref(variable) {
+        validate_storage_ref(constraint, accessor, storage, k, stage_id, block_mode, ctx);
+        return;
+    }
     match variable {
-        VariableRef::HydroStorageInitial { block_id, .. } => {
-            validate_storage_ref(
-                constraint,
-                StorageRef::Initial(*block_id),
-                k,
-                stage_id,
-                block_mode,
-                ctx,
-            );
-        }
-        VariableRef::HydroStorageFinal { block_id, .. } => {
-            validate_storage_ref(
-                constraint,
-                StorageRef::Final(*block_id),
-                k,
-                stage_id,
-                block_mode,
-                ctx,
-            );
-        }
         VariableRef::HydroEvaporation {
             block_id: Some(b), ..
         } if *b >= k => {
@@ -150,18 +134,37 @@ fn validate_block_ref(
     }
 }
 
+/// The accessor name and boundary of a storage-boundary term, `None` for every
+/// other variant.
+fn storage_boundary_ref(variable: &VariableRef) -> Option<(&'static str, StorageRef)> {
+    match variable {
+        VariableRef::HydroStorageInitial { block_id, .. } => {
+            Some(("hydro_storage_initial", StorageRef::Initial(*block_id)))
+        }
+        VariableRef::HydroStorageFinal { block_id, .. } => {
+            Some(("hydro_storage_final", StorageRef::Final(*block_id)))
+        }
+        VariableRef::HydroUsefulVolumeInitial { block_id, .. } => Some((
+            "hydro_useful_volume_initial",
+            StorageRef::Initial(*block_id),
+        )),
+        VariableRef::HydroUsefulVolumeFinal { block_id, .. } => {
+            Some(("hydro_useful_volume_final", StorageRef::Final(*block_id)))
+        }
+        _ => None,
+    }
+}
+
 fn validate_storage_ref(
     constraint: &GenericConstraint,
+    accessor: &str,
     storage: StorageRef,
     k: usize,
     stage_id: i32,
     block_mode: BlockMode,
     ctx: &mut ValidationContext,
 ) {
-    let (accessor, block_id) = match storage {
-        StorageRef::Initial(b) => ("hydro_storage_initial", b),
-        StorageRef::Final(b) => ("hydro_storage_final", b),
-    };
+    let (StorageRef::Initial(block_id) | StorageRef::Final(block_id)) = storage;
 
     if let Some(b) = block_id
         && b >= k
@@ -312,6 +315,121 @@ mod tests {
         VariableRef::HydroStorageFinal {
             hydro_id: EntityId::from(1),
             block_id,
+        }
+    }
+
+    fn useful_initial(block_id: Option<usize>) -> VariableRef {
+        VariableRef::HydroUsefulVolumeInitial {
+            hydro_id: EntityId::from(1),
+            block_id,
+        }
+    }
+
+    fn useful_final(block_id: Option<usize>) -> VariableRef {
+        VariableRef::HydroUsefulVolumeFinal {
+            hydro_id: EntityId::from(1),
+            block_id,
+        }
+    }
+
+    /// The single error a reference raises, with `accessor` rewritten to the
+    /// storage sibling's name so the two messages can be compared verbatim.
+    fn sole_error_as_storage(
+        block_mode: BlockMode,
+        variable: VariableRef,
+        accessor: &str,
+        storage_accessor: &str,
+    ) -> String {
+        let errors = interior_errors(&make_data_storage_ref(block_mode, 3, variable));
+        assert_eq!(errors.len(), 1, "expected one error, got: {errors:?}");
+        let msg = &errors[0].message;
+        assert!(
+            msg.contains(accessor),
+            "message should name `{accessor}`, got: {msg}"
+        );
+        msg.replace(accessor, storage_accessor)
+    }
+
+    #[test]
+    fn useful_volume_out_of_range_block_matches_storage_sibling() {
+        for block_mode in [BlockMode::Parallel, BlockMode::Chronological] {
+            for (useful, storage, accessor, storage_accessor) in [
+                (
+                    useful_initial(Some(5)),
+                    initial(Some(5)),
+                    "hydro_useful_volume_initial",
+                    "hydro_storage_initial",
+                ),
+                (
+                    useful_final(Some(5)),
+                    final_(Some(5)),
+                    "hydro_useful_volume_final",
+                    "hydro_storage_final",
+                ),
+            ] {
+                assert_eq!(
+                    sole_error_as_storage(block_mode, useful, accessor, storage_accessor),
+                    sole_error_as_storage(block_mode, storage, storage_accessor, storage_accessor),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn useful_volume_parallel_interior_boundary_matches_storage_sibling() {
+        // Initial{1} and Final{0} both reference boundary k=1, interior for K=3.
+        for (useful, storage, accessor, storage_accessor) in [
+            (
+                useful_initial(Some(1)),
+                initial(Some(1)),
+                "hydro_useful_volume_initial",
+                "hydro_storage_initial",
+            ),
+            (
+                useful_final(Some(0)),
+                final_(Some(0)),
+                "hydro_useful_volume_final",
+                "hydro_storage_final",
+            ),
+        ] {
+            assert_eq!(
+                sole_error_as_storage(BlockMode::Parallel, useful, accessor, storage_accessor),
+                sole_error_as_storage(
+                    BlockMode::Parallel,
+                    storage,
+                    storage_accessor,
+                    storage_accessor
+                ),
+            );
+        }
+    }
+
+    #[test]
+    fn non_storage_per_block_reference_is_unrestricted() {
+        // An interior block on a parallel stage would be rejected for a storage boundary.
+        for block_mode in [BlockMode::Parallel, BlockMode::Chronological] {
+            let turbined = VariableRef::HydroTurbined {
+                hydro_id: EntityId::from(1),
+                block_id: Some(1),
+                bus_id: None,
+            };
+            let data = make_data_storage_ref(block_mode, 3, turbined);
+            assert!(interior_errors(&data).is_empty());
+        }
+    }
+
+    #[test]
+    fn useful_volume_valid_references_accepted() {
+        for (block_mode, variable) in [
+            (BlockMode::Parallel, useful_initial(Some(0))),
+            (BlockMode::Parallel, useful_final(Some(2))),
+            (BlockMode::Parallel, useful_initial(None)),
+            (BlockMode::Parallel, useful_final(None)),
+            (BlockMode::Chronological, useful_initial(Some(1))),
+            (BlockMode::Chronological, useful_final(Some(1))),
+        ] {
+            let data = make_data_storage_ref(block_mode, 3, variable);
+            assert!(interior_errors(&data).is_empty());
         }
     }
 

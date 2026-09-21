@@ -2949,3 +2949,90 @@ fn storage_boundary_variants_are_block_independent() {
         }
     ));
 }
+
+/// `HydroUsefulVolumeInitial`/`HydroUsefulVolumeFinal` resolve to the SAME
+/// column as `HydroStorageInitial`/`HydroStorageFinal` (the `-V_lo` shift is a
+/// bound-fold concern, not a resolution-time offset), and are block-independent
+/// like their storage counterparts.
+#[test]
+fn hydro_useful_volume_boundary_matches_storage_boundary() {
+    let indexer = make_indexer();
+    let state = make_state();
+    let geom = make_chronological_geom(&indexer, &state);
+    let prod = make_production_models();
+    let hpos = make_hydro_pos();
+    let tpos = make_thermal_pos();
+    let bpos = make_bus_pos();
+    let lpos = make_line_pos();
+
+    for block_id in [None, Some(0), Some(1), Some(2)] {
+        let useful_initial = call(
+            VariableRef::HydroUsefulVolumeInitial {
+                hydro_id: EntityId(10),
+                block_id,
+            },
+            0,
+            &geom,
+            &prod,
+            &hpos,
+            &tpos,
+            &bpos,
+            &lpos,
+        );
+        let storage_initial = call(
+            VariableRef::HydroStorageInitial {
+                hydro_id: EntityId(10),
+                block_id,
+            },
+            0,
+            &geom,
+            &prod,
+            &hpos,
+            &tpos,
+            &bpos,
+            &lpos,
+        );
+        assert_eq!(useful_initial, storage_initial);
+
+        let useful_final = call(
+            VariableRef::HydroUsefulVolumeFinal {
+                hydro_id: EntityId(10),
+                block_id,
+            },
+            0,
+            &geom,
+            &prod,
+            &hpos,
+            &tpos,
+            &bpos,
+            &lpos,
+        );
+        let storage_final = call(
+            VariableRef::HydroStorageFinal {
+                hydro_id: EntityId(10),
+                block_id,
+            },
+            0,
+            &geom,
+            &prod,
+            &hpos,
+            &tpos,
+            &bpos,
+            &lpos,
+        );
+        assert_eq!(useful_final, storage_final);
+
+        assert!(variable_ref_is_block_independent(
+            &VariableRef::HydroUsefulVolumeInitial {
+                hydro_id: EntityId(10),
+                block_id,
+            }
+        ));
+        assert!(variable_ref_is_block_independent(
+            &VariableRef::HydroUsefulVolumeFinal {
+                hydro_id: EntityId(10),
+                block_id,
+            }
+        ));
+    }
+}
