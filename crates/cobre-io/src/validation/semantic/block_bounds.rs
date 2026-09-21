@@ -78,6 +78,31 @@ const GENERIC_CONSTRAINT: FamilyMeta = FamilyMeta {
     file: "constraints/generic_constraint_bounds.parquet",
 };
 
+const BUS_PENALTY: FamilyMeta = FamilyMeta {
+    family: "Bus",
+    entity_label: "bus_id",
+    row_label: "penalty_overrides_bus",
+    file: "constraints/penalty_overrides_bus.parquet",
+};
+const LINE_PENALTY: FamilyMeta = FamilyMeta {
+    family: "Line",
+    entity_label: "line_id",
+    row_label: "penalty_overrides_line",
+    file: "constraints/penalty_overrides_line.parquet",
+};
+const HYDRO_PENALTY: FamilyMeta = FamilyMeta {
+    family: "Hydro",
+    entity_label: "hydro_id",
+    row_label: "penalty_overrides_hydro",
+    file: "constraints/penalty_overrides_hydro.parquet",
+};
+const NCS_PENALTY: FamilyMeta = FamilyMeta {
+    family: "NCS",
+    entity_label: "ncs_id",
+    row_label: "penalty_overrides_ncs",
+    file: "constraints/penalty_overrides_ncs.parquet",
+};
+
 /// `", hydro_unit_group_id={g}"` for `Some(g)`, else empty — the extra key
 /// axis a group row's `entity` field carries that the five plant-level
 /// families never set.
@@ -238,9 +263,9 @@ fn check_row(
 }
 
 /// Rule 49: rejects a bound-override row whose `stage_id` names no declared study
-/// stage, across the six bound families. Admission is membership in the
+/// stage, across bound and penalty-override families. Admission is membership in the
 /// declared id set — the same map [`resolve_bounds`] keys on — never a
-/// `[0, n)` position test: study ids may be gapped or start at 1. NCS is
+/// `[0, n)` position test: study ids may be gapped or start at 1. NCS bounds are
 /// excluded because the Layer-3 referential check already owns its stage axis.
 pub(super) fn check_bound_stage_id_range(data: &ParsedData, ctx: &mut ValidationContext) {
     let study_stage_ids: HashSet<i32> = data
@@ -306,6 +331,56 @@ pub(super) fn check_bound_stage_id_range(data: &ParsedData, ctx: &mut Validation
             &HYDRO_UNIT_GROUP,
             row.hydro_id.0,
             Some(row.hydro_unit_group_id.0),
+            row.stage_id,
+            &study_stage_ids,
+            ctx,
+        );
+    }
+    for row in &data.generic_constraint_bounds {
+        check_row_stage_range(
+            &GENERIC_CONSTRAINT,
+            row.constraint_id,
+            None,
+            row.stage_id,
+            &study_stage_ids,
+            ctx,
+        );
+    }
+    for row in &data.penalty_overrides_bus {
+        check_row_stage_range(
+            &BUS_PENALTY,
+            row.bus_id.0,
+            None,
+            row.stage_id,
+            &study_stage_ids,
+            ctx,
+        );
+    }
+    for row in &data.penalty_overrides_line {
+        check_row_stage_range(
+            &LINE_PENALTY,
+            row.line_id.0,
+            None,
+            row.stage_id,
+            &study_stage_ids,
+            ctx,
+        );
+    }
+    for row in &data.penalty_overrides_hydro {
+        check_row_stage_range(
+            &HYDRO_PENALTY,
+            row.hydro_id.0,
+            None,
+            row.stage_id,
+            &study_stage_ids,
+            ctx,
+        );
+    }
+    for row in &data.penalty_overrides_ncs {
+        check_row_stage_range(
+            &NCS_PENALTY,
+            row.source_id.0,
+            None,
             row.stage_id,
             &study_stage_ids,
             ctx,
@@ -1263,6 +1338,94 @@ mod tests {
     }
 
     // ── stage-axis rule (check_bound_stage_id_range, rule 49) ────────────────
+
+    #[test]
+    fn generic_and_penalty_overrides_require_declared_study_stages() {
+        use crate::constraints::{
+            BusPenaltyOverrideRow, HydroPenaltyOverrideRow, LinePenaltyOverrideRow,
+            NcsPenaltyOverrideRow,
+        };
+        for declared in [vec![10, 30], vec![]] {
+            let mut data = make_data(
+                vec![],
+                vec![],
+                vec![],
+                make_stages(declared.clone()),
+                vec![],
+                vec![],
+            );
+            for stage_id in [-1, 0, 2, 30] {
+                data.generic_constraint_bounds
+                    .push(generic_constraint_row(7, stage_id, None));
+                data.penalty_overrides_bus.push(BusPenaltyOverrideRow {
+                    bus_id: EntityId::from(7),
+                    stage_id,
+                    excess_cost: Some(1.0),
+                });
+                data.penalty_overrides_line.push(LinePenaltyOverrideRow {
+                    line_id: EntityId::from(7),
+                    stage_id,
+                    exchange_cost: Some(1.0),
+                });
+                data.penalty_overrides_ncs.push(NcsPenaltyOverrideRow {
+                    source_id: EntityId::from(7),
+                    stage_id,
+                    curtailment_cost: Some(1.0),
+                });
+                data.penalty_overrides_hydro.push(HydroPenaltyOverrideRow {
+                    hydro_id: EntityId::from(7),
+                    stage_id,
+                    spillage_cost: Some(1.0),
+                    turbined_cost: None,
+                    diversion_cost: None,
+                    storage_violation_below_cost: None,
+                    filling_target_violation_cost: None,
+                    turbined_violation_below_cost: None,
+                    outflow_violation_below_cost: None,
+                    outflow_violation_above_cost: None,
+                    generation_violation_below_cost: None,
+                    evaporation_violation_cost: None,
+                    water_withdrawal_violation_cost: None,
+                    water_withdrawal_violation_pos_cost: None,
+                    water_withdrawal_violation_neg_cost: None,
+                    evaporation_violation_pos_cost: None,
+                    evaporation_violation_neg_cost: None,
+                    inflow_nonnegativity_cost: None,
+                });
+            }
+            let mut ctx = ValidationContext::new();
+            super::check_bound_stage_id_range(&data, &mut ctx);
+            let errors = ctx.errors();
+            assert_eq!(errors.len(), if declared.is_empty() { 20 } else { 15 });
+            for file in [
+                "generic_constraint_bounds",
+                "penalty_overrides_bus",
+                "penalty_overrides_line",
+                "penalty_overrides_hydro",
+                "penalty_overrides_ncs",
+            ] {
+                for stage in [-1, 0, 2, 30] {
+                    let matching: Vec<_> = errors
+                        .iter()
+                        .filter(|e| {
+                            e.file == format!("constraints/{file}.parquet")
+                                && e.message.contains(&format!("stage_id={stage},"))
+                        })
+                        .collect();
+                    assert_eq!(matching.len(), usize::from(!declared.contains(&stage)));
+                    for error in matching {
+                        assert_eq!(error.kind, ErrorKind::BusinessRuleViolation);
+                        assert!(
+                            error
+                                .entity
+                                .as_ref()
+                                .is_some_and(|entity| entity.contains("=7,"))
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_all_six_bound_families_in_horizon_stage_accepted() {

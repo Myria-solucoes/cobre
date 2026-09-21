@@ -280,6 +280,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reject generic-constraint bounds and bus, line, hydro and NCS penalty overrides
+  that reference an undeclared study stage, instead of silently ignoring them.
+  Sparse study stage IDs remain valid; negative pre-study IDs are rejected.
+
 - **`cobre validate` and `cobre.io.validate` now reject a boundary-configured
   study whose scalar-parameter table has a genuine gap, instead of silently
   passing.** Both entry points build the study against the loaded
