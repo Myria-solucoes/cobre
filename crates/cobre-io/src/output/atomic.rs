@@ -56,7 +56,7 @@ pub(crate) fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<(), Output
     writer
         .write_all(bytes)
         .map_err(|e| OutputError::io(&tmp, e))?;
-    // Explicit flush before rename — see module doc (drop-flush swallows errors).
+    // Explicit flush before rename — see module doc.
     writer.flush().map_err(|e| OutputError::io(&tmp, e))?;
 
     std::fs::rename(&tmp, path).map_err(|e| OutputError::io(path, e))?;
@@ -129,9 +129,8 @@ pub(crate) fn write_parquet_atomic(path: &Path, batch: &RecordBatch) -> Result<(
         .write(batch)
         .map_err(|e| OutputError::serialization("parquet_writer", e.to_string()))?;
 
-    // Redundant with `into_inner`'s flush today, but kept to surface an I/O
-    // error before the rename rather than via drop-flush — do not remove without
-    // re-verifying the parquet version in `Cargo.lock`.
+    // Explicit flush to surface I/O errors before rename (into_inner's flush
+    // behavior may vary; do not remove without verifying the parquet version).
     let mut buf = writer
         .into_inner()
         .map_err(|e| OutputError::serialization("parquet_writer", e.to_string()))?;

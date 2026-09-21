@@ -299,18 +299,10 @@ mod tests {
     fn event_sender_some_can_send_training_event() {
         let (tx, rx) = std::sync::mpsc::channel::<TrainingEvent>();
         let config = TrainingConfig {
-            loop_config: LoopConfig {
-                forward_passes: 4,
-                max_iterations: 200,
-                ..LoopConfig::default()
-            },
-            cut_management: CutManagementConfig {
-                cut_activity_tolerance: 1e-6,
-                ..CutManagementConfig::default()
-            },
+            loop_config: LoopConfig::default(),
+            cut_management: CutManagementConfig::default(),
             events: EventConfig {
                 event_sender: Some(tx),
-                checkpoint_interval: Some(50),
                 ..EventConfig::default()
             },
         };
@@ -339,16 +331,9 @@ mod tests {
     #[test]
     fn debug_output_non_empty() {
         let config = TrainingConfig {
-            loop_config: LoopConfig {
-                forward_passes: 8,
-                max_iterations: 500,
-                ..LoopConfig::default()
-            },
+            loop_config: LoopConfig::default(),
             cut_management: CutManagementConfig::default(),
-            events: EventConfig {
-                checkpoint_interval: Some(100),
-                ..EventConfig::default()
-            },
+            events: EventConfig::default(),
         };
         let debug = format!("{config:?}");
         assert!(!debug.is_empty());

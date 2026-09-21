@@ -414,7 +414,6 @@ mod tests {
         );
         assert!(stage.is_null(2), "lower_bound stage_id must be NULL");
 
-        // No -1 in stage_id, iteration, scenario_id, or opening_index.
         for name in ["stage_id", "iteration", "scenario_id", "opening_index"] {
             let col = batch
                 .column_by_name(name)
@@ -460,10 +459,8 @@ mod tests {
             .as_any()
             .downcast_ref::<Int32Array>()
             .unwrap();
-        // Training row: iteration Some, scenario_id NULL.
         assert!(!iter_col.is_null(0) && iter_col.value(0) == 7);
         assert!(scen_col.is_null(0), "training row scenario_id must be NULL");
-        // Simulation row: iteration NULL, scenario_id Some.
         assert!(iter_col.is_null(1), "simulation row iteration must be NULL");
         assert!(!scen_col.is_null(1) && scen_col.value(1) == 12);
     }

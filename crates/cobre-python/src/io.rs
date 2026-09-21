@@ -48,12 +48,8 @@ use crate::run::reconcile_boundary_policy;
 
 // ── Error conversion ──────────────────────────────────────────────────────────
 
-/// Load and validate the effective config for [`validate`]'s phase 7.
-///
-/// Deep-merges `overrides` onto the config file via
-/// [`cobre_io::Config::with_overrides`] when present, so overrides are
-/// validated identically to an edited `config.json`; otherwise behaves like
-/// [`cobre_io::parse_config`].
+/// Loads and validates config, deep-merging `overrides` when present
+/// (validated identically to an edited `config.json`).
 fn load_validate_config(
     config_path: &std::path::Path,
     overrides: Option<&serde_json::Map<String, serde_json::Value>>,
@@ -74,13 +70,7 @@ fn convert_load_error(err: &LoadError) -> PyErr {
     convert_error(Load(err))
 }
 
-/// Build the `"warnings"` list (`list[dict]`) shared by the two validate
-/// surfaces: [`validate`] and `Study::validate`.
-///
-/// Each `cobre-io` [`cobre_io::ReportEntry`] becomes a dict with the stable
-/// `{"kind", "message", "file", "entity"}` shape (the `cobre.io.validate` data
-/// contract). Extracted so both validate paths emit the identical warning shape
-/// from a single place.
+/// Converts `ReportEntry` warnings to the `{"kind", "message", "file", "entity"}` dict shape shared by [`validate`] and `Study::validate`.
 pub(crate) fn build_warnings_list<'py>(
     py: Python<'py>,
     warnings: &[ReportEntry],
@@ -147,26 +137,9 @@ pub fn load_case(py: Python<'_>, path: PathBuf) -> PyResult<PySystem> {
 /// callers see all problems at once. A malformed `config_overrides` dict
 /// raises `ValueError` at call time.
 ///
-/// The pipeline executes these phases:
-///
-/// 1. Path existence check
-/// 2–6. `cobre-io` six-layer pipeline (structural, schema, referential,
-///      dimensional, semantic, cross-file resolution)
-/// 7. `config.json` parse
-/// 8. [`StudyParams::from_config`] — validates solver-level config fields
-///    and surfaces deprecation warnings for fields scheduled for removal
-/// 9. [`prepare_stochastic`] — PAR estimation, opening trees, stochastic context
-/// 10. [`prepare_hydro_models_from_artifacts`] — production/evaporation models
-/// 11. [`validate_generic_constraint_parameters`] — builds the resolved
-///     scalar-parameter table and rejects a generic constraint referencing an
-///     unresolved id. Run for a deck with no boundary policy; a boundary deck
-///     runs the same guard inside the phase-12 `StudySetup` build.
-/// 12. Boundary reconciliation — when `config.policy.boundary` is configured,
-///     build the `StudySetup` and reconcile the boundary checkpoint against the
-///     terminal entity manifest. Skipped when no boundary policy is configured.
-///
-/// If any phase fails, the remaining phases are skipped and the error is
-/// returned immediately (short-circuit semantics matching `cobre validate`).
+/// Executes the full validation pipeline (case structure, schema, configuration,
+/// stochastic preparation, hydro models, generic constraints, and boundary
+/// reconciliation when configured), short-circuiting on the first failure.
 ///
 /// # Arguments
 ///
@@ -226,17 +199,12 @@ pub fn validate(
     Ok(dict.into())
 }
 
-/// Plain-Rust outcome of a failed [`run_validate_pipeline`] phase, converted
-/// to the API's `errors`/`valid` dict shape only after the GIL is
-/// re-acquired.
 struct ValidateFailure {
     kind: &'static str,
     message: String,
 }
 
-/// Run phases 1-12 of [`validate`]'s pipeline without touching the GIL,
-/// short-circuiting on the first failure (matching `cobre validate`'s
-/// short-circuit semantics).
+/// GIL-free validation pipeline, short-circuiting on the first failure.
 fn run_validate_pipeline(
     path: &std::path::Path,
     overrides: Option<&serde_json::Map<String, serde_json::Value>>,
@@ -248,8 +216,6 @@ fn run_validate_pipeline(
         });
     }
 
-    // The _with_artifacts variant yields the pre-parsed CaseArtifacts bundle phase
-    // 10 reuses without re-reading disk.
     let (loaded, report) = validate_case_with_artifacts(path).map_err(|err| ValidateFailure {
         kind: err.kind(),
         message: err.to_string(),
@@ -342,8 +308,7 @@ fn run_validate_pipeline(
             }
         })?;
     } else {
-        // The boundary branch above runs this guard inside `StudySetup::new`; a
-        // non-boundary deck builds none.
+        // The boundary branch runs this guard inside StudySetup::new.
         validate_generic_constraint_parameters(
             &prepared.system,
             &hydro_models,

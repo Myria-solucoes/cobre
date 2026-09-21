@@ -22,9 +22,8 @@ use crate::StochasticError;
 // Correlation estimation
 // ---------------------------------------------------------------------------
 
-/// Minimum number of paired observations required per season for a per-season
-/// correlation matrix. Seasons below this threshold fall back to the pooled
-/// (all-season) matrix via the "default" profile.
+/// Minimum paired observations per season for a seasonal matrix; seasons below
+/// this fall back to the pooled "default" profile.
 const MIN_CORRELATION_PAIRS: usize = 30;
 
 /// Estimate the cross-entity residual correlation matrix from historical observations.
@@ -73,7 +72,7 @@ const MIN_CORRELATION_PAIRS: usize = 30;
 ///
 /// - `observations` — `(entity_id, date, value)` triples sorted by `(entity_id, date)`.
 /// - `hydro_ids` — canonical sorted entity IDs; determines matrix row/column order.
-/// - `season_map` — optional [`SeasonMap`] fallback.
+/// - `season_map` — fallback to map dates outside `stages` to a season.
 ///
 /// # Errors
 ///
@@ -174,9 +173,7 @@ pub fn estimate_correlation_with_season_map(
 
 /// Compute standardized AR innovation residuals (see
 /// `estimate_correlation_with_season_map`'s residual formula) for each hydro, keyed by
-/// `season_id` rather than pooled
-/// into a flat date map; one entry per position in `hydro_ids`. Each season's
-/// `Vec` is date-sorted (chronological `all_obs` traversal, one season per date).
+/// `season_id`; one entry per position in `hydro_ids`. Each season's vec is date-sorted.
 fn compute_hydro_residuals(
     lookups: &SeasonLookups<'_>,
     ar_lookup: &HashMap<(EntityId, usize), &ArCoefficientEstimate>,
@@ -365,12 +362,9 @@ fn warn_degenerate_hydros(
 
 /// Compute per-season Pearson correlation matrices.
 ///
-/// Seasons whose minimum paired-observation count across all hydro pairs is below
-/// [`MIN_CORRELATION_PAIRS`] are omitted and fall back to the pooled matrix via
-/// the `"default"` profile — the gate uses the min-pair count
-/// [`compute_seasonal_pearson_matrix`] already derives while building the matrix,
-/// rather than re-walking the pairs. All hydros participate regardless of
-/// degeneracy; rank-deficient matrices are acceptable (the spectral
+/// Seasons whose minimum paired-observation count is below [`MIN_CORRELATION_PAIRS`]
+/// are omitted and fall back to the pooled "default" profile. All hydros participate
+/// regardless of degeneracy; rank-deficient matrices are acceptable (spectral
 /// decomposition handles them).
 fn compute_seasonal_matrices(
     per_season_residuals: &[HashMap<usize, Vec<(NaiveDate, f64)>>],
@@ -457,8 +451,7 @@ pub(super) fn compute_pearson_correlation_matrix(
                 continue;
             }
 
-            // Date-sorted accumulation for declaration-order determinism (see doc);
-            // dates are unique within a series, so the order is total.
+            // Dates are unique within a series: the order is total, so the unstable sort is deterministic.
             pairs.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
             let rho = pearson_rho(
@@ -476,16 +469,12 @@ pub(super) fn compute_pearson_correlation_matrix(
 }
 
 /// Compute the `n_hydros` x `n_hydros` Pearson correlation matrix from
-/// date-sorted residual slices, plus the minimum per-pair overlap count (or,
-/// for a single series, its own residual count) that [`compute_seasonal_matrices`]
-/// gates the season on.
+/// date-sorted residual slices, plus the minimum per-pair overlap count
+/// [`compute_seasonal_matrices`] gates on.
 ///
-/// Determinism: each pair's overlapping dates are found by a linear
-/// merge-walk of the two date-sorted inputs, visiting shared dates in
-/// ascending `NaiveDate` order — the same accumulation order
-/// [`compute_pearson_correlation_matrix`] produces via its sort — so the
-/// result is bit-identical and, like that function, invariant to the
-/// declaration order of the input series.
+/// Determinism: merge-walk visits shared dates in ascending `NaiveDate` order,
+/// matching the accumulation order [`compute_pearson_correlation_matrix`]
+/// produces, so results are bit-identical and invariant to input series order.
 fn compute_seasonal_pearson_matrix(hydro_residuals: &[&[(NaiveDate, f64)]]) -> (Vec<f64>, usize) {
     let n = hydro_residuals.len();
     let mut matrix = vec![0.0_f64; n * n];

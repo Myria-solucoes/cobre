@@ -35,15 +35,11 @@ use crate::{
     workspace::ScratchBuffers,
 };
 
-/// Rank-0 accumulation scratch for [`evaluate_lower_bound`]'s risk-measure
-/// aggregation over stage-0 openings; reused across iterations. The
-/// noise/NCS-transform scratch every other solve site shares lives on
-/// [`ScratchBuffers`] instead — these two fields have no counterpart there.
+/// Rank-0 risk-measure aggregation scratch, reused across iterations.
 pub struct LbEvalScratch {
-    /// Per-opening objective values from the stage-0 evaluation.
+    /// Per-opening objectives.
     pub objectives_buf: Vec<f64>,
-    /// Root outcome-set product weights `P(root→n)·q_{n,ω}`, canonical order —
-    /// assembled from the node graph, never a uniform fill.
+    /// Root outcome-set product weights `P(root→n)·q_{n,ω}`.
     pub weights_buf: Vec<f64>,
 }
 
@@ -64,9 +60,8 @@ impl Default for LbEvalScratch {
     }
 }
 
-/// Groups the mutable scratch refs for [`evaluate_lower_bound`] so its signature
-/// stays under clippy's `too-many-arguments-threshold`. Build via
-/// [`LbEvalScratchBundle::from_scratch_fields`] (disjoint-borrow factory).
+/// Mutable scratch bundle for [`evaluate_lower_bound`]; build via
+/// [`LbEvalScratchBundle::from_scratch_fields`].
 pub struct LbEvalScratchBundle<'a> {
     /// Reusable LP row-bound patch buffer.
     pub patch_buf: &'a mut PatchBuffer,
@@ -163,11 +158,8 @@ fn lb_init_rank0<S: SolverInterface>(
     Ok(())
 }
 
-/// Truncation precompute (PAR lag matrix + eta floor, constant across openings),
-/// then a per-opening LP solve delegating solve-prep to [`StageSolvePrep::run`]
-/// (`load_noise = Absent`, `inflow_noise = PreBuilt`: the lower bound hand-builds
-/// `noise_buf`/`z_inflow_rhs_buf` itself and has no load-bus noise dimension),
-/// writing each objective into `objectives_buf`.
+/// Truncation precompute then per-opening stage-0 LP solve via [`StageSolvePrep::run`],
+/// writing objectives into `objectives_buf`.
 ///
 /// # Errors
 ///
@@ -349,12 +341,8 @@ fn find_root_position(node_graph: &NodeGraph) -> Result<NodePos, SddpError> {
     Ok(root_pos)
 }
 
-/// Flatten `successors` into `out`, canonical (ascending child node id) order,
-/// each entry the un-re-normalized product `P(n→child)·q_{child,ω}`, applied
-/// here at the (validated) root. Delegates to the shared
-/// [`crate::setup::node_graph::assemble_outcome_weights`] primitive — the
-/// single owner of this fill, shared with
-/// `backward_pass_state::assemble_successor_outcome_weights`.
+/// Flatten `successors` into `out`, canonical order, each entry the product
+/// `P(n→child)·q_{child,ω}`.
 fn assemble_outcome_weights(
     node_graph: &NodeGraph,
     successors: &[NodeSuccessor],
@@ -419,9 +407,6 @@ fn lb_aggregate_and_broadcast<C: Communicator>(
 }
 
 /// Evaluate the global lower bound for the current FCF approximation.
-///
-/// Only rank 0 runs the stage-0 opening loop and applies the risk measure; the
-/// resulting scalar is broadcast to all ranks. See [`LbEvalScratchBundle`].
 ///
 /// # Errors
 ///

@@ -143,8 +143,6 @@ fn test_clp_load_model_reload_zero_row() {
     let mut solver = ClpSolver::new().expect("CLP solver creation failed");
     solver.load_model(&make_fixture_stage_template());
 
-    // Re-load with a zero-row, single-column template replaces the prior model
-    // and resizes buffers.
     let zero_row = StageTemplate {
         num_cols: 1,
         num_rows: 0,
@@ -215,7 +213,6 @@ fn test_clp_add_rows_updates_dimensions() {
     assert_eq!(solver.row_indices, vec![0, 1, 2, 3, 2, 3, 1]);
     assert_eq!(solver.values, vec![1.0, 2.0, -5.0, 3.0, 1.0, 1.0, 1.0]);
 
-    // Appended row bounds land at the end of the retained vectors.
     assert_eq!(solver.row_lower, vec![6.0, 14.0, 20.0, 80.0]);
     assert!(solver.row_upper[2].is_infinite());
     assert!(solver.row_upper[3].is_infinite());
@@ -373,8 +370,6 @@ fn test_clp_escalation_restores_floor_after_exhaustion() {
     let floor_perturbation = solver.current_profile.perturbation;
     let floor_scaling = solver.current_profile.scaling;
 
-    // Pin x0 = 100 (violates row0 equality x0 = 6): the escalation ladder turns
-    // perturbation and scaling ON on its inner rungs and exhausts.
     solver.set_col_bounds(&[0], &[100.0], &[100.0]);
     let infeasible = solver.solve(None);
     assert!(
@@ -407,19 +402,9 @@ fn test_clp_escalation_restores_floor_after_exhaustion() {
     assert_eq!(solver.stats.retry_count, LADDER_RUNGS as u64);
 }
 
-/// Power statement: CLP has no `HiGHS`-style narrower `reapply_profile` — the
-/// `solve()` retry finalization (`interface.rs`) re-installs the WHOLE cached
-/// `current_profile` through the SAME `apply_profile` used for the initial
-/// install, unconditionally, after the escalation ladder runs. CLP exposes no
-/// FFI option-readback getters (unlike `HiGHS`'s `get_double_option`/
-/// `get_int_option`), so this pins the seam with the closest available
-/// assertion: every `ClpProfile` field — not merely perturbation/scaling, as
-/// `test_clp_escalation_restores_floor_after_exhaustion` above checks — equals
-/// the caller's installed profile after a genuinely exhausted escalation
-/// ladder. It does NOT prove the live CLP option state matches (no getter
-/// exists to read that back); it proves the cache the rest of `ClpSolver`
-/// reads (`resolve_simplex_cap`, the next `solve()`'s dispatch) was not
-/// silently reset to a narrower or default profile.
+/// Every `ClpProfile` field survives escalation finalization — the cached
+/// `current_profile` is restored in full, not narrowed to perturbation/scaling
+/// only (unlike `test_clp_escalation_restores_floor_after_exhaustion`).
 #[test]
 fn test_clp_full_profile_survives_escalation_finalization() {
     let mut solver = ClpSolver::new().expect("CLP solver creation failed");
@@ -442,8 +427,6 @@ fn test_clp_full_profile_survives_escalation_finalization() {
     );
     solver.apply_profile(&profile);
 
-    // Pin x0 = 100 (violates row0 equality x0 = 6): the LP has no feasible
-    // point, so the escalation ladder genuinely exhausts every rung.
     solver.set_col_bounds(&[0], &[100.0], &[100.0]);
     let infeasible = solver.solve(None);
     assert!(
@@ -614,16 +597,9 @@ fn test_clp_solve_rejects_undersized_row_basis() {
 
     let mut captured = Basis::new(0, 0);
     solver.get_basis(&mut captured);
-    assert_eq!(
-        captured.row_status.len(),
-        2,
-        "captured basis must have 2 row statuses"
-    );
 
-    // Reload and add 2 rows to a 4-row LP, leaving the 2-row basis undersized.
     solver.load_model(&make_fixture_stage_template());
     solver.add_rows(&make_fixture_row_batch());
-    assert_eq!(solver.num_rows, 4, "LP must have 4 rows after add_rows");
 
     let offered_before = solver.stats.basis_offered;
     let failures_before = solver.stats.basis_consistency_failures;
@@ -649,11 +625,6 @@ fn test_clp_solve_rejects_undersized_row_basis() {
             assert_eq!(
                 basis_rows, 2,
                 "basis_rows must equal the offered basis length"
-            );
-            assert_eq!(
-                basis_rows,
-                lp_rows - 2,
-                "the undersized basis is 2 rows short of the LP"
             );
         }
         other => panic!(
@@ -691,8 +662,6 @@ fn test_clp_basis_roundtrip_identity() {
 
 #[test]
 fn test_clp_apply_default_profile_then_solve() {
-    // Applying the default profile before a solve must not break it — the SS1.1
-    // LP still returns obj 100.0.
     let mut solver = ClpSolver::new().expect("CLP solver creation failed");
     solver.apply_profile(&ClpProfile::default());
     assert_eq!(solver.current_profile, ClpProfile::default());

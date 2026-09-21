@@ -154,13 +154,6 @@ pub fn write_simulation_results(
 /// Write the training result tables and, when supplied, the simulation
 /// completion metadata to the output directory.
 ///
-/// This delegates to [`write_training_results`] and [`write_simulation_results`];
-/// it does not write the simulation scenario Parquet data itself, the policy
-/// checkpoint, or any of the other artifacts the CLI and the Python bindings
-/// write directly (provenance, hydro-model exports, stochastic echoes,
-/// solver-stats sidecars). Simulation metadata is written only when
-/// `simulation_output` is `Some`.
-///
 /// # Errors
 ///
 /// Returns [`OutputError`] if any file I/O or serialization step fails.

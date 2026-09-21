@@ -517,8 +517,6 @@ fn build_reduction_fixture(coverage: SeasonCoverage) -> ReductionFixture {
     }
 }
 
-/// The headline claim: a pure horizon reduction reconciles with zero dropped
-/// couplings across every family, selected by date alone.
 #[test]
 fn horizon_reduction_reconciles_with_zero_dropped_couplings() {
     let fixture = build_reduction_fixture(SeasonCoverage::Absent);
@@ -554,14 +552,10 @@ fn horizon_reduction_reconciles_with_zero_dropped_couplings() {
     }
 }
 
-/// The checkpoint carries one pool per study stage; exactly one is priced at
-/// the truncated study's boundary date, it is interior (neither the first nor
-/// the last pool), and the loaded record count equals that pool's own active
-/// cut count, so selection is by date rather than by position. The same load
-/// also gives each family the fixture models a non-zero `copy + fan_out`
-/// total while `other_identity` — the family no entity in this fixture
-/// belongs to — stays entirely zero, so a zero-dropped verdict cannot pass
-/// vacuously on a fixture that lost a family.
+/// The boundary pool is interior (neither first nor last) and the loaded
+/// record count equals its active cut count, so selection is by date rather
+/// than by position. Each modeled family has non-zero `copy + fan_out` while
+/// `other_identity` stays zero, proving the fixture didn't lose a family.
 #[test]
 fn horizon_reduction_selects_the_pool_priced_at_the_boundary_date() {
     let fixture = build_reduction_fixture(SeasonCoverage::Absent);
@@ -687,14 +681,11 @@ fn horizon_reduction_leaves_intercepts_untouched_by_an_empty_fold() {
     }
 }
 
-/// A faithful horizon reduction under a real twelve-season monthly map: the
-/// truncated study references only seasons 0 and 1, so its descriptor holds
-/// `None` at seasons 2 and 3 for hydro 2 even though the source checkpoint
-/// (written by the full, four-stage study) genuinely priced order 1 there —
-/// the season-gate relaxation to unreferenced seasons. The reduction still
-/// reconciles with zero dropped couplings across every family, proving a
-/// horizon reduction against a longer source loads under a real season map,
-/// not only along the skip path a study with no season map takes.
+/// The truncated study references only seasons 0 and 1, so its descriptor
+/// holds `None` at seasons 2 and 3 for hydro 2 even though the source
+/// checkpoint genuinely priced order 1 there — the season-gate relaxation to
+/// unreferenced seasons. Zero dropped couplings across every family confirms
+/// this loads correctly.
 #[test]
 fn horizon_reduction_under_a_real_season_map_reconciles_with_zero_dropped_couplings() {
     let truncated = truncated_system(SeasonCoverage::MonthlyCycle);

@@ -171,10 +171,8 @@ pub struct StudyParams {
     /// (`config.exports.states`). Overridable post-construction via
     /// [`StudySetup::set_export_states`](super::StudySetup::set_export_states).
     pub export_states: bool,
-    /// Loaded `constraints/generic_parameters.json` entries, supplied by the
-    /// caller — [`Self::from_config`] takes them as an argument rather than
-    /// defaulting them, so a boundary-configured study can never build against
-    /// an empty table by omission.
+    /// Caller-supplied scalar parameters from `constraints/generic_parameters.json`
+    /// to ensure boundary-configured studies cannot build against an empty table by omission.
     pub scalar_parameters: Vec<ScalarParameter>,
 }
 

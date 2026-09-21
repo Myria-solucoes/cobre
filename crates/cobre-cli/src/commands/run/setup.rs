@@ -474,8 +474,6 @@ pub(super) fn run_pre_training(
     root_estimation_path: Option<EstimationPath>,
     setup_timings: Option<&SetupTimings>,
 ) -> Result<(), CliError> {
-    // Renders before the Hydro models block so the setup timings sit with the
-    // other setup summaries.
     if ctx.is_root
         && !ctx.quiet
         && let Some(timings) = setup_timings
@@ -551,8 +549,7 @@ fn run_root_exports(
             system.hydros().len(),
             &setup.hydro_models.provenance,
         );
-        // Fingerprint the derived lag seed (training-side library only) so
-        // stale-library detection can compare against a fresh digest on later runs.
+        // Stale-library detection compares this digest on later runs.
         provenance.inflow.historical_library_seed_digest = setup
             .scenario_libraries
             .training

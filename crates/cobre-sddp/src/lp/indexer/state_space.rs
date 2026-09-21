@@ -230,10 +230,6 @@ impl StateSpace {
         let l = max_par_order;
         let n_ant_state = n_anticipated * k_max;
 
-        // Optional blocks collapse to the literal `0..0`, not `RangeCursor::alloc`'s
-        // `pos..pos` — skipping `alloc` when a count is `0` is safe because a
-        // zero-length allocation leaves `cursor.pos()` unchanged either way, so
-        // every downstream offset is identical regardless of which branch runs.
         let mut cursor = RangeCursor::new(0);
         let storage = cursor.alloc(n);
         let inflow_lags = cursor.alloc(n * l);
@@ -262,8 +258,7 @@ impl StateSpace {
 
         let theta = cursor.pos();
 
-        // Outgoing and incoming commitment-hold pairs describe the SAME state
-        // dimensions each, so `n_ant_state` enters `n_state` once, not twice.
+        // n_ant_state counted once (commit_out/commit_in are the same dimensions), not twice.
         let n_state = n * (1 + l) + n_buckets + n_ant_state;
 
         debug_assert_eq!(
@@ -349,11 +344,7 @@ impl StateSpace {
         self.theta + 1
     }
 
-    // ── Canonical state-dimension region boundaries ─────────────────────────
-    // GLOBAL STATE INDEX space, not LP columns. `REGION_ORDER` is the single
-    // owner of the storage → lag → bucket → anticipated walk order;
-    // `state_dim_range` dispatches each `StateRegion` to the accessor below,
-    // so every REGION_ORDER-driven call site shares one boundary derivation.
+    // GLOBAL STATE INDEX space (not LP columns).
 
     /// State-dimension region `[0, N)` — storage.
     #[inline]

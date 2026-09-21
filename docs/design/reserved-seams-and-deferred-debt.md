@@ -754,20 +754,18 @@ found those overwhelmingly clean (`hull/`, `lead_time/`, `horizon_mode.rs`'s
 single-variant enum is a documented reserved seam, `generic_constraint_echo.rs`,
 `config.rs`, `training/backward/replicated.rs`) plus two architecture items:
 
-- **Prep-phase abstraction covers three of four phases; boundary check
-  unmirrored.** `crates/cobre-sddp/src/validate_phases.rs` `PrepPhase` documents
-  itself as unifying "one of the four SDDP preparation steps," but the enum has
+- **Prep-phase abstraction covered three of four phases; boundary check
+  unmirrored — RESOLVED.** `crates/cobre-sddp/src/validate_phases.rs` `PrepPhase`
+  documented itself as unifying the SDDP preparation steps while the enum had
   exactly three variants (`Config`, `Stochastic`, `HydroModels`) — a doc/code
-  mismatch. The real fourth step — boundary-cut reconciliation — bypasses the
+  mismatch. The real fourth step — boundary-cut reconciliation — bypassed the
   shared `PrepPhase` / `prep_phase_metadata` abstraction with its own ad-hoc error
-  formatting (`crates/cobre-cli/src/commands/validate.rs`) and has no equivalent
-  in the Python binding (`crates/cobre-python/src/io.rs` carries no boundary check).
-  This is a validation-surface asymmetry (the Python-parity hard rule proper
-  governs _output_ files, not validation phases — so whether the Python path must
-  gain the check is an owner call), plus an over-sold "shared validation-phase"
-  contract. Fold the boundary check into `PrepPhase` (or correct the doc to
-  "three"). **Owner.** The setup / I-O owner. **Trigger.** The next
-  validation-phase or boundary-check change.
+  formatting (`crates/cobre-cli/src/commands/validate.rs`) and had no equivalent
+  in the Python binding. **Resolution.** `PrepPhase` carries a `Boundary` variant
+  that both front ends route the boundary reject through (its own
+  `prep_phase_metadata` row, `validate --json` error object included), the Python
+  binding runs the boundary reconciliation as a validation phase of its own, and
+  the enum doc states no variant count — see the fixed-items register below.
 - **Enumerated forward and enumerated simulation duplicate their mid-level
   claim/scatter orchestration.** `simulation/enumerated.rs` and
   `training/forward/enumerated.rs` each reimplement the stage-synchronous
@@ -1310,10 +1308,10 @@ recorded so a future audit does not re-raise these items.
   `SchemaError`), and the standalone `CaseValidationError` kind is retired with no
   alias — a documented `--json` contract change.
 - **The boundary-preparation reject is a first-class preparation phase.**
-  `PrepPhase` gains a fourth `Boundary` variant, so both front ends route a boundary
-  reject through the shared `PrepPhase` / `prep_phase_metadata` (a fourth metadata
-  row) and `validate --json` emits the error object, matching the documented four
-  preparation steps.
+  `PrepPhase` gains a `Boundary` variant, so both front ends route a boundary
+  reject through the shared `PrepPhase` / `prep_phase_metadata` (its own metadata
+  row) and `validate --json` emits the error object; the enum doc states no variant
+  count.
 - **The scalar-parameter table is a `StudySetup` constructor input and its
   resolution gaps fail loud.** The three `ResolvedParametersError` classes
   (`MissingSeason`, `PerStageBlockCoverage`, `MissingSpecificProductivity`) are

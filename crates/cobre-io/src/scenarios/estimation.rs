@@ -114,8 +114,7 @@ pub enum EstimationPath {
 impl EstimationPath {
     /// Resolve the estimation path from the three boolean manifest flags.
     ///
-    /// This function is a total map over all 8 boolean combinations. Invalid
-    /// combinations (AR present without history or stats) fall back to
+    /// Invalid combinations (AR present without history or stats) fall back to
     /// `Deterministic` because AR coefficients alone cannot drive estimation.
     #[must_use]
     pub fn resolve(manifest: &FileManifest) -> Self {
@@ -276,9 +275,7 @@ fn run_estimation(
     let annual_rows = ar_estimates_to_annual_rows(&ar_estimates, stages);
 
     let mut inflow_models = assemble_inflow_models(stats_rows, coeff_rows, annual_rows)?;
-    // `stages` (study + synthesized prestudy) matches `seasonal_stats_to_rows`'s own
-    // stage_to_season construction above: prestudy stage_ids appear in
-    // `inflow_models` too, so `system.stages()` alone would under-resolve them.
+    // `stages` includes prestudy (see synthesize_prestudy_stages doc).
     let (stage_to_season, n_seasons) = resolve_stage_seasons(stages, season_map);
     populate_derived_residual_ratios(&mut inflow_models, &stage_to_season, n_seasons)?;
 
@@ -371,8 +368,7 @@ fn run_partial_estimation(
     let coeff_rows = ar_estimates_to_rows(&ar_estimates, stages);
     let annual_rows = ar_estimates_to_annual_rows(&ar_estimates, stages);
     let mut inflow_models = assemble_inflow_models(stats_rows, coeff_rows, annual_rows)?;
-    // `stages` (study + synthesized prestudy) — see `run_estimation`'s identical
-    // rationale: prestudy stage_ids appear in `inflow_models` too.
+    // `stages` includes prestudy (see synthesize_prestudy_stages doc).
     let (stage_to_season, n_seasons) = resolve_stage_seasons(stages, season_map);
     populate_derived_residual_ratios(&mut inflow_models, &stage_to_season, n_seasons)?;
 
@@ -460,6 +456,8 @@ fn resolve_coverage_gated_observations(
     let mut observations = Vec::new();
     let mut skipped_partial = BTreeMap::new();
 
+    // Cursor sweep requires ascending-by-start, disjoint windows; upstream guarantees:
+    // `parse_inflow_history` sorts by (hydro_id, start_date), `validate_windowed_records` rejects overlaps.
     for (&hydro_id, windows) in &windows_by_hydro {
         debug_assert!(
             windows.is_sorted_by(|a, b| a.end_date <= b.start_date),
@@ -698,8 +696,7 @@ fn run_user_ar_estimation(
     let stats_rows = seasonal_stats_to_rows(&seasonal_stats, extended);
 
     let mut inflow_models = assemble_inflow_models(stats_rows, user_ar_rows, vec![])?;
-    // `extended` (study + synthesized prestudy) matches `seasonal_stats_to_rows`'s
-    // own coverage above — see `run_estimation`'s identical rationale.
+    // `extended` includes prestudy (see synthesize_prestudy_stages doc).
     let (stage_to_season, n_seasons) = resolve_stage_seasons(extended, season_map);
     populate_derived_residual_ratios(&mut inflow_models, &stage_to_season, n_seasons)?;
 
@@ -897,7 +894,6 @@ fn check_std_ratio_divergence(
         }
     }
 
-    // Sort by (hydro_id, season_a) for deterministic output.
     warnings.sort_by_key(|w| (w.hydro_id, w.season_a));
     warnings
 }
@@ -971,8 +967,7 @@ fn synthesize_prestudy_stages(
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         let id = first.id - k as i32;
 
-        // Override only identity/dates/season; estimation keys off id + season_id,
-        // so the cloned block/state/risk/scenario config only keeps the stage valid.
+        // Override only identity/dates/season; estimation keys off id + season_id.
         let mut stage = first.clone();
         stage.index = 0;
         stage.id = id;
@@ -1157,7 +1152,6 @@ fn ar_estimates_to_rows(
         }
     }
 
-    // Sort by (hydro_id, stage_id, lag) ascending — matches parser convention.
     rows.sort_by_key(|r| (r.hydro_id.0, r.stage_id, r.lag));
 
     rows
@@ -1195,7 +1189,6 @@ fn ar_estimates_to_annual_rows(
         }
     }
 
-    // Sort by (hydro_id, stage_id) ascending — matches parser convention.
     rows.sort_by_key(|r| (r.hydro_id.0, r.stage_id));
 
     rows

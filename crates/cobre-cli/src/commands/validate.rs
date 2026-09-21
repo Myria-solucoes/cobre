@@ -62,12 +62,7 @@ pub struct ValidateArgs {
     pub json: bool,
 }
 
-/// `cobre validate --json`'s stdout payload. On success, populates
-/// `configured`, `boundary_date` and `report` together (`boundary_date`/
-/// `report` stay `None` — an explicit absent marker, not a crash — when
-/// `configured` is `Some(false)`). On a failure that aborts before boundary
-/// status is ever resolved, all three stay `None` and `error` is populated
-/// instead — the two outcomes never overlap.
+/// Success outcome (`configured`/`boundary_date`/`report` populated, `error` None) and error outcome (`configured`/`boundary_date`/`report` None, `error` populated) never overlap.
 #[derive(Debug, Serialize)]
 struct ValidateBoundaryOutput {
     /// Whether `policy.boundary` is configured in this case's `config.json`.
@@ -82,20 +77,14 @@ struct ValidateBoundaryOutput {
     error: Option<ValidateErrorOutput>,
 }
 
-/// The date `reconcile_boundary` selected the boundary pool against, paired
-/// with the reconciliation outcome — computed once, carried to both the
-/// `--json` object and the human-mode render.
+/// Computed once and carried to both `--json` and human-mode outputs.
 #[derive(Debug)]
 struct BoundaryOutcome {
     boundary_date: NaiveDate,
     report: BoundaryReconciliationReport,
 }
 
-/// One `cobre validate --json` early-abort failure: `phase` is
-/// [`prep_phase_metadata`]'s stable kind string, or [`LoadError::kind`]'s
-/// string for the six-layer IO pipeline (which precedes any [`PrepPhase`]) —
-/// the same string programmatic callers already filter on; `message` is the
-/// human-readable detail.
+/// Early-abort failure. `phase` is the stable kind string from [`prep_phase_metadata`] or [`LoadError::kind`] (same string programmatic callers filter on).
 #[derive(Debug, Serialize)]
 struct ValidateErrorOutput {
     phase: String,
@@ -143,8 +132,7 @@ fn format_constraint_description(
     }
 }
 
-/// The `Validation: ... warnings` header plus one `warning:` line per entry;
-/// empty when `report.warning_count` is zero. `report.error_count` is always
+/// Formats validation warnings as report lines (empty when no warnings). `report.error_count` is always
 /// zero here — [`validate_case_with_artifacts`] returns `Err` on any error.
 fn report_lines(report: &ValidationReport, case_dir: &Path) -> Vec<String> {
     if report.warning_count == 0 {
@@ -170,10 +158,7 @@ fn report_lines(report: &ValidationReport, case_dir: &Path) -> Vec<String> {
     lines
 }
 
-/// Compute a pre-solver preparation error's stable phase kind (the same
-/// string [`prep_phase_metadata`] exposes for programmatic filtering) and its
-/// `"file_label: message"` report string — shared by the human stdout render
-/// and the `--json` error object, so the two never drift apart.
+/// Computes the stable phase kind and `"file_label: message"` report string, shared by both human and `--json` outputs to prevent drift.
 fn describe_prep_error(phase: PrepPhase, err: &SddpError) -> (&'static str, String) {
     let (kind, file_label) = prep_phase_metadata(phase, err);
     (kind, format!("{file_label}: {err}"))
@@ -243,9 +228,7 @@ fn reconcile_boundary(
 ) -> Result<BoundaryOutcome, SddpError> {
     let boundary_path = bp.checkpoint_path(case_dir);
 
-    // Resolve the boundary state requirements before building the layout, so
-    // validate mirrors the run path; the load guard below reads them back off the
-    // constructed setup rather than re-reading the checkpoint.
+    // Resolve before building the layout so validate mirrors the run path.
     let boundary_requirements = resolve_boundary_state_requirements(case_dir, config)?;
 
     let setup = StudySetup::new_with_boundary_requirements(
@@ -294,11 +277,7 @@ fn reconcile_boundary(
     })
 }
 
-/// Reconcile `config.policy.boundary` when configured, mapping a reject into
-/// a [`CliError::Validation`] via [`prep_error_to_cli_error`] (which renders
-/// to `stdout` in human mode and emits the `--json` error object otherwise).
-/// Returns `Ok(None)` when no boundary is configured — no `StudySetup` work
-/// runs.
+/// Reconciles `config.policy.boundary` when configured, mapping a reject to [`CliError::Validation`]. Returns `Ok(None)` when no boundary is configured (no `StudySetup` work runs).
 fn run_boundary_check(
     case_dir: &Path,
     config: &Config,
@@ -333,10 +312,7 @@ fn run_boundary_check(
     }
 }
 
-/// Run study construction's scalar-parameter presence guard for a deck with no
-/// boundary policy; a boundary deck runs the same guard inside [`StudySetup::new`]
-/// via [`run_boundary_check`], so this is a no-op there. A reject maps to a
-/// [`CliError::Validation`] via [`prep_error_to_cli_error`].
+/// Runs the scalar-parameter presence guard for decks without a boundary policy (boundary decks run the guard inside [`StudySetup::new`], so this is a no-op there). Rejects map to [`CliError::Validation`].
 fn run_generic_constraint_parameter_check(
     case_dir: &Path,
     config: &Config,
@@ -406,8 +382,7 @@ pub fn execute(args: &ValidateArgs) -> Result<(), CliError> {
         });
     }
 
-    // _with_artifacts returns the pre-parsed CaseArtifacts the hydro-models phase
-    // needs, avoiding a second disk read.
+    // Reuses the pre-parsed CaseArtifacts to avoid re-reading disk.
     let (loaded, report) = match validate_case_with_artifacts(&args.case_dir) {
         Ok(result) => result,
         Err(err) => {
@@ -462,8 +437,7 @@ pub fn execute(args: &ValidateArgs) -> Result<(), CliError> {
 
     let seed = study_params.seed;
 
-    // config_path is a sentinel here: training_scenario_source uses it only for
-    // historical-years look-up and error messages.
+    // config_path is used only for historical-years look-up and error messages, not file operations.
     let training_source = match config.training_scenario_source(&config_path) {
         Ok(source) => source,
         Err(err) => {
@@ -472,8 +446,7 @@ pub fn execute(args: &ValidateArgs) -> Result<(), CliError> {
         }
     };
 
-    // The most expensive step (PAR estimation, opening trees); validate runs it
-    // anyway so an exit-0 guarantees full parity with `run`.
+    // Runs the expensive PAR estimation/opening-trees step to guarantee that exit-0 means full parity with `run`.
     let boundary_requirements = resolve_boundary_state_requirements(&args.case_dir, &config)?;
     let prepared = run_prep_phase(
         prepare_stochastic(
@@ -490,7 +463,7 @@ pub fn execute(args: &ValidateArgs) -> Result<(), CliError> {
         &args.case_dir,
     )?;
 
-    // `&artifacts` reuses the already-parsed bundle instead of re-reading disk.
+    // Reuses the parsed bundle instead of re-reading disk.
     let hydro_models = run_prep_phase(
         prepare_hydro_models_from_artifacts(&prepared.system, &artifacts, false, None),
         stdout_sink,

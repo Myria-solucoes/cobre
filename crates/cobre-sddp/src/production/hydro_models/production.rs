@@ -83,7 +83,6 @@ pub fn resolve_production_models_from_artifacts(
 
     let prod_configs: &[ProductionModelConfig] = &artifacts.production_models;
 
-    // `None` skips the merge pass entirely.
     let plane_reduction: Option<&PlaneReductionConfig> = artifacts.plane_reduction.as_ref();
 
     let config_map: HashMap<EntityId, &ProductionModelConfig> =
@@ -108,7 +107,6 @@ pub fn resolve_production_models_from_artifacts(
         HashMap::new()
     };
 
-    // A plant absent from this map falls back to its entity `TailraceModel`.
     let families_map: HashMap<EntityId, TailraceFamilies> =
         if uses_computed_fpha && !artifacts.tailrace_curves.is_empty() {
             build_tailrace_families_map(&artifacts.tailrace_curves)?
@@ -185,18 +183,11 @@ pub fn resolve_production_models_from_artifacts(
             )
         })
         .collect::<Result<Vec<_>, SddpError>>()?;
-    // This SEQUENTIAL flatten is the ordering anchor for the parallel fit above:
-    // it concatenates export rows, deviation-point rows, and deviations in canonical
-    // hydro then stage order, and emits the `tracing::warn!` here (not from a worker)
-    // so the carried vectors and the warning order are declaration-order invariant.
     for (hydro, fit) in system.hydros().iter().zip(fits) {
         provenance.push(fit.provenance);
         export_rows.extend(fit.export_rows);
         fpha_deviation_point_rows.extend(fit.deviation_point_rows);
         all_models.push(fit.stage_models);
-        // Push every distinct fit's deviation unconditionally (the metadata
-        // aggregate must reflect every computed-FPHA plant/stage); warn only for
-        // warn-worthy entries.
         for diag in fit.fpha_deviations {
             fpha_fit_deviations.push(FphaFitDeviationEntry {
                 hydro_id: hydro.id,
@@ -344,7 +335,7 @@ fn fit_one_hydro(
     })
 }
 
-/// Build an `O(1)` geometry map: `hydro_id → sorted geometry row references`.
+/// O(1) lookup: `hydro_id` → geometry rows, sorted by volume.
 fn build_geometry_map(
     geometry_rows: &[HydroGeometryRow],
 ) -> HashMap<EntityId, Vec<&HydroGeometryRow>> {

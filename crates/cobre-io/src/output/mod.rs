@@ -93,22 +93,22 @@ pub struct IterationRecord {
     /// `None` when the lower bound is zero or negative (gap is ill-defined).
     pub gap_percent: Option<f64>,
 
-    /// Number of rows added to the row pool during this iteration.
+    /// Rows added to the pool.
     pub cuts_added: u32,
 
-    /// Number of rows removed from the row pool during this iteration.
+    /// Rows removed from the pool.
     pub cuts_removed: u32,
 
     /// Total number of active rows in the pool after this iteration.
     pub cuts_active: u32,
 
-    /// Wall-clock time spent in the forward pass for this iteration (ms).
+    /// Forward pass wall-clock time (ms).
     pub time_forward_ms: u64,
 
-    /// Wall-clock time spent in the backward pass for this iteration (ms).
+    /// Backward pass wall-clock time (ms).
     pub time_backward_ms: u64,
 
-    /// Total wall-clock time for this iteration (ms).
+    /// Total wall-clock time (ms).
     pub time_total_ms: u64,
 
     /// Forward pass wall-clock time (ms) → `forward_wall_ms`.
@@ -151,7 +151,7 @@ pub struct IterationRecord {
     /// `time_total_ms - (forward + backward + cut_selection + mpi_allreduce + lower_bound)`.
     pub time_overhead_ms: u64,
 
-    /// Number of forward-pass scenarios solved in this iteration.
+    /// Forward-pass scenarios solved.
     pub forward_passes: u32,
 
     /// Total number of LP solves (across all stages and passes) in this iteration.

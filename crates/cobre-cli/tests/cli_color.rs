@@ -1,28 +1,12 @@
 //! Integration tests for the `--color` global flag.
-//!
-//! Each test spawns a subprocess so that `console`'s global
-//! `colors_enabled_stderr` state is completely isolated from the test process.
 
 #![allow(clippy::unwrap_used)]
-
-use std::fs;
-use std::path::Path;
-use std::process::Command;
 
 use assert_cmd::prelude::*;
 use predicates::prelude::*;
 use tempfile::TempDir;
 
 mod common;
-use common::PENALTIES_JSON;
-
-fn cobre() -> Command {
-    Command::new(assert_cmd::cargo::cargo_bin!("cobre"))
-}
-
-// Minimal valid-case fixture; only the penalties config is shared (via
-// `common`) — the rest is duplicated with cli_run.rs to keep this test
-// module self-contained.
 
 const CONFIG_JSON: &str = r#"{
     "training": {
@@ -65,29 +49,17 @@ const LINES_JSON: &str = r#"{ "lines": [] }"#;
 const HYDROS_JSON: &str = r#"{ "hydros": [] }"#;
 const THERMALS_JSON: &str = r#"{ "thermals": [] }"#;
 
-fn write_file(root: &Path, relative: &str, content: &str) {
-    let full = root.join(relative);
-    if let Some(parent) = full.parent() {
-        fs::create_dir_all(parent).unwrap();
-    }
-    fs::write(&full, content).unwrap();
-}
-
 fn make_valid_case(dir: &TempDir) {
     let root = dir.path();
-    write_file(root, "config.json", CONFIG_JSON);
-    write_file(root, "penalties.json", PENALTIES_JSON);
-    write_file(root, "stages.json", STAGES_JSON);
-    write_file(root, "initial_conditions.json", INITIAL_CONDITIONS_JSON);
-    write_file(root, "system/buses.json", BUSES_JSON);
-    write_file(root, "system/lines.json", LINES_JSON);
-    write_file(root, "system/hydros.json", HYDROS_JSON);
-    write_file(root, "system/thermals.json", THERMALS_JSON);
+    common::write_file(root, "config.json", CONFIG_JSON);
+    common::write_file(root, "penalties.json", common::PENALTIES_JSON);
+    common::write_file(root, "stages.json", STAGES_JSON);
+    common::write_file(root, "initial_conditions.json", INITIAL_CONDITIONS_JSON);
+    common::write_file(root, "system/buses.json", BUSES_JSON);
+    common::write_file(root, "system/lines.json", LINES_JSON);
+    common::write_file(root, "system/hydros.json", HYDROS_JSON);
+    common::write_file(root, "system/thermals.json", THERMALS_JSON);
 }
-
-// ------------------------------------------------------------------
-// Tests
-// ------------------------------------------------------------------
 
 #[test]
 fn color_always_flag_forces_ansi_in_banner() {
@@ -95,7 +67,7 @@ fn color_always_flag_forces_ansi_in_banner() {
     make_valid_case(&dir);
     let out = TempDir::new().unwrap();
 
-    cobre()
+    common::cobre()
         .args([
             "run",
             "--color",
@@ -120,7 +92,7 @@ fn color_never_flag_suppresses_ansi_in_banner() {
     make_valid_case(&dir);
     let out = TempDir::new().unwrap();
 
-    cobre()
+    common::cobre()
         .args([
             "run",
             "--color",
@@ -135,14 +107,13 @@ fn color_never_flag_suppresses_ansi_in_banner() {
         .stderr(predicate::str::contains("\x1b[").not());
 }
 
-/// Accepted because the `--color` arg is declared with `global = true`.
 #[test]
 fn color_always_global_flag_before_subcommand_is_accepted() {
     let dir = TempDir::new().unwrap();
     make_valid_case(&dir);
     let out = TempDir::new().unwrap();
 
-    cobre()
+    common::cobre()
         .args([
             "--color",
             "always",

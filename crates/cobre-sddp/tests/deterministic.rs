@@ -180,10 +180,10 @@ fn run_with_simulation(
 }
 
 fn assert_cost(actual: f64, expected: f64, tolerance: f64, case_name: &str) {
-    let diff = (actual - expected).abs();
     assert!(
-        diff <= tolerance,
-        "{case_name}: expected cost {expected}, got {actual} (diff={diff} > tolerance={tolerance})"
+        (actual - expected).abs() <= tolerance,
+        "{case_name}: expected cost {expected}, got {actual} (diff={} > tolerance={tolerance})",
+        (actual - expected).abs()
     );
 }
 

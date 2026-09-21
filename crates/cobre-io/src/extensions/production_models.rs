@@ -877,9 +877,7 @@ fn convert_season_config(raw: RawSeasonConfig) -> SeasonConfig {
 
 /// Pick the public variant from whichever field is `Some`.
 ///
-/// `validate_reference_volume` guarantees exactly one field is `Some`, so the
-/// `volume_hm3` priority is unambiguous and the `unwrap_or` default is
-/// unreachable — it only keeps the conversion total without a panic.
+/// `validate_reference_volume` guarantees exactly one is `Some`; the `unwrap_or` default is unreachable.
 fn convert_reference_volume(raw: &RawReferenceVolume) -> ReferenceVolume {
     match raw.volume_hm3 {
         Some(vol) => ReferenceVolume::AbsoluteHm3(vol),

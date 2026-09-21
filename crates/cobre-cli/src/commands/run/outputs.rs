@@ -176,8 +176,7 @@ pub(super) fn write_simulation_outputs(args: &WriteSimulationArgs<'_>) -> Result
     write_simulation_results(args.output_dir, args.sim_output, args.output_ctx)
         .map_err(CliError::from)?;
 
-    // Simulation fills scenario_id (not iteration) and has no stage/opening/rank/
-    // worker dimension; those axes are all None.
+    // Simulation fills scenario_id (not iteration).
     if !args.sim_solver_stats.is_empty() {
         let rows: Vec<SolverStatsRow> = args
             .sim_solver_stats

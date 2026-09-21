@@ -33,9 +33,7 @@
 //! via [`LoadError`], which carries enough context for diagnostic messages without
 //! re-reading input files.
 
-// Internal (unpublished) workspace crate: public items intra-doc-link their
-// pub(crate) collaborators as a maintainer aid (docs read with
-// --document-private-items); the public-only doc gate flags these intentional links.
+// Intentional for maintainer docs with --document-private-items.
 #![allow(rustdoc::private_intra_doc_links)]
 
 #[cfg(feature = "schema")]

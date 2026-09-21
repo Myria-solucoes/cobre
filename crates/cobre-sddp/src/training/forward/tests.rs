@@ -47,13 +47,7 @@ use crate::{
 
 /// Mock solver that returns a configurable fixed `LpSolution` on every `solve()`.
 ///
-/// Optionally returns `SolverError::Infeasible` at a specific
-/// `(scenario, stage)` pair (counted across calls in the scenario-outer,
-/// stage-inner traversal order). `infeasible_at` counts global solve
-/// calls starting from 0.
-///
-/// `warm_start_calls` is incremented each time `solve(Some(&basis))`
-/// is called, enabling warm-start invocation tests.
+/// Optionally returns `SolverError::Infeasible` at the n-th solve call (0-indexed).
 struct MockSolver {
     solution: LpSolution,
     /// If `Some(n)`, the n-th solve call (0-indexed, counting both cold-start
@@ -99,7 +93,6 @@ impl MockSolver {
         }
     }
 
-    /// Shared solve logic used by both cold-start and warm-start paths.
     fn do_solve(&mut self) -> Result<cobre_solver::SolutionView<'_>, SolverError> {
         let call = self.call_count;
         self.call_count += 1;
@@ -169,9 +162,7 @@ impl SolverInterface for MockSolver {
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
-/// Minimal valid stage template for N=1 hydro, L=0 PAR order: columns
-/// `[storage_out(0), z_inflow(1), storage_in(2), theta(3)]`, one storage-fixing
-/// row whose only nonzero is the `storage_in` coefficient. Minimises theta.
+/// Minimal N=1, L=0 template: `[storage_out, z_inflow, storage_in, theta]`, one row.
 fn minimal_template_1_0() -> StageTemplate {
     StageTemplate {
         num_cols: 4,
@@ -2459,7 +2450,6 @@ fn none_method_unchanged_with_truncation_code_present() {
     )
     .unwrap();
 
-    // Regression guard: same assertions as `ac_two_scenarios_three_stages_fixed_solution`.
     assert_eq!(result.scenario_costs.len(), 2);
     for (i, record) in records.iter().enumerate() {
         assert_eq!(
@@ -2633,8 +2623,6 @@ fn test_forward_pass_parallel_infeasibility() {
     let n_scenarios = 10usize;
     let n_workers = 4usize;
 
-    // Worker 1 handles scenarios [3, 6). Its first solve call (call index 0
-    // within that worker) corresponds to scenario 3, stage 0.
     let mut workspaces: Vec<SolverWorkspace<MockSolver>> = (0..n_workers)
         .map(|w| {
             let solver = if w == 1 {
@@ -2717,8 +2705,6 @@ fn test_forward_pass_parallel_infeasibility() {
         &mut records,
     );
 
-    // Worker 1's partition: partition(10, 4, 1) → start_m=3.
-    // The first solve in that worker is scenario 3, stage 0.
     match result {
         Err(SddpError::Infeasible {
             stage,

@@ -67,10 +67,8 @@ mod common;
 use common::StubComm;
 use common::builders::{BusSpec, HydroSpec, StageSpec, make_bus, make_hydro, make_stage};
 
-/// Build the role-(a) [`StateSpace`] via the public [`StateSpace::new`] (full
-/// `max_par_order` lag stride per hydro). This external test crate cannot see the
-/// parent's `#[cfg(test)]`/`test-support` surface, so it constructs from explicit
-/// dimensions rather than a test helper.
+/// External test crate cannot see parent's `test-support` surface; constructs
+/// from explicit dimensions.
 fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateSpace {
     StateSpace::new(
         hydro_count,
@@ -84,10 +82,7 @@ fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateSpace {
     )
 }
 
-/// Build `StudyDimensions` from explicit entity counts. This external test crate
-/// cannot see the parent's `#[cfg(test)]`/`test-support` surface, so it sets the
-/// fields directly; `n_pumping`/`has_ncs`/anticipated are empty for these
-/// single-bus, no-pumping, no-NCS fixtures.
+/// External test crate cannot see `test-support`; sets fields directly.
 fn study_dims_for(
     n_thermals: usize,
     n_lines: usize,
@@ -116,9 +111,6 @@ fn study_dims_for(
 const N_STAGES: usize = 3;
 const N_HYDROS: usize = 2;
 
-/// Build the 2-hydro, 1-bus, 3-stage negative-inflow fixture. `ResolvedBounds`
-/// and `ResolvedPenalties` are built manually from the hydro entity values so
-/// `build_stage_templates_resolving_layout` can read them without `cobre-io` case loading.
 fn build_system() -> cobre_core::System {
     use cobre_core::entities::hydro::{HydroGenerationModel, HydroPenalties};
     use cobre_core::scenario::InflowModel;
@@ -354,7 +346,6 @@ fn build_system() -> cobre_core::System {
         .unwrap()
 }
 
-/// Build a [`StochasticContext`] for the 2-hydro, 3-stage negative-inflow fixture.
 fn build_stochastic() -> StochasticContext {
     let system = build_system();
     build_stochastic_context(
@@ -947,11 +938,8 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
     );
 }
 
-/// Local mirror of the gated `test_support::all_enabled_cut_state_layouts`
-/// via the public `CutStateProjection::new`, so this external test crate (which cannot
-/// see the parent crate's `#[cfg(test)]` surface) builds the default all-enabled
-/// per-pool projection. Every pool projects the full global state, keeping the
-/// extracted subgradient bit-identical to the global-loop result.
+/// External test crate cannot see parent's `#[cfg(test)]` surface; mirrors
+/// `test_support::all_enabled_cut_state_layouts` via public API.
 fn all_enabled_cut_state_layouts(global: &StateSpace, n_stages: usize) -> Vec<CutStateProjection> {
     let full = StageStateConfig {
         storage: true,

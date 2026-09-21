@@ -3,8 +3,7 @@
 //! fixtures in a temp dir.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, dead_code)]
-// Each `tests/*.rs` binary compiles this module separately and uses only the
-// subset of items it needs, so an item unused by one binary is not dead code.
+// Items may be unused in one binary but used in another.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -102,9 +101,7 @@ const DEFAULT_HYDROS_JSON: &str = r#"{ "hydros": [] }"#;
 const DEFAULT_THERMALS_JSON: &str = r#"{ "thermals": [] }"#;
 
 /// Writes a minimal valid case fixture under `dir`. Each `Some` override
-/// replaces the matching default file's content (`config.json`/`stages.json`/
-/// `initial_conditions.json`/`system/thermals.json`); the buses/lines/hydros
-/// fixtures are always the fixed defaults.
+/// replaces the matching default; buses/lines/hydros use fixed defaults.
 pub fn make_valid_case(
     dir: &Path,
     config_json: Option<&str>,

@@ -10,18 +10,16 @@
 
 /// Column and row indices for one evaporation constraint.
 ///
-/// Locates the three evaporation columns and one evaporation row of a single
-/// `(hydro, block)` pair within a stage LP. The producing layout holds one entry
-/// per `(evap hydro, block)`, block-major.
+/// Per-`(evap hydro, block)` pair within a stage LP, block-major.
 #[derive(Debug, Clone, Copy)]
 pub struct EvaporationIndices {
-    /// Column index of the stage-averaged evaporation-outflow variable (m³/s).
+    /// Stage-averaged evaporation-outflow variable (m³/s).
     pub evaporation_flow_col: usize,
-    /// Column index of the positive violation slack `f_evap_plus_h` (m³/s).
+    /// Positive violation slack `f_evap_plus_h` (m³/s).
     pub f_evap_plus_col: usize,
-    /// Column index of the negative violation slack `f_evap_minus_h` (m³/s).
+    /// Negative violation slack `f_evap_minus_h` (m³/s).
     pub f_evap_minus_col: usize,
-    /// Row index of the evaporation equality constraint.
+    /// Evaporation equality constraint.
     pub evap_row: usize,
 }
 

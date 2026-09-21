@@ -73,7 +73,6 @@ use common::StubComm;
 const REL_TOL: f64 = 1e-6;
 const ABS_TOL: f64 = 1e-4;
 
-/// `true` when `a` and `b` agree within [`REL_TOL`]·|scale| + [`ABS_TOL`].
 fn close(a: f64, b: f64) -> bool {
     (a - b).abs() <= ABS_TOL + REL_TOL * a.abs().max(b.abs())
 }

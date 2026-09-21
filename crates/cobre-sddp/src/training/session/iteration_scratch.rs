@@ -1,8 +1,7 @@
 //! Per-iteration scratch buffers for the SDDP training loop.
 //!
-//! [`IterationScratch`] holds reusable scratch fields allocated once at
-//! training-run startup and reused every iteration, avoiding per-iteration heap
-//! allocation.
+//! Allocated once at training-run startup and reused every iteration to avoid
+//! per-iteration heap allocation.
 
 use cobre_solver::FreezeScratch;
 use cobre_solver::freeze_rows_into_template;
@@ -21,8 +20,6 @@ use crate::{
 
 /// Per-training-run iteration scratch owned by `TrainingSession`.
 ///
-/// Allocated once in `IterationScratch::new` and reused in place across
-/// iterations; no per-iteration heap allocation is permitted on these fields.
 /// Excludes backward-pass-specific scratch, which `BackwardPassState` owns.
 pub(crate) struct IterationScratch {
     /// Patch buffer for lower-bound LP patching (single solver path).
@@ -41,16 +38,16 @@ pub(crate) struct IterationScratch {
     pub frozen_templates: Vec<StageTemplate>,
     /// Row batches used to build the active-cut rows before freeze, one per pool.
     pub freeze_row_batches: Vec<RowBatch>,
-    /// Cut row map for the lower-bound LP (tracks row positions within stage 0 template).
+    /// Cut row map for the lower-bound LP.
     pub lb_cut_row_map: CutRowMap,
-    /// Per-evaluation scratch buffers for lower-bound evaluation (reused across iterations).
+    /// Per-evaluation scratch buffers for lower-bound evaluation.
     pub lb_scratch: LbEvalScratch,
     /// Noise/NCS-transform scratch for the lower-bound path, the same shape
     /// [`StageSolvePrep::run`] reads on every other solve site.
     ///
     /// [`StageSolvePrep::run`]: crate::training::stage_solve_prep::StageSolvePrep::run
     pub lb_noise_scratch: ScratchBuffers,
-    /// Reusable scratch buffers for `freeze_rows_into_template` (count/emit-pass temporaries).
+    /// Scratch buffers for `freeze_rows_into_template` (count/emit-pass temporaries).
     pub(crate) freeze_scratch: FreezeScratch,
     /// Per-path probability weights for the exact upper-bound reduction, filled
     /// only on an enumerated forward; empty on the sampled path.
@@ -64,7 +61,7 @@ pub(crate) struct IterationScratch {
     /// refrozen afterward, so this stays fixed for the rest of the run.
     pub(crate) terminal_has_boundary_cuts: bool,
     /// Packed per-stage forward solver-stat scalars, the cross-rank allreduce
-    /// input in `run_forward_phase` (reused; empty until the first forward phase).
+    /// input in `run_forward_phase` (empty until the first forward phase).
     pub(crate) fwd_stats_pack_local: Vec<f64>,
     /// Allreduced (summed) counterpart of [`Self::fwd_stats_pack_local`].
     pub(crate) fwd_stats_pack_global: Vec<f64>,
@@ -74,10 +71,9 @@ pub(crate) struct IterationScratch {
 }
 
 impl IterationScratch {
-    /// Allocate and initialise all iteration scratch buffers, pre-freeze each
-    /// `frozen_templates[p]` as an empty-cut-batch structural copy of pool `p`'s
-    /// base stage template `stage_ctx.templates[pool_stage[p]]` so iteration 1
-    /// can use the frozen load path.
+    /// Allocate all iteration scratch buffers; pre-freeze each `frozen_templates[p]`
+    /// as an empty-cut-batch structural copy of pool `p`'s base stage template so
+    /// iteration 1 can use the frozen load path.
     // Rationale: each argument sizes a distinct pre-allocated scratch region with
     // its own sizing formula, so no sub-struct would group a subset of the arity.
     #[allow(clippy::too_many_arguments)]
@@ -96,8 +92,6 @@ impl IterationScratch {
         stage_ctx: &StageContext<'_>,
     ) -> Self {
         let n_pools = pool_stage.len();
-        // Construct each record fresh: `Vec::new()` is cheaper than cloning a
-        // capacity-0 Vec.
         let records: Vec<TrajectoryRecord> = (0..max_local_fwd * num_stages)
             .map(|_| TrajectoryRecord {
                 primal: Vec::new(),
@@ -108,11 +102,10 @@ impl IterationScratch {
             })
             .collect();
 
-        // The LB path never calls `fill_load_patches` (load), so the
-        // `n_load_buses` and `max_blocks` args are 0. Bucket and anticipated
-        // column capacity MUST be sized by the actual `n_buckets` /
-        // `n_anticipated * k_max`: undersizing leaves those state slots
-        // unpinned or panics in `fill_col_state_patches`.
+        // The LB path never calls `fill_load_patches`, so `n_load_buses` and
+        // `max_blocks` are 0. Bucket and anticipated capacity MUST match
+        // `n_buckets` / `n_anticipated * k_max` — undersizing panics in
+        // `fill_col_state_patches`.
         let patch_buf = PatchBuffer::new(
             hydro_count,
             max_par_order,
@@ -154,10 +147,8 @@ impl IterationScratch {
 
         let lb_scratch = LbEvalScratch::new();
 
-        // The LB path never patches load-bus/NCS-column-index reuse across
-        // stages (always stage 0), so `n_load_buses`/`max_blocks`/pool-capacity
-        // sizing hints are irrelevant here; every `ScratchBuffers` field grows
-        // on demand regardless.
+        // The LB path is always stage 0, so `n_load_buses`/`max_blocks`/pool-capacity
+        // sizing hints are irrelevant; `ScratchBuffers` fields grow on demand.
         let lb_noise_scratch = ScratchBuffers::new(WorkspaceSizing {
             hydro_count,
             max_par_order,
@@ -358,17 +349,7 @@ mod tests {
 
     /// Regression: `IterationScratch::new` must size the lower-bound
     /// patch buffer's anticipated capacity to `n_anticipated * k_max`.
-    ///
-    /// Before the fix the trailing two arguments were hard-coded zero, so the
-    /// LB patch buffer had no slots for the `anticipated_state_fixing` rows.
-    /// `fill_forward_patches` then silently skipped the anticipated patches and the LP's
-    /// `anticipated_state_fixing` rows kept their template default of `0 == 0`,
-    /// forcing every `commit_in` column to zero in the LB solve and
-    /// ignoring past commitments stored in `initial_state`.
-    ///
-    /// This test exercises a non-trivial `(n_anticipated, k_max) = (3, 2)` and
-    /// asserts that the resulting buffer can hold all `N*(2+L) + A*K + N`
-    /// patches required by the forward-pass fill path.
+    /// Undersizing panics in `fill_col_state_patches`.
     #[test]
     fn iteration_scratch_new_sizes_patch_buffer_for_anticipated_thermals() {
         let max_local_fwd = 1;
@@ -430,10 +411,8 @@ mod tests {
         );
     }
 
-    /// Regression (zero-anticipated case): when the study has no
-    /// anticipated thermals, the patch buffer must size identically to the
-    /// pre-anticipated layout. This guards against accidentally allocating
-    /// anticipated-state capacity when the indexer reports `n_anticipated == 0`.
+    /// Regression: with `n_anticipated == 0`, the patch buffer must size
+    /// identically to the pre-anticipated layout.
     #[test]
     fn iteration_scratch_new_patch_buffer_zero_anticipated_unchanged() {
         let max_local_fwd = 1;
@@ -472,10 +451,8 @@ mod tests {
     }
 
     /// Regression: `IterationScratch::new` must size the lower-bound patch
-    /// buffer's column region to include `n_buckets` travel-time bucket slots —
-    /// omitting it leaves no room for the bucket incoming columns, so
-    /// `fill_col_state_patches` panics (undersized buffer) once a bucket-aware
-    /// layout reaches the LB path.
+    /// buffer's column region to include `n_buckets` travel-time bucket slots;
+    /// omitting them panics in `fill_col_state_patches`.
     #[test]
     fn iteration_scratch_new_sizes_patch_buffer_for_transit_buckets() {
         let max_local_fwd = 1;

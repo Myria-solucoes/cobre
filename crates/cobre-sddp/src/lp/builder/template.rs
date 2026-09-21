@@ -687,7 +687,7 @@ fn load_models_from_normal(
 /// use cobre_sddp::InflowNonNegativityMethod;
 /// use cobre_sddp::hydro_models::PrepareHydroModelsResult;
 /// use cobre_sddp::indexer::{HydroCellIndex, StateSpace};
-/// use cobre_sddp::lp::builder::build_stage_templates;
+/// use cobre_sddp::build_stage_templates;
 /// use cobre_sddp::resolved_parameters::ResolvedParameters;
 /// use cobre_stochastic::par::precompute::PrecomputedPar;
 ///

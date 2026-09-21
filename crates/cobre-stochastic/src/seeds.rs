@@ -17,12 +17,11 @@ use crate::season_cast::{
 #[derive(Debug)]
 pub struct DerivedInflowSeeds {
     /// Lag-slot seeds, entity-major: `lag_values[pos * l_state + lag]`, lag
-    /// index `0` is lag 1 (most recent). Length `n_hydros * l_state`.
+    /// index `0` is lag 1 (most recent).
     pub lag_values: Vec<f64>,
-    /// Per-hydro accumulator seed (`p.value * p.coverage`) for the first
-    /// stage's in-progress occurrence. Length `n_hydros`.
+    /// Per-hydro accumulator seed for the first stage's in-progress occurrence.
     pub accum: Vec<f64>,
-    /// Per-hydro coverage fraction seed (`p.coverage`). Length `n_hydros`.
+    /// Per-hydro coverage fraction seed.
     pub weight: Vec<f64>,
 }
 
@@ -37,9 +36,7 @@ impl DerivedInflowSeeds {
         }
     }
 
-    /// The [`DerivedSeed`] view over this owned seed, paired with the
-    /// caller's own `l_state` (the widened lag-state depth, supplied
-    /// separately because this struct does not itself carry it).
+    /// Borrowed view over this owned seed, paired with `l_state`.
     #[must_use]
     pub fn as_seed(&self, l_state: usize) -> DerivedSeed<'_> {
         DerivedSeed {
@@ -51,13 +48,11 @@ impl DerivedInflowSeeds {
     }
 }
 
-/// Borrowed, [`Copy`] view of a stage-0 derived seed — the four values that
-/// describe it travel together and reset at the same outer boundary. Every
-/// slice is ordered by canonical hydro position, the same order
-/// [`derive_inflow_seeds`] walks `hydros` in, so a caller indexes with that
-/// position directly and needs no id lookup. An empty `accum`/`weight` means
-/// "no seed": the accumulator resets to zero, matching a period-boundary
-/// start.
+/// Borrowed, [`Copy`] view of a stage-0 derived seed. Every slice is ordered
+/// by canonical hydro position (the order [`derive_inflow_seeds`] walks
+/// `hydros` in), so a caller indexes with that position directly. An empty
+/// `accum`/`weight` means "no seed": the accumulator resets to zero, matching
+/// a period-boundary start.
 #[derive(Debug, Clone, Copy)]
 pub struct DerivedSeed<'a> {
     /// Lag-slot seed, entity-major: `lag_values[pos * l_state + lag]`, lag
@@ -65,23 +60,20 @@ pub struct DerivedSeed<'a> {
     pub lag_values: &'a [f64],
     /// Per-hydro stride of `lag_values`.
     pub l_state: usize,
-    /// Per-hydro mid-period accumulator seed, same canonical position as
-    /// `lag_values`.
+    /// Per-hydro mid-period accumulator seed.
     pub accum: &'a [f64],
-    /// Per-hydro coverage-fraction seed, same canonical position as
-    /// `lag_values`.
+    /// Per-hydro coverage-fraction seed.
     pub weight: &'a [f64],
 }
 
 /// Derive [`DerivedInflowSeeds`] from the layered `record`/`conditioning`
 /// inflow series, one hydro at a time in `hydros`' canonical order (the loop
-/// index is the returned position; no id-to-position lookup is built).
+/// index is the returned position).
 ///
 /// `conditioning` shadows `record` day-wise via [`merge_layered_windows`]
 /// before every [`crate::season_cast::cast`]. Returns
-/// [`DerivedInflowSeeds::zero`] when `hydros` is empty,
-/// `first_stage.season_id` is `None`, or that id is absent from
-/// `season_map.seasons`.
+/// [`DerivedInflowSeeds::zero`] when `hydros` is empty, `first_stage.season_id`
+/// is `None`, or that id is absent from `season_map.seasons`.
 #[must_use]
 pub fn derive_inflow_seeds(
     record: &[InflowHistoryRow],
@@ -276,7 +268,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::float_cmp)] // full-coverage windows make cast's weighted-value/overlap ratio bit-exact
-    fn test_derive_inflow_seeds_full_coverage_matches_positional_lags() {
+    fn test_derive_inflow_seeds_full_coverage() {
         let season_map = monthly_season_map(MonthlyLabels::OneBased);
         let first_stage = make_stage(0, d(2026, 4, 1), d(2026, 5, 1), Some(3));
         let hydros = vec![make_hydro(1)];
@@ -477,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bucketed_seeds_match_per_hydro_filter_reference_with_interleaved_rows() {
+    fn test_bucketed_seeds_match_per_hydro_filter_reference() {
         let season_map = monthly_season_map(MonthlyLabels::OneBased);
         let first_stage = make_stage(0, d(2026, 4, 1), d(2026, 5, 1), Some(3));
         let hydros = vec![make_hydro(1), make_hydro(2)];

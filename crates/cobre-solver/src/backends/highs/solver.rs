@@ -387,11 +387,9 @@ impl HighsSolver {
         status: i32,
         solve_time_seconds: f64,
     ) -> Option<SolverError> {
+        #[allow(clippy::match_same_arms)]
         match status {
-            ffi::HIGHS_MODEL_STATUS_OPTIMAL => {
-                // Caller should have handled optimal before reaching here.
-                None
-            }
+            ffi::HIGHS_MODEL_STATUS_OPTIMAL => None,
             ffi::HIGHS_MODEL_STATUS_INFEASIBLE => Some(SolverError::Infeasible),
             ffi::HIGHS_MODEL_STATUS_UNBOUNDED_OR_INFEASIBLE => {
                 // A dual ray classifies as Infeasible, a primal ray as Unbounded.
@@ -489,8 +487,6 @@ impl HighsSolver {
         self.stats.solve_count += 1;
 
         if model_status == ffi::HIGHS_MODEL_STATUS_OPTIMAL {
-            // Read the iteration count before `extract_solution_view` borrows
-            // self, so stats can be updated without an aliasing conflict.
             // SAFETY: handle is valid non-null HiGHS pointer.
             #[allow(clippy::cast_sign_loss)]
             let iterations =

@@ -236,22 +236,15 @@ pub(crate) struct BroadcastOpeningTree {
 }
 
 /// Postcard-serializable wrapper for [`NodeGraph`] broadcast — plain
-/// struct-of-`Vec`s (no tagged enum on the wire), mirroring
-/// [`BroadcastOpeningTree`]'s shape. `NodeOpenings::source` becomes the
-/// `is_external` flag; successor lists flatten to a CSR triple
+/// struct-of-`Vec`s (no tagged enum on the wire). `NodeOpenings::source`
+/// becomes the `is_external` flag; successor lists flatten to a CSR triple
 /// (`successor_offsets`/`successor_child`/`successor_probability`).
 ///
-/// Not currently wired into the live MPI broadcast: [`NodeGraph`] is a pure,
-/// deterministic function of already-broadcast inputs (`System::policy_graph`
-/// — carried whole by the existing `System` broadcast — and the standardized
-/// scenario libraries, themselves rebuilt identically on every rank inside
-/// `StudySetup::from_broadcast_params`), so every rank constructs a
-/// bitwise-identical graph without a wire hop — the same guarantee
-/// `cut_state_layouts`/`stage_templates`/`scenario_libraries` already rely on.
-/// This type exists so a future caller can transport the graph explicitly
-/// (e.g. to cross-check the deterministic-construction guarantee, the way
-/// [`BroadcastOpeningTree`] transports a user-supplied tree) without
-/// inventing a second wire shape.
+/// Not currently wired: [`NodeGraph`] is deterministically reconstructed
+/// on every rank from already-broadcast inputs, so explicit transport is
+/// unnecessary. This type reserves the wire shape for future use (e.g. to
+/// cross-check the deterministic-construction guarantee) without inventing
+/// a second format later.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct BroadcastNodeGraph {
     pub(crate) node_ids: Vec<i32>,

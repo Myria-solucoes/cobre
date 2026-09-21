@@ -336,12 +336,8 @@ fn exchange_gather_plan<C: Communicator>(
 }
 
 /// Gather every rank's `(scenario_id, stage_id, node_id)` path rows for the
-/// run-level, unpartitioned `paths.parquet`.
-///
-/// Rows serialize to three `i32`s each and ride the same allgatherv-of-lengths-
-/// then-payload pattern the other per-scenario gathers use. Order is irrelevant:
-/// `write_paths` fixes the canonical `(scenario_id, stage_id)` order, so the file
-/// is identical across rank shapes (the rank-invariance contract).
+/// run-level, unpartitioned `paths.parquet`. Order is irrelevant: `write_paths`
+/// fixes the canonical `(scenario_id, stage_id)` order (rank-invariance contract).
 fn aggregate_simulation_paths<C: Communicator>(
     comm: &C,
     local: &[SimulationPathRecord],

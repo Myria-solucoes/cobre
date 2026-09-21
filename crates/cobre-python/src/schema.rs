@@ -13,8 +13,8 @@ use pyo3::prelude::*;
 /// Generate JSON Schema files for all case-directory input types and write them
 /// to `output_dir` (a `str` or `pathlib.Path`), creating it if needed.
 ///
-/// Existing schema files are overwritten without prompting — schemas are
-/// generated, not hand-edited. Returns the number of files written.
+/// Existing schema files are overwritten without prompting. Returns the number
+/// of files written.
 ///
 /// # Raises
 ///

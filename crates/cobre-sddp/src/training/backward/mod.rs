@@ -112,14 +112,13 @@ pub type StageWorkerOpeningDelta = (i32, i32, usize, SolverStatsDelta);
 #[derive(Debug, Clone)]
 #[must_use]
 pub struct BackwardResult {
-    /// Total cuts generated during the backward pass, summed across all ranks
-    /// (rank-count invariant — the globally-replicated pool's per-iteration growth).
+    /// Cuts generated, summed across all ranks (rank-count invariant).
     pub cuts_generated: usize,
 
-    /// Wall-clock time in milliseconds for this rank's backward pass.
+    /// This rank's wall time (milliseconds).
     pub elapsed_ms: u64,
 
-    /// Number of LP solves performed during this backward pass.
+    /// LP solves performed.
     pub lp_solves: u64,
 
     /// Per-stage, per-`(rank, worker_id, opening)` solver statistics deltas.
@@ -135,39 +134,27 @@ pub struct BackwardResult {
     /// order.
     pub stage_stats: Vec<(usize, Vec<StageWorkerOpeningDelta>)>,
 
-    /// Wall-clock time for state exchange (`allgatherv`) accumulated across
-    /// all stages, in milliseconds.
+    /// State exchange time, accumulated across all stages (milliseconds).
     pub state_exchange_time_ms: u64,
 
-    /// Wall-clock time for `build_cut_row_batch_into` accumulated across
-    /// all stages, in milliseconds.
+    /// `build_cut_row_batch_into` time, accumulated across all stages (milliseconds).
     pub cut_batch_build_time_ms: u64,
 
-    /// Aggregate non-solve work inside the parallel region accumulated across
-    /// all stages, in milliseconds.
-    ///
-    /// Computed per-stage as the sum over all workers of
+    /// Aggregate non-solve work inside the parallel region, accumulated across
+    /// all stages (milliseconds). Computed per-stage as the sum over all workers of
     /// `load_model_time_ms + set_bounds_time_ms + basis_set_time_ms`.
     pub setup_time_ms: u64,
 
-    /// Load-imbalance component of parallel overhead accumulated across all
-    /// stages, in milliseconds.
-    ///
-    /// Computed per-stage as `max_worker_total_ms - avg_worker_total_ms`, where
-    /// `worker_total_ms = solve + load_model + set_bounds + basis_set`
-    /// for each worker. Measures how much the slowest worker exceeds the average.
+    /// Load-imbalance component of parallel overhead, accumulated across all
+    /// stages (milliseconds). Computed per-stage as `max_worker_total_ms - avg_worker_total_ms`,
+    /// where `worker_total_ms = solve + load_model + set_bounds + basis_set` for each worker.
     pub load_imbalance_ms: u64,
 
-    /// True rayon scheduling overhead accumulated across all stages, in
-    /// milliseconds.
-    ///
-    /// Computed per-stage as `parallel_wall_ms - max_worker_total_ms`. Represents
-    /// rayon barrier, thread wake-up, and work-stealing dispatch costs after
-    /// accounting for all measured per-worker work.
+    /// Rayon scheduling overhead, accumulated across all stages (milliseconds).
+    /// Computed per-stage as `parallel_wall_ms - max_worker_total_ms`.
     pub scheduling_overhead_ms: u64,
 
-    /// Wall-clock time for per-stage cut synchronization (`allgatherv`)
-    /// accumulated across all stages, in milliseconds.
+    /// Per-stage cut synchronization time, accumulated across all stages (milliseconds).
     pub cut_sync_time_ms: u64,
 }
 

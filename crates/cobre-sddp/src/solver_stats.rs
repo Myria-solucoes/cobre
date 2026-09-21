@@ -66,8 +66,6 @@ fn ensure_histogram_capacity(result: &mut Vec<u64>, source: &[u64]) {
 
 impl SolverStatsDelta {
     /// Compute the delta between two [`SolverStatistics`] snapshots.
-    ///
-    /// Counters are monotonically increasing, so `after - before` is non-negative.
     #[must_use]
     pub fn from_snapshots(before: &SolverStatistics, after: &SolverStatistics) -> Self {
         Self {
@@ -101,8 +99,7 @@ impl SolverStatsDelta {
         }
     }
 
-    /// Add `rhs` element-wise into `dst` in place — an allocation-free
-    /// `*dst = aggregate([dst, rhs])` for the hot backward-pass path.
+    /// Add `rhs` element-wise into `dst` in place — allocation-free for the hot backward-pass path.
     pub fn accumulate_into(dst: &mut Self, rhs: &Self) {
         dst.lp_solves += rhs.lp_solves;
         dst.lp_successes += rhs.lp_successes;
@@ -182,8 +179,7 @@ impl SolverStatsDelta {
     }
 }
 
-/// Sum [`SolverStatistics`] counters across all solver instances in a workspace
-/// pool, yielding one before/after snapshot for a phase that distributes work.
+/// Sum solver counters across a workspace pool into one aggregate snapshot.
 #[must_use]
 pub fn aggregate_solver_statistics(
     stats: impl Iterator<Item = SolverStatistics>,
@@ -245,9 +241,8 @@ pub struct SolverStatsLogEntry {
 }
 
 impl SolverStatsLogEntry {
-    /// Build an entry from raw producer values, decoding the `-1` sentinel on
-    /// `opening`/`worker_id` into `None` exactly once here. `stage_id` is a
-    /// nullable domain id passed directly (no sentinel); `rank` is stored verbatim.
+    /// Build an entry from raw producer values. The `-1` sentinel on `opening`/`worker_id`
+    /// decodes to `None`; `stage_id` passes through; `rank` is verbatim.
     #[must_use]
     pub fn from_raw(
         iteration: u64,
@@ -314,9 +309,7 @@ pub fn delta_to_stats_row(
 /// Fold a solver-stats log into the five phase-derived training-summary
 /// counts: `(first_try, retried, failed, forward_solve_seconds,
 /// backward_solve_seconds)`. `rank_filter = Some(rank)` keeps only entries
-/// from that rank — the CLI's filter for backward entries, which are
-/// allgatherv-replicated across ranks before an `allreduce(Sum)`; `None`
-/// folds every entry (the single-process Python caller).
+/// from that rank (CLI backward-entry filter); `None` folds every entry.
 ///
 /// `total_lp_solves` is deliberately NOT derived here — it stays sourced from
 /// the per-iteration convergence records (`IterationRecord.lp_solves`), which
@@ -389,10 +382,7 @@ pub const SCENARIO_STATS_STRIDE: usize = 1 + SOLVER_STATS_DELTA_SCALAR_FIELDS;
 /// Packed `f64` stride per entry: `worker_id`, `slot_idx`, + 13 scalar fields (total 15).
 pub const WORKER_STATS_ENTRY_STRIDE: usize = 2 + SOLVER_STATS_DELTA_SCALAR_FIELDS;
 
-/// Required `f64` buffer length for a per-worker per-slot pack payload.
-///
-/// Returns `n_workers * n_slots * WORKER_STATS_ENTRY_STRIDE`. Use to preallocate
-/// MPI send/recv buffers at training setup.
+/// Preallocate buffer size for per-worker per-slot MPI payloads.
 #[must_use]
 #[inline]
 pub fn worker_opening_stats_buffer_size(n_workers: usize, n_slots: usize) -> usize {

@@ -1,10 +1,7 @@
 //! Frozen Parquet writer encoding parameters shared by every output writer.
 //!
-//! The compression codec, row-group size, and dictionary-encoding setting are
-//! fixed for every Parquet file this crate writes: Zstd level 3, 100_000-row
-//! groups, dictionary encoding enabled. [`WRITER_PROPERTIES`] resolves them
-//! once, process-lifetime; [`super::atomic::write_parquet_atomic`] clones the
-//! already-built handle instead of rebuilding it per file.
+//! Process-lifetime constants resolved once via [`WRITER_PROPERTIES`]; writers
+//! clone the handle instead of rebuilding per file.
 
 use std::sync::LazyLock;
 

@@ -49,7 +49,7 @@ use common::builders::{
     BusSpec, HydroSpec, StageSpec, ThermalSpec, make_bus, make_hydro, make_stage, make_thermal,
 };
 
-/// LP objective cost scale factor. Matches `cobre_sddp::lp::builder::COST_SCALE_FACTOR`.
+/// LP objective cost scale factor. Matches `cobre_sddp::setup::params::DEFAULT_COST_SCALE_FACTOR`.
 const COST_SCALE_FACTOR: f64 = 1_000_000.0;
 
 /// Evaporation flow safety margin multiplier. Matches `cobre_sddp::lp::builder::EVAPORATION_FLOW_SAFETY_MARGIN`.
@@ -668,18 +668,6 @@ fn fpha_system_with_turbined_cost(
     (system, production)
 }
 
-// ---- turbined_cost tests -------------------------------------------
-
-// -------------------------------------------------------------------------
-// FPHA generation model validation tests
-
-// -------------------------------------------------------------------------
-// Inflow non-negativity penalty method tests
-
-// -------------------------------------------------------------------------
-// load balance row starts, n_load_buses, load_bus_indices
-// -------------------------------------------------------------------------
-
 /// Build a two-bus system with N hydros and K blocks per stage.
 /// Bus B1 (EntityId=10) has `std_mw` = 0 (no load noise).
 /// Bus B2 (EntityId=20) has `std_mw` > 0 (stochastic load).
@@ -906,10 +894,6 @@ fn two_bus_system_with_stochastic_load(
     }
     builder.build().expect("two_bus_system: valid")
 }
-
-// -------------------------------------------------------------------------
-// FPHA constraint tests
-// -------------------------------------------------------------------------
 
 /// CSC coefficient at (`col`, `row`); `None` if the column has no entry in that row.
 #[allow(clippy::cast_sign_loss)] // col_starts and row_indices are non-negative by construction
@@ -1864,10 +1848,6 @@ fn multi_segment_system(buses: Vec<Bus>, block_hours: f64) -> cobre_core::System
         .expect("multi_segment_system: valid")
 }
 
-// -------------------------------------------------------------------------
-// Water withdrawal LP wiring unit tests
-// -------------------------------------------------------------------------
-
 /// `one_hydro_system` variant injecting `water_withdrawal_m3s` and
 /// `water_withdrawal_violation_cost`. One 744h block; `lag_order` adds AR lag columns.
 #[allow(
@@ -2102,8 +2082,6 @@ fn one_hydro_system_with_withdrawal(
         .build()
         .expect("one_hydro_system_with_withdrawal: valid")
 }
-
-// ── Generic constraint layout tests ──────────────────────────
 
 /// One-bus, one-stage system with `n_blks` operating blocks.
 #[allow(clippy::cast_possible_wrap)]

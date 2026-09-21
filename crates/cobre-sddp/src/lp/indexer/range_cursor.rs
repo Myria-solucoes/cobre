@@ -5,21 +5,11 @@
 
 use std::ops::Range;
 
-/// A running column/row offset allocator: [`Self::alloc`] returns `pos..pos +
-/// len` and advances the cursor by `len`, so a family's start is never
-/// re-threaded by hand and adjacency between consecutive families — the next
-/// family's start equals the previous family's end — is structural, not a
-/// hand-copied `.end`.
+/// Running column/row offset allocator. [`Self::alloc`] returns `pos..pos + len`
+/// and advances the cursor by `len`.
 ///
-/// `alloc(0)` returns `pos..pos`, the live cursor position, never `0..0` —
-/// `0..0` loses the position an empty-block-cursor field
-/// (`generation_col_start`/`evap_col_start`/`post_equipment_col_start`/
-/// `post_equipment_row_start`) or an `n_h == 0` accessor fallback needs;
-/// `pos..pos` carries it, so those reads and fallbacks collapse to a bare
-/// `.start`/`.end` with no branch. A caller that needs the literal `0..0`
-/// convention for an optional block (e.g.
-/// [`StateSpace::new`](super::StateSpace)) normalises it explicitly at the
-/// call site — `RangeCursor` itself never returns `0..0`.
+/// `alloc(0)` returns `pos..pos`, never `0..0` — empty ranges must preserve their
+/// position for empty-block fields and `n_h == 0` fallbacks.
 pub(crate) struct RangeCursor {
     pos: usize,
 }

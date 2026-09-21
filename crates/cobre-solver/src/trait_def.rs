@@ -117,11 +117,6 @@ pub trait SolverInterface: Send {
     /// either call `load_model` (which resets topology) or pass an explicit
     /// `Basis` via `solve(Some(&b))`.
     ///
-    /// `HighsSolver` retains its internal simplex basis and factorization across
-    /// consecutive `solve` calls — the primary warm-start mechanism when a
-    /// handle solves a long sequence of same-shape LPs that differ only in
-    /// bounds or objective.
-    ///
     /// # Errors
     ///
     /// Returns `Err(SolverError)` after internal retry exhaustion.
@@ -214,11 +209,9 @@ pub trait SolverInterface: Send {
     /// solve's result cannot depend on which models the same handle solved
     /// before it, so output stays bit-identical across thread/rank counts.
     ///
-    /// Default: no-op. `HighsSolver` rebuilds its full solver state on every
-    /// `load_model` (`Highs_passLp`), so it is already order-independent. The
-    /// CLP backend overrides this because `Clp_loadProblem` does **not** heal the
-    /// `ClpSimplex` rim/pricing state, leaving stale steepest-edge weights that
-    /// make the landed vertex on alternative-optima LPs order-dependent.
+    /// Default: no-op. Override when your backend retains solver state across
+    /// `load_model` calls (e.g., factorization, pricing weights) that would make
+    /// results depend on prior solve history.
     fn reset_solver_state(&mut self) {}
 }
 
@@ -289,7 +282,6 @@ mod tests {
     fn test_noop_solver_name() {
         let name = NoopSolver.name();
         assert_eq!(name, "Noop");
-        assert!(!name.is_empty());
     }
 
     #[test]

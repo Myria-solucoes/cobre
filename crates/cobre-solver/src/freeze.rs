@@ -723,25 +723,20 @@ mod tests {
     /// Verifies that `freeze_rows_into_template` panics with the expected message
     /// when `base.num_nz + rows_nnz` exceeds `i32::MAX`.
     ///
-    /// Skipped in debug builds because `debug_assert!` on `base.row_indices.len()`
-    /// fires before the overflow guard when `num_nz` is fabricated. The
-    /// `i32::try_from` path exists in both builds; run `cargo test --release` to
-    /// exercise it directly.
+    /// Release-only: debug asserts on fabricated sizes fire first in debug builds.
+    /// Run `cargo test --release` to exercise the i32::try_from guard.
     #[test]
     #[cfg(not(debug_assertions))]
     #[should_panic(expected = "total nnz exceeds i32::MAX")]
     fn test_freeze_panics_on_nnz_overflow() {
-        // base: zero columns, zero actual non-zeros, but num_nz = i32::MAX.
-        // In release mode, debug_asserts are disabled so the i32::try_from guard
-        // is reached before any length check. rows contributes 1 extra non-zero
-        // (rows_nnz = 1), making total_nnz = i32::MAX + 1 which overflows i32.
-        let large_num_nz = usize::try_from(i32::MAX).unwrap(); // 2_147_483_647
+        // base.num_nz = i32::MAX; rows adds 1 more to trigger the overflow.
+        let large_num_nz = usize::try_from(i32::MAX).unwrap();
         let base = StageTemplate {
             num_cols: 0,
             num_rows: 0,
             num_nz: large_num_nz,
-            col_starts: vec![0_i32], // len = num_cols + 1 = 1
-            row_indices: vec![],     // empty — debug_asserts disabled in release
+            col_starts: vec![0_i32],
+            row_indices: vec![],
             values: vec![],
             col_lower: vec![],
             col_upper: vec![],
@@ -756,11 +751,6 @@ mod tests {
             col_scale: Vec::new(),
             row_scale: Vec::new(),
         };
-        // rows contributes 1 non-zero, tipping base.num_nz + 1 > i32::MAX.
-        // col_indices = [0] would be out-of-range for num_cols == 0, but the
-        // corresponding debug_assert is also disabled in release mode; the
-        // i32::try_from check fires first because total_nnz is computed before
-        // any further use of col_indices.
         let rows = RowBatch {
             num_rows: 1,
             row_starts: vec![0_i32, 1],

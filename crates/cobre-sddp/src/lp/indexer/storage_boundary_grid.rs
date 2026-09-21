@@ -13,11 +13,6 @@
 use super::Boundary;
 
 /// Typed storage-boundary address calculator for one SDDP stage LP.
-///
-/// A cheap `Copy` value carrying the two state bases and the two stage
-/// constants `block_storage_col`'s three address arms need: the incoming- and
-/// outgoing-state column bases (from [`StateSpace`](super::StateSpace)) and
-/// the interior control-region anchor plus block count (from `StageLayout`).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StorageBoundaryGrid {
     storage_in_base: usize,

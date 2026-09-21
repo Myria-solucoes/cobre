@@ -38,19 +38,6 @@ use super::RunContext;
 
 /// Load a policy checkpoint from disk, rescale its cuts into the current
 /// study's cost-scale space, and validate compatibility.
-///
-/// Every warm-start, resume, and simulation-only load shares this one function,
-/// so [`cobre_sddp::rescale_checkpoint_cuts_for_load`] and
-/// validation both run exactly once per load, unconditionally. Validation
-/// routes through [`cobre_sddp::validate_policy_load`] typed to [`FullFcf`],
-/// checking `state_dimension` and `num_stages`, then the checkpoint terminal
-/// manifest against the current study's terminal manifest — rejecting a
-/// same-dimension-different-entity policy the dims check alone would pass. The
-/// returned [`PolicyLoadProof<FullFcf>`] is the sole credential
-/// [`FutureCostFunction::new_with_warm_start`](cobre_sddp::FutureCostFunction::new_with_warm_start)
-/// and
-/// [`FutureCostFunction::from_deserialized`](cobre_sddp::FutureCostFunction::from_deserialized)
-/// accept.
 fn load_and_validate_checkpoint(
     ctx: &RunContext<impl Communicator>,
     policy_dir: &Path,
@@ -123,9 +110,7 @@ fn load_checkpoint_into_setup(
     proof: &PolicyLoadProof<FullFcf>,
     setup: &mut StudySetup,
 ) -> Result<(), CliError> {
-    // The pre-replacement (cold-path) FCF already carries the per-pool arrays
-    // `new_per_pool` derived for this study; the resume path reuses them
-    // verbatim rather than substituting a scalar.
+    // Reuse per-pool dimensions from the current study's FCF, not the checkpoint's.
     let pool_state_dimensions: Vec<usize> =
         setup.fcf.pools.iter().map(|p| p.state_dimension).collect();
     let visit_bounds: Vec<u64> = setup
@@ -188,9 +173,7 @@ pub(super) fn apply_training_policy(
                 load_and_validate_checkpoint(ctx, &policy_dir, system, setup)?;
             load_checkpoint_into_setup(&checkpoint, &proof, setup)?;
             if ctx.is_root && !ctx.quiet {
-                // Pool 0 (the chain's stage-0 / lowest-id pool) stands in as a
-                // representative sample for this advisory message, not a
-                // per-pool count.
+                // pools[0] as representative; this is not a per-pool count.
                 let warm_count = setup.fcf.pools[0].warm_start_count;
                 let _ = ctx.stderr.write_line(&format!(
                     "Warm-start: loaded {warm_count} cuts per stage from prior policy."
@@ -239,13 +222,10 @@ pub(super) fn apply_training_policy(
     // Must run after the match: warm-start replaces the whole FCF first, then
     // boundary cuts overwrite only the terminal pool.
     //
-    // Boundary PRESENCE is a broadcast fact (`boundary_requirements`), identical
-    // on every rank; the reconciled cuts are read and reconciled once on rank 0
-    // (the single disk reader, the only rank carrying `root_config`) and
-    // broadcast, so every rank injects the identical terminal pool. Gating on the
-    // rank-0-only `root_config` instead leaves non-root ranks with an empty
-    // terminal pool, so their forward/backward/simulation terminal solves drop
-    // the post-horizon value-to-go — a rank-count-dependent wrong bound.
+    // boundary_requirements() is identical on all ranks; rank 0 reads and
+    // broadcasts the reconciled cuts, then every rank injects the identical
+    // terminal pool. Gating on root_config would leave non-root ranks with an
+    // empty terminal pool — a rank-count-dependent wrong bound.
     if setup.boundary_requirements().is_present() {
         let boundary_records: Option<Vec<OwnedPolicyCutRecord>> = if ctx.is_root {
             let bp = root_config

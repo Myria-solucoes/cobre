@@ -23,8 +23,7 @@ use crate::{
 pub struct StageContext<'a> {
     /// Stage LP templates.
     pub templates: &'a [StageTemplate],
-    /// Per-stage admissible box for the outgoing state vector, consumed by
-    /// the read-back canonicalization seam.
+    /// Per-stage admissible box for the outgoing state vector.
     pub state_boxes: &'a [StateBox],
     /// Row index of the first water-balance row in each stage template.
     pub base_rows: &'a [usize],
@@ -218,7 +217,7 @@ impl StageContext<'_> {
 /// pass, and simulation pipeline. The external-scenario `Option` libraries are
 /// `Some` exactly when their entity class's `SamplingScheme` selects them.
 pub struct TrainingContext<'a> {
-    /// Horizon mode (finite/infinite) determining stage count.
+    /// Horizon mode determining stage count.
     pub horizon: &'a HorizonMode,
     /// Single owner of the state-vector layout: the state column ranges,
     /// `n_state`, the resolvers, and the mask. Every hot-path state-column read
@@ -232,8 +231,7 @@ pub struct TrainingContext<'a> {
     /// chain degeneracy `pool_id == stage`. Empty on the non-training paths
     /// (simulation, lower-bound eval), which never extract cuts.
     pub cut_state_layouts: &'a [CutStateProjection],
-    /// Single owner of the study-invariant, non-state LP shape: non-state entity
-    /// counts, optional-column presence flags, anticipated-thermal identity list.
+    /// Single owner of the study-invariant, non-state LP shape.
     pub study_dims: &'a StudyDimensions,
     /// Inflow non-negativity enforcement strategy.
     pub inflow_method: &'a InflowNonNegativityMethod,

@@ -174,8 +174,6 @@ fn computed_fpha_config(hydro_id: i32) -> ProductionModelConfig {
 
 // ── resolve_production_models unit tests (in-memory, no disk I/O) ─────────
 
-/// The downstream sentinel behaviour is exercised by
-/// `test_resolve_stage_model_returns_sentinel_when_no_config_entry`.
 #[test]
 fn all_constant_no_config_returns_default_constant_provenance() {
     let hydro0 = make_hydro(0, HydroGenerationModel::ConstantProductivity);
@@ -187,8 +185,6 @@ fn all_constant_no_config_returns_default_constant_provenance() {
     assert_eq!(src1, ProductionModelSource::DefaultConstant);
 }
 
-/// The downstream sentinel behaviour is exercised by
-/// `test_resolve_stage_model_returns_sentinel_when_no_config_entry`.
 #[test]
 fn linearized_head_entity_resolves_to_constant_productivity() {
     let hydro = make_hydro(0, HydroGenerationModel::LinearizedHead);
@@ -221,7 +217,6 @@ fn computed_source_returns_computed_from_geometry() {
     );
 }
 
-/// A hydro with all computed-source prerequisites (tailrace, losses, efficiency).
 fn make_computed_hydro(id: i32) -> Hydro {
     let mut hydro = make_hydro(id, HydroGenerationModel::Fpha);
     hydro.tailrace = Some(TailraceModel::Polynomial {
@@ -1124,8 +1119,6 @@ fn precomputed_config_returns_precomputed_source() {
 
 // ── Computed-source integration tests ─────────────────────────────────────
 
-/// Sobradinho-style hydro with all computed prerequisites — the known-valid fit
-/// fixture (mirrors `fpha_fitting.rs`).
 fn make_sobradinho_computed_hydro(id: i32) -> Hydro {
     let mut hydro = make_hydro(id, HydroGenerationModel::Fpha);
     hydro.name = format!("Sobradinho{id}");
@@ -1140,7 +1133,6 @@ fn make_sobradinho_computed_hydro(id: i32) -> Hydro {
     hydro
 }
 
-/// Four-point VHA geometry rows (Sobradinho-style, mirrors `fpha_fitting.rs`).
 fn make_sobradinho_geometry_rows(hydro_id: i32) -> Vec<HydroGeometryRow> {
     vec![
         HydroGeometryRow {
@@ -1196,9 +1188,6 @@ fn computed_source_end_to_end_produces_valid_fpha_planes() {
     .expect("fit_planes_for_hydro must succeed for valid Sobradinho-style input");
     let planes = &fit_result.planes;
 
-    // The hull-based fitter emits one plane per distinct upper-envelope hull
-    // face, so the count is not fixed; assert only that at least one plane
-    // exists with valid coefficient signs.
     assert!(
         !planes.is_empty(),
         "expected at least one plane, got {}",

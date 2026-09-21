@@ -182,8 +182,6 @@ pub(super) fn run_training_phase(
         serial_scheduling_ms: phase_timing.scheduling_ms,
     };
 
-    // The convergence records are not yet persisted at this point, so the
-    // in-memory copy is authoritative; reading from disk would return None.
     let initial_gap_percent = training_output
         .convergence_records
         .first()

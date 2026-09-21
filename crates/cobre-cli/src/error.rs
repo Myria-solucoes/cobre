@@ -53,7 +53,7 @@ pub enum CliError {
     /// Case directory failed the validation pipeline (exit code 1).
     #[error("validation error: {report}")]
     Validation {
-        /// Human-readable summary of the validation failure.
+        /// Validation failure summary.
         report: String,
         /// `true` when the originating subcommand already printed `report` to
         /// stdout (the `validate` subcommand): [`CliError::format_error`] then
@@ -75,7 +75,7 @@ pub enum CliError {
     /// LP solver error during training or simulation (exit code 3).
     #[error("solver error: {message}")]
     Solver {
-        /// Human-readable description of the solver failure.
+        /// Solver failure description.
         message: String,
     },
 
@@ -84,7 +84,7 @@ pub enum CliError {
     /// A software or environment problem rather than a user error.
     #[error("internal error: {message}")]
     Internal {
-        /// Human-readable description of the internal failure.
+        /// Internal failure description.
         message: String,
     },
 }

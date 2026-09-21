@@ -294,9 +294,7 @@ fn estimate_ar_with_pacf(
 /// Propagates `StochasticError::InsufficientData` from
 /// [`estimate_annual_seasonal_stats`] when any hydro has fewer than 13
 /// chronological observations (no rolling window can be formed).
-// Rationale: a single cohesive PACF estimation pipeline whose phases share
-// intermediate look-up tables; splitting into sub-functions would thread those
-// tables as extra arguments and obscure the sequential data-flow contract.
+// Rationale: splitting would thread intermediate look-ups as extra arguments and obscure sequential data-flow.
 #[allow(clippy::too_many_lines)]
 fn estimate_ar_with_pacf_annual(
     observations: &[(EntityId, NaiveDate, f64)],
@@ -528,10 +526,7 @@ fn estimate_ar_with_pacf_annual(
 /// Reductions act on the AR order alone (the φ vector); the annual term ψ is a
 /// separate parameter preserved across reductions and refreshed via re-solves of
 /// the extended Yule-Walker system at the new ceiling.
-// Rationale: the function threads four independent paired look-up tables (regular and annual
-// variants of observations and year-start maps) plus three independent stat maps and two
-// scalar controls; bundling them into a struct would just displace the arity to the struct
-// literal at each of the two call sites with no clarity gain.
+// Rationale: bundling into a struct would displace the arity to the struct literal with no clarity gain.
 #[allow(clippy::too_many_arguments)]
 fn apply_annual_prepass_reductions(
     estimates: &mut [ArCoefficientEstimate],
@@ -635,10 +630,7 @@ fn detect_failing_seasons(
 /// and ψ are refreshed. When the ceiling reaches 0 the AR coefficients are
 /// dropped but ψ is retained via a final order-0 YW solve, keeping the constant
 /// term consistent with the per-season annual stats.
-// Rationale: the arguments are independently-sourced look-up/stat tables spanned
-// by no context struct, and the per-entity reduction loop re-solves the annual
-// Yule-Walker system per ceiling reduction over the mutable `estimates` slice,
-// so it cannot be decomposed without threading that slice across helpers.
+// Rationale: independently-sourced tables with no natural context struct; the mutable slice prevents decomposition.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn reduce_entity_orders_annual(
     estimates: &mut [ArCoefficientEstimate],
@@ -1207,10 +1199,6 @@ fn iterative_pacf_reduction(
 ///
 /// Each hydro's selected order is the **maximum** across its seasons, matching
 /// the single-order-per-hydro shape the I/O layer (`FittingReport`) expects.
-// Rationale: the `contribution_reductions` map is always built with the default
-// hasher by the in-crate callers and the report consumer; generalising over
-// `BuildHasher` would widen the signature for no caller that uses a custom
-// hasher, so the implicit-hasher lint is suppressed rather than satisfied.
 #[allow(clippy::implicit_hasher)]
 pub fn build_estimation_report(
     estimates: &[ArCoefficientEstimate],

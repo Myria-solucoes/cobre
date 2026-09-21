@@ -17,7 +17,7 @@ use crate::SddpError;
 
 /// Which pre-solver preparation phase produced an error.
 ///
-/// Each variant corresponds to one of the four SDDP preparation steps that
+/// Each variant corresponds to the SDDP preparation steps that
 /// follow the six-layer cobre-io loading pipeline:
 ///
 /// | Phase                | Function called                            | Typical trigger file                  |
@@ -41,10 +41,7 @@ pub enum PrepPhase {
     Stochastic,
     /// `prepare_hydro_models_from_artifacts` (production/evaporation models).
     HydroModels,
-    /// `validate_generic_constraint_parameters` (resolved scalar-parameter table
-    /// build plus the generic-constraint parameter-presence guard, run for a deck
-    /// with no boundary policy — a boundary deck runs the same guard inside
-    /// `StudySetup::new`).
+    /// Scalar-parameter resolution and constraint validation (no-boundary decks only; boundary decks run this inside `StudySetup::new`).
     GenericConstraints,
     /// `load_boundary_cuts` (boundary checkpoint reconciliation against the
     /// terminal entity manifest, when `config.policy.boundary` is set).
@@ -62,10 +59,6 @@ pub enum PrepPhase {
 ///   (e.g. `"ConfigValidationError"`, `"StochasticPreparationError"`).
 /// * `file_label` — a short relative path pointing to the file most likely
 ///   responsible for the error, suitable for user-facing diagnostics.
-///
-/// # Returns
-///
-/// `(kind, file_label)` where both are `'static str` references.
 ///
 /// # Examples
 ///

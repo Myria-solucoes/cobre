@@ -215,9 +215,10 @@ impl<'a> GroupBoundLookup<'a> {
     }
 }
 
+/// Methods return the resolved per-block value: the override when the study
+/// supplies one, the declaration otherwise.
 impl GroupBoundLookup<'_> {
-    /// Group `group_pos`'s resolved turbined-flow maximum — the override when
-    /// the study supplies one, `group.max_turbined_m3s` otherwise.
+    /// Group `group_pos`'s resolved turbined-flow maximum.
     fn max_turbined(&self, group_pos: usize, group: &HydroUnitGroup) -> f64 {
         self.table
             .override_at_block(self.hydro_idx, group_pos, self.stage_idx, self.block_idx)
@@ -225,8 +226,7 @@ impl GroupBoundLookup<'_> {
             .unwrap_or(group.max_turbined_m3s)
     }
 
-    /// Group `group_pos`'s resolved generation maximum — the override when the
-    /// study supplies one, `group.max_generation_mw` otherwise.
+    /// Group `group_pos`'s resolved generation maximum.
     fn max_generation(&self, group_pos: usize, group: &HydroUnitGroup) -> f64 {
         self.table
             .override_at_block(self.hydro_idx, group_pos, self.stage_idx, self.block_idx)
@@ -234,8 +234,7 @@ impl GroupBoundLookup<'_> {
             .unwrap_or(group.max_generation_mw)
     }
 
-    /// Group `group_pos`'s resolved turbined-flow minimum — the override when
-    /// the study supplies one, `group.min_turbined_m3s` otherwise.
+    /// Group `group_pos`'s resolved turbined-flow minimum.
     pub(super) fn min_turbined(&self, group_pos: usize, group: &HydroUnitGroup) -> f64 {
         self.table
             .override_at_block(self.hydro_idx, group_pos, self.stage_idx, self.block_idx)
@@ -243,8 +242,7 @@ impl GroupBoundLookup<'_> {
             .unwrap_or(group.min_turbined_m3s)
     }
 
-    /// Group `group_pos`'s resolved generation minimum — the override when the
-    /// study supplies one, `group.min_generation_mw` otherwise.
+    /// Group `group_pos`'s resolved generation minimum.
     pub(super) fn min_generation(&self, group_pos: usize, group: &HydroUnitGroup) -> f64 {
         self.table
             .override_at_block(self.hydro_idx, group_pos, self.stage_idx, self.block_idx)

@@ -41,12 +41,11 @@ use crate::{
 ///
 #[derive(Debug, Clone)]
 pub struct CutSyncBuffers {
-    /// This rank's serialized records; only the leading
-    /// `actual_cuts * record_size` bytes are sent each call.
+    /// Only the leading `actual_cuts * record_size` bytes are sent each call.
     send_buf: Vec<u8>,
 
-    /// All ranks' serialized records; rank `r`'s records occupy
-    /// `recv_buf[displs[r]..displs[r] + counts[r]]` after `allgatherv`.
+    /// Rank `r`'s records occupy `recv_buf[displs[r]..displs[r] + counts[r]]`
+    /// after `allgatherv`.
     recv_buf: Vec<u8>,
 
     /// Per-rank byte count for `allgatherv`, recomputed each `sync_level_records` call.

@@ -132,6 +132,7 @@ impl BasisStatus {
 #[cfg(test)]
 mod tests {
     use super::BasisStatus;
+    use crate::ffi::clp::CLP_BASIS_SUPERBASIC;
     use crate::ffi::highs::{
         HIGHS_BASIS_STATUS_BASIC, HIGHS_BASIS_STATUS_LOWER, HIGHS_BASIS_STATUS_NONBASIC,
         HIGHS_BASIS_STATUS_UPPER, HIGHS_BASIS_STATUS_ZERO,
@@ -231,7 +232,7 @@ mod tests {
 
     #[test]
     fn to_clp_code_folds_highs_only_variant() {
-        assert_eq!(BasisStatus::Nonbasic.to_clp_code(), 4);
+        assert_eq!(BasisStatus::Nonbasic.to_clp_code(), CLP_BASIS_SUPERBASIC);
     }
 
     #[test]

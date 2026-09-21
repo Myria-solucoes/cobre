@@ -265,7 +265,6 @@ impl From<PyProducerBlock> for ProducerBlock {
 #[derive(Debug, FromPyObject)]
 #[pyo3(from_item_all)]
 pub(crate) struct PyPolicyCheckpointMetadata {
-    /// Format version, defaults to `FORMAT_VERSION` when omitted.
     #[pyo3(default = FORMAT_VERSION)]
     format_version: u32,
     cobre_version: String,
@@ -303,9 +302,8 @@ fn checked_u32_len(len: usize, what: &str) -> PyResult<u32> {
         .map_err(|_| PyValueError::new_err(format!("{what} has {len} entries, exceeding u32::MAX")))
 }
 
-/// Validate each stage's cut coefficient lengths against its `state_dimension`
-/// and resolve the `populated_count` default (`cuts.len()`), naming the
-/// offending stage/cut on failure.
+/// Validates `coefficients.len() == state_dimension` per cut; resolves
+/// `populated_count` default to `cuts.len()`.
 fn resolve_populated_counts(stage_cuts: &[PyStageCutsPayload]) -> PyResult<Vec<u32>> {
     let mut resolved = Vec::with_capacity(stage_cuts.len());
     for sc in stage_cuts {
@@ -329,8 +327,7 @@ fn resolve_populated_counts(stage_cuts: &[PyStageCutsPayload]) -> PyResult<Vec<u
     Ok(resolved)
 }
 
-/// Validate each stage's flat state-data length against `count * state_dimension`,
-/// naming the offending stage on failure.
+/// Validates `data.len() == count * state_dimension` per stage.
 fn validate_stage_states(stage_states: &[PyStageStatesPayload]) -> PyResult<()> {
     for ss in stage_states {
         let expected = ss.count as usize * ss.state_dimension as usize;
@@ -369,13 +366,9 @@ fn reject_unreserved_lag_coefficients(
     Ok(())
 }
 
-/// Owned per-stage payload data: the entity manifest and each cut's coefficient
-/// vector, either as supplied or widened by an inflow-lag reservation, plus the
-/// resulting `state_dimension`. Owning the manifest lets the borrowed
-/// [`StageCutsPayload`]/[`PolicyCutRecord`] views reference the reserved
-/// coefficients (which the writer must own — the caller's `coefficients` are
-/// storage-only when a reservation runs); the no-reservation branch borrows
-/// `sc.cuts[*].coefficients` directly instead of cloning.
+/// Owns the manifest and coefficients so borrowed [`StageCutsPayload`]/[`PolicyCutRecord`]
+/// views can reference them (reservation widens coefficients, requiring owned storage;
+/// no-reservation borrows `sc.cuts[*].coefficients` directly).
 struct StageCutsData<'a> {
     manifest: Vec<EntitySlot>,
     coefficients: Vec<Cow<'a, [f64]>>,

@@ -3,7 +3,7 @@
 #![allow(clippy::unwrap_used)]
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use assert_cmd::prelude::*;
@@ -251,8 +251,7 @@ fn duplicate_bus_id_json_mode_reports_constraint_error_kind() {
 }
 
 /// A `config.json` parse failure is caught after the six-layer pipeline
-/// succeeds; under `--json` it must still emit a single error object, where
-/// previously stdout stayed empty on this failure.
+/// succeeds; under `--json` it must still emit a single error object.
 #[test]
 fn config_parse_failure_json_mode_emits_error_object() {
     let dir = TempDir::new().unwrap();
@@ -313,10 +312,6 @@ fn valid_case_piped_stdout_has_no_ansi_escapes() {
         "stdout should contain no ANSI escape sequences when piped, got: {stdout:?}"
     );
 }
-
-// These tests cover failures that pass the six-layer IO pipeline but are caught
-// only by the three additional phases (StudyParams::from_config, prepare_stochastic,
-// prepare_hydro_models_from_artifacts) that `validate` exercises.
 
 /// An unknown `cut_selection` key is a hard schema error under
 /// `deny_unknown_fields`, not silently ignored.
@@ -745,8 +740,7 @@ fn boundary_mismatched_hydro_set_exits_nonzero_and_names_hydro() {
 
 /// The same mismatched-hydro-set boundary reject under `--json` emits a
 /// single parseable error object whose `kind` is the shared
-/// `BoundaryReconciliationError` vocabulary — previously `--json` left
-/// stdout empty on a boundary reject.
+/// `BoundaryReconciliationError` vocabulary.
 #[test]
 fn boundary_mismatched_hydro_set_json_mode_reports_boundary_reconciliation_error_kind() {
     let target_dir = TempDir::new().unwrap();
@@ -886,15 +880,6 @@ fn fpha_hydro_without_production_models_json_stdout_mentions_file() {
 // ── non-boundary scalar-parameter presence guard ───────────────────────────────
 
 /// Absolute path to `examples/<name>`, resolved two levels above the crate.
-fn example_case(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .unwrap()
-        .join("examples")
-        .join(name)
-}
-
 fn copy_dir_recursive(src: &Path, dst: &Path) {
     fs::create_dir_all(dst).unwrap();
     for entry in fs::read_dir(src).unwrap() {
@@ -910,13 +895,13 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
 }
 
 /// A non-boundary deck whose scalar-parameter table has a resolution gap (a
-/// `seasonal` param with no entry for the resolved season) now exits 1, honoring
+/// `seasonal` param with no entry for the resolved season) exits 1, honoring
 /// the module contract that a clean `validate` implies a clean pre-solver `run`.
 /// The `--json` kind and message are identical to `cobre.io.validate`'s.
 #[test]
 fn non_boundary_scalar_parameter_gap_is_rejected() {
     let dir = TempDir::new().unwrap();
-    copy_dir_recursive(&example_case("1dtoy"), dir.path());
+    copy_dir_recursive(&common::case_dir("1dtoy"), dir.path());
     write_file(
         dir.path(),
         "constraints/generic_parameters.json",
@@ -949,7 +934,7 @@ fn non_boundary_scalar_parameter_gap_is_rejected() {
 #[test]
 fn non_boundary_resolved_scalar_parameter_validates() {
     let dir = TempDir::new().unwrap();
-    copy_dir_recursive(&example_case("1dtoy"), dir.path());
+    copy_dir_recursive(&common::case_dir("1dtoy"), dir.path());
     write_file(
         dir.path(),
         "constraints/generic_parameters.json",

@@ -68,9 +68,8 @@ pub(crate) fn reconcile_error_flag<C: Communicator>(
 ///
 /// # Errors
 ///
-/// Returns whatever [`reconcile_error_flag`] returns, plus a
-/// [`SddpError::Communication`] on the branch (unreachable by the primitive's
-/// contract) where the flag agreed but this rank held no payload.
+/// Returns whatever [`reconcile_error_flag`] returns, or
+/// [`SddpError::Communication`] if the flag agreed but this rank held no payload.
 pub(crate) fn reconcile_result<T, C: Communicator>(
     local: Result<T, SddpError>,
     comm: &C,
@@ -81,7 +80,6 @@ pub(crate) fn reconcile_result<T, C: Communicator>(
         Err(e) => (None, Err(e)),
     };
     reconcile_error_flag(local_ok, comm, scratch)?;
-    // reconcile_error_flag returned Ok ⟹ no rank failed ⟹ this rank produced a payload.
     payload.ok_or_else(|| {
         SddpError::Communication(CommError::CollectiveFailed {
             operation: "reconcile_result",
@@ -299,10 +297,7 @@ mod tests {
         }
     }
 
-    /// Forward-phase deadlock-freedom: with rank 1's forward solve returning
-    /// `Infeasible` on a 2-rank comm, the reconcile between the solve loop and
-    /// `sync_forward` makes BOTH ranks return `Err` (this test terminates rather
-    /// than one rank blocking in `sync_forward`'s allgatherv).
+    /// Forward-phase deadlock-freedom: both ranks return `Err` before `sync_forward`'s collective (avoiding deadlock).
     #[test]
     fn reconcile_result_fails_both_ranks_before_forward_collective() {
         let failing = ReconcileStub {
@@ -332,12 +327,7 @@ mod tests {
         assert!(matches!(rank0, Err(SddpError::Communication(_))));
     }
 
-    /// Backward-phase deadlock-freedom: with rank 1's backward solve returning
-    /// `Infeasible` on a 2-rank comm (ranks solve disjoint trial points, so the
-    /// failure is divergent), the reconcile between the cut-insert loop and
-    /// `sync_level_records` makes BOTH ranks return `Err` before any sync
-    /// collective — `ReconcileStub::allgatherv` is unreachable, so reaching one
-    /// would panic instead of hanging as the real allgatherv would.
+    /// Backward-phase deadlock-freedom: both ranks return `Err` before `sync_level_records`' collective (avoiding deadlock).
     #[test]
     fn reconcile_result_fails_both_ranks_before_backward_collective() {
         let failing = ReconcileStub {
@@ -367,10 +357,7 @@ mod tests {
         assert!(matches!(rank0, Err(SddpError::Communication(_))));
     }
 
-    /// Finalize deadlock-freedom: a rank that reached the clean `finalize` while a
-    /// peer is erroring must return `Err` (and skip `broadcast_basis_cache`) rather
-    /// than enter the broadcast alone, and the erroring rank (in
-    /// `finalize_with_error`) keeps its own error and likewise skips the broadcast.
+    /// Finalize deadlock-freedom: all ranks skip `broadcast_basis_cache` in lockstep when any rank errors.
     #[test]
     fn finalize_reconcile_makes_all_ranks_skip_broadcast_in_lockstep() {
         let clean_peer_failed = ReconcileStub {
@@ -420,13 +407,7 @@ mod tests {
         ));
     }
 
-    /// CLI simulation-phase deadlock-freedom: `reconcile_global_ok` between the
-    /// per-rank `simulate()` and the first post-sim collective
-    /// (`merge_simulation_metadata`'s allreduce) reports `Ok(false)` on BOTH the
-    /// failing rank and its healthy peer, so the CLI fails every rank in lockstep
-    /// rather than let a healthy rank block in that allreduce. The stub's
-    /// non-reconcile collectives are `unreachable!`, so the reconcile touches only
-    /// the flag allreduce.
+    /// CLI simulation-phase deadlock-freedom: `reconcile_global_ok` makes both ranks fail before `merge_simulation_metadata`'s collective (avoiding deadlock).
     #[test]
     fn reconcile_global_ok_fails_both_ranks_before_post_sim_collective() {
         let failing = ReconcileStub {
@@ -452,11 +433,7 @@ mod tests {
         ));
     }
 
-    /// CLI setup-phase deadlock-freedom: `reconcile_global_ok` between the
-    /// rank-0-only export writes and the post-export barrier reports `Ok(false)` on
-    /// BOTH the rank whose write failed and its healthy peers, so the CLI fails
-    /// every rank in lockstep rather than strand peers at the barrier
-    /// (`ReconcileStub::barrier` is `unreachable!`, so reaching it would panic).
+    /// CLI setup-phase deadlock-freedom: `reconcile_global_ok` makes all ranks fail before the post-export barrier (avoiding deadlock).
     #[test]
     fn reconcile_global_ok_fails_both_ranks_before_post_export_barrier() {
         let root_failed = ReconcileStub {

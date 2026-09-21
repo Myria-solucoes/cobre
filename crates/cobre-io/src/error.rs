@@ -31,7 +31,7 @@ pub enum LoadError {
     /// Filesystem read failure (file not found, permission denied, I/O error).
     #[error("I/O error reading {path}: {source}")]
     IoError {
-        /// Path to the file that could not be read.
+        /// File that could not be read.
         path: PathBuf,
         /// Underlying I/O error.
         source: Error,
@@ -40,7 +40,7 @@ pub enum LoadError {
     /// JSON or Parquet parsing failure (malformed content, encoding error).
     #[error("parse error in {path}: {message}")]
     ParseError {
-        /// Path to the file that failed to parse.
+        /// File that failed to parse.
         path: PathBuf,
         /// Human-readable description of the parse failure.
         message: String,
@@ -49,7 +49,7 @@ pub enum LoadError {
     /// Schema validation failure (missing required field, wrong type, value out of range).
     #[error("schema error in {path}, field {field}: {message}")]
     SchemaError {
-        /// Path to the file containing the invalid entry.
+        /// File containing the invalid entry.
         path: PathBuf,
         /// Dot-separated field path within the JSON object (e.g., `"hydros[3].bus_id"`).
         field: String,

@@ -15,16 +15,12 @@ use cobre_core::scenario::{CorrelationModel, InflowModel};
 use cobre_core::{EntityId, Hydro, HydroPenalties, SeasonMap, Stage, SystemBuilder};
 use cobre_stochastic::PrecomputedPar;
 
-// ── Helper to build a minimal System ─────────────────────────────────────
-
 fn minimal_system_with_inflow_models(models: Vec<InflowModel>) -> System {
     SystemBuilder::new()
         .inflow_models(models)
         .build()
         .expect("valid system")
 }
-
-// ── with_scenario_models tests ────────────────────────────────────────────
 
 #[test]
 fn test_with_scenario_models_replaces_fields() {
@@ -121,8 +117,6 @@ fn test_with_scenario_models_clears_when_empty() {
     assert!(updated.inflow_models().is_empty());
 }
 
-// ── estimate_from_history path-matrix tests ────────────────────────────────
-
 #[test]
 fn test_estimate_explicit_stats_returns_unchanged() {
     use tempfile::TempDir;
@@ -196,8 +190,6 @@ fn test_estimate_no_history_returns_unchanged() {
     assert!(report.is_none(), "no history path must return None report");
 }
 
-// ── EstimationPath unit tests ─────────────────────────────────────────────
-
 #[test]
 fn test_estimation_path_resolve_all_8_combinations() {
     use crate::{FileManifest, InputFile};
@@ -220,7 +212,6 @@ fn test_estimation_path_resolve_all_8_combinations() {
         EstimationPath::resolve(&make(false, false, false)),
         EstimationPath::Deterministic,
     );
-    // AR alone is meaningless → Deterministic
     assert_eq!(
         EstimationPath::resolve(&make(false, false, true)),
         EstimationPath::Deterministic,
@@ -276,8 +267,6 @@ fn test_estimation_path_as_str_round_trip() {
         "as_str() must return unique strings for each variant"
     );
 }
-
-// ── user_stats_to_rows unit tests ─────────────────────────────────────────
 
 #[test]
 fn test_user_stats_to_rows_maps_all_models() {
@@ -338,11 +327,7 @@ fn test_user_stats_to_rows_empty_system() {
     assert!(rows.is_empty(), "empty system must produce empty rows");
 }
 
-// ── PartialEstimation unit tests ──────────────────────────────────────────
-
-/// Writes a real `inflow_history.parquet` (`parse_inflow_history` requires real
-/// content, not a sentinel). Observation dates must fall within the
-/// `make_two_season_stage` stages so they map to seasons 0/1.
+/// Observation dates must fall within `make_two_season_stage` stages (map to seasons 0/1).
 fn write_unit_test_inflow_history(path: &std::path::Path, hydro_id: i32, n_years: usize) {
     use arrow::array::{Date32Array, Float64Array, Int32Array};
     use arrow::datatypes::{DataType, Field, Schema};
@@ -403,9 +388,7 @@ fn write_unit_test_inflow_history(path: &std::path::Path, hydro_id: i32, n_years
     writer.close().expect("close writer");
 }
 
-/// One-hydro 2-season system with pre-loaded user stats — the state after
-/// `load_case` reads `inflow_seasonal_stats.parquet` but not
-/// `inflow_ar_coefficients.parquet` (the `PartialEstimation` precondition).
+/// Precondition for `PartialEstimation` path: user stats loaded, no AR coefficients.
 #[allow(clippy::cast_possible_wrap)]
 fn build_system_with_user_stats(n_years: usize) -> System {
     use cobre_core::scenario::InflowModel;
@@ -461,8 +444,6 @@ fn build_system_with_user_stats(n_years: usize) -> System {
         .expect("valid system with user stats")
 }
 
-/// Writes a real history parquet + a sentinel `inflow_seasonal_stats.parquet`
-/// (no AR file) → the `PartialEstimation` manifest classification.
 fn setup_partial_estimation_case(case_dir: &std::path::Path, n_years: usize) {
     create_required_files(case_dir);
     let scenarios = case_dir.join("scenarios");
@@ -482,7 +463,7 @@ fn setup_partial_estimation_case(case_dir: &std::path::Path, n_years: usize) {
 fn test_partial_estimation_preserves_user_stats() {
     use tempfile::TempDir;
 
-    const N_YEARS: usize = 30; // sufficient for PACF order selection
+    const N_YEARS: usize = 30;
     let dir = TempDir::new().unwrap();
     let case_dir = dir.path();
 
@@ -530,11 +511,7 @@ fn test_partial_estimation_preserves_user_stats() {
     }
 }
 
-/// The `PartialEstimation` path's internally-fitted AR (periodic YW from
-/// history) must have its `residual_std_ratio` superseded by the
-/// periodic-ACF closure (`populate_derived_residual_ratios`), not the raw YW
-/// estimate — asserted against an independent closure call over the same
-/// final coefficients, per hydro/season.
+/// `residual_std_ratio` must come from the periodic-ACF closure, not raw YW.
 #[test]
 fn test_partial_estimation_populates_closure_derived_ratio() {
     use cobre_stochastic::par::derive_residual_std_ratios;
@@ -620,12 +597,7 @@ fn test_partial_estimation_returns_report() {
     );
 }
 
-/// One-hydro, partial-year (4 monthly stages, seasons 8-11 = Sep-Dec) system
-/// with pre-loaded user stats and a real monthly [`SeasonMap`] — unlike
-/// [`build_system_with_user_stats`], `synthesize_prestudy_stages` is
-/// non-empty here (season_map present, `max_order > 0`), exercising the
-/// `run_partial_estimation` branch that appends negative prestudy ids after
-/// the positive user ids.
+/// Partial-year system (seasons 8-11) with `SeasonMap` and user stats (exercises prestudy synthesis).
 fn build_partial_year_system_with_user_stats() -> System {
     use cobre_core::entities::hydro::HydroGenerationModel;
     use cobre_core::scenario::InflowModel;
@@ -724,14 +696,7 @@ fn build_partial_year_system_with_user_stats() -> System {
         .expect("valid partial-year system with user stats")
 }
 
-/// `run_partial_estimation` extends the positive-id user stats with
-/// negative-id prestudy rows; without a re-sort, `with_scenario_models`
-/// rejects the concatenation as `UnsortedModelTable` for every partial-year
-/// study with `max_order > 0` — a case `test_partial_estimation_preserves_user_stats`
-/// does not cover (its system has `season_map = None`, so
-/// `synthesize_prestudy_stages` is always empty there). This test drives the
-/// real `estimate_from_history` entry point end to end and asserts both
-/// success and canonical ordering.
+/// Prestudy models (negative stage_id) must be sorted canonically with user models.
 #[test]
 fn test_partial_estimation_partial_year_study_orders_canonically() {
     use tempfile::TempDir;
@@ -786,8 +751,6 @@ fn test_partial_estimation_partial_year_study_orders_canonically() {
     );
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────
-
 fn default_config() -> Config {
     use crate::config::{EstimationConfig, OrderSelectionMethod};
     let mut cfg: Config = serde_json::from_str(MINIMAL_CONFIG_JSON).unwrap();
@@ -824,8 +787,6 @@ fn create_required_files(case_dir: &std::path::Path) {
     write("system/hydros.json");
     write("system/thermals.json");
 }
-
-// ── EstimationReport unit tests ───────────────────────────────────────────
 
 #[test]
 fn test_estimation_report_structure() {
@@ -891,8 +852,6 @@ fn test_estimation_report_empty_for_pacf() {
     );
 }
 
-// ── Pre-study stage expansion tests ─────────────────────────────────────
-
 fn make_expansion_stage(index: usize, id: i32, season_id: Option<usize>) -> Stage {
     use chrono::NaiveDate;
     use cobre_core::temporal::{
@@ -957,10 +916,6 @@ fn seasonal_stats_to_rows_includes_prestudy_stages() {
 
     let rows = seasonal_stats_to_rows(&stats, &stages);
 
-    // season 0: stage 0 only
-    // season 1: stages -2 and 1
-    // season 2: stages -1 and 2
-    // Total: 1 + 2 + 2 = 5 rows
     assert_eq!(rows.len(), 5, "expected 5 rows (3 study + 2 pre-study)");
 
     let prestudy_rows: Vec<_> = rows.iter().filter(|r| r.stage_id < 0).collect();
@@ -1023,10 +978,6 @@ fn ar_estimates_to_rows_includes_prestudy_stages() {
 
     let rows = ar_estimates_to_rows(&ar_estimates, &stages);
 
-    // season 0 -> 1 stage (id 0): 1 row
-    // season 1 -> 2 stages (ids -2, 1): 2 rows
-    // season 2 -> 2 stages (ids -1, 2): 2 rows
-    // Total: 5 rows (each AR(1), so 1 coefficient row per stage)
     assert_eq!(rows.len(), 5, "expected 5 rows");
 
     let prestudy_rows: Vec<_> = rows.iter().filter(|r| r.stage_id < 0).collect();
@@ -1114,8 +1065,6 @@ fn full_estimation_produces_prestudy_inflow_models() {
     assert!((prestudy_neg2.mean_m3s - 110.0).abs() < f64::EPSILON);
     assert!((prestudy_neg2.std_m3s - 22.0).abs() < f64::EPSILON);
 }
-
-// ── PACF and contribution cascade tests ──────────────────────
 
 /// Simulate a 2-season PAR(2) process with a deterministic seeded LCG.
 #[allow(
@@ -1208,11 +1157,7 @@ fn make_two_season_stage(
     }
 }
 
-// ── ar_rows_to_estimates unit tests ───────────────────────────────────────
-
-/// 2 hydros × 3 stages (stages 0,1 → season 0; stage 2 → season 1) produce
-/// 2 hydros × 2 seasons = 4 estimates; each carries the coefficients from the
-/// FIRST stage in its season (stage 0 for season 0, stage 2 for season 1).
+/// Groups AR coefficients by season (2 hydros × 2 seasons = 4 estimates).
 #[test]
 #[allow(clippy::cast_sign_loss)]
 fn test_ar_rows_to_estimates_groups_by_season() {
@@ -1294,7 +1239,6 @@ fn test_ar_rows_to_estimates_groups_by_season() {
         estimates.len()
     );
 
-    // season 0 coeff comes from stage 0 (the season's first stage).
     let e = estimates
         .iter()
         .find(|e| e.hydro_id == EntityId(1) && e.season_id == 0)
@@ -1305,7 +1249,6 @@ fn test_ar_rows_to_estimates_groups_by_season() {
         "coeff must be 0.50, got {}",
         e.coefficients[0]
     );
-    // season 1 coeff comes from stage 2 (the season's first stage).
     let e = estimates
         .iter()
         .find(|e| e.hydro_id == EntityId(1) && e.season_id == 1)
@@ -1328,11 +1271,7 @@ fn test_ar_rows_to_estimates_groups_by_season() {
     assert!((e.coefficients[0] - 0.35).abs() < f64::EPSILON);
 }
 
-// ── UserArHistoryStats unit tests ─────────────────────────────────────────
-
-/// Writes `inflow_ar_coefficients.parquet` with a known AR(1) coefficient, one
-/// lag-1 row per stage. `stages` must match the system's stages so the
-/// stage_ids resolve.
+/// Writes one AR(1) lag-1 row per stage.
 fn write_unit_test_ar_coefficients(
     path: &std::path::Path,
     hydro_id: i32,
@@ -1379,9 +1318,7 @@ fn write_unit_test_ar_coefficients(
     writer.close().expect("close writer");
 }
 
-/// One-hydro 2-season system with EMPTY inflow_models — the state after
-/// `load_case` when `inflow_seasonal_stats.parquet` is absent (the
-/// `UserArHistoryStats` case), where `assemble_inflow_models` returns empty.
+/// System with empty inflow_models (UserArHistoryStats precondition).
 #[allow(clippy::cast_possible_wrap)]
 fn build_system_empty_models(n_years: usize) -> System {
     use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder};
@@ -1422,9 +1359,7 @@ fn build_system_empty_models(n_years: usize) -> System {
         .expect("valid system with empty inflow models")
 }
 
-/// Sets up the `UserArHistoryStats` case: real `inflow_history.parquet` +
-/// `inflow_ar_coefficients.parquet` (known AR(1) coeffs), no
-/// `inflow_seasonal_stats.parquet`.
+/// Sets up UserArHistoryStats: history + AR coefficients, no seasonal stats.
 #[allow(clippy::cast_possible_wrap)]
 fn setup_user_ar_case(
     case_dir: &std::path::Path,
@@ -1461,13 +1396,7 @@ fn setup_user_ar_case(
     );
 }
 
-/// The user AR file's `coefficient` column is preserved bitwise (Role 2 is
-/// user-owned), but its `residual_std_ratio` column is now superseded by the
-/// periodic-ACF closure (`populate_derived_residual_ratios`) — for this
-/// uniform-AR(1) two-season fixture the closure decouples exactly to
-/// `r = sqrt(1 - coefficient^2)`, a value deliberately different
-/// from `KNOWN_RATIO` here, so the assertion below also proves the stale
-/// user-column value no longer reaches the returned `System`.
+/// User AR coefficients preserved bitwise; residual_std_ratio superseded by closure.
 #[test]
 fn test_user_ar_estimation_preserves_ar_coefficients() {
     use tempfile::TempDir;
@@ -1602,8 +1531,6 @@ fn test_user_ar_estimation_returns_user_provided_report() {
     );
 }
 
-// ── Bidirectional coverage validation tests ─────────────────
-
 fn make_hydro(hydro_id: EntityId, bus_id: EntityId) -> Hydro {
     use cobre_core::entities::hydro::HydroGenerationModel;
     let mut hydro = Hydro {
@@ -1655,8 +1582,7 @@ fn make_hydro(hydro_id: EntityId, bus_id: EntityId) -> Hydro {
     hydro
 }
 
-/// Two-hydro system; inflow_models (user stats) are built only for
-/// `stats_hydro_ids`, so hydros in `all_hydro_ids` outside it have no stats.
+/// Two-hydro system with selective stats (only stats_hydro_ids have inflow_models).
 #[allow(clippy::cast_possible_wrap)]
 fn build_two_hydro_system_selective_stats(
     n_years: usize,
@@ -1721,8 +1647,6 @@ fn build_two_hydro_system_selective_stats(
         .expect("valid two-hydro system")
 }
 
-/// Writes `inflow_history.parquet` with identical synthetic PAR(2) data for
-/// each hydro_id.
 fn write_history_for_hydros(path: &std::path::Path, hydro_ids: &[i32], n_years: usize) {
     use arrow::array::{Date32Array, Float64Array, Int32Array};
     use arrow::datatypes::{DataType, Field, Schema};
@@ -1950,11 +1874,7 @@ fn test_full_estimation_report_has_empty_fallbacks() {
     );
 }
 
-// ── StdRatioDivergence unit tests ─────────────────────────────────────────
-
-/// Builds a single-hydro System + fitting_stats from per-season user/estimated
-/// stds (stage_id == season_id, one stage per season), then calls
-/// `check_std_ratio_divergence`.
+/// Collects std ratio divergence warnings for given user/estimated stds.
 fn collect_std_ratio_warnings(
     hydro_id: EntityId,
     user_stds: &[f64],
@@ -2007,8 +1927,6 @@ fn collect_std_ratio_warnings(
     check_std_ratio_divergence(&system, &fitting_stats, &stages)
 }
 
-/// user stds [100.0, 20.0], est stds [100.0, 100.0]. Pair (0→1): ratio_user=5.0,
-/// ratio_est=1.0 → divergence 5.0 (> 2× threshold → warn); wrap (1→0) likewise.
 #[test]
 fn test_std_ratio_divergence_fires_when_ratios_diverge() {
     let warnings = collect_std_ratio_warnings(EntityId(1), &[100.0, 20.0], &[100.0, 100.0]);
@@ -2034,8 +1952,6 @@ fn test_std_ratio_divergence_fires_when_ratios_diverge() {
     );
 }
 
-/// user stds [100.0, 20.0], est stds [90.0, 18.0]: ratio_user=5.0, ratio_est=5.0,
-/// divergence 1.0 (≤ 2× threshold) → no warning.
 #[test]
 fn test_std_ratio_divergence_not_fires_when_similar() {
     let warnings = collect_std_ratio_warnings(EntityId(1), &[100.0, 20.0], &[90.0, 18.0]);
@@ -2045,9 +1961,7 @@ fn test_std_ratio_divergence_not_fires_when_similar() {
     );
 }
 
-/// user stds [100.0, 0.0], est stds [90.0, 18.0]: pair 0→1 has denominator
-/// u_b=0.0 < 1e-12 → skipped; the wrap pair's divergence = max(0/0.2, 0.2/0)
-/// hits the near-zero guard on the second division → skipped. No panic.
+/// Near-zero std edge case must not panic.
 #[test]
 fn test_std_ratio_divergence_skips_near_zero_std() {
     let warnings = collect_std_ratio_warnings(EntityId(1), &[100.0, 0.0], &[90.0, 18.0]);
@@ -2055,9 +1969,6 @@ fn test_std_ratio_divergence_skips_near_zero_std() {
 }
 
 /// Wrap-around pair (last season → first) is checked.
-/// user stds [100.0, 20.0, 50.0], est stds [100.0, 20.0, 10.0]:
-/// (0→1) divergence 1.0 (no warn); (1→2) divergence 5.0 (warn);
-/// wrap (2→0) divergence 5.0 (warn).
 #[test]
 fn test_std_ratio_divergence_wraps_last_to_first() {
     let warnings =
@@ -2073,8 +1984,6 @@ fn test_std_ratio_divergence_wraps_last_to_first() {
         "expected a warning for the wrap-around pair season 2 → season 0"
     );
 }
-
-// ── estimate_from_history annual-path integration tests ─────────────────
 
 use chrono::NaiveDate;
 use cobre_core::temporal::{
@@ -2118,7 +2027,6 @@ fn make_monthly_stages_for_annual(n_years: usize) -> Vec<Stage> {
     stages
 }
 
-/// `n_years` × 12 synthetic monthly observations for `hydro_id`.
 fn synthetic_monthly_obs(
     hydro_id: EntityId,
     n_years: usize,
@@ -2144,8 +2052,7 @@ fn synthetic_monthly_obs(
     obs
 }
 
-/// Two-hydro 12-season monthly system with no pre-loaded inflow models —
-/// `estimate_from_history` follows the `FullEstimation` path.
+/// Two-hydro 12-season monthly system (empty inflow_models for FullEstimation path).
 #[allow(clippy::cast_possible_wrap)]
 fn build_two_hydro_monthly_system(n_years: usize) -> System {
     use cobre_core::{Bus, DeficitSegment, SystemBuilder};
@@ -2171,8 +2078,6 @@ fn build_two_hydro_monthly_system(n_years: usize) -> System {
         .expect("valid two-hydro monthly system")
 }
 
-/// Writes `inflow_history.parquet` with distinct synthetic monthly series for
-/// hydros 1 and 2.
 fn write_monthly_inflow_history_two_hydros(path: &std::path::Path, n_years: usize) {
     use arrow::array::{Date32Array, Float64Array, Int32Array};
     use arrow::datatypes::{DataType, Field, Schema};
@@ -2357,7 +2262,6 @@ fn estimate_ar_coefficients_with_selection_classical_path_unchanged() {
     }
 }
 
-/// Build a 12-season monthly `SeasonMap` (season id m → calendar month m+1).
 fn monthly_season_map() -> SeasonMap {
     use cobre_core::temporal::{SeasonCycleType, SeasonDefinition};
     let seasons = (0..12usize)
@@ -2376,8 +2280,6 @@ fn monthly_season_map() -> SeasonMap {
     }
 }
 
-/// Build study stages for a partial-year monthly study spanning seasons
-/// `[first_season, first_season + n)` starting in calendar year `start_year`.
 fn partial_year_stages(first_season: usize, n: usize, start_year: i32) -> Vec<Stage> {
     (0..n)
         .map(|k| {
@@ -2414,9 +2316,7 @@ fn partial_year_stages(first_season: usize, n: usize, start_year: i32) -> Vec<St
         .collect()
 }
 
-/// Full-cycle PAR(2) partial-year fit: a monthly study over seasons 8–11
-/// (Sep–Dec) with 30 years of full-cycle history, mirroring the `run_estimation`
-/// pipeline (synthesize pre-study stages → fit → expand → assemble → build).
+/// Partial-year study (seasons 8-11) with full-cycle history must synthesize prestudy lag models.
 #[test]
 fn partial_year_par2_synthesizes_prestudy_lag_models() {
     let h1 = EntityId(1);
@@ -2431,18 +2331,15 @@ fn partial_year_par2_synthesizes_prestudy_lag_models() {
     let obs = synthetic_monthly_obs(h1, n_years, 100.0, 5.0, 1.0);
 
     let prestudy = synthesize_prestudy_stages(&study_stages, max_order, Some(&season_map));
-    // max_order=2 → lags into seasons 7 (Aug) and 6 (Jul), neither in study.
     assert_eq!(
         prestudy.len(),
         2,
         "expected 2 synthetic pre-study stages, got {}",
         prestudy.len()
     );
-    // Pre-study ids descend from the first study stage id (0): -1, -2.
     let mut pre_ids: Vec<i32> = prestudy.iter().map(|s| s.id).collect();
     pre_ids.sort_unstable();
     assert_eq!(pre_ids, vec![-2, -1], "pre-study ids must be -1, -2");
-    // Seasons k positions before season 8: -1 → 7 (Aug), -2 → 6 (Jul).
     let season_of = |id: i32| prestudy.iter().find(|s| s.id == id).unwrap().season_id;
     assert_eq!(
         season_of(-1),
@@ -2522,11 +2419,7 @@ fn partial_year_par2_synthesizes_prestudy_lag_models() {
     );
 }
 
-/// `resolve_model_stage_seasons` must recover the ordinal of a synthesized
-/// pre-study stage id (never present in `stages`) via the same back-walk
-/// convention `synthesize_prestudy_stages` used to mint it, while a declared
-/// pre-study stage still resolves through its own `season_id` and an id that
-/// is not below the first study stage stays unmapped.
+/// Synthesized prestudy stage ids resolve via back-walk; declared prestudy via season_id.
 #[test]
 fn resolve_model_stage_seasons_recovers_synthesized_prestudy_gap_seasons() {
     let season_map = monthly_season_map();
@@ -2565,10 +2458,6 @@ fn resolve_model_stage_seasons_recovers_synthesized_prestudy_gap_seasons() {
     );
 }
 
-// ── coverage-gated occurrence resolution ──────────────────────
-
-/// Build one full-coverage monthly `InflowHistoryRow` window for `hydro_id`
-/// covering the whole calendar month `(year, month)`.
 fn full_month_row(hydro_id: EntityId, year: i32, month: u32, value: f64) -> InflowHistoryRow {
     let start_date = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
     let end_date = if month == 12 {
@@ -2584,8 +2473,6 @@ fn full_month_row(hydro_id: EntityId, year: i32, month: u32, value: f64) -> Infl
     }
 }
 
-/// 12 full-coverage monthly occurrences for one hydro must produce exactly 12
-/// samples and no skipped-partial diagnostic.
 #[test]
 fn test_estimation_full_coverage_one_sample_per_occurrence() {
     let season_map = monthly_season_map();
@@ -2611,9 +2498,7 @@ fn test_estimation_full_coverage_one_sample_per_occurrence() {
     );
 }
 
-/// A partial-coverage occurrence (15 of April's 30 days) contributes no
-/// sample and is counted exactly once in `skipped_partial`; the 11 remaining
-/// full-coverage occurrences still produce samples.
+/// Partial-coverage occurrence is skipped and counted in skipped_partial.
 #[test]
 fn test_estimation_partial_occurrence_skipped_and_counted() {
     let season_map = monthly_season_map();
@@ -2659,10 +2544,7 @@ fn test_estimation_partial_occurrence_skipped_and_counted() {
     );
 }
 
-/// A partial occurrence's outlier value must not reach
-/// `estimate_seasonal_stats_with_season_map`: the fitted std for January must
-/// equal the population std of the two full-coverage January samples alone,
-/// not a value skewed by the excluded third (partial) occurrence.
+/// Partial occurrence must not affect fitted sigma.
 #[test]
 fn test_estimation_partial_does_not_affect_sigma() {
     let season_map = monthly_season_map();
@@ -2672,8 +2554,6 @@ fn test_estimation_partial_does_not_affect_sigma() {
     let history = vec![
         full_month_row(hydro_id, 2000, 1, 100.0),
         full_month_row(hydro_id, 2001, 1, 200.0),
-        // Partial (half-month) January with a wildly different value: must be
-        // excluded, not blended into the mean/std below.
         InflowHistoryRow {
             hydro_id,
             start_date: NaiveDate::from_ymd_opt(2002, 1, 1).unwrap(),
@@ -2709,8 +2589,6 @@ fn test_estimation_partial_does_not_affect_sigma() {
     );
 }
 
-/// Build a 12-season monthly `System` (real `SeasonMap`) with configurable
-/// `recent_observations`, for the record-only owner-gate test below.
 fn build_monthly_system_with_conditioning(
     n_years: usize,
     recent_observations: Vec<cobre_core::RecentObservation>,
@@ -2755,8 +2633,6 @@ fn build_monthly_system_with_conditioning(
         .expect("valid monthly system with conditioning")
 }
 
-/// Writes `inflow_history.parquet` with full-coverage MONTHLY windows
-/// (`[month_start, next_month_start)`) for one hydro.
 fn write_full_month_history_one_hydro(path: &std::path::Path, hydro_id: EntityId, n_years: usize) {
     use arrow::array::{Date32Array, Float64Array, Int32Array};
     use arrow::datatypes::{DataType, Field, Schema};
@@ -2812,11 +2688,7 @@ fn write_full_month_history_one_hydro(path: &std::path::Path, hydro_id: EntityId
     writer.close().expect("close writer");
 }
 
-/// OWNER GATE (record-only): adding a `recent_observations` conditioning
-/// window changes no fitted seasonal mean/std or AR coefficient. Estimation
-/// reads only `inflow_history.parquet`'s record windows; `recent_observations`
-/// is never consulted (grep-verified: `estimation.rs` contains no reference
-/// to it).
+/// Owner gate: recent_observations must not affect fitted statistics (grep-verified: estimation.rs never reads it).
 #[test]
 fn test_conditioning_window_does_not_change_fitted_statistics() {
     use tempfile::TempDir;
@@ -2894,10 +2766,7 @@ fn test_conditioning_window_does_not_change_fitted_statistics() {
     }
 }
 
-/// `resolve_coverage_gated_observations`'s internal cursor sweep must select
-/// the same per-occurrence window subset as an independent per-occurrence
-/// filter, for a hydro whose windows straddle multiple monthly season
-/// occurrences with more than one window overlapping a single occurrence.
+/// Cursor-based window selection must match filter-based reference across straddling occurrences.
 #[test]
 fn cursor_subslice_matches_filter_collect_across_straddling_occurrences() {
     let season_map = monthly_season_map();

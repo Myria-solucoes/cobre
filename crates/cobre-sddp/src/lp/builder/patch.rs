@@ -439,9 +439,7 @@ mod tests {
         state_layout(n, l)
     }
 
-    /// Every dimension unbounded — the pin-time box-membership assert is
-    /// vacuous, byte-identical to every `fill_col_state_patches` caller before
-    /// the box parameter was added.
+    /// Every dimension unbounded — the pin-time box-membership assert is vacuous.
     fn unbounded_state_box(n_state: usize) -> StateBox {
         StateBox {
             lower: vec![f64::NEG_INFINITY; n_state],

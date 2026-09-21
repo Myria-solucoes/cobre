@@ -112,8 +112,6 @@ fn check_annual_component_monthly_only(data: &ParsedData, ctx: &mut ValidationCo
     );
 }
 
-/// The first study stage (`id >= 0`, lowest `id`; stages are canonical-sorted
-/// ascending). `None` when the study declares no study stages.
 fn first_study_stage(data: &ParsedData) -> Option<&Stage> {
     data.stages
         .stages
@@ -122,9 +120,7 @@ fn first_study_stage(data: &ParsedData) -> Option<&Stage> {
         .min_by_key(|s| s.id)
 }
 
-/// The classical AR order per (hydro, stage): the row count of
-/// `inflow_ar_coefficients` sharing that key (mirrors `InflowModel::ar_order`,
-/// which is `ar_coefficients.len()`). Zero without any rows.
+/// Mirrors `InflowModel::ar_order` per (hydro, stage).
 fn classical_max_ar_order(data: &ParsedData) -> usize {
     let mut counts: HashMap<(EntityId, i32), usize> = HashMap::new();
     for row in &data.inflow_ar_coefficients {
@@ -159,11 +155,8 @@ pub fn seed_lag_state_depth(classical_ar_order: usize, has_annual_component: boo
     }
 }
 
-/// `n_fin`: the number of season-period occurrences that finalize (complete)
-/// within the study horizon — the count of `finalize_period` transitions
-/// among study stages (`id >= 0`). Computed over the full canonical stage set
-/// (pre-study stages included) so `finalize_period`'s own stage lookahead
-/// resolves correctly; zero without a `season_map`.
+/// Pass all stages (including pre-study) to `precompute_stage_lag_transitions`
+/// so its lookahead resolves correctly.
 fn finalizing_period_count(data: &ParsedData) -> usize {
     let Some(season_map) = &data.stages.policy_graph.season_map else {
         return 0;
@@ -177,15 +170,8 @@ fn finalizing_period_count(data: &ParsedData) -> usize {
         .count()
 }
 
-/// Buckets `inflow_history` (record) and `recent_observations`
-/// (conditioning) by hydro in one pass each, merging every hydro's bucket
-/// once via [`merge_layered_windows`] — the same layered construction
-/// [`cobre_stochastic::derive_inflow_seeds`] uses per hydro — instead of
-/// re-scanning both slices per hydro. Each bucket keeps `data`'s declared row
-/// order, the same order a per-hydro filter would produce: an overlap
-/// resolves to the first-listed covering window, so sorting a bucket (e.g. by
-/// date) would silently change which value wins an overlap. Absent from the
-/// map for a hydro with no record and no conditioning windows.
+/// Mirrors [`cobre_stochastic::derive_inflow_seeds`] per-hydro construction.
+/// Preserves row order: overlaps resolve to the first-listed window.
 fn merged_windows_by_hydro(data: &ParsedData) -> HashMap<EntityId, Vec<RealizedWindow>> {
     let mut record: HashMap<EntityId, Vec<RealizedWindow>> = HashMap::new();
     for row in &data.inflow_history {
@@ -225,10 +211,7 @@ fn merged_windows_by_hydro(data: &ParsedData) -> HashMap<EntityId, Vec<RealizedW
     merged
 }
 
-/// Reference oracle for [`merged_windows_by_hydro`]: the retired per-hydro
-/// filtered scan, kept to prove the bucketed map's merged windows are
-/// identical, hydro-for-hydro and window-for-window, to a direct per-hydro
-/// filter-then-merge.
+/// Test oracle: the retired per-hydro scan for equivalence validation.
 #[cfg(test)]
 fn merged_windows_for_hydro_reference(
     data: &ParsedData,
@@ -350,11 +333,8 @@ fn check_slot_coverage(
     }
 }
 
-/// Row 3: a `recent_observations` window extending past the study start would
-/// overlap the solved study itself — the same future-dating ban
-/// `travel_time.rs`'s defluence rule enforces on `past_defluences`, mirrored
-/// here on the same side: a conditioning window must stay entirely pre-study
-/// (lag-slot and in-progress seeding both read only pre-study days).
+/// Row 3: rejects `recent_observations` extending past study start
+/// (mirrors `travel_time.rs` defluence ban).
 fn check_conditioning_window_bound(data: &ParsedData, ctx: &mut ValidationContext) {
     let Some(study_start) = first_study_stage(data).map(|s| s.start_date) else {
         return;
@@ -422,13 +402,9 @@ fn check_inprogress_partial_coverage(
     }
 }
 
-/// Row 5 (PD-1): warns when the first study stage's season cannot resolve —
-/// no `season_map`, no `season_id` on the first study stage, or an unmatched
-/// `season_id` — the same three guards `derive_inflow_seeds` returns a zero
-/// seed under. Still fires alongside Layer 5b's season-id-consistency rule
-/// (which already hard-errors an unmatched id on any stage): the two
-/// diagnostics answer different questions — schema validity vs. seed
-/// derivability.
+/// Row 5: warns when the first stage's season is unresolvable
+/// (mirrors `derive_inflow_seeds` zero-seed path). Distinct from Layer 5b's
+/// schema validity check.
 fn warn_unresolvable_first_stage_season(data: &ParsedData, ctx: &mut ValidationContext) {
     if max_seed_lag_depth(data) == 0 || data.hydros.is_empty() {
         return;

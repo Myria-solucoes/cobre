@@ -117,16 +117,16 @@ impl TrainingParquetWriter {
 }
 
 fn require_dir_exists(dir: &Path, label: &str) -> Result<(), OutputError> {
-    if dir.exists() {
-        return Ok(());
+    if !dir.exists() {
+        return Err(OutputError::io(
+            dir,
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("{label} directory does not exist"),
+            ),
+        ));
     }
-    Err(OutputError::io(
-        dir,
-        std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("{label} directory does not exist"),
-        ),
-    ))
+    Ok(())
 }
 
 /// Build a `RecordBatch` for `training/convergence.parquet` from iteration records.
@@ -141,8 +141,7 @@ fn build_convergence_batch(
 ) -> Result<RecordBatch, OutputError> {
     let schema = Arc::new(convergence_schema());
     let n = records.len();
-    // The bound regime is a run-level property: an exact (enumerated) bound
-    // carries no sampling distribution, so its std column is NULL on every row.
+    // Exact bounds carry no sampling distribution; std is NULL for all rows when is_exact.
     let is_exact = upper_bound_kind == "exact";
 
     let mut iteration = Int32Builder::with_capacity(n);

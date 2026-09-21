@@ -41,7 +41,7 @@ use crate::solver_stats::SolverStatsDelta;
 /// self-describing rather than positionally filled.
 #[derive(Clone, Debug)]
 pub struct CapturedBasis {
-    /// The underlying solver basis (row and column statuses).
+    /// Row and column statuses from the solver.
     pub basis: Basis,
     /// Number of template (non-cut) LP rows at capture time; row statuses at
     /// `0..base_row_count` are template rows.
@@ -52,7 +52,7 @@ pub struct CapturedBasis {
     /// State vector `x_hat` at capture, the operating point for evaluating newly
     /// added cuts on the backward warm-start.
     pub state_at_capture: Vec<f64>,
-    /// Declared node id (`NodeGraph::node_ids[node]`) this basis was captured at.
+    /// Node this basis was captured at (`NodeGraph::node_ids[node]`).
     pub node_id: NodeId,
 }
 
@@ -75,27 +75,21 @@ pub struct CapturedBasis {
 /// so there the field is never part of a consumed warm-start.
 pub const BASIS_BROADCAST_FORMAT_TAG: i32 = 2;
 
-/// Widens [`BasisStatus::to_discriminant_code`] to the `i32` the broadcast payload
-/// carries; that method is the single owner of the numeric mapping (injective, so
-/// a CLP-captured `Superbasic`/`Fixed` round-trips). The payload byte layout stays
-/// owned by [`CapturedBasis::to_broadcast_payload`] /
-/// [`CapturedBasis::try_from_broadcast_payload`].
+/// Converts via [`BasisStatus::to_discriminant_code`], the single owner of the numeric
+/// mapping (injective for round-trip). Payload byte layout owned by the
+/// `to_broadcast_payload`/`try_from_broadcast_payload` pair.
 fn basis_status_to_wire_code(status: BasisStatus) -> i32 {
     i32::from(status.to_discriminant_code())
 }
 
-/// Inverse of [`basis_status_to_wire_code`] via [`BasisStatus::from_discriminant_code`];
-/// any `i32` outside the discriminant range decodes to [`BasisStatus::Nonbasic`]
-/// without panicking.
+/// Out-of-range codes decode to [`BasisStatus::Nonbasic`] via
+/// [`BasisStatus::from_discriminant_code`].
 fn basis_status_from_wire_code(code: i32) -> BasisStatus {
     u8::try_from(code).map_or(BasisStatus::Nonbasic, BasisStatus::from_discriminant_code)
 }
 
 impl CapturedBasis {
-    /// Construct an empty `CapturedBasis` with the given capacities.
-    ///
-    /// `cut_row_slots` and `state_at_capture` are pre-sized to
-    /// `cut_slot_capacity` / `n_state` but start empty (length 0).
+    /// Pre-sizes `cut_row_slots` and `state_at_capture` but leaves them empty (length 0).
     #[must_use]
     pub fn new(
         num_cols: usize,
@@ -114,9 +108,7 @@ impl CapturedBasis {
         }
     }
 
-    /// Clear slot and state metadata in place, retaining capacity.
-    ///
-    /// Does **not** touch `basis` — the next `get_basis` overwrites it.
+    /// Retains capacity. Does not touch `basis` (next `get_basis` overwrites it).
     pub fn clear(&mut self) {
         self.cut_row_slots.clear();
         self.state_at_capture.clear();
@@ -124,10 +116,7 @@ impl CapturedBasis {
 
     /// Append this basis's wire-format payload to the output buffers.
     ///
-    /// The layout mirrors the pack loop in
-    /// `broadcast_basis_cache` (`training/training.rs`). This method is the
-    /// type-level owner of the wire format; any future change must
-    /// update both this method and
+    /// Single owner of the wire format; any change must update both this method and
     /// [`CapturedBasis::try_from_broadcast_payload`] together.
     ///
     /// Pushes the following into `i32_buf` in order:

@@ -51,8 +51,6 @@ pub mod system;
 pub mod test_support;
 pub mod topology;
 
-// Crate-root module aliases so `cobre_core::<module>::Symbol` paths resolve for
-// external consumers.
 pub use model::{parameters, penalty, resolved, scenario, temporal};
 
 pub use constraints::{generic_constraint, initial_conditions, training_event};

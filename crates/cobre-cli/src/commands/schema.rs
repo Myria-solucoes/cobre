@@ -1,6 +1,5 @@
 //! `cobre schema export [--output-dir DIR]` subcommand.
 //!
-//! Generates JSON Schema files for all user-facing case directory input types.
 //! `export` is a sub-subcommand to leave room for future `validate`/`list` siblings.
 
 use std::path::PathBuf;
@@ -53,9 +52,7 @@ pub fn execute(args: &SchemaArgs) -> Result<(), CliError> {
 }
 
 fn execute_export(args: &ExportArgs) -> Result<(), CliError> {
-    let output_dir = &args.output_dir;
-
-    let count = cobre_io::schema::export_schemas(output_dir).map_err(|err| match err {
+    let count = cobre_io::schema::export_schemas(&args.output_dir).map_err(|err| match err {
         SchemaExportError::Generation(e) => CliError::Internal {
             message: format!("schema generation failed: {e}"),
         },
@@ -70,7 +67,7 @@ fn execute_export(args: &ExportArgs) -> Result<(), CliError> {
 
     let _ = Term::stderr().write_line(&format!(
         "Exported {count} schema files to {}",
-        output_dir.display()
+        args.output_dir.display()
     ));
 
     Ok(())

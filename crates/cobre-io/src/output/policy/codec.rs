@@ -376,7 +376,6 @@ pub(super) fn build_stage_basis(record: &PolicyBasisRecord<'_>) -> FlatBufferBui
 
     let mut builder = FlatBufferBuilder::with_capacity(estimated);
 
-    // Nested vectors must be created before opening the table.
     let col_vec = builder.create_vector(record.column_status);
     let row_vec = builder.create_vector(record.row_status);
 

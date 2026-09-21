@@ -48,28 +48,9 @@ use serde_json::{Error, Value};
 /// conventional name of the generated schema file (e.g. `"config.schema.json"`)
 /// and `schema_value` is the JSON Schema as a [`serde_json::Value`].
 ///
-/// The returned `Vec` contains one entry per top-level input file:
-///
-/// | Filename                              | Describes                              |
-/// | ------------------------------------- | -------------------------------------- |
-/// | `config.schema.json`                  | `config.json`                          |
-/// | `buses.schema.json`                   | `system/buses.json`                    |
-/// | `hydros.schema.json`                  | `system/hydros.json`                   |
-/// | `thermals.schema.json`                | `system/thermals.json`                 |
-/// | `lines.schema.json`                   | `system/lines.json`                    |
-/// | `energy_contracts.schema.json`        | `system/energy_contracts.json`         |
-/// | `non_controllable_sources.schema.json`| `system/non_controllable_sources.json` |
-/// | `pumping_stations.schema.json`        | `system/pumping_stations.json`         |
-/// | `stages.schema.json`                  | `stages.json`                          |
-/// | `penalties.schema.json`               | `penalties.json`                       |
-/// | `generic_constraints.schema.json`     | `constraints/generic_constraints.json` |
-/// | `load_factors.schema.json`            | `scenarios/load_factors.json`          |
-/// | `non_controllable_factors.schema.json`| `scenarios/non_controllable_factors.json` |
-/// | `correlation.schema.json`             | `scenarios/correlation.json`           |
-/// | `initial_conditions.schema.json`      | `initial_conditions.json`              |
-/// | `post_study_stages.schema.json`       | `post_study_stages.json`               |
-/// | `production_models.schema.json`       | `system/hydro_production_models.json`  |
-/// | `generic_parameters.schema.json`      | `constraints/generic_parameters.json`  |
+/// Covers all user-facing case directory inputs: configuration, system entities,
+/// stages, penalties, constraints, scenarios, initial conditions, post-study
+/// stages, and extensions.
 ///
 /// # Errors
 ///

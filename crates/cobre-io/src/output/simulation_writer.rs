@@ -945,9 +945,7 @@ fn scenario_batch_non_controllables(
     Ok(Some(batch))
 }
 
-// inflow_lags is gated on hydro count, not its own; hydro_bus_generation above
-// is gated on hydro count too, not a multi-bus predicate — every hydro study
-// emits it, single-bus systems included.
+// Gated on hydro count, not a lag-specific predicate.
 fn scenario_batch_inflow_lags(
     _writer: &SimulationParquetWriter,
     result: &ScenarioWritePayload,
@@ -1678,7 +1676,6 @@ fn build_thermals_batch<'a>(
 /// - `net_flow_mw = direct_flow_mw - reverse_flow_mw`
 /// - `net_flow_mwh = net_flow_mw * block_duration_hours`
 /// - `losses_mw = (1.0 - loss_factor) * (direct_flow_mw + reverse_flow_mw)`
-///   where `loss_factor = 1.0 - losses_percent / 100.0`
 /// - `losses_mwh = losses_mw * block_duration_hours`
 ///
 /// A `line_id` absent from `loss_factors` defaults to loss factor `1.0`

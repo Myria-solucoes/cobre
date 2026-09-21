@@ -43,20 +43,12 @@
 //!
 //! - `anticipated_gate` — the anticipated-decision temporal-gating free
 //!   functions (`is_anticipated_decision_active_for_delivery`,
-//!   `anticipated_resolution_for`, plus the test-only constant-lead wrapper
-//!   `is_anticipated_decision_active`), taking `state: &`[`StateSpace`]
-//!   rather than living as methods on it — column geometry and temporal
-//!   gating are separate concerns.
+//!   `anticipated_resolution_for`).
 //! - `layout` — the per-stage geometry satellite type [`EvaporationIndices`]
 //!   (locating one hydro's evaporation columns/row within a stage LP).
-//! - `index` — the base typed vocabulary [`StateDim`] and the
-//!   [`InCol`]/[`OutCol`] incoming/outgoing column-role split. Every
-//!   `StateSpace`/`CutStateProjection` incoming and outgoing resolver, plus
-//!   [`CutStateProjection::render_pairs`], resolves through it. [`BlockIdx`]
-//!   is the block operand every [`BlockGrid`] shape method takes. [`Boundary`]
-//!   is the chronological storage-boundary operand
-//!   [`StorageBoundaryGrid::col`] takes, classified from a dynamic `k` via
-//!   [`Boundary::from_index`].
+//! - `index` — the base typed vocabulary: [`StateDim`], [`InCol`]/[`OutCol`]
+//!   (incoming/outgoing column roles), [`BlockIdx`] (block operand), and
+//!   [`Boundary`] (chronological storage-boundary operand).
 //! - `block_grid` — the [`BlockGrid`] typed block-stride address primitive and
 //!   its three shape methods ([`BlockGrid::flat`], [`BlockGrid::fpha_plane`],
 //!   [`BlockGrid::deficit`]).
@@ -80,14 +72,11 @@
 //!   projection of [`StateSpace`] exposing only the cut-state dimensions a
 //!   stage's `StageStateConfig` enables (anticipated state always included),
 //!   delegating each column to [`StateSpace::state_to_lp_incoming_column`].
-//! - `entity_index` — the entity system/local index vocabulary
+//! - `entity_index` — entity system/local index vocabulary
 //!   ([`HydroSys`]/[`ThermalSys`]/[`LineSys`], [`FphaLocal`]/[`EvapLocal`]/
 //!   [`FillingTargetLocal`]/[`FloorLocal`]/[`AnticipatedLocal`],
-//!   [`HydroCell`]/[`FphaCellLocal`]), distinguishing an entity's canonical
-//!   system position from its position within a per-stage local identity list
-//!   or within the study-scope hydro-cell partition.
-//! - `hydro_cell` — the [`HydroCellIndex`] study-scope partition of each hydro
-//!   plant's unit groups into `bus_id`-equivalence-class cells ([`HydroCell`]).
+//!   [`HydroCell`]/[`FphaCellLocal`]).
+//! - `hydro_cell` — the [`HydroCellIndex`] partition and [`HydroCell`] type.
 //!
 //! Every public symbol is re-exported here so the `cobre_sddp::indexer::Symbol`
 //! and `crate::indexer::Symbol` module paths resolve to the same item regardless

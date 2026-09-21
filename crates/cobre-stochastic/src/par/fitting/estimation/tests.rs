@@ -385,7 +385,6 @@ fn test_apply_contribution_validation_reduces_explosive() {
     }];
     let stats_map: HashMap<(EntityId, usize), &SeasonalStats> =
         stats.iter().map(|s| ((s.entity_id, 0_usize), s)).collect();
-    // At order 1, residual is sqrt(0.81) ~= 0.9
 
     let reductions = apply_contribution_validation(
         &mut estimates,

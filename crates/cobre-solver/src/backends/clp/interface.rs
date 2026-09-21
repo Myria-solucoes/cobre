@@ -1,5 +1,3 @@
-//! `impl SolverInterface for ClpSolver`.
-
 use std::time::Instant;
 
 use super::config::{ClpAlgorithm, ClpProfile};
@@ -214,7 +212,6 @@ impl SolverInterface for ClpSolver {
             return;
         }
 
-        // `per_col_count[c]` is the number of batch entries in column `c`.
         let mut per_col_count = vec![0_usize; self.num_cols];
         for &col in &rows.col_indices {
             #[allow(clippy::cast_sign_loss)]
@@ -227,15 +224,11 @@ impl SolverInterface for ClpSolver {
             per_col_count[col] += 1;
         }
 
-        // Each column `c` keeps its existing entries followed by
-        // `per_col_count[c]` appended entries.
         let merged_nz = self.num_nz + new_nz;
         let mut new_col_starts = Vec::with_capacity(self.num_cols + 1);
         let mut new_row_indices = vec![0_i32; merged_nz];
         let mut new_values = vec![0.0_f64; merged_nz];
 
-        // `write_cursor[c]` tracks the next write position within column `c`'s
-        // slice of the merged buffers.
         let mut write_cursor = Vec::with_capacity(self.num_cols);
         let mut acc = 0_usize;
         for c in 0..self.num_cols {
@@ -392,8 +385,7 @@ impl SolverInterface for ClpSolver {
             self.col_lower[col] = lower[i];
             self.col_upper[col] = upper[i];
         }
-        // `Clp_chgColumn*` replace the entire bound array (not a subset), so the
-        // retained vectors are forwarded in full.
+
         // SAFETY:
         // - `self.handle` is a valid, non-null CLP pointer with a model loaded.
         // - `self.col_lower`/`self.col_upper` each have exactly `self.num_cols`

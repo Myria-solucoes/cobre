@@ -969,7 +969,6 @@ pub(crate) fn build_study_setup(
         StudyParams::from_config(&config, Vec::new()).map_err(|e| e.to_string())?;
     construction.boundary = boundary_requirements;
     construction.scalar_parameters = artifacts.scalar_parameters;
-    // export_states is captured by StudyParams::from_config from config.exports.states.
     let setup = StudySetup::from_broadcast_params(
         &system,
         result.stochastic,

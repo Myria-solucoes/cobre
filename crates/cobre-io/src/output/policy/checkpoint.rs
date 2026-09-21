@@ -139,14 +139,10 @@ fn check_family_applicability(pool_id: u32, slot: &EntitySlot) -> Result<(), Out
     Ok(())
 }
 
-/// Verify one pool's [`StateFamily::HydroTransitBucket`] slots (grouped by
-/// `entity_id`) carry non-sentinel `interval_start`s that are monotone
-/// non-decreasing in `subindex` (the maturity-lag depth).
-///
-/// Only this family is checked: its `subindex` is a genuine delivery-ordered
-/// maturity depth, whereas the other calendar-shaped family's modular
-/// delivery-target-residue `subindex` wraps across the horizon, so enforcing
-/// monotonicity there would reject correctly-produced, non-monotone dates.
+/// Non-sentinel `interval_start`s must be monotone non-decreasing in `subindex`
+/// for [`StateFamily::HydroTransitBucket`] slots. Only this family is checked:
+/// the other calendar-shaped family's modular delivery-target-residue `subindex`
+/// wraps across the horizon, so monotonicity there would reject valid dates.
 ///
 /// # Errors
 ///
@@ -208,10 +204,8 @@ fn validate_checkpoint_dates(checkpoint: &PolicyCheckpoint) -> Result<(), Output
     Ok(())
 }
 
-/// One `.bin` payload file name, keyed by the payload's own id (the pool id for
-/// `cuts/`, the stage id for `basis/`/`states/`). Zero-padded for a stable
-/// on-disk sort; the reader derives identity from inside each buffer, never from
-/// this name.
+/// Zero-padded `.bin` name for stable on-disk sort. Identity comes from the
+/// buffer content, never this filename.
 fn bin_file_name(id: u32) -> String {
     format!("{id:03}.bin")
 }
@@ -370,9 +364,8 @@ pub fn write_policy_checkpoint(
     Ok(())
 }
 
-/// Deletes every `.bin` payload in `dir`. Only meaningful once `manifest.bin`
-/// is gone: [`read_policy_checkpoint`] lists the directory, so a file the
-/// current write does not replace would otherwise be read as a live pool.
+/// Removes stale `.bin` files so [`read_policy_checkpoint`] does not mistake
+/// them for live pools.
 fn remove_bin_files(dir: &Path) -> Result<(), OutputError> {
     for entry in std::fs::read_dir(dir).map_err(|e| OutputError::io(dir, e))? {
         let file_path = entry.map_err(|e| OutputError::io(dir, e))?.path();

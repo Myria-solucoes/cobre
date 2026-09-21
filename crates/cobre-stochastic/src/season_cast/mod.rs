@@ -11,7 +11,6 @@ use cobre_core::temporal::{
     SeasonMap, Stage, StageRiskConfig, StageStateConfig, window_period_overlaps,
 };
 
-/// Exclusive end date of calendar month `month` (1–12) in `year`.
 pub(crate) fn month_exclusive_end(year: i32, month: u32) -> NaiveDate {
     let (next_year, next_month) = if month == 12 {
         (year + 1, 1u32)
@@ -72,7 +71,6 @@ pub struct SeasonPeriodWindow {
     pub hours: f64,
 }
 
-/// Number of real calendar days in `year`-`month` (1–12).
 pub(crate) fn days_in_month(year: i32, month: u32) -> u32 {
     let first = NaiveDate::from_ymd_opt(year, month, 1)
         .unwrap_or_else(|| unreachable!("month-start date is always valid"));
@@ -348,7 +346,6 @@ pub struct Projection {
     pub coverage: f64,
 }
 
-/// Hours of calendar overlap, zero when the window does not intersect the period.
 fn overlap_hours(
     window_start: NaiveDate,
     window_end: NaiveDate,
@@ -450,8 +447,6 @@ pub struct DatedWindow {
     pub end_date: NaiveDate,
 }
 
-/// Hours of wall clock between `later` and `earlier` (`later − earlier`),
-/// negative when `earlier` follows `later`.
 // Rationale: calendar spans are on the order of centuries at most, far under
 // f64's exact-integer range; a checked conversion buys nothing.
 #[allow(clippy::cast_precision_loss)]

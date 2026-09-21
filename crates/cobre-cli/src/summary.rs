@@ -15,7 +15,6 @@ use std::path::Path;
 
 use cobre_sddp::{BoundaryReconciliationReport, HydroModelSummary, ModelProvenanceReport};
 
-/// The exact lines `print_hydro_model_summary` writes, one per `stderr` line.
 fn hydro_model_summary_lines(summary: &HydroModelSummary) -> Vec<String> {
     vec![
         console::style("Hydro models").bold().to_string(),
@@ -24,7 +23,7 @@ fn hydro_model_summary_lines(summary: &HydroModelSummary) -> Vec<String> {
     ]
 }
 
-/// Print the hydro model preprocessing summary to `stderr`.
+/// Print hydro model summary to `stderr`.
 pub fn print_hydro_model_summary(stderr: &Term, summary: &HydroModelSummary) {
     for line in hydro_model_summary_lines(summary) {
         let _ = stderr.write_line(&line);
@@ -184,10 +183,8 @@ pub fn print_execution_topology(
     }
 }
 
-/// Format the production detail line for a [`HydroModelSummary`].
-///
-/// Counts only — the plane-source qualifiers (precomputed vs. computed from
-/// geometry) belong to the model provenance section, not here.
+/// Plane-source qualifiers (precomputed vs. computed from geometry) belong to
+/// the model provenance section, not here.
 fn format_production_line(summary: &HydroModelSummary) -> String {
     match (summary.n_constant, summary.n_fpha) {
         (0, 0) => "0 hydros".to_string(),
@@ -200,11 +197,8 @@ fn format_production_line(summary: &HydroModelSummary) -> String {
     }
 }
 
-/// Format the evaporation detail line for a [`HydroModelSummary`].
-///
-/// Counts only, with no noun between the count and the `linearized`/`without`
-/// keywords (`"1 linearized"`). The reference-volume source qualifiers
-/// (user-supplied vs. midpoint) belong to the model provenance section.
+/// Reference-volume source qualifiers (user-supplied vs. midpoint) belong to
+/// the model provenance section.
 fn format_evaporation_line(summary: &HydroModelSummary) -> String {
     format!(
         "{} linearized, {} without",
@@ -212,7 +206,6 @@ fn format_evaporation_line(summary: &HydroModelSummary) -> String {
     )
 }
 
-/// The exact lines `print_setup_summary` writes, one per `stderr` line.
 fn setup_summary_lines(timings: &SetupTimings) -> Vec<String> {
     vec![
         console::style("Setup").bold().to_string(),
@@ -239,17 +232,15 @@ fn setup_summary_lines(timings: &SetupTimings) -> Vec<String> {
     ]
 }
 
-/// Print the per-phase setup timing summary to `stderr`.
+/// Print setup timing summary to `stderr`.
 pub fn print_setup_summary(stderr: &Term, timings: &SetupTimings) {
     for line in setup_summary_lines(timings) {
         let _ = stderr.write_line(&line);
     }
 }
 
-/// Format the AR detail parenthetical for the provenance summary line.
-///
 /// Returns `" (method, max order N)"` when AR method is known, or an empty
-/// string when AR is `NotApplicable` (no parenthetical shown).
+/// string when AR is `NotApplicable`.
 fn provenance_ar_detail(report: &ModelProvenanceReport) -> String {
     match (&report.inflow.ar_method, report.inflow.ar_max_order) {
         (Some(method), Some(max_order)) => format!(" ({method}, max order {max_order})"),
@@ -257,7 +248,6 @@ fn provenance_ar_detail(report: &ModelProvenanceReport) -> String {
     }
 }
 
-/// The exact lines `print_provenance_summary` writes, one per `stderr` line.
 fn provenance_summary_lines(report: &ModelProvenanceReport) -> Vec<String> {
     let ar_detail = provenance_ar_detail(report);
     vec![
@@ -273,20 +263,16 @@ fn provenance_summary_lines(report: &ModelProvenanceReport) -> Vec<String> {
     ]
 }
 
-/// Print the model provenance summary to `stderr`.
+/// Print model provenance summary to `stderr`.
 pub fn print_provenance_summary(stderr: &Term, report: &ModelProvenanceReport) {
     for line in provenance_summary_lines(report) {
         let _ = stderr.write_line(&line);
     }
 }
 
-/// The `Reconciliation:` row's value: the four-total tally with a compact
-/// trailing "N dropped" phrase, or the dimension-only notice on the skip path.
-///
-/// Wording is independent of [`BoundaryReconciliationReport::summary_line`],
-/// which keeps the legacy "N source slots dropped" wording byte-identical for
-/// `cobre validate`; the totals themselves come from the same
-/// [`BoundaryReconciliationReport::tally_totals`] both share.
+/// Wording is independent of [`BoundaryReconciliationReport::summary_line`]
+/// (legacy "N source slots dropped" for `cobre validate`); totals come from
+/// [`BoundaryReconciliationReport::tally_totals`].
 fn format_boundary_reconciliation_row(report: &BoundaryReconciliationReport) -> String {
     if !report.reconciled {
         return "dimension-only load (entity manifest absent)".to_string();
@@ -297,7 +283,6 @@ fn format_boundary_reconciliation_row(report: &BoundaryReconciliationReport) -> 
     )
 }
 
-/// The exact lines `print_boundary_summary` writes, one per `stderr` line.
 fn boundary_summary_lines(
     loaded: usize,
     boundary_date: NaiveDate,
@@ -315,7 +300,7 @@ fn boundary_summary_lines(
     ]
 }
 
-/// Print the boundary-policy load summary to `stderr`.
+/// Print boundary-policy load summary to `stderr`.
 pub fn print_boundary_summary(
     stderr: &Term,
     loaded: usize,
@@ -701,7 +686,6 @@ fn policy_rows_lines(t: &TrainingSummary) -> Vec<String> {
     out
 }
 
-/// The exact lines `print_training_summary` writes, one per `stderr` line.
 fn training_summary_lines(t: &TrainingSummary) -> Vec<String> {
     let duration = format_duration(t.total_time_ms);
     let convergence_detail = format_convergence_detail(t.converged, t.converged_at, &t.reason);
@@ -743,14 +727,13 @@ fn training_summary_lines(t: &TrainingSummary) -> Vec<String> {
     lines
 }
 
-/// Print the training completion summary to `stderr`.
+/// Print training summary to `stderr`.
 pub fn print_training_summary(stderr: &Term, t: &TrainingSummary) {
     for line in training_summary_lines(t) {
         let _ = stderr.write_line(&line);
     }
 }
 
-/// The exact lines `print_simulation_summary` writes, one per `stderr` line.
 fn simulation_summary_lines(sim: &SimulationSummary) -> Vec<String> {
     let duration = format_duration(sim.total_time_ms);
 
@@ -801,14 +784,13 @@ fn simulation_summary_lines(sim: &SimulationSummary) -> Vec<String> {
     lines
 }
 
-/// Print the simulation completion summary to `stderr`.
+/// Print simulation summary to `stderr`.
 pub fn print_simulation_summary(stderr: &Term, sim: &SimulationSummary) {
     for line in simulation_summary_lines(sim) {
         let _ = stderr.write_line(&line);
     }
 }
 
-/// The exact line `print_output_path` writes to `stderr`.
 fn output_path_line(output_dir: &Path, write_secs: f64) -> String {
     format!(
         "{} {}/ {}",
@@ -818,7 +800,7 @@ fn output_path_line(output_dir: &Path, write_secs: f64) -> String {
     )
 }
 
-/// Print the output directory path and write duration to `stderr`.
+/// Print output path and write duration to `stderr`.
 pub fn print_output_path(stderr: &Term, output_dir: &Path, write_secs: f64) {
     let _ = stderr.write_line(&output_path_line(output_dir, write_secs));
 }

@@ -28,7 +28,6 @@ use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 /// mass-fraction small enough to treat as negligible.
 const NEGLIGIBLE_RATIO_THRESHOLD: f64 = 0.01;
 
-/// Rules 21-26 (see the module table above for the row-to-check mapping).
 pub(super) fn validate_travel_time(data: &ParsedData, ctx: &mut ValidationContext) {
     let study_durations = study_stage_durations(data);
     let start_0 = study_start_date(data);

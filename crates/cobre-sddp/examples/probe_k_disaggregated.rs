@@ -94,8 +94,7 @@ fn run_probe(config_path: &Path) -> Result<(), ExitCode> {
         ExitCode::from(2)
     })?;
 
-    // Override the stopping rule (not `loop_params.max_iterations` post-construction)
-    // so the FCF cut pool is sized for one iteration's cuts, not the full budget.
+    // FCF pools size from stopping rules, so override here for one-iteration sizing.
     config.training.stopping_rules = Some(vec![StoppingRuleConfig::IterationLimit {
         limit: PROBE_MAX_ITERATIONS,
     }]);
@@ -131,8 +130,7 @@ fn run_probe(config_path: &Path) -> Result<(), ExitCode> {
             ExitCode::from(1)
         })?;
 
-    // Redundant with the stopping-rule cap above, guarding any path that reads
-    // max_iterations directly.
+    // Guards direct reads of max_iterations.
     setup.loop_params.max_iterations = u64::from(PROBE_MAX_ITERATIONS);
 
     let comm = LocalBackend;
@@ -200,11 +198,10 @@ fn print_pool_report(setup: &StudySetup) -> PoolReport {
         return PoolReport::EmptyPools;
     }
 
-    // Non-zero divisor: the max_K == 0 branch above already returned if empty.
     let n_stages = pools.len() as u64;
     #[allow(clippy::cast_precision_loss)]
     let mean_k = total_k as f64 / n_stages as f64;
-    // Maps the unchanged usize::MAX sentinel to 0 (unreachable here, kept defensive).
+    // Defensive: maps the init sentinel to 0.
     let min_k_out = if min_k == usize::MAX { 0 } else { min_k };
 
     println!("summary D={d} M={m} max_K={max_k} mean_K={mean_k:.2} min_K={min_k_out}");

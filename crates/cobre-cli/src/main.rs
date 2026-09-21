@@ -24,7 +24,7 @@ use commands::{
     version,
 };
 
-/// Controls when ANSI color/style escapes are emitted on stderr (no environment override).
+/// Color output mode for stderr (no environment variable override).
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub(crate) enum ColorWhen {
     /// Enable color when stderr is connected to a TTY (default).
@@ -35,7 +35,6 @@ pub(crate) enum ColorWhen {
     Never,
 }
 
-/// Must be called before stderr output; `Auto` leaves TTY auto-detection in place.
 pub(crate) fn resolve_color(cli_color: ColorWhen) {
     match cli_color {
         ColorWhen::Always => console::set_colors_enabled_stderr(true),
@@ -62,7 +61,6 @@ struct Cli {
     command: Command,
 }
 
-/// Top-level subcommands for the `cobre` binary.
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Scaffold a new case directory from an embedded template.

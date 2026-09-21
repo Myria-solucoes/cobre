@@ -188,8 +188,6 @@ impl HighsSolver {
             ffi::cobre_highs_set_string_option(self.handle, c"presolve".as_ptr(), c"on".as_ptr());
         }
         match level {
-            // L5/L6: no scaler override — every level inherits the default
-            // scaler (`default_options()`: Off).
             5 => {}
             6 => unsafe {
                 ffi::cobre_highs_set_int_option(self.handle, c"simplex_strategy".as_ptr(), 1);

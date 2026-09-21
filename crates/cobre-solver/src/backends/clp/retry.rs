@@ -12,22 +12,15 @@ use crate::clp_ffi;
 
 /// Number of re-solve rungs in [`ClpSolver::escalate_solve`].
 ///
-/// The ladder runs (1) primal simplex, (2) perturbation-on dual then primal,
-/// (3) scaling-on dual then primal — five re-solves total. `solve` charges this
-/// many attempts to `retry_count` when the ladder is exhausted; the recovered
-/// path charges only the rungs that actually ran (`EscalationOutcome::attempts`).
-/// Typed `usize` so it can size the `RUNGS` array without a fallible cast; the
-/// `retry_count` use-sites widen it to `u64`.
-///
-/// `pub(crate)` so the exhausted-ladder `retry_count` regression test can read it.
+/// Typed `usize` to size the `RUNGS` array without a fallible cast; `retry_count`
+/// use-sites widen it to `u64`. `pub(crate)` so the exhausted-ladder regression
+/// test can read it.
 pub(crate) const LADDER_RUNGS: usize = 5;
 
-/// Outcome of a recovered [`ClpSolver::escalate_solve`] run.
-///
-/// Returned by value (not a borrow) so the caller can finish updating
-/// `self.stats` before constructing the `SolutionView` that borrows the owned
-/// solution buffers. The solution itself is already copied into `col_value` /
-/// `col_dual` / `row_dual` by `escalate_solve` on the rung that returned OPTIMAL.
+/// Returned by value (not a borrow) so the caller can finish updating `self.stats`
+/// before constructing the `SolutionView` that borrows the owned solution buffers.
+/// The solution itself is already copied into `col_value` / `col_dual` / `row_dual`
+/// by `escalate_solve` on the rung that returned OPTIMAL.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct EscalationOutcome {
     /// Objective value of the recovered optimal solution (minimize sense).
@@ -67,31 +60,25 @@ impl ClpSolver {
     }
 
     /// Cold-solve escalation ladder run when the initial dual simplex falsely
-    /// declares a feasible LP `PRIMAL_INFEASIBLE` (or stops short).
+    /// declares a feasible LP `PRIMAL_INFEASIBLE`.
     ///
     /// CLP's bare dual simplex can spuriously report `PRIMAL_INFEASIBLE` on
-    /// numerically delicate LPs late in a long solve sequence that are in fact
-    /// feasible (proven: the failing LP moves with tolerances, disappears
-    /// under the primal simplex, and the identical LP solves cleanly in
-    /// `HiGHS`). This ladder
-    /// re-solves the SAME already-loaded model with progressively stronger
-    /// settings (`RUNGS`), stopping at the first rung that returns OPTIMAL; every
-    /// rung first resets to a clean all-slack cold basis ([`Self::escalate_run`])
-    /// so no rung inherits the failed basis. On OPTIMAL the solution is copied
-    /// into the owned buffers and an [`EscalationOutcome`] is returned by value;
-    /// on exhaustion, `None`.
+    /// numerically delicate LPs that are in fact feasible. This ladder re-solves
+    /// the already-loaded model with progressively stronger settings (`RUNGS`),
+    /// stopping at the first rung that returns OPTIMAL; each rung resets to a
+    /// clean all-slack cold basis ([`Self::escalate_run`]) so no rung inherits
+    /// the failed basis. On OPTIMAL the solution is copied into the owned buffers
+    /// and an [`EscalationOutcome`] is returned by value; on exhaustion, `None`.
     ///
-    /// The caller ([`SolverInterface::solve`]) restores the floor (deterministic)
-    /// settings afterward by re-applying `current_profile` regardless of outcome
-    /// — perturbation and scaling are turned on here only for the ladder's
-    /// duration. Deterministic per-LP (fixed rung order, no randomness, no
-    /// time-dependent branching), so results stay bit-for-bit identical across
-    /// thread / rank counts.
+    /// The caller ([`SolverInterface::solve`]) restores the floor settings
+    /// afterward by re-applying `current_profile` — perturbation and scaling are
+    /// turned on here only for the ladder's duration. Deterministic per-LP (fixed
+    /// rung order, no randomness, no time-dependent branching).
     pub(super) fn escalate_solve(&mut self) -> Option<EscalationOutcome> {
         // Rung tuple: (perturbation, scaling, algorithm). Perturbation `102`
         // disables CLP auto-perturbation (the deterministic floor), `50` turns it
-        // on; scaling `0` off, `1` on. The first OPTIMAL wins. Declared first so
-        // no statements precede it (clippy::items_after_statements).
+        // on; scaling `0` off, `1` on. Declared first so no statements precede it
+        // (clippy::items_after_statements).
         const RUNGS: [(i32, i32, ClpAlgorithm); LADDER_RUNGS] = [
             // 1. Primal simplex (perturbation/scaling stay at the floor).
             (102, 0, ClpAlgorithm::Primal),

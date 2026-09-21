@@ -128,15 +128,12 @@ impl BlockGrid {
 mod tests {
     use super::{BlockGrid, BlockIdx};
 
-    // Flat shape: 9 + 1*3 + 2 = 14, with n_blks = 3.
     #[test]
     fn flat_block_major_address() {
         let grid = BlockGrid::new(3, 1);
         assert_eq!(grid.flat(9, 1, BlockIdx::new(2)), 14);
     }
 
-    // FPHA-plane shape: 100 + 1*5 + 2 = 107, with n_planes = 5 (block OUTER,
-    // plane INNER — the opposite nesting of the flat shape).
     #[test]
     fn fpha_plane_address() {
         let grid = BlockGrid::new(3, 1);
@@ -146,25 +143,18 @@ mod tests {
     #[test]
     fn fpha_base_advance() {
         let grid = BlockGrid::new(3, 1);
-        // 100 + 3 * 5 = 115 — the next cell's fpha_block_start.
+
         assert_eq!(grid.advance_fpha_base(100, 5), 115);
     }
 
-    // Deficit 3-term shape: 61 + 0*2*3 + 1*3 + 0 = 64, with S = 2, n_blks = 3.
     #[test]
     fn deficit_three_term_address() {
         let grid = BlockGrid::new(3, 2);
         assert_eq!(grid.deficit(61, 0, 1, BlockIdx::new(0)), 64);
     }
 
-    // Pins the per-shape transpose as unexpressible: each assertion computes the
-    // CORRECT address and asserts it differs from the transpose, using asymmetric
-    // factors so any swap is detectable (symmetric indices can collide by accident).
     #[test]
     fn block_grid_forbids_transposed_shape() {
-        // Flat: entity-OUTER, block-INNER. The transpose makes the block the outer
-        // stride: `blk * n_entities + entity`. With entity=1, blk=2, n_blks=3,
-        // n_entities=4 the two land on different cells (5 vs 9).
         let grid = BlockGrid::new(3, 2);
         let (n_entities, entity, blk) = (4, 1, 2);
         let correct_flat = grid.flat(0, entity, BlockIdx::new(blk));
@@ -172,10 +162,6 @@ mod tests {
         assert_eq!(correct_flat, 5);
         assert_ne!(correct_flat, transposed_flat);
 
-        // FPHA-plane: block-OUTER (stride n_planes), plane-INNER. The transpose
-        // swaps the roles — plane-outer with the block as the inner stride n_blks:
-        // `p_idx * n_blks + blk`. With blk=1, p_idx=3, n_planes=5, n_blks=2 the two
-        // land on different cells (8 vs 7).
         let grid = BlockGrid::new(2, 2);
         let (blk, p_idx, n_planes) = (1, 3, 5);
         let correct_fpha = grid.fpha_plane(0, BlockIdx::new(blk), p_idx, n_planes);
@@ -183,10 +169,6 @@ mod tests {
         assert_eq!(correct_fpha, 8);
         assert_ne!(correct_fpha, transposed_fpha);
 
-        // Deficit: bus-OUTER (stride S*n_blks), segment-MIDDLE (stride n_blks),
-        // block-INNER. A transpose that strides the segment by S instead of n_blks
-        // — `b_pos*S*n_blks + seg*S + blk` — lands elsewhere when S != n_blks. With
-        // b_pos=1, seg=1, blk=0, S=2, n_blks=3 the two differ (9 vs 8).
         let grid = BlockGrid::new(3, 2);
         let (b_pos, seg, blk) = (1, 1, 0);
         let correct_def = grid.deficit(0, b_pos, seg, BlockIdx::new(blk));

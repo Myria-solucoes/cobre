@@ -26,7 +26,7 @@ use cobre_comm::{BackendKind, Communicator, ExecutionTopology};
 
 use crate::error::CliError;
 
-/// Communication backend selected by `--comm-backend`. Maps to [`BackendKind`].
+/// Communication backend selected by `--comm-backend`.
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
 pub enum CommBackendArg {
     /// Auto-detect (default): the MPI backend when launched under an MPI
@@ -85,40 +85,22 @@ pub struct RunArgs {
 
 /// Shared context for execute phases (communicator, output, topology, etc.).
 pub(super) struct RunContext<C: Communicator> {
-    /// The MPI (or local) communicator.
     pub(super) comm: C,
-    /// Whether this rank is rank 0.
     pub(super) is_root: bool,
-    /// Whether terminal output is suppressed.
     pub(super) quiet: bool,
-    /// Number of rayon worker threads.
     pub(super) n_threads: usize,
-    /// Resolved output directory.
     pub(super) output_dir: PathBuf,
-    /// Case (input) directory — the root every input path resolves against,
-    /// including `policy.boundary.path` (an external source checkpoint), never
-    /// the output directory.
+    /// Input root every path resolves against, never the output directory.
     pub(super) case_dir: PathBuf,
-    /// Terminal width for progress bars.
     pub(super) term_width: u16,
-    /// Terminal handle for stderr output.
     pub(super) stderr: Term,
-    /// Rendering strategy for progress events; non-TTY stderr gets append-only
-    /// lines instead of cursor-driven bars.
+    /// Progress strategy: non-TTY stderr gets append-only lines, not bars.
     pub(super) render_mode: RenderMode,
-    /// Execution topology gathered during communicator setup.
     pub(super) topology: ExecutionTopology,
-    /// Solver version string.
     pub(super) solver_version: String,
 }
 
-/// Execute the `run` subcommand.
-///
-/// Under MPI, only rank 0 loads from disk and writes outputs; non-root ranks
-/// always behave as if `--quiet` is set, participating in collectives but
-/// producing no terminal output and writing no files. The raw `Config` stays on
-/// rank 0; a postcard-safe [`BroadcastConfig`](super::broadcast::BroadcastConfig)
-/// is broadcast because the `Config` `#[serde(tag)]` enums postcard cannot handle.
+/// Execute the `run` subcommand (load, train, optionally simulate, write outputs).
 ///
 /// # Errors
 ///
@@ -150,7 +132,6 @@ fn execute_inner<C: Communicator>(ctx: &RunContext<C>, args: &RunArgs) -> Result
         setup_timings,
     } = broadcast_and_build_setup(ctx, args)?;
 
-    // Pre-training data-preparation outputs run regardless of training_enabled.
     run_pre_training(
         ctx,
         &system,
@@ -171,8 +152,6 @@ fn execute_inner<C: Communicator>(ctx: &RunContext<C>, args: &RunArgs) -> Result
             let training = run_training_phase(ctx, &mut setup)?;
             let training_completed_at = now_iso8601();
 
-            // Write training outputs before simulation so they persist even if
-            // simulation fails.
             if ctx.is_root {
                 let config = root_config.take().ok_or_else(|| CliError::Internal {
                     message: "root_config was None on rank 0 — internal invariant violated"
@@ -246,11 +225,7 @@ fn execute_inner<C: Communicator>(ctx: &RunContext<C>, args: &RunArgs) -> Result
     Ok(())
 }
 
-/// Guard the `u64 as f64` cast in [`cobre_sddp::pack_delta_scalars`] before the
-/// MPI `allreduce(Sum)`: a `u64` above `2^53` loses precision as `f64`, silently
-/// corrupting the global totals. The body's field list is the authoritative set
-/// of guarded counters; native-`f64` timing fields are excluded as they need no
-/// cast.
+/// Guard `u64 as f64` cast before MPI `allreduce(Sum)`: reject counters ≥ `2^53` that lose precision.
 ///
 /// # Errors
 ///
@@ -286,9 +261,6 @@ pub(super) fn check_stats_overflow(delta: &SolverStatsDelta) -> Result<(), CliEr
 }
 
 /// Build a [`cobre_io::DistributionInfo`] from the cached execution topology.
-///
-/// `ranks_participated` is the number of MPI ranks that actively contributed
-/// to the computation (may differ from `world_size` if some ranks were idle).
 pub(super) fn build_distribution_info(
     topology: &ExecutionTopology,
     n_threads: usize,
@@ -313,15 +285,12 @@ pub(super) fn build_distribution_info(
     }
 }
 
-/// Total parallelism as thread count times participating rank count.
 pub(super) fn compute_parallelism(n_threads: usize, comm_size: usize) -> u32 {
     u32::try_from(n_threads)
         .unwrap_or(u32::MAX)
         .saturating_mul(u32::try_from(comm_size).unwrap_or(u32::MAX))
 }
 
-/// Map per-host rank assignments into [`cobre_io::HostLayout`] carriers,
-/// preserving the topology's host ordering (first-rank order).
 fn host_layouts(topology: &ExecutionTopology) -> Vec<HostLayout> {
     topology
         .hosts

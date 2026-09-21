@@ -10,10 +10,10 @@
 //!
 //! ## Example
 //!
-//! ```ignore
+//! ```rust,no_run
 //! use std::sync::mpsc;
 //! use cobre_core::TrainingEvent;
-//! use cobre_cli::progress::{run_progress_thread, RenderMode};
+//! use crate::progress::{run_progress_thread, RenderMode};
 //!
 //! let (tx, rx) = mpsc::channel::<TrainingEvent>();
 //! let handle = run_progress_thread(rx, RenderMode::auto(), 100, 120);
@@ -100,10 +100,6 @@ fn fmt_avg_lp_time(total_ms: f64, count: u64) -> String {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
 /// Rendering strategy for progress events.
 ///
 /// Chosen once per run based on whether stderr is user-attended.
@@ -184,10 +180,6 @@ pub fn resolve_term_width() -> u16 {
     120
 }
 
-// ---------------------------------------------------------------------------
-// Internal dispatcher
-// ---------------------------------------------------------------------------
-
 /// Enum-dispatched renderer. Keeps the event loop in [`run_progress_thread`]
 /// free of dynamic dispatch while still letting each mode own its state.
 enum ProgressRenderer {
@@ -220,10 +212,6 @@ impl ProgressRenderer {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Bar renderer (TTY)
-// ---------------------------------------------------------------------------
 
 /// [`TermLike`] wrapper that overrides the width reported to `indicatif`.
 ///
@@ -419,10 +407,6 @@ fn create_bar(total: u64, term_width: u16, template: &str) -> ProgressBar {
     bar.set_style(style);
     bar
 }
-
-// ---------------------------------------------------------------------------
-// Line renderer (non-TTY)
-// ---------------------------------------------------------------------------
 
 /// Emits one compact append-only line per training iteration and per
 /// simulation-progress event.

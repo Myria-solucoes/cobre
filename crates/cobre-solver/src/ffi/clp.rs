@@ -56,8 +56,7 @@ unsafe extern "C" {
     pub fn cobre_clp_destroy(model: *mut c_void);
 
     /// Set the model's logging verbosity. Wraps `Clp_setLogLevel()`.
-    /// Level `0` is silent; cobre applies it at construction so CLP does not
-    /// print per-solve progress to stdout (mirrors `HiGHS` `output_flag=0`).
+    /// Level `0` is silent.
     pub fn cobre_clp_set_log_level(model: *mut c_void, value: int32_t);
 
     // ============================================================
@@ -82,12 +81,6 @@ unsafe extern "C" {
 
     // ============================================================
     // Incremental Mutation
-    //
-    // These mutate a loaded model in place (preserving CLP's factorization and
-    // basis across the change) instead of rebuilding it. The C wrapper owns the
-    // ±IEEE-infinity → ±COIN_DBL_MAX bound translation, so the bound slices are
-    // forwarded verbatim. `row_starts`/`columns` are `*const i32`, matching the
-    // `CoinBigIndex == int` build asserted at compile time in the C wrapper.
     // ============================================================
 
     /// Append `number` constraint rows from row-major (CSR) data.
@@ -231,10 +224,6 @@ unsafe extern "C" {
 
     // ============================================================
     // C++ class-only knobs (implemented in clp_wrapper_cpp.cpp)
-    //
-    // These reach methods that exist only on the C++ `ClpSimplex` class and are
-    // not in the CLP C interface: dual-steepest-edge pricing and factorization
-    // frequency.
     // ============================================================
 
     /// Select dual-steepest-edge pricing. Wraps

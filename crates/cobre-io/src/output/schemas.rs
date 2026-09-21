@@ -16,10 +16,10 @@ use std::sync::{Arc, LazyLock};
 use arrow::datatypes::{DataType, Field, Schema};
 
 /// The `(scenario_id, stage_id, node_id)` axis prefix shared by every simulation
-/// entity row and by `paths.parquet`. All three are non-null `Int32`; `scenario_id`
-/// duplicates the Hive partition as a column so a three-way join is a join rather
-/// than a directory-name parse, and `node_id` is the visited node's declared id
-/// (the degenerate per-stage id on a chain — never gated on `nodes[]`).
+/// entity row and by `paths.parquet`. `scenario_id` duplicates the Hive partition
+/// as a column so joins don't parse directory names, and `node_id` is the visited
+/// node's declared id (the degenerate per-stage id on a chain — never gated on
+/// `nodes[]`).
 fn simulation_row_prefix() -> Vec<Field> {
     vec![
         Field::new("scenario_id", DataType::Int32, false),

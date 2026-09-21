@@ -134,10 +134,7 @@ const K1_SURVIVORS: &[&str] = &[
 /// actually moves that fixture's bytes/assertions: a `.sha256` regen for the tier-1 parity case,
 /// a hold-geometry rewrite for a shift-geometry-asserting structural test, or
 /// no change at all for an assertion that turns out robust to the
-/// permutation. There are zero `k_max >= 2` tier-1 parity goldens today
-/// (`parity_hash_d34` is `k_max == 1`); every entry below is an LP-structural
-/// or behavioral fixture (`.claude/rules/testing.md` tiers 2/3), not a
-/// `.sha256` golden.
+/// permutation.
 ///
 /// `test_anticipated_decision_no_column_at_boundary_stage_strict_predicate`
 /// sweeps `k_max in {1, 2, 3}` in one fixture; it lands here (the superset)

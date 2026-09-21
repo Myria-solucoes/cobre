@@ -11,18 +11,6 @@
 //! in-crate copy must stay byte-identical to the canonical `examples/1dtoy/`
 //! at the workspace root, enforced by
 //! `test_1dtoy_embedded_files_match_canonical_source` below.
-//!
-//! # Example
-//!
-//! ```rust
-//! use crate::templates;
-//!
-//! let templates = templates::available_templates();
-//! assert!(!templates.is_empty());
-//!
-//! let toy = templates::find_template("1dtoy").expect("1dtoy template must exist");
-//! assert_eq!(toy.name, "1dtoy");
-//! ```
 
 /// A single file belonging to a template.
 #[derive(Clone, Copy)]
@@ -138,15 +126,6 @@ pub(crate) fn available_templates() -> &'static [Template] {
 }
 
 /// Look up a template by its short name (case-sensitive).
-///
-/// # Example
-///
-/// ```rust
-/// use crate::templates;
-///
-/// assert!(templates::find_template("1dtoy").is_some());
-/// assert!(templates::find_template("nonexistent").is_none());
-/// ```
 pub(crate) fn find_template(name: &str) -> Option<&'static Template> {
     ALL_TEMPLATES.iter().find(|t| t.name == name)
 }
@@ -196,10 +175,6 @@ mod tests {
         }
     }
 
-    /// Guards the hand-synced dual copy against drift: `build.rs` embeds the
-    /// `crates/cobre-cli/templates/1dtoy/` copy via `include_bytes!`, while
-    /// `examples/1dtoy/` is the canonical source the docs point at.
-    /// Covers the whole set (JSON *and* parquet), not just `config.json`.
     #[test]
     fn test_1dtoy_embedded_files_match_canonical_source() {
         let template = find_template("1dtoy").unwrap();

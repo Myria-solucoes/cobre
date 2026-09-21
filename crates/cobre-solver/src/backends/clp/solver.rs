@@ -33,7 +33,7 @@ use crate::{
 /// # }
 /// ```
 pub struct ClpSolver {
-    /// Opaque pointer to the CLP model, obtained from `cobre_clp_create()`.
+    /// Opaque pointer to the CLP model.
     pub(super) handle: *mut c_void,
     /// Primal column values extracted after each solve.
     pub(super) col_value: Vec<f64>,
@@ -130,13 +130,10 @@ impl ClpSolver {
 
     /// Copies the three CLP-owned solution pointers into the owned buffers.
     ///
-    /// Called immediately after an optimal solve and before any further CLP call:
-    /// the CLP-owned pointers are valid only until the next solve. Row prices are
-    /// normalized via `normalize_row_dual`.
-    ///
-    /// Each copy is guarded with `if len > 0` because passing a null or dangling
-    /// pointer to `std::slice::from_raw_parts` is undefined behavior even with
-    /// length 0 (a zero-column or zero-row LP may yield such a pointer from CLP).
+    /// CLP-owned pointers are valid only until the next solve. Each copy is
+    /// guarded with `if len > 0` because passing a null or dangling pointer to
+    /// `std::slice::from_raw_parts` is undefined behavior even with length 0 (a
+    /// zero-column or zero-row LP may yield such a pointer from CLP).
     pub(super) fn copy_solution(&mut self) {
         if self.num_cols > 0 {
             // SAFETY: `self.handle` is a valid, non-null CLP pointer that has
@@ -177,11 +174,9 @@ impl ClpSolver {
 
     /// Reinstalls an offered warm-start basis into the CLP model element-by-element.
     ///
-    /// CLP exposes basis status **per element**, not as a bulk array. Each
-    /// canonical status in `b` is mapped via `to_clp_code` before the per-element
-    /// write. An oversized row basis is tolerated (reinstalled up to
-    /// `min(len, num_rows)`); an undersized one cannot be padded soundly and is
-    /// rejected.
+    /// CLP exposes basis status **per element**, not as a bulk array. An oversized
+    /// row basis is tolerated (reinstalled up to `min(len, num_rows)`); an
+    /// undersized one cannot be padded soundly and is rejected.
     ///
     /// # Errors
     ///
@@ -204,9 +199,7 @@ impl ClpSolver {
             b.col_status.len(),
             self.num_cols
         );
-        // An undersized row basis cannot be padded soundly: the missing tail rows
-        // would keep whatever (wrong) status CLP currently holds. Reject before
-        // `basis_offered` is incremented — a rejected basis was never offered.
+        // Reject before `basis_offered` is incremented — a rejected basis was never offered.
         if b.row_status.len() < self.num_rows {
             self.stats.basis_consistency_failures += 1;
             return Err(SolverError::BasisRowCountMismatch {
@@ -327,8 +320,7 @@ impl ClpSolver {
 /// Normalizes a raw CLP row price into cobre's canonical dual-sign convention.
 ///
 /// Identity is correct: `cobre_clp_get_row_price` already matches the canonical
-/// convention (`HiGHS` does not negate either). See
-/// `tests/_clp_sign_convention_probe.rs`.
+/// convention. See `tests/_clp_sign_convention_probe.rs`.
 const fn normalize_row_dual(raw: f64) -> f64 {
     raw
 }

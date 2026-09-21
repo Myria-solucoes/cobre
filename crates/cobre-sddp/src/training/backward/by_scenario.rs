@@ -54,8 +54,7 @@ pub(crate) enum StageOpeningSolver {
 }
 
 impl StageOpeningSolver {
-    /// Choose the strategy from the already-`is_active`-filtered `dcs_params`:
-    /// `Some` → [`StageOpeningSolver::Lazy`], `None` → [`StageOpeningSolver::Frozen`].
+    /// `Some(params)` → [`StageOpeningSolver::Lazy`], `None` → [`StageOpeningSolver::Frozen`].
     pub(crate) fn from_dcs_params(dcs_params: Option<DcsParams>) -> Self {
         match dcs_params {
             Some(params) => StageOpeningSolver::Lazy(params),
@@ -64,15 +63,9 @@ impl StageOpeningSolver {
     }
 
     /// Per-CHILD LP load, issued once after `reset_solver_state()` and before that
-    /// child's opening solves; each variant owns its own load. Each child loads ITS
-    /// OWN pool's LP, so a fan's blocks never reuse child 0's LP (the child-0
-    /// collapse). One child ⟹ one load per trial point ⟹ chain byte-parity.
-    ///
-    /// - [`StageOpeningSolver::Frozen`]: load the child's frozen all-cuts LP via
-    ///   [`load_backward_lp`].
-    /// - [`StageOpeningSolver::Lazy`]: load the cut-free core and build the metadata
-    ///   seed from the child's pool, then reuse the loaded LP across that child's
-    ///   openings.
+    /// child's opening solves. Each child loads ITS OWN pool's LP, so a fan never
+    /// reuses child 0's LP (the child-0 collapse). One child ⟹ one load per trial
+    /// point ⟹ chain byte-parity.
     pub(crate) fn prepare<S: SolverInterface + Send>(
         &self,
         ws: &mut SolverWorkspace<S>,
@@ -163,9 +156,7 @@ impl StageOpeningSolver {
         }
     }
 
-    /// Frozen all-cuts per-opening solve: patch the opening bounds, reconstruct +
-    /// solve, extract state and cut duals, accumulate the outcome (including the
-    /// `slot_increments` update), and capture the first-solved opening's basis.
+    /// Frozen all-cuts per-opening solve; captures the first-solved opening's basis.
     // Rationale: see [`StageOpeningSolver::solve_opening`] — disjoint-borrow args
     // with no natural grouping.
     #[allow(clippy::too_many_arguments)]

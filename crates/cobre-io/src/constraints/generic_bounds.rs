@@ -266,8 +266,6 @@ mod tests {
 
         assert_eq!(rows.len(), 3);
 
-        // After sorting by (constraint_id, stage_id, block_id):
-        // (0, 0, None) < (0, 0, Some(0)) < (1, 2, Some(1))
         assert_eq!(rows[0].constraint_id, 0);
         assert_eq!(rows[0].stage_id, 0);
         assert_eq!(rows[0].block_id, None);
@@ -415,7 +413,6 @@ mod tests {
         let rows = parse_generic_constraint_bounds(tmp.path()).unwrap();
 
         assert_eq!(rows.len(), 4);
-        // Expected order: (0,0,None), (0,1,Some(0)), (1,0,None), (2,0,None)
         assert_eq!(
             (rows[0].constraint_id, rows[0].stage_id, rows[0].block_id),
             (0, 0, None)
@@ -498,9 +495,8 @@ mod tests {
         let rows = parse_generic_constraint_bounds(tmp.path()).unwrap();
 
         assert_eq!(rows.len(), 4);
-        // Expected order: (0,0,None), (0,1,Some(0)), (1,0,None), (2,0,None) —
-        // identical to the no-endpoint ordering test, proving the endpoint values
-        // do not perturb the sort.
+        // Proves endpoint values do not perturb the sort (order identical to
+        // test_parse_sort_order_invariance).
         assert_eq!(
             (rows[0].constraint_id, rows[0].stage_id, rows[0].block_id),
             (0, 0, None)
