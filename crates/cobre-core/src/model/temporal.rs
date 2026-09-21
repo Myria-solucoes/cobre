@@ -14,11 +14,13 @@
 //!
 //! Source: `stages.json`. See `internal-structures.md` SS12.
 
+use std::sync::LazyLock;
+
 use chrono::{Datelike, NaiveDate};
 
 pub mod overlap;
 pub mod stage_key;
-pub use overlap::window_period_overlaps;
+pub use overlap::{window_period_overlaps, window_period_reach_depth, window_reaches_any_period};
 pub use stage_key::{CalendarMonth, StageId, StudyPos, month_of};
 
 // ---------------------------------------------------------------------------
@@ -380,7 +382,7 @@ impl SeasonDefinition {
     /// is a stage-vs-season fact a caller derives separately when needed).
     ///
     /// `Monthly` reads a fixed non-leap month-length table (its February is 28);
-    /// `Custom` counts covered days out of the leap `canonical_calendar_days`
+    /// `Custom` counts covered days out of the leap `CANONICAL_CALENDAR_DAYS`
     /// calendar (Feb 29 included) — the two arms disagree on Feb 29 by design,
     /// the same sweep `is_multi_resolution` uses to detect overlapping definitions.
     #[must_use]
@@ -392,9 +394,9 @@ impl SeasonDefinition {
                 let index = usize::try_from(self.month_start.saturating_sub(1)).unwrap_or(0);
                 MONTH_DAYS.get(index).copied().unwrap_or(31)
             }
-            SeasonCycleType::Custom => canonical_calendar_days()
-                .into_iter()
-                .filter(|&(month, day)| self.covers(month, day))
+            SeasonCycleType::Custom => CANONICAL_CALENDAR_DAYS
+                .iter()
+                .filter(|&&(month, day)| self.covers(month, day))
                 .count(),
         }
     }
@@ -404,8 +406,9 @@ impl SeasonDefinition {
 /// comparing `Custom` season spans — the year itself is arbitrary since
 /// `Custom` matching (`SeasonMap::season_for_date`, `SeasonDefinition::covers`)
 /// operates on `(month, day)` alone, and omitting February 29 would silently
-/// skip a checkable calendar position.
-fn canonical_calendar_days() -> Vec<(u32, u32)> {
+/// skip a checkable calendar position. Built once and borrowed by every
+/// reader rather than rebuilt per call.
+static CANONICAL_CALENDAR_DAYS: LazyLock<Vec<(u32, u32)>> = LazyLock::new(|| {
     const DAYS_IN_MONTH_LEAP: [u32; 12] = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
     let mut days = Vec::with_capacity(366);
     for (month_index, &days_in_month) in DAYS_IN_MONTH_LEAP.iter().enumerate() {
@@ -415,7 +418,7 @@ fn canonical_calendar_days() -> Vec<(u32, u32)> {
         }
     }
     days
-}
+});
 
 // ---------------------------------------------------------------------------
 // SeasonMap (SS12.8)
@@ -491,7 +494,7 @@ impl SeasonMap {
         if self.cycle_type != SeasonCycleType::Custom {
             return false;
         }
-        canonical_calendar_days().into_iter().any(|(month, day)| {
+        CANONICAL_CALENDAR_DAYS.iter().any(|&(month, day)| {
             self.seasons
                 .iter()
                 .filter(|def| def.covers(month, day))

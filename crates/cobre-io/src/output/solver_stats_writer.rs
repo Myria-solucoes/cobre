@@ -7,12 +7,14 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{Float64Array, Int32Array, StringBuilder, UInt32Array, UInt64Array};
+use arrow::array::{
+    Float64Builder, Int32Array, Int32Builder, StringBuilder, UInt32Array, UInt32Builder,
+    UInt64Array, UInt64Builder,
+};
 use arrow::record_batch::RecordBatch;
 
 use super::atomic::write_parquet_atomic;
 use super::error::OutputError;
-use super::parquet_config::ParquetWriterConfig;
 use super::schemas::{retry_histogram_schema, solver_iterations_schema};
 
 /// A single row in the solver statistics Parquet file.
@@ -25,7 +27,7 @@ pub struct SolverStatsRow {
     /// [`Self::iteration`] instead.
     pub scenario_id: Option<i32>,
     /// Phase name: `"forward"`, `"backward"`, `"lower_bound"`, or `"simulation"`.
-    pub phase: String,
+    pub phase: &'static str,
     /// Declared study `stage_id` for forward/backward rows; `None` for the
     /// lower-bound and simulation rows that carry no per-stage attribution.
     pub stage_id: Option<i32>,
@@ -90,91 +92,68 @@ pub fn write_simulation_solver_stats(
 /// Build Arrow column arrays for `iterations.parquet` (scalar metrics only).
 fn build_iterations_columns(rows: &[SolverStatsRow]) -> Vec<Arc<dyn arrow::array::Array>> {
     let n = rows.len();
-    let iteration_arr = Int32Array::from(
-        rows.iter()
-            .map(|r| r.iteration)
-            .collect::<Vec<Option<i32>>>(),
-    );
-    let scenario_id_arr = Int32Array::from(
-        rows.iter()
-            .map(|r| r.scenario_id)
-            .collect::<Vec<Option<i32>>>(),
-    );
-    let mut phase_builder = StringBuilder::with_capacity(n, n * 10);
+    let mut iteration = Int32Builder::with_capacity(n);
+    let mut scenario_id = Int32Builder::with_capacity(n);
+    let mut phase = StringBuilder::with_capacity(n, n * 10);
+    let mut stage_id = Int32Builder::with_capacity(n);
+    let mut opening_index = Int32Builder::with_capacity(n);
+    let mut rank = Int32Builder::with_capacity(n);
+    let mut worker_id = Int32Builder::with_capacity(n);
+    let mut lp_solves = UInt32Builder::with_capacity(n);
+    let mut lp_successes = UInt32Builder::with_capacity(n);
+    let mut lp_retries = UInt32Builder::with_capacity(n);
+    let mut lp_failures = UInt32Builder::with_capacity(n);
+    let mut retry_attempts = UInt32Builder::with_capacity(n);
+    let mut basis_offered = UInt32Builder::with_capacity(n);
+    let mut basis_consistency_failures = UInt32Builder::with_capacity(n);
+    let mut simplex_iterations = UInt64Builder::with_capacity(n);
+    let mut solve_time_ms = Float64Builder::with_capacity(n);
+    let mut load_model_time_ms = Float64Builder::with_capacity(n);
+    let mut set_bounds_time_ms = Float64Builder::with_capacity(n);
+    let mut basis_set_time_ms = Float64Builder::with_capacity(n);
+
     for r in rows {
-        phase_builder.append_value(&r.phase);
+        iteration.append_option(r.iteration);
+        scenario_id.append_option(r.scenario_id);
+        phase.append_value(r.phase);
+        stage_id.append_option(r.stage_id);
+        opening_index.append_option(r.opening_index);
+        rank.append_option(r.rank);
+        worker_id.append_option(r.worker_id);
+        lp_solves.append_value(r.lp_solves);
+        lp_successes.append_value(r.lp_successes);
+        lp_retries.append_value(r.lp_retries);
+        lp_failures.append_value(r.lp_failures);
+        retry_attempts.append_value(r.retry_attempts);
+        basis_offered.append_value(r.basis_offered);
+        basis_consistency_failures.append_value(r.basis_consistency_failures);
+        simplex_iterations.append_value(r.simplex_iterations);
+        solve_time_ms.append_value(r.solve_time_ms);
+        load_model_time_ms.append_value(r.load_model_time_ms);
+        set_bounds_time_ms.append_value(r.set_bounds_time_ms);
+        basis_set_time_ms.append_value(r.basis_set_time_ms);
     }
-    let phase_arr = phase_builder.finish();
-    let stage_arr = Int32Array::from(
-        rows.iter()
-            .map(|r| r.stage_id)
-            .collect::<Vec<Option<i32>>>(),
-    );
-    let opening_arr = Int32Array::from(
-        rows.iter()
-            .map(|r| r.opening_index)
-            .collect::<Vec<Option<i32>>>(),
-    );
-    let rank_arr = Int32Array::from(rows.iter().map(|r| r.rank).collect::<Vec<Option<i32>>>());
-    let worker_id_arr = Int32Array::from(
-        rows.iter()
-            .map(|r| r.worker_id)
-            .collect::<Vec<Option<i32>>>(),
-    );
-    let lp_solves_arr = UInt32Array::from(rows.iter().map(|r| r.lp_solves).collect::<Vec<_>>());
-    let lp_successes_arr =
-        UInt32Array::from(rows.iter().map(|r| r.lp_successes).collect::<Vec<_>>());
-    let lp_retries_arr = UInt32Array::from(rows.iter().map(|r| r.lp_retries).collect::<Vec<_>>());
-    let lp_failures_arr = UInt32Array::from(rows.iter().map(|r| r.lp_failures).collect::<Vec<_>>());
-    let retry_attempts_arr =
-        UInt32Array::from(rows.iter().map(|r| r.retry_attempts).collect::<Vec<_>>());
-    let basis_offered_arr =
-        UInt32Array::from(rows.iter().map(|r| r.basis_offered).collect::<Vec<_>>());
-    let basis_consistency_failures_arr = UInt32Array::from(
-        rows.iter()
-            .map(|r| r.basis_consistency_failures)
-            .collect::<Vec<_>>(),
-    );
-    let simplex_iter_arr = UInt64Array::from(
-        rows.iter()
-            .map(|r| r.simplex_iterations)
-            .collect::<Vec<_>>(),
-    );
-    let solve_time_arr =
-        Float64Array::from(rows.iter().map(|r| r.solve_time_ms).collect::<Vec<_>>());
-    let load_model_time_arr = Float64Array::from(
-        rows.iter()
-            .map(|r| r.load_model_time_ms)
-            .collect::<Vec<_>>(),
-    );
-    let set_bounds_time_arr = Float64Array::from(
-        rows.iter()
-            .map(|r| r.set_bounds_time_ms)
-            .collect::<Vec<_>>(),
-    );
-    let basis_set_time_arr =
-        Float64Array::from(rows.iter().map(|r| r.basis_set_time_ms).collect::<Vec<_>>());
 
     vec![
-        Arc::new(iteration_arr),
-        Arc::new(scenario_id_arr),
-        Arc::new(phase_arr),
-        Arc::new(stage_arr),
-        Arc::new(opening_arr),
-        Arc::new(rank_arr),
-        Arc::new(worker_id_arr),
-        Arc::new(lp_solves_arr),
-        Arc::new(lp_successes_arr),
-        Arc::new(lp_retries_arr),
-        Arc::new(lp_failures_arr),
-        Arc::new(retry_attempts_arr),
-        Arc::new(basis_offered_arr),
-        Arc::new(basis_consistency_failures_arr),
-        Arc::new(simplex_iter_arr),
-        Arc::new(solve_time_arr),
-        Arc::new(load_model_time_arr),
-        Arc::new(set_bounds_time_arr),
-        Arc::new(basis_set_time_arr),
+        Arc::new(iteration.finish()),
+        Arc::new(scenario_id.finish()),
+        Arc::new(phase.finish()),
+        Arc::new(stage_id.finish()),
+        Arc::new(opening_index.finish()),
+        Arc::new(rank.finish()),
+        Arc::new(worker_id.finish()),
+        Arc::new(lp_solves.finish()),
+        Arc::new(lp_successes.finish()),
+        Arc::new(lp_retries.finish()),
+        Arc::new(lp_failures.finish()),
+        Arc::new(retry_attempts.finish()),
+        Arc::new(basis_offered.finish()),
+        Arc::new(basis_consistency_failures.finish()),
+        Arc::new(simplex_iterations.finish()),
+        Arc::new(solve_time_ms.finish()),
+        Arc::new(load_model_time_ms.finish()),
+        Arc::new(set_bounds_time_ms.finish()),
+        Arc::new(basis_set_time_ms.finish()),
     ]
 }
 
@@ -192,9 +171,7 @@ fn build_retry_histogram_batch(rows: &[SolverStatsRow]) -> Result<RecordBatch, O
     let mut aggregated: BTreeMap<(i32, &str, Option<i32>), Vec<u64>> = BTreeMap::new();
     for r in rows {
         let id = r.iteration.or(r.scenario_id).unwrap_or_default();
-        let entry = aggregated
-            .entry((id, r.phase.as_str(), r.stage_id))
-            .or_default();
+        let entry = aggregated.entry((id, r.phase, r.stage_id)).or_default();
         if entry.len() < r.retry_level_histogram.len() {
             entry.resize(r.retry_level_histogram.len(), 0);
         }
@@ -247,18 +224,14 @@ fn build_retry_histogram_batch(rows: &[SolverStatsRow]) -> Result<RecordBatch, O
 fn write_solver_stats_to(dir: &Path, rows: &[SolverStatsRow]) -> Result<(), OutputError> {
     std::fs::create_dir_all(dir).map_err(|e| OutputError::io(dir, e))?;
 
-    // Crate-wide default so solver-stats files match every other Parquet
-    // output rather than carrying a bespoke codec.
-    let config = ParquetWriterConfig::default();
-
     let iter_schema = Arc::new(solver_iterations_schema());
     let columns = build_iterations_columns(rows);
     let iter_batch = RecordBatch::try_new(Arc::clone(&iter_schema), columns)
         .map_err(|e| OutputError::serialization("solver_stats", format!("RecordBatch: {e}")))?;
-    write_parquet_atomic(&dir.join("iterations.parquet"), &iter_batch, &config)?;
+    write_parquet_atomic(&dir.join("iterations.parquet"), &iter_batch)?;
 
     let hist_batch = build_retry_histogram_batch(rows)?;
-    write_parquet_atomic(&dir.join("retry_histogram.parquet"), &hist_batch, &config)?;
+    write_parquet_atomic(&dir.join("retry_histogram.parquet"), &hist_batch)?;
 
     Ok(())
 }
@@ -272,11 +245,11 @@ mod tests {
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
     /// A zeroed row with all axis columns absent; tests set the axes they exercise.
-    fn base_row(phase: &str) -> SolverStatsRow {
+    fn base_row(phase: &'static str) -> SolverStatsRow {
         SolverStatsRow {
             iteration: None,
             scenario_id: None,
-            phase: phase.to_string(),
+            phase,
             stage_id: None,
             opening_index: None,
             rank: None,
@@ -559,7 +532,7 @@ mod tests {
         // retry data, independent of input partitioning/order.
         fn make(
             iteration: i32,
-            phase: &str,
+            phase: &'static str,
             stage_id: i32,
             opening_index: Option<i32>,
             rank: Option<i32>,

@@ -43,8 +43,8 @@ use cobre_io::output::simulation_writer::{
     ScenarioWritePayload, SimulationParquetWriter, write_scenario_summary,
 };
 use cobre_io::{
-    Config, EstimationConfig, MetadataSimulationSolveStats, ParquetWriterConfig, PolicyCutRecord,
-    PolicyMode, STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, SimulationOutput, StageCutsPayload,
+    Config, EstimationConfig, MetadataSimulationSolveStats, PolicyCutRecord, PolicyMode,
+    STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, SimulationOutput, StageCutsPayload,
     read_policy_checkpoint, write_policy_checkpoint, write_results,
 };
 use cobre_sddp::{
@@ -2356,8 +2356,7 @@ fn write_census_parquet_outputs(
 ) -> (Vec<u8>, Vec<u8>) {
     let tmp = tempfile::TempDir::new().expect("tempdir must succeed");
     let system = writer_shape_system(n_stages);
-    let config = ParquetWriterConfig::default();
-    let mut writer = SimulationParquetWriter::new(tmp.path(), &system, &config)
+    let mut writer = SimulationParquetWriter::new(tmp.path(), &system)
         .expect("SimulationParquetWriter::new must succeed");
     for scenario in results {
         writer

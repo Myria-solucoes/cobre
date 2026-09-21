@@ -12,11 +12,10 @@ use std::path::{Path, PathBuf};
 
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
-use parquet::file::properties::WriterProperties;
 use serde::Serialize;
 
 use super::error::OutputError;
-use super::parquet_config::ParquetWriterConfig;
+use super::parquet_config::WRITER_PROPERTIES;
 
 /// Temporary sibling path for an atomic write, preserving the original extension
 /// as a prefix of `.tmp` (`foo.json` → `foo.json.tmp`) so the temp never
@@ -110,31 +109,22 @@ fn serialize_json_then_flush<W: Write>(
 
 /// Write a `RecordBatch` to `path` as a Parquet file, atomically.
 ///
-/// Honors `config` (compression, row-group size, dictionary encoding). The
-/// parent directory must already exist.
+/// Uses the crate-wide frozen encoding (Zstd level 3, 100_000-row groups,
+/// dictionary encoding enabled — see [`super::parquet_config`]). The parent
+/// directory must already exist.
 ///
 /// # Errors
 ///
 /// Returns [`OutputError::SerializationError`] if the Parquet writer fails, or
 /// [`OutputError::IoError`] if creating, flushing, or renaming the temporary
 /// file fails.
-pub(crate) fn write_parquet_atomic(
-    path: &Path,
-    batch: &RecordBatch,
-    config: &ParquetWriterConfig,
-) -> Result<(), OutputError> {
+pub(crate) fn write_parquet_atomic(path: &Path, batch: &RecordBatch) -> Result<(), OutputError> {
     let tmp = tmp_path(path);
-
-    let props = WriterProperties::builder()
-        .set_compression(config.compression)
-        .set_max_row_group_row_count(Some(config.row_group_size))
-        .set_dictionary_enabled(config.dictionary_encoding)
-        .build();
 
     let file = std::fs::File::create(&tmp).map_err(|e| OutputError::io(&tmp, e))?;
     let buf = BufWriter::new(file);
 
-    let mut writer = ArrowWriter::try_new(buf, batch.schema(), Some(props))
+    let mut writer = ArrowWriter::try_new(buf, batch.schema(), Some(WRITER_PROPERTIES.clone()))
         .map_err(|e| OutputError::serialization("parquet_writer", e.to_string()))?;
     writer
         .write(batch)
@@ -160,7 +150,7 @@ pub(crate) fn write_parquet_atomic(
 /// See [`write_parquet_atomic`].
 pub(crate) fn write_batch_atomic(path: &Path, batch: &RecordBatch) -> Result<(), OutputError> {
     ensure_parent_dir(path)?;
-    write_parquet_atomic(path, batch, &ParquetWriterConfig::default())
+    write_parquet_atomic(path, batch)
 }
 
 #[cfg(test)]

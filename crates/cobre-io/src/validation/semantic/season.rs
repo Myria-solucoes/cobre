@@ -104,8 +104,11 @@ pub(super) fn check_season_id_consistency(data: &ParsedData, ctx: &mut Validatio
 // ── Shared stage-index lookup (Rules 28, 31) ──────────────────────────────────
 
 /// Stages sorted by id, which matches date order — the season lookup below
-/// relies on it for `partition_point`.
-fn build_stage_index(data: &ParsedData) -> Vec<(chrono::NaiveDate, chrono::NaiveDate, usize)> {
+/// relies on it for `partition_point`. Shared cross-module with
+/// `scenarios::check_estimation_prerequisites`.
+pub(super) fn build_stage_index(
+    data: &ParsedData,
+) -> Vec<(chrono::NaiveDate, chrono::NaiveDate, usize)> {
     data.stages
         .stages
         .iter()
@@ -113,8 +116,11 @@ fn build_stage_index(data: &ParsedData) -> Vec<(chrono::NaiveDate, chrono::Naive
         .collect()
 }
 
-/// Looks up the season whose stage window contains `date`.
-fn season_id_for_date(
+/// Resolves the stage-index position of the occurrence whose window contains
+/// `date`, or `None` outside every window. Shared cross-module with
+/// `scenarios::check_estimation_prerequisites`, which uses the position
+/// itself rather than the season id `season_id_for_date` derives from it.
+pub(super) fn resolve_stage_position(
     stage_index: &[(chrono::NaiveDate, chrono::NaiveDate, usize)],
     date: chrono::NaiveDate,
 ) -> Option<usize> {
@@ -122,8 +128,27 @@ fn season_id_for_date(
     if pos == 0 {
         return None;
     }
-    let (_, end_date, sid) = stage_index[pos - 1];
-    (date < end_date).then_some(sid)
+    let (_, end_date, _) = stage_index[pos - 1];
+    (date < end_date).then_some(pos - 1)
+}
+
+/// Looks up the season whose stage window contains `date`.
+fn season_id_for_date(
+    stage_index: &[(chrono::NaiveDate, chrono::NaiveDate, usize)],
+    date: chrono::NaiveDate,
+) -> Option<usize> {
+    resolve_stage_position(stage_index, date).map(|p| stage_index[p].2)
+}
+
+/// Whether the history-based PAR(p) estimation path is active: history rows
+/// are present, and not both `inflow_seasonal_stats` and
+/// `inflow_ar_coefficients` are already supplied. Shared cross-module with
+/// `scenarios::check_estimation_prerequisites`.
+pub(super) fn estimation_active(data: &ParsedData) -> bool {
+    let has_history = !data.inflow_history.is_empty();
+    let has_stats = !data.inflow_seasonal_stats.is_empty();
+    let has_ar = !data.inflow_ar_coefficients.is_empty();
+    has_history && !(has_stats && has_ar)
 }
 
 // ── Rule 31: Observation-to-season alignment ──────────────────────────────────
@@ -149,12 +174,7 @@ fn season_id_for_date(
 pub(super) fn check_observation_season_alignment(data: &ParsedData, ctx: &mut ValidationContext) {
     use chrono::Datelike;
 
-    let has_history = !data.inflow_history.is_empty();
-    let has_stats = !data.inflow_seasonal_stats.is_empty();
-    let has_ar_coefficients = !data.inflow_ar_coefficients.is_empty();
-    let estimation_active = has_history && !(has_stats && has_ar_coefficients);
-
-    if !estimation_active {
+    if !estimation_active(data) {
         return;
     }
 
@@ -252,10 +272,7 @@ pub(super) fn check_season_observation_coverage(
     use cobre_core::scenario::SamplingScheme;
     use std::path::Path;
 
-    let has_history = !data.inflow_history.is_empty();
-    let has_stats = !data.inflow_seasonal_stats.is_empty();
-    let has_ar = !data.inflow_ar_coefficients.is_empty();
-    if !has_history || (has_stats && has_ar) {
+    if !estimation_active(data) {
         return;
     }
 
@@ -356,6 +373,21 @@ mod tests {
     };
 
     // ── Local helpers ─────────────────────────────────────────────────────────
+
+    /// Reference: `check_estimation_prerequisites` (scenarios.rs) inlined this
+    /// partition_point + bound check before it was lifted into the shared
+    /// [`resolve_stage_position`].
+    fn reference_resolve_stage_position(
+        stage_index: &[(chrono::NaiveDate, chrono::NaiveDate, usize)],
+        date: chrono::NaiveDate,
+    ) -> Option<usize> {
+        let pos = stage_index.partition_point(|(start, _, _)| *start <= date);
+        if pos == 0 {
+            return None;
+        }
+        let (_, end_date, _) = stage_index[pos - 1];
+        (date < end_date).then_some(pos - 1)
+    }
 
     /// Build a windowed `InflowHistoryRow` covering `[date, date + 1 day)`.
     /// These fixtures bucket by `start_date` alone, so the window width itself
@@ -1614,6 +1646,48 @@ mod tests {
             "rule 31 must be skipped when estimation is inactive; got errors: {:?}",
             ctx.errors()
         );
+    }
+
+    /// `resolve_stage_position` (the shared helper now consumed by
+    /// `season_id_for_date`, `check_season_observation_coverage`, and
+    /// `scenarios::check_estimation_prerequisites`) must resolve every history
+    /// row's stage position identically to the `partition_point` + bound-check
+    /// each of the three call sites inlined before the share; `estimation_active`
+    /// must match the inline `has_history && !(has_stats && has_ar)` predicate.
+    #[test]
+    fn shared_stage_index_helper_matches_pre_share_inline_builds() {
+        let stages = make_stages_with_seasons(12, /*with_season_map=*/ true);
+        let history = make_history_rows(1, 12);
+        let data = make_data_estimation(vec![make_hydro(1, None)], stages, history);
+
+        let has_history = !data.inflow_history.is_empty();
+        let has_stats = !data.inflow_seasonal_stats.is_empty();
+        let has_ar = !data.inflow_ar_coefficients.is_empty();
+        assert_eq!(
+            estimation_active(&data),
+            has_history && !(has_stats && has_ar),
+            "estimation_active must match the inline predicate all three sites computed"
+        );
+        assert!(
+            estimation_active(&data),
+            "fixture must have estimation active"
+        );
+
+        let stage_index = build_stage_index(&data);
+        for row in &data.inflow_history {
+            let resolved = resolve_stage_position(&stage_index, row.start_date);
+            assert_eq!(
+                resolved,
+                reference_resolve_stage_position(&stage_index, row.start_date),
+                "resolved stage position for {:?} must match the pre-share inline build",
+                row.start_date
+            );
+            assert_eq!(
+                season_id_for_date(&stage_index, row.start_date),
+                resolved.map(|p| stage_index[p].2),
+                "season_id_for_date must derive its result from the shared position"
+            );
+        }
     }
 
     /// Given a monthly study where inflow history runs from April 1990 through

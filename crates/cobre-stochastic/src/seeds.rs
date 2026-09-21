@@ -2,7 +2,9 @@
 //! layered `inflow_history` record and `recent_observations` conditioning
 //! series ([`crate::season_cast`]).
 
-use cobre_core::{Hydro, InflowHistoryRow, RecentObservation, SeasonMap, Stage};
+use std::collections::HashMap;
+
+use cobre_core::{EntityId, Hydro, InflowHistoryRow, RecentObservation, SeasonMap, Stage};
 
 #[cfg(test)]
 use crate::season_cast::nth_previous_occurrence;
@@ -82,6 +84,87 @@ pub struct DerivedSeed<'a> {
 /// `season_map.seasons`.
 #[must_use]
 pub fn derive_inflow_seeds(
+    record: &[InflowHistoryRow],
+    conditioning: &[RecentObservation],
+    hydros: &[Hydro],
+    first_stage: &Stage,
+    season_map: &SeasonMap,
+    l_state: usize,
+) -> DerivedInflowSeeds {
+    let n_hydros = hydros.len();
+    if n_hydros == 0 {
+        return DerivedInflowSeeds::zero(n_hydros, l_state);
+    }
+
+    let Some(season_id) = first_stage.season_id else {
+        return DerivedInflowSeeds::zero(n_hydros, l_state);
+    };
+
+    let Some(season_def) = season_map.seasons.iter().find(|s| s.id == season_id) else {
+        return DerivedInflowSeeds::zero(n_hydros, l_state);
+    };
+
+    let calendar = StageCalendar::new(std::slice::from_ref(first_stage));
+    let in_progress = season_period_window(season_map, season_def, first_stage);
+
+    // Bucketed once, in `record`'s/`conditioning`'s own declared order: a
+    // per-hydro bucket's row order must match its filtered-scan equivalent,
+    // since `merge_layered_windows` resolves an overlap to the first-listed
+    // covering window.
+    let mut record_by_hydro: HashMap<EntityId, Vec<RealizedWindow>> = HashMap::new();
+    for row in record {
+        record_by_hydro
+            .entry(row.hydro_id)
+            .or_default()
+            .push(RealizedWindow {
+                start_date: row.start_date,
+                end_date: row.end_date,
+                value_m3s: row.value_m3s,
+            });
+    }
+    let mut conditioning_by_hydro: HashMap<EntityId, Vec<RealizedWindow>> = HashMap::new();
+    for obs in conditioning {
+        conditioning_by_hydro
+            .entry(obs.hydro_id)
+            .or_default()
+            .push(RealizedWindow {
+                start_date: obs.start_date,
+                end_date: obs.end_date,
+                value_m3s: obs.value_m3s,
+            });
+    }
+
+    let mut seeds = DerivedInflowSeeds::zero(n_hydros, l_state);
+
+    for (pos, hydro) in hydros.iter().enumerate() {
+        let record_windows = record_by_hydro
+            .get(&hydro.id)
+            .map_or(&[][..], Vec::as_slice);
+        let conditioning_windows = conditioning_by_hydro
+            .get(&hydro.id)
+            .map_or(&[][..], Vec::as_slice);
+        let merged = merge_layered_windows(record_windows, conditioning_windows);
+
+        let in_progress_projection = cast(&merged, &in_progress);
+        seeds.accum[pos] = in_progress_projection.value * in_progress_projection.coverage;
+        seeds.weight[pos] = in_progress_projection.coverage;
+
+        if let Some(occurrences) = calendar.season_occurrences(season_map, season_def, l_state) {
+            for (k, occurrence) in occurrences.iter().enumerate().skip(1) {
+                seeds.lag_values[pos * l_state + (k - 1)] = cast(&merged, occurrence).value;
+            }
+        }
+    }
+
+    seeds
+}
+
+/// Reference oracle for [`derive_inflow_seeds`]: the retired per-hydro
+/// full-slice filter and per-`k` [`StageCalendar::season_occurrence`]
+/// restart, kept to prove the bucketed, incrementally-walked derivation is
+/// bit-identical to a direct filter-then-restart derivation.
+#[cfg(test)]
+fn derive_inflow_seeds_reference(
     record: &[InflowHistoryRow],
     conditioning: &[RecentObservation],
     hydros: &[Hydro],
@@ -390,6 +473,86 @@ mod tests {
             seeds.lag_values[1], 500.0,
             "hydro id=0 (canonical position 1) lag should be its own record value"
         );
+    }
+
+    #[test]
+    fn test_bucketed_seeds_match_per_hydro_filter_reference_with_interleaved_rows() {
+        let season_map = monthly_season_map(MonthlyLabels::OneBased);
+        let first_stage = make_stage(0, d(2026, 4, 1), d(2026, 5, 1), Some(3));
+        let hydros = vec![make_hydro(1), make_hydro(2)];
+        let record = vec![
+            InflowHistoryRow {
+                hydro_id: EntityId(1),
+                start_date: d(2026, 1, 1),
+                end_date: d(2026, 2, 1),
+                value_m3s: 100.0,
+            },
+            InflowHistoryRow {
+                hydro_id: EntityId(2),
+                start_date: d(2026, 1, 1),
+                end_date: d(2026, 2, 1),
+                value_m3s: 400.0,
+            },
+            InflowHistoryRow {
+                hydro_id: EntityId(1),
+                start_date: d(2026, 2, 1),
+                end_date: d(2026, 3, 1),
+                value_m3s: 200.0,
+            },
+            InflowHistoryRow {
+                hydro_id: EntityId(2),
+                start_date: d(2026, 2, 1),
+                end_date: d(2026, 3, 1),
+                value_m3s: 500.0,
+            },
+            InflowHistoryRow {
+                hydro_id: EntityId(1),
+                start_date: d(2026, 3, 1),
+                end_date: d(2026, 4, 1),
+                value_m3s: 300.0,
+            },
+            InflowHistoryRow {
+                hydro_id: EntityId(2),
+                start_date: d(2026, 3, 1),
+                end_date: d(2026, 4, 1),
+                value_m3s: 600.0,
+            },
+        ];
+        let conditioning = vec![
+            RecentObservation {
+                hydro_id: EntityId(2),
+                start_date: d(2026, 3, 10),
+                end_date: d(2026, 3, 20),
+                value_m3s: 999.0,
+            },
+            RecentObservation {
+                hydro_id: EntityId(1),
+                start_date: d(2026, 3, 10),
+                end_date: d(2026, 3, 20),
+                value_m3s: 888.0,
+            },
+        ];
+
+        let actual = derive_inflow_seeds(
+            &record,
+            &conditioning,
+            &hydros,
+            &first_stage,
+            &season_map,
+            3,
+        );
+        let expected = derive_inflow_seeds_reference(
+            &record,
+            &conditioning,
+            &hydros,
+            &first_stage,
+            &season_map,
+            3,
+        );
+
+        assert_eq!(actual.lag_values, expected.lag_values);
+        assert_eq!(actual.accum, expected.accum);
+        assert_eq!(actual.weight, expected.weight);
     }
 
     #[test]

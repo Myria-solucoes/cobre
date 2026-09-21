@@ -287,8 +287,12 @@ fn check_file_identifier(buf: &[u8], ctx: &str) -> Result<(), OutputError> {
 /// assert!(!buf.is_empty());
 /// ```
 #[must_use]
-#[allow(clippy::cast_possible_truncation)]
 pub fn serialize_stage_cuts(payload: &StageCutsPayload<'_>) -> Vec<u8> {
+    build_stage_cuts(payload).finished_data().to_vec()
+}
+
+#[allow(clippy::cast_possible_truncation)]
+pub(super) fn build_stage_cuts(payload: &StageCutsPayload<'_>) -> FlatBufferBuilder<'static> {
     let estimated = 64
         + payload.cuts.len()
             * (96usize + payload.state_dimension as usize * std::mem::size_of::<f64>())
@@ -336,7 +340,7 @@ pub fn serialize_stage_cuts(payload: &StageCutsPayload<'_>) -> Vec<u8> {
     let root_offset = builder.end_table(root);
     builder.finish(root_offset, Some(POLICY_FILE_IDENTIFIER));
 
-    builder.finished_data().to_vec()
+    builder
 }
 
 /// Serialize one stage's solver basis into a root `StageBasis` `FlatBuffers`
@@ -361,8 +365,12 @@ pub fn serialize_stage_cuts(payload: &StageCutsPayload<'_>) -> Vec<u8> {
 /// assert!(!buf.is_empty());
 /// ```
 #[must_use]
-#[allow(clippy::cast_possible_truncation)]
 pub fn serialize_stage_basis(record: &PolicyBasisRecord<'_>) -> Vec<u8> {
+    build_stage_basis(record).finished_data().to_vec()
+}
+
+#[allow(clippy::cast_possible_truncation)]
+pub(super) fn build_stage_basis(record: &PolicyBasisRecord<'_>) -> FlatBufferBuilder<'static> {
     let estimated =
         64 + std::mem::size_of_val(record.column_status) + std::mem::size_of_val(record.row_status);
 
@@ -385,14 +393,18 @@ pub fn serialize_stage_basis(record: &PolicyBasisRecord<'_>) -> Vec<u8> {
     let root_offset = builder.end_table(root);
     builder.finish(root_offset, Some(POLICY_FILE_IDENTIFIER));
 
-    builder.finished_data().to_vec()
+    builder
 }
 
 /// Serialize one stage's visited states into a root `StageStates` `FlatBuffers`
 /// buffer, ready to write directly to a `.bin` policy file under `states/`.
 #[must_use]
-#[allow(clippy::cast_possible_truncation)]
 pub fn serialize_stage_states(payload: &StageStatesPayload<'_>) -> Vec<u8> {
+    build_stage_states(payload).finished_data().to_vec()
+}
+
+#[allow(clippy::cast_possible_truncation)]
+pub(super) fn build_stage_states(payload: &StageStatesPayload<'_>) -> FlatBufferBuilder<'static> {
     let estimated =
         64 + std::mem::size_of_val(payload.data) + payload.entity_manifest.len() * 32usize;
     let mut builder = FlatBufferBuilder::with_capacity(estimated);
@@ -417,7 +429,7 @@ pub fn serialize_stage_states(payload: &StageStatesPayload<'_>) -> Vec<u8> {
     let root_offset = builder.end_table(root);
     builder.finish(root_offset, Some(POLICY_FILE_IDENTIFIER));
 
-    builder.finished_data().to_vec()
+    builder
 }
 
 /// Serialize a [`CheckpointManifest`] into a root `CheckpointManifest`
@@ -429,6 +441,12 @@ pub fn serialize_stage_states(payload: &StageStatesPayload<'_>) -> Vec<u8> {
 /// and writes.
 #[must_use]
 pub fn serialize_checkpoint_manifest(manifest: &CheckpointManifest) -> Vec<u8> {
+    build_checkpoint_manifest(manifest).finished_data().to_vec()
+}
+
+pub(super) fn build_checkpoint_manifest(
+    manifest: &CheckpointManifest,
+) -> FlatBufferBuilder<'static> {
     let graph = &manifest.graph_manifest;
     let producer = &manifest.producer;
 
@@ -516,7 +534,7 @@ pub fn serialize_checkpoint_manifest(manifest: &CheckpointManifest) -> Vec<u8> {
     let root_offset = builder.end_table(root);
     builder.finish(root_offset, Some(POLICY_FILE_IDENTIFIER));
 
-    builder.finished_data().to_vec()
+    builder
 }
 
 // ── Safe FlatBuffers wire-format helpers ─────────────────────────────────────

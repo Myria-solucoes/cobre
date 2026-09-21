@@ -461,21 +461,24 @@ fn resolve_coverage_gated_observations(
     let mut skipped_partial = BTreeMap::new();
 
     for (&hydro_id, windows) in &windows_by_hydro {
+        debug_assert!(
+            windows.is_sorted_by(|a, b| a.end_date <= b.start_date),
+            "hydro {hydro_id}: windows must be ascending-by-start and disjoint for the cursor sweep"
+        );
         let occurrences = discover_hydro_occurrences(season_map, stage_template, windows);
         let mut skip_count = 0usize;
+        let mut lo = 0usize;
 
         for occurrence in &occurrences {
-            let overlapping: Vec<RealizedWindow> = windows
-                .iter()
-                .filter(|w| w.start_date < occurrence.end && w.end_date > occurrence.start)
-                .map(|w| RealizedWindow {
-                    start_date: w.start_date,
-                    end_date: w.end_date,
-                    value_m3s: w.value_m3s,
-                })
-                .collect();
+            while lo < windows.len() && windows[lo].end_date <= occurrence.start {
+                lo += 1;
+            }
+            let mut hi = lo;
+            while hi < windows.len() && windows[hi].start_date < occurrence.end {
+                hi += 1;
+            }
 
-            let projection = cast(&overlapping, occurrence);
+            let projection = cast(&windows[lo..hi], occurrence);
 
             if projection.coverage == 1.0 {
                 observations.push((hydro_id, occurrence.start, projection.value));

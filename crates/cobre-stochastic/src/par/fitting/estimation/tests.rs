@@ -1483,3 +1483,125 @@ fn ar_fit_is_thread_count_invariant() {
         assert_bit_identical(&outputs[0], estimates_n, thread_counts[0], n);
     }
 }
+
+/// The annual-path per-hydro initial fit in `estimate_ar_with_pacf_annual` is a
+/// `par_iter().flat_map_iter().collect()`, so (a) its output order must not
+/// depend on the rayon pool size for a fixed `hydro_ids` order, and (b) its
+/// per-hydro values must not depend on the order `hydro_ids` is declared in.
+/// This gate runs the annual PACF dispatch over a three-hydro, twelve-season
+/// fixture under pools of 1, 2, and 4 threads (unsorted comparison — a
+/// regression that collected via a shared `Mutex<Vec>` would reorder the
+/// stream and fail here) and again with a shuffled `hydro_ids` order compared
+/// as a `(hydro_id, season_id)`-sorted set (a regression that let one hydro's
+/// closure observe another's state would change values, not just order, and
+/// fail here too).
+#[test]
+fn annual_ar_fit_is_thread_count_and_declaration_order_invariant() {
+    let h1 = EntityId(1);
+    let h2 = EntityId(2);
+    let h3 = EntityId(3);
+    let n_years = 30;
+    let stages = make_monthly_stages_for_annual(n_years);
+
+    let mut obs = synthetic_monthly_obs(h1, n_years, 100.0, 5.0, 1.0);
+    obs.extend(synthetic_monthly_obs(h2, n_years, 200.0, 3.0, 0.5));
+    obs.extend(synthetic_monthly_obs(h3, n_years, 150.0, 4.0, 0.8));
+
+    let seasonal_stats = {
+        use crate::par::fitting::estimate_seasonal_stats_with_season_map;
+        estimate_seasonal_stats_with_season_map(&obs, &stages, &[h1, h2, h3], None).unwrap()
+    };
+
+    let fit = |hydro_ids: &[EntityId], n_threads: usize| -> Vec<ArCoefficientEstimate> {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(n_threads)
+            .build()
+            .expect("rayon pool must build")
+            .install(|| {
+                let (estimates, _report) = estimate_ar_with_pacf_annual(
+                    &obs,
+                    &seasonal_stats,
+                    &stages,
+                    hydro_ids,
+                    3,    // max_order
+                    None, // season_map
+                    None, // max_coeff_magnitude
+                )
+                .expect("estimate_ar_with_pacf_annual must succeed with 30 years of data");
+                estimates
+            })
+    };
+
+    let assert_bit_identical =
+        |label: &str, a: &[ArCoefficientEstimate], b: &[ArCoefficientEstimate]| {
+            assert_eq!(a.len(), b.len(), "{label}: estimate count mismatch");
+            for (ea, eb) in a.iter().zip(b) {
+                assert_eq!(ea.hydro_id, eb.hydro_id, "{label}: hydro_id mismatch");
+                assert_eq!(ea.season_id, eb.season_id, "{label}: season_id mismatch");
+                assert_eq!(
+                    ea.coefficients.len(),
+                    eb.coefficients.len(),
+                    "{label}: coefficient length mismatch"
+                );
+                for (ca, cb) in ea.coefficients.iter().zip(&eb.coefficients) {
+                    assert_eq!(
+                        ca.to_bits(),
+                        cb.to_bits(),
+                        "{label}: coefficient must be bit-identical"
+                    );
+                }
+                match (&ea.annual, &eb.annual) {
+                    (Some(aa), Some(ab)) => {
+                        assert_eq!(
+                            aa.coefficient.to_bits(),
+                            ab.coefficient.to_bits(),
+                            "{label}: annual.coefficient must be bit-identical"
+                        );
+                        assert_eq!(
+                            aa.mean_m3s.to_bits(),
+                            ab.mean_m3s.to_bits(),
+                            "{label}: annual.mean_m3s must be bit-identical"
+                        );
+                        assert_eq!(
+                            aa.std_m3s.to_bits(),
+                            ab.std_m3s.to_bits(),
+                            "{label}: annual.std_m3s must be bit-identical"
+                        );
+                    }
+                    (None, None) => {}
+                    _ => panic!("{label}: annual Some/None mismatch"),
+                }
+            }
+        };
+
+    let canonical = [h1, h2, h3];
+    let baseline = fit(&canonical, 1);
+    assert!(
+        baseline.iter().any(|e| !e.coefficients.is_empty()),
+        "the fixture must fit at least one non-empty coefficient vector"
+    );
+
+    // (a) Thread-count invariance at a fixed `hydro_ids` order: same order, no sort.
+    for &n in &[2usize, 4] {
+        assert_bit_identical(
+            &format!("{n}-thread pool vs 1-thread baseline"),
+            &baseline,
+            &fit(&canonical, n),
+        );
+    }
+
+    // (b) Declaration-order invariance: a shuffled `hydro_ids` legitimately
+    // reassembles in the new canonical order, so compare as sorted sets.
+    let shuffled = [h3, h1, h2];
+    let mut baseline_sorted = baseline.clone();
+    baseline_sorted.sort_by_key(|e| (e.hydro_id, e.season_id));
+    for &n in &[1usize, 4] {
+        let mut shuffled_out = fit(&shuffled, n);
+        shuffled_out.sort_by_key(|e| (e.hydro_id, e.season_id));
+        assert_bit_identical(
+            &format!("shuffled hydro_ids order, {n}-thread pool"),
+            &baseline_sorted,
+            &shuffled_out,
+        );
+    }
+}

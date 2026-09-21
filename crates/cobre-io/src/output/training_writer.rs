@@ -20,7 +20,6 @@ use arrow::array::{
 use super::{IterationRecord, TrainingOutput, WorkerTimingRecord};
 use crate::output::atomic::write_parquet_atomic;
 use crate::output::error::OutputError;
-use crate::output::parquet_config::ParquetWriterConfig;
 use crate::output::schemas::{convergence_schema, iteration_timing_schema};
 
 /// Writes training output to `training/convergence.parquet` and
@@ -29,14 +28,13 @@ use crate::output::schemas::{convergence_schema, iteration_timing_schema};
 /// # Examples
 ///
 /// ```no_run
-/// use cobre_io::{TrainingOutput, RowPoolStatistics, ParquetWriterConfig};
+/// use cobre_io::{TrainingOutput, RowPoolStatistics};
 /// use cobre_io::MetadataTrainingSolveStats;
 /// use cobre_io::output::training_writer::TrainingParquetWriter;
 /// use std::path::Path;
 ///
 /// # fn main() -> Result<(), cobre_io::OutputError> {
-/// let config = ParquetWriterConfig::default();
-/// let writer = TrainingParquetWriter::new(Path::new("/tmp/out"), &config)?;
+/// let writer = TrainingParquetWriter::new(Path::new("/tmp/out"))?;
 /// let training = TrainingOutput {
 ///     convergence_records: Vec::new(),
 ///     final_lower_bound: 42.0,
@@ -68,7 +66,6 @@ use crate::output::schemas::{convergence_schema, iteration_timing_schema};
 /// ```
 pub struct TrainingParquetWriter {
     output_dir: PathBuf,
-    config: ParquetWriterConfig,
 }
 
 impl TrainingParquetWriter {
@@ -81,7 +78,7 @@ impl TrainingParquetWriter {
     ///
     /// - [`OutputError::IoError`] if the `training/` or `training/timing/`
     ///   directories do not exist or are not accessible.
-    pub fn new(output_dir: &Path, config: &ParquetWriterConfig) -> Result<Self, OutputError> {
+    pub fn new(output_dir: &Path) -> Result<Self, OutputError> {
         let training_dir = output_dir.join("training");
         let timing_dir = output_dir.join("training/timing");
 
@@ -90,7 +87,6 @@ impl TrainingParquetWriter {
 
         Ok(Self {
             output_dir: output_dir.to_path_buf(),
-            config: config.clone(),
         })
     }
 
@@ -110,11 +106,11 @@ impl TrainingParquetWriter {
         let convergence_batch =
             build_convergence_batch(records, &training_output.final_upper_bound_kind)?;
         let convergence_path = self.output_dir.join("training/convergence.parquet");
-        write_parquet_atomic(&convergence_path, &convergence_batch, &self.config)?;
+        write_parquet_atomic(&convergence_path, &convergence_batch)?;
 
         let timing_batch = build_iteration_timing_batch(&training_output.worker_timing_records)?;
         let timing_path = self.output_dir.join("training/timing/iterations.parquet");
-        write_parquet_atomic(&timing_path, &timing_batch, &self.config)?;
+        write_parquet_atomic(&timing_path, &timing_batch)?;
 
         Ok(())
     }
@@ -299,7 +295,6 @@ fn build_iteration_timing_batch(
 pub fn write_row_selection_records(
     output_dir: &Path,
     records: &[super::RowSelectionRecord],
-    config: &ParquetWriterConfig,
 ) -> Result<(), OutputError> {
     if records.is_empty() {
         return Ok(());
@@ -351,7 +346,7 @@ pub fn write_row_selection_records(
     let batch = RecordBatch::try_new(schema, columns)
         .map_err(|e| OutputError::serialization("cut_selection", e.to_string()))?;
 
-    write_parquet_atomic(&dir.join("iterations.parquet"), &batch, config)
+    write_parquet_atomic(&dir.join("iterations.parquet"), &batch)
 }
 
 #[cfg(test)]
@@ -512,7 +507,6 @@ mod tests {
 
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
         std::fs::create_dir_all(tmp.path().join("training/timing")).unwrap();
-        let config = ParquetWriterConfig::default();
 
         // Build 3 records with distinct non-zero overhead component values so we
         // can verify each column carries the right field.
@@ -579,7 +573,7 @@ mod tests {
             .collect();
         let mut training = make_training_output(records);
         training.worker_timing_records = worker_records;
-        let writer = TrainingParquetWriter::new(tmp.path(), &config).expect("new must succeed");
+        let writer = TrainingParquetWriter::new(tmp.path()).expect("new must succeed");
         writer.write(&training).expect("write must succeed");
 
         let timing_path = tmp.path().join("training/timing/iterations.parquet");
@@ -643,9 +637,8 @@ mod tests {
 
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
         let path = tmp.path().join("convergence.parquet");
-        let config = ParquetWriterConfig::default();
 
-        write_parquet_atomic(&path, &batch, &config).expect("write must succeed");
+        write_parquet_atomic(&path, &batch).expect("write must succeed");
         assert!(path.exists(), "convergence.parquet must exist after write");
 
         let read_batch = read_first_batch(&path);
@@ -691,9 +684,8 @@ mod tests {
 
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
         let path = tmp.path().join("convergence.parquet");
-        let config = ParquetWriterConfig::default();
 
-        write_parquet_atomic(&path, &batch, &config).expect("write must succeed");
+        write_parquet_atomic(&path, &batch).expect("write must succeed");
 
         let tmp_path = path.with_extension("parquet.tmp");
         assert!(
@@ -710,22 +702,20 @@ mod tests {
     #[test]
     fn writer_fails_if_training_dir_missing() {
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
-        let config = ParquetWriterConfig::default();
 
         // Do not create the training/ directory.
-        let result = TrainingParquetWriter::new(tmp.path(), &config);
+        let result = TrainingParquetWriter::new(tmp.path());
         assert!(result.is_err(), "new() must fail when training/ is missing");
     }
 
     #[test]
     fn writer_fails_if_timing_dir_missing() {
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
-        let config = ParquetWriterConfig::default();
 
         // Create training/ but not training/timing/.
         std::fs::create_dir_all(tmp.path().join("training")).unwrap();
 
-        let result = TrainingParquetWriter::new(tmp.path(), &config);
+        let result = TrainingParquetWriter::new(tmp.path());
         assert!(
             result.is_err(),
             "new() must fail when training/timing/ is missing"
@@ -738,9 +728,8 @@ mod tests {
 
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
         std::fs::create_dir_all(tmp.path().join("training/timing")).unwrap();
-        let config = ParquetWriterConfig::default();
 
-        let writer = TrainingParquetWriter::new(tmp.path(), &config).expect("new must succeed");
+        let writer = TrainingParquetWriter::new(tmp.path()).expect("new must succeed");
         let training = make_training_output(vec![]);
         writer.write(&training).expect("write must succeed");
 
@@ -773,7 +762,6 @@ mod tests {
     fn writer_writes_five_records() {
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
         std::fs::create_dir_all(tmp.path().join("training/timing")).unwrap();
-        let config = ParquetWriterConfig::default();
 
         let records: Vec<IterationRecord> = (1..=5).map(|i| make_record(i, Some(1.0))).collect();
         let mut training = make_training_output(records);
@@ -782,7 +770,7 @@ mod tests {
         // convergence rows.
         training.worker_timing_records = (1u32..=5).map(make_worker_timing_record).collect();
 
-        let writer = TrainingParquetWriter::new(tmp.path(), &config).expect("new must succeed");
+        let writer = TrainingParquetWriter::new(tmp.path()).expect("new must succeed");
         writer.write(&training).expect("write must succeed");
 
         let conv_path = tmp.path().join("training/convergence.parquet");
@@ -800,7 +788,6 @@ mod tests {
     fn writer_gap_percent_null_at_correct_row() {
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
         std::fs::create_dir_all(tmp.path().join("training/timing")).unwrap();
-        let config = ParquetWriterConfig::default();
 
         let records = vec![
             make_record(1, Some(10.0)),
@@ -811,7 +798,7 @@ mod tests {
         ];
         let training = make_training_output(records);
 
-        let writer = TrainingParquetWriter::new(tmp.path(), &config).expect("new must succeed");
+        let writer = TrainingParquetWriter::new(tmp.path()).expect("new must succeed");
         writer.write(&training).expect("write must succeed");
 
         let conv_path = tmp.path().join("training/convergence.parquet");
@@ -835,8 +822,7 @@ mod tests {
     #[test]
     fn write_cut_selection_empty_is_noop() {
         let tmp = tempfile::tempdir().unwrap();
-        let config = ParquetWriterConfig::default();
-        write_row_selection_records(tmp.path(), &[], &config).unwrap();
+        write_row_selection_records(tmp.path(), &[]).unwrap();
         assert!(
             !tmp.path()
                 .join("training/cut_selection/iterations.parquet")
@@ -849,7 +835,6 @@ mod tests {
         use super::super::RowSelectionRecord;
 
         let tmp = tempfile::tempdir().unwrap();
-        let config = ParquetWriterConfig::default();
         let records = vec![
             RowSelectionRecord {
                 iteration: 3,
@@ -876,7 +861,7 @@ mod tests {
                 active_after_budget: None,
             },
         ];
-        write_row_selection_records(tmp.path(), &records, &config).unwrap();
+        write_row_selection_records(tmp.path(), &records).unwrap();
         let path = tmp.path().join("training/cut_selection/iterations.parquet");
         assert!(path.exists());
 
@@ -890,7 +875,6 @@ mod tests {
         use super::super::RowSelectionRecord;
 
         let tmp = tempfile::tempdir().unwrap();
-        let config = ParquetWriterConfig::default();
         let records = vec![
             // Record with all budget columns populated (budget enabled).
             RowSelectionRecord {
@@ -919,7 +903,7 @@ mod tests {
                 active_after_budget: None,
             },
         ];
-        write_row_selection_records(tmp.path(), &records, &config).unwrap();
+        write_row_selection_records(tmp.path(), &records).unwrap();
         let path = tmp.path().join("training/cut_selection/iterations.parquet");
         assert!(path.exists());
 
@@ -968,7 +952,6 @@ mod tests {
         use super::super::RowSelectionRecord;
 
         let tmp = tempfile::tempdir().unwrap();
-        let config = ParquetWriterConfig::default();
         let records = vec![RowSelectionRecord {
             iteration: 1,
             stage: 0,
@@ -981,7 +964,7 @@ mod tests {
             budget_evicted: None,
             active_after_budget: None,
         }];
-        write_row_selection_records(tmp.path(), &records, &config).unwrap();
+        write_row_selection_records(tmp.path(), &records).unwrap();
         let path = tmp.path().join("training/cut_selection/iterations.parquet");
 
         let file = std::fs::File::open(&path).unwrap();

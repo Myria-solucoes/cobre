@@ -611,6 +611,58 @@ impl<'a> StageCalendar<'a> {
         Some(cast(windows, &occurrence))
     }
 
+    /// Backward occurrence-window sequence: entry `0` is this calendar's own
+    /// in-progress occurrence of `season_def`, entries `1..=max_k` are the
+    /// consecutive results of walking [`previous_season_period_window`], each
+    /// computed exactly once — equivalent to calling [`Self::season_occurrence`]
+    /// independently for every `k` in `0..=max_k`, but without restarting the
+    /// walk from the anchor each time.
+    ///
+    /// `None` only when the calendar has no stages. A `Some` result may hold
+    /// fewer than `max_k + 1` entries: [`nth_previous_occurrence`]'s per-step
+    /// season lookup can fail partway through the chain, and every later step
+    /// depends on it, so the walk stops there — the same `k`s an independent
+    /// per-call [`Self::season_occurrence`] would have returned `None` for.
+    #[must_use]
+    pub fn season_occurrences(
+        &self,
+        season_map: &SeasonMap,
+        season_def: &SeasonDefinition,
+        max_k: usize,
+    ) -> Option<Vec<SeasonPeriodWindow>> {
+        let anchor_stage = self.stages.first()?;
+        let mut window = season_period_window(season_map, season_def, anchor_stage);
+        let mut current_id = season_def.id;
+        let mut occurrences = Vec::with_capacity(max_k + 1);
+        occurrences.push(SeasonPeriodWindow {
+            start: window.start,
+            end: window.end,
+            hours: window.hours,
+        });
+
+        for _ in 0..max_k {
+            let Some(current_def) = season_map.seasons.iter().find(|s| s.id == current_id) else {
+                break;
+            };
+            let Some(previous) = previous_season_period_window(season_map, current_def, &window)
+            else {
+                break;
+            };
+            let Some(next_id) = season_map.season_for_date(previous.start) else {
+                break;
+            };
+            current_id = next_id;
+            window = previous;
+            occurrences.push(SeasonPeriodWindow {
+                start: window.start,
+                end: window.end,
+                hours: window.hours,
+            });
+        }
+
+        Some(occurrences)
+    }
+
     /// Backward hour-window projection: the per-study-stage share of a
     /// `period_duration`-hour, fixed-rate pre-study window landing in each
     /// stage, where the window ends `cumulative_before` hours before an
@@ -1282,6 +1334,43 @@ mod tests {
 
             assert_eq!(actual.value, expected.value);
             assert_eq!(actual.coverage, expected.coverage);
+        }
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)] // both paths run the identical arithmetic; the comparison must be bit-exact
+    fn test_season_occurrences_matches_per_k_restart_sequence() {
+        let seasons: Vec<SeasonDefinition> = (0..12u32)
+            .map(|i| SeasonDefinition {
+                id: i as usize,
+                label: format!("Month{}", i + 1),
+                month_start: i + 1,
+                day_start: None,
+                month_end: None,
+                day_end: None,
+            })
+            .collect();
+        let season_map = SeasonMap {
+            cycle_type: SeasonCycleType::Monthly,
+            seasons,
+        };
+        let season_def = &season_map.seasons[3];
+        let first_stage = stage_with_width(0, NaiveDate::from_ymd_opt(2026, 4, 4).unwrap(), 28);
+        let stages = [first_stage];
+        let calendar = StageCalendar::new(&stages);
+        let max_k = 5;
+
+        let occurrences = calendar
+            .season_occurrences(&season_map, season_def, max_k)
+            .unwrap();
+        assert_eq!(occurrences.len(), max_k + 1);
+
+        let anchor = season_period_window(&season_map, season_def, &stages[0]);
+        for (k, occurrence) in occurrences.iter().enumerate() {
+            let expected = nth_previous_occurrence(&season_map, season_def, &anchor, k).unwrap();
+            assert_eq!(occurrence.start, expected.start);
+            assert_eq!(occurrence.end, expected.end);
+            assert_eq!(occurrence.hours, expected.hours);
         }
     }
 

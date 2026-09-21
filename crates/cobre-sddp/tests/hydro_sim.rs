@@ -1389,7 +1389,6 @@ mod transit_seed_output {
         PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
         ResolvedPenalties, System, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
     };
-    use cobre_io::ParquetWriterConfig;
     use cobre_io::config::{
         Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
         InflowNonNegativityMethod, ModelingConfig, PolicyConfig, RowSelectionConfig,
@@ -1701,10 +1700,8 @@ mod transit_seed_output {
         );
 
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
-        let parquet_config = ParquetWriterConfig::default();
-        let mut writer =
-            SimulationParquetWriter::new(tmp.path(), &build_system(false), &parquet_config)
-                .expect("SimulationParquetWriter::new must succeed");
+        let mut writer = SimulationParquetWriter::new(tmp.path(), &build_system(false))
+            .expect("SimulationParquetWriter::new must succeed");
         writer
             .write_scenario(ScenarioWritePayload::from(scenario))
             .expect("write_scenario must succeed");
@@ -1724,12 +1721,10 @@ mod transit_seed_output {
     /// `right_boundary_output.rs::identical_runs_produce_byte_identical_anticipated_lanes_parquet`.
     #[test]
     fn identical_runs_produce_byte_identical_transit_seed_parquet() {
-        let parquet_config = ParquetWriterConfig::default();
         let write_once = |tmp_path: &std::path::Path| {
             let scenario = simulate_one(build_system(true));
-            let mut writer =
-                SimulationParquetWriter::new(tmp_path, &build_system(true), &parquet_config)
-                    .expect("SimulationParquetWriter::new must succeed");
+            let mut writer = SimulationParquetWriter::new(tmp_path, &build_system(true))
+                .expect("SimulationParquetWriter::new must succeed");
             writer
                 .write_scenario(ScenarioWritePayload::from(scenario))
                 .expect("write_scenario must succeed");

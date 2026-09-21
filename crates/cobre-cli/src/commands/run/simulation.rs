@@ -9,7 +9,6 @@ use cobre_core::{System, TrainingEvent};
 use cobre_io::MetadataCost;
 use cobre_io::MetadataSimulationSolveStats;
 use cobre_io::OutputContext;
-use cobre_io::ParquetWriterConfig;
 use cobre_io::SimulationOutput;
 use cobre_io::now_iso8601;
 use cobre_io::output::simulation_writer::ScenarioWritePayload;
@@ -74,8 +73,7 @@ pub(super) fn run_simulation_phase(
     let io_capacity = sim_config.io_channel_capacity;
     let (result_tx, result_rx) = mpsc::sync_channel(io_capacity.max(1));
 
-    let parquet_config = ParquetWriterConfig::default();
-    let mut sim_writer = SimulationParquetWriter::new(&ctx.output_dir, system, &parquet_config)?;
+    let mut sim_writer = SimulationParquetWriter::new(&ctx.output_dir, system)?;
 
     // Drain straight to Parquet rather than collecting into a Vec and gathering
     // on rank 0 via MPI, which overflows i32 on large cases.

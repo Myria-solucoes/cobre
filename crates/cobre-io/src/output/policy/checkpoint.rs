@@ -11,9 +11,9 @@ use std::path::Path;
 use super::super::atomic::write_bytes_atomic;
 use super::super::error::OutputError;
 use super::codec::{
+    build_checkpoint_manifest, build_stage_basis, build_stage_cuts, build_stage_states,
     deserialize_checkpoint_manifest, deserialize_stage_basis, deserialize_stage_cuts,
-    deserialize_stage_states, read_sorted_bin_files, serialize_checkpoint_manifest,
-    serialize_stage_basis, serialize_stage_cuts, serialize_stage_states,
+    deserialize_stage_states, read_sorted_bin_files,
 };
 use super::records::{
     CheckpointManifest, ENTITY_SLOT_DATE_SENTINEL, EntitySlot, OwnedPolicyBasisRecord,
@@ -348,24 +348,24 @@ pub fn write_policy_checkpoint(
 
     for payload in stage_cuts {
         let file_path = cuts_dir.join(bin_file_name(payload.stage_id));
-        let buf = serialize_stage_cuts(payload);
-        write_bytes_atomic(&file_path, &buf)?;
+        let builder = build_stage_cuts(payload);
+        write_bytes_atomic(&file_path, builder.finished_data())?;
     }
 
     for record in stage_bases {
         let file_path = basis_dir.join(bin_file_name(record.stage_id));
-        let buf = serialize_stage_basis(record);
-        write_bytes_atomic(&file_path, &buf)?;
+        let builder = build_stage_basis(record);
+        write_bytes_atomic(&file_path, builder.finished_data())?;
     }
 
     for payload in stage_states {
         let file_path = states_dir.join(bin_file_name(payload.stage_id));
-        let buf = serialize_stage_states(payload);
-        write_bytes_atomic(&file_path, &buf)?;
+        let builder = build_stage_states(payload);
+        write_bytes_atomic(&file_path, builder.finished_data())?;
     }
 
-    let manifest_buf = serialize_checkpoint_manifest(metadata);
-    write_bytes_atomic(&manifest_path, &manifest_buf)?;
+    let manifest_builder = build_checkpoint_manifest(metadata);
+    write_bytes_atomic(&manifest_path, manifest_builder.finished_data())?;
 
     Ok(())
 }

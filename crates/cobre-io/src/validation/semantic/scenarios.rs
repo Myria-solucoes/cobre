@@ -528,7 +528,8 @@ struct ClassExternal {
     name: &'static str,
     file: &'static str,
     /// `(stage_idx, scenario_id, entity_id) -> value` over rows whose `stage_id`
-    /// resolves; a repeated key is an A1 duplicate, caught on insert.
+    /// resolves; a repeated key is an A1 duplicate, caught on insert. Left
+    /// empty when [`extract_class`]'s `populate_values` is `false`.
     cells: HashMap<(usize, i32, i32), f64>,
     entities: BTreeSet<i32>,
     raw_c: Vec<usize>,
@@ -570,6 +571,10 @@ pub(super) fn check_external_library_coherence(data: &ParsedData, ctx: &mut Vali
         .chain(data.inflow_annual_components.iter().map(|r| r.hydro_id.0))
         .collect();
 
+    // check_prefix_coherence (the sole reader of ClassExternal.cells' values)
+    // runs only under a declared nodes[] graph; skip populating values otherwise.
+    let policy_graph_declared = !data.stages.policy_graph.nodes.is_empty();
+
     let mut classes: Vec<ClassExternal> = Vec::new();
     if source.inflow_scheme == SamplingScheme::External && !data.external_scenarios.is_empty() {
         classes.push(extract_class(
@@ -582,6 +587,7 @@ pub(super) fn check_external_library_coherence(data: &ParsedData, ctx: &mut Vali
             &resolver,
             n_stages,
             &hydros_with_ar_dynamics,
+            policy_graph_declared,
             ctx,
         ));
     }
@@ -596,6 +602,7 @@ pub(super) fn check_external_library_coherence(data: &ParsedData, ctx: &mut Vali
             &resolver,
             n_stages,
             &hydros_with_ar_dynamics,
+            policy_graph_declared,
             ctx,
         ));
     }
@@ -610,13 +617,14 @@ pub(super) fn check_external_library_coherence(data: &ParsedData, ctx: &mut Vali
             &resolver,
             n_stages,
             &hydros_with_ar_dynamics,
+            policy_graph_declared,
             ctx,
         ));
     }
 
     check_raw_c_agreement(&classes, &study_ids, ctx);
 
-    if !data.stages.policy_graph.nodes.is_empty() {
+    if policy_graph_declared {
         check_prefix_coherence(data, &classes, &resolver, ctx);
     }
 }
@@ -633,6 +641,11 @@ pub(super) fn check_external_library_coherence(data: &ParsedData, ctx: &mut Vali
 /// deterministic base is exactly μ) and rejected for one present in it
 /// (AR(p > 0): a deterministic value would have to equal a PAR output this
 /// loader cannot compute upstream).
+///
+/// `populate_values`: when `false` (no declared `nodes[]`), the returned
+/// [`ClassExternal::cells`] carries no values -- only [`check_prefix_coherence`]
+/// reads them, and it does not run in that dialect. A1 duplicate detection
+/// still runs, over a key-only set.
 fn extract_class(
     name: &'static str,
     file: &'static str,
@@ -641,9 +654,11 @@ fn extract_class(
     resolver: &StageIdResolver,
     n_stages: usize,
     hydros_with_ar_dynamics: &HashSet<i32>,
+    populate_values: bool,
     ctx: &mut ValidationContext,
 ) -> ClassExternal {
     let mut cells: HashMap<(usize, i32, i32), f64> = HashMap::new();
+    let mut seen_keys: HashSet<(usize, i32, i32)> = HashSet::new();
     let mut entities: BTreeSet<i32> = BTreeSet::new();
     let mut union_by_stage: Vec<BTreeSet<i32>> = vec![BTreeSet::new(); n_stages];
     let mut entity_scen: HashMap<(usize, i32), BTreeSet<i32>> = HashMap::new();
@@ -663,10 +678,14 @@ fn extract_class(
             );
             continue;
         };
-        if cells
-            .insert((stage_idx, scenario_id, entity_id), value)
-            .is_some()
-        {
+        let is_duplicate = if populate_values {
+            cells
+                .insert((stage_idx, scenario_id, entity_id), value)
+                .is_some()
+        } else {
+            !seen_keys.insert((stage_idx, scenario_id, entity_id))
+        };
+        if is_duplicate {
             ctx.add_error(
                 ErrorKind::BusinessRuleViolation,
                 file,
@@ -842,37 +861,77 @@ fn check_prefix_coherence(
         }
     }
 
+    // Several edges can share the same (class, cn, cm) column pair (e.g. a
+    // fan-in of source nodes onto one column); memoise the walk per pair so
+    // it runs once for the deepest sn seen, not once per edge. Every edge
+    // still gets its own warning, attributed only when the cached first
+    // disagreement falls within that edge's own prefix depth.
+    let mut walks: HashMap<(usize, i32, i32), PrefixWalk> = HashMap::new();
+
     for tr in &graph.transitions {
         let (Some(&(sn, Some(cn))), Some(&(_, Some(cm)))) =
             (node_info.get(&tr.source_id), node_info.get(&tr.target_id))
         else {
             continue;
         };
-        for class in classes {
-            for s in 0..=sn {
-                let disagreement = class.entities.iter().find_map(|&e| {
-                    match (class.cells.get(&(s, cn, e)), class.cells.get(&(s, cm, e))) {
-                        (Some(&va), Some(&vb)) if va.to_bits() != vb.to_bits() => Some((e, va, vb)),
-                        _ => None,
-                    }
-                });
-                if let Some((e, va, vb)) = disagreement {
-                    let stage_id = resolver.id_at(s).unwrap_or_default();
-                    ctx.add_warning(
-                        ErrorKind::ModelQuality,
-                        class.file,
-                        Some(format!("edge {}->{}", tr.source_id, tr.target_id)),
-                        format!(
-                            "prefix-coherence: external class '{}' columns {cn} and {cm} \
-                             (edge {}->{}) disagree at stage {stage_id}, entity {e}: {va} vs {vb}; \
-                             a node reproduces its pointed column's own history, not the mixed path",
-                            class.name, tr.source_id, tr.target_id
-                        ),
-                    );
-                    break;
-                }
+        for (class_idx, class) in classes.iter().enumerate() {
+            let walk = walks.entry((class_idx, cn, cm)).or_default();
+            walk.extend_to(class, cn, cm, sn);
+            if let Some((s, e, va, vb)) = walk.disagreement.filter(|&(s, ..)| s <= sn) {
+                let stage_id = resolver.id_at(s).unwrap_or_default();
+                ctx.add_warning(
+                    ErrorKind::ModelQuality,
+                    class.file,
+                    Some(format!("edge {}->{}", tr.source_id, tr.target_id)),
+                    format!(
+                        "prefix-coherence: external class '{}' columns {cn} and {cm} \
+                         (edge {}->{}) disagree at stage {stage_id}, entity {e}: {va} vs {vb}; \
+                         a node reproduces its pointed column's own history, not the mixed path",
+                        class.name, tr.source_id, tr.target_id
+                    ),
+                );
             }
         }
+    }
+}
+
+/// Incremental prefix walk for one `(class, cn, cm)` column pair, shared by
+/// every edge that reaches it: extends forward from the last stage walked,
+/// never re-scanning a stage whose disagreement outcome is already known.
+#[derive(Default)]
+struct PrefixWalk {
+    /// Inclusive stage depth walked so far, or `None` before the first call.
+    walked_through: Option<usize>,
+    /// The first (lowest-stage) disagreement found within `0..=walked_through`.
+    disagreement: Option<(usize, i32, f64, f64)>,
+}
+
+impl PrefixWalk {
+    /// Extends the walk to cover `0..=sn` unless a disagreement is already
+    /// cached (it is necessarily the first one, valid for any larger `sn`)
+    /// or that depth was already walked. Stops at the first disagreement
+    /// found, matching the per-edge scan it replaces.
+    fn extend_to(&mut self, class: &ClassExternal, cn: i32, cm: i32, sn: usize) {
+        if self.disagreement.is_some() {
+            return;
+        }
+        let start = self.walked_through.map_or(0, |d| d + 1);
+        if start > sn {
+            return;
+        }
+        for s in start..=sn {
+            let found = class.entities.iter().find_map(|&e| {
+                match (class.cells.get(&(s, cn, e)), class.cells.get(&(s, cm, e))) {
+                    (Some(&va), Some(&vb)) if va.to_bits() != vb.to_bits() => Some((s, e, va, vb)),
+                    _ => None,
+                }
+            });
+            if found.is_some() {
+                self.disagreement = found;
+                break;
+            }
+        }
+        self.walked_through = Some(sn);
     }
 }
 
@@ -957,14 +1016,7 @@ fn window_hours(start: chrono::NaiveDate, end: chrono::NaiveDate) -> f64 {
 /// Rule 21: Every hydro in the system must have at least one observation in
 /// `inflow_history.parquet`; missing hydros cannot be estimated.
 pub(super) fn check_estimation_prerequisites(data: &ParsedData, ctx: &mut ValidationContext) {
-    // Mirror the runtime's estimation trigger: it skips only when BOTH stats and
-    // AR coefficients are present, so estimation is active otherwise (history present).
-    let has_history = !data.inflow_history.is_empty();
-    let has_stats = !data.inflow_seasonal_stats.is_empty();
-    let has_ar_coefficients = !data.inflow_ar_coefficients.is_empty();
-    let estimation_active = has_history && !(has_stats && has_ar_coefficients);
-
-    if !estimation_active {
+    if !super::season::estimation_active(data) {
         return;
     }
 
@@ -1004,13 +1056,7 @@ pub(super) fn check_estimation_prerequisites(data: &ParsedData, ctx: &mut Valida
     if data.stages.policy_graph.season_map.is_some() {
         let min_obs = data.config.estimation.min_observations_per_season as usize;
 
-        // Stages are sorted by id, which matches date order — partition_point relies on it.
-        let stage_index: Vec<(chrono::NaiveDate, chrono::NaiveDate, usize)> = data
-            .stages
-            .stages
-            .iter()
-            .filter_map(|s| s.season_id.map(|sid| (s.start_date, s.end_date, sid)))
-            .collect();
+        let stage_index = super::season::build_stage_index(data);
 
         // Bucket rows by the study-stage occurrence they fall within, keyed by
         // (hydro_id, stage_index position): a stage's rows may be split across
@@ -1019,16 +1065,13 @@ pub(super) fn check_estimation_prerequisites(data: &ParsedData, ctx: &mut Valida
         // partial occurrence must not count.
         let mut rows_by_occurrence: HashMap<(i32, usize), Vec<RealizedWindow>> = HashMap::new();
         for row in &data.inflow_history {
-            let pos = stage_index.partition_point(|(start, _, _)| *start <= row.start_date);
-            if pos == 0 {
+            let Some(stage_pos) =
+                super::season::resolve_stage_position(&stage_index, row.start_date)
+            else {
                 continue;
-            }
-            let (_, end_date, _) = stage_index[pos - 1];
-            if row.start_date >= end_date {
-                continue;
-            }
+            };
             rows_by_occurrence
-                .entry((row.hydro_id.0, pos - 1))
+                .entry((row.hydro_id.0, stage_pos))
                 .or_default()
                 .push(RealizedWindow {
                     start_date: row.start_date,
@@ -2622,6 +2665,34 @@ mod tests {
         );
     }
 
+    /// On a chain-dialect deck (no `nodes[]`), `extract_class` tracks
+    /// duplicates in a key-only set instead of the value map -- the rejection
+    /// must still fire, byte-identical to the value-carrying path.
+    #[test]
+    fn a1_rejects_duplicate_chain_dialect_key_only() {
+        let data = external_data(
+            vec![0],
+            vec![inflow_row(1, 0, 0, 10.0), inflow_row(1, 0, 0, 11.0)],
+            vec![],
+            vec![],
+        );
+        assert!(
+            data.stages.policy_graph.nodes.is_empty(),
+            "chain-dialect fixture"
+        );
+        let ctx = run(&data);
+        assert!(
+            error_msgs(&ctx).iter().any(|m| {
+                m.contains(
+                    "inflow external library has a duplicate row at stage 0 for scenario_id 0, \
+                     entity 1",
+                )
+            }),
+            "a key-only duplicate check must still reject the duplicate row, got: {:?}",
+            error_msgs(&ctx)
+        );
+    }
+
     /// An out-of-range member (`5`) is rejected naming the offending value.
     #[test]
     fn a1_rejects_out_of_range() {
@@ -2881,6 +2952,202 @@ mod tests {
                 .any(|w| w.message.contains("prefix-coherence")),
             "identical trunk columns must not warn, got: {:?}",
             ctx.warnings()
+        );
+    }
+
+    /// A second source node (id 3) shares stage 0, column 0 with node 0, so
+    /// edges `0->2` and `3->2` share the same `(cn, cm, sn)` triple
+    /// [`PrefixWalk`] memoises. Both edges must still warn independently, in
+    /// transition order, each with its own edge attribution -- the memo
+    /// removes the redundant re-walk, never a warning.
+    #[test]
+    fn prefix_coherence_shared_pair_warns_independently_per_edge() {
+        let mut data = prefix_graph_data(10.0, 20.0);
+        data.stages.policy_graph.nodes.push(Node {
+            id: 3,
+            stage_id: 0,
+            scenario_id: Some(0),
+            label: None,
+        });
+        data.stages.policy_graph.transitions.push(Transition {
+            source_id: 3,
+            target_id: 2,
+            probability: 0.5,
+            annual_discount_rate_override: None,
+        });
+        let ctx = run(&data);
+        let prefix_warnings: Vec<_> = ctx
+            .warnings()
+            .into_iter()
+            .filter(|w| w.message.contains("prefix-coherence"))
+            .collect();
+        assert_eq!(
+            prefix_warnings.len(),
+            2,
+            "both edges sharing (cn,cm,sn) must warn independently, got: {:?}",
+            ctx.warnings()
+        );
+        assert!(
+            prefix_warnings[0].message.contains("0->2"),
+            "edge 0->2 (declared first) must warn first, got: {prefix_warnings:?}"
+        );
+        assert!(
+            prefix_warnings[1].message.contains("3->2"),
+            "edge 3->2 (declared second) must warn second, got: {prefix_warnings:?}"
+        );
+        for w in &prefix_warnings {
+            assert!(
+                w.message.contains("10") && w.message.contains("20"),
+                "each edge's own warning must name both disagreeing values, got: {}",
+                w.message
+            );
+        }
+    }
+
+    /// Two edges share the same `(cn, cm)` column pair but differ in `sn`: a
+    /// DEEP edge (`0->2`, `sn=2`) and a SHALLOW edge (`1->2`, `sn=0`). Columns
+    /// agree at stage 0 and disagree at stage 1 -- so the deep edge's own
+    /// prefix reaches the disagreement (must warn) while the shallow edge's
+    /// own prefix (`0..=0`) never does (must not warn), even though the deep
+    /// edge is declared FIRST and caches the disagreement before the shallow
+    /// edge is evaluated. Without the depth-gated attribution, the shallow
+    /// edge would spuriously inherit the deep edge's cached disagreement.
+    #[test]
+    fn prefix_coherence_differing_sn_shallow_edge_does_not_inherit_deep_disagreement() {
+        let inflow = vec![
+            inflow_row(1, 0, 0, 10.0),
+            inflow_row(1, 0, 1, 10.0),
+            inflow_row(1, 1, 0, 10.0),
+            inflow_row(1, 1, 1, 20.0),
+            inflow_row(1, 2, 0, 30.0),
+            inflow_row(1, 2, 1, 30.0),
+        ];
+        let mut data = external_data(vec![0, 1, 2], inflow, vec![], vec![]);
+        data.stages.policy_graph.nodes = vec![
+            Node {
+                id: 0,
+                stage_id: 2,
+                scenario_id: Some(0),
+                label: None,
+            },
+            Node {
+                id: 1,
+                stage_id: 0,
+                scenario_id: Some(0),
+                label: None,
+            },
+            Node {
+                id: 2,
+                stage_id: 1,
+                scenario_id: Some(1),
+                label: None,
+            },
+        ];
+        data.stages.policy_graph.transitions = vec![
+            Transition {
+                source_id: 0,
+                target_id: 2,
+                probability: 0.5,
+                annual_discount_rate_override: None,
+            },
+            Transition {
+                source_id: 1,
+                target_id: 2,
+                probability: 0.5,
+                annual_discount_rate_override: None,
+            },
+        ];
+
+        let ctx = run(&data);
+        let prefix_warnings: Vec<_> = ctx
+            .warnings()
+            .into_iter()
+            .filter(|w| w.message.contains("prefix-coherence"))
+            .collect();
+        assert_eq!(
+            prefix_warnings.len(),
+            1,
+            "only the deep edge (sn >= the disagreement's stage) may warn; the \
+             shallow edge (sn < that stage) must not inherit the cached \
+             disagreement, got: {prefix_warnings:?}"
+        );
+        let msg = &prefix_warnings[0].message;
+        assert!(
+            msg.contains("0->2") && !msg.contains("1->2"),
+            "the warning must be attributed to the deep edge 0->2, not the \
+             shallow edge 1->2, got: {msg}"
+        );
+        assert!(
+            msg.contains("stage 1") && msg.contains("10") && msg.contains("20"),
+            "the warning must name stage 1 and both disagreeing values, got: {msg}"
+        );
+    }
+
+    /// The reverse declaration order (shallow edge first) reaches the same
+    /// outcome: the shallow edge's own walk never reaches the disagreement, and
+    /// the deep edge extends the walk past it afterward.
+    #[test]
+    fn prefix_coherence_differing_sn_shallow_edge_does_not_inherit_deep_disagreement_reverse_order()
+    {
+        let inflow = vec![
+            inflow_row(1, 0, 0, 10.0),
+            inflow_row(1, 0, 1, 10.0),
+            inflow_row(1, 1, 0, 10.0),
+            inflow_row(1, 1, 1, 20.0),
+            inflow_row(1, 2, 0, 30.0),
+            inflow_row(1, 2, 1, 30.0),
+        ];
+        let mut data = external_data(vec![0, 1, 2], inflow, vec![], vec![]);
+        data.stages.policy_graph.nodes = vec![
+            Node {
+                id: 0,
+                stage_id: 2,
+                scenario_id: Some(0),
+                label: None,
+            },
+            Node {
+                id: 1,
+                stage_id: 0,
+                scenario_id: Some(0),
+                label: None,
+            },
+            Node {
+                id: 2,
+                stage_id: 1,
+                scenario_id: Some(1),
+                label: None,
+            },
+        ];
+        data.stages.policy_graph.transitions = vec![
+            Transition {
+                source_id: 1,
+                target_id: 2,
+                probability: 0.5,
+                annual_discount_rate_override: None,
+            },
+            Transition {
+                source_id: 0,
+                target_id: 2,
+                probability: 0.5,
+                annual_discount_rate_override: None,
+            },
+        ];
+
+        let ctx = run(&data);
+        let prefix_warnings: Vec<_> = ctx
+            .warnings()
+            .into_iter()
+            .filter(|w| w.message.contains("prefix-coherence"))
+            .collect();
+        assert_eq!(
+            prefix_warnings.len(),
+            1,
+            "declaration order must not change the outcome, got: {prefix_warnings:?}"
+        );
+        assert!(
+            prefix_warnings[0].message.contains("0->2"),
+            "the warning must still be attributed to the deep edge, got: {:?}",
+            prefix_warnings[0]
         );
     }
 

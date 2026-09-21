@@ -15,7 +15,6 @@ use cobre_core::System;
 
 use crate::output::atomic::{write_bytes_atomic, write_parquet_atomic};
 use crate::output::error::OutputError;
-use crate::output::parquet_config::ParquetWriterConfig;
 use crate::output::schemas::{OUTPUT_SCHEMAS, bounds_schema};
 #[cfg(test)]
 use crate::output::schemas::{hydro_bus_generation_schema, hydros_schema};
@@ -63,7 +62,7 @@ pub fn write_dictionaries(path: &Path, system: &System) -> Result<(), OutputErro
     write_codes_json(path)?;
     write_entities_csv(path, system)?;
     write_variables_csv(path)?;
-    write_bounds_parquet(path, system, &ParquetWriterConfig::default())?;
+    write_bounds_parquet(path, system)?;
     Ok(())
 }
 
@@ -784,11 +783,7 @@ fn description_for(file: &str, column: &str) -> &'static str {
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap
 )]
-fn write_bounds_parquet(
-    path: &Path,
-    system: &System,
-    config: &ParquetWriterConfig,
-) -> Result<(), OutputError> {
+fn write_bounds_parquet(path: &Path, system: &System) -> Result<(), OutputError> {
     let schema = Arc::new(bounds_schema());
     let n_stages = system.bounds().n_stages();
 
@@ -1301,7 +1296,7 @@ fn write_bounds_parquet(
     .map_err(|e| OutputError::serialization("bounds", e.to_string()))?;
 
     let parquet_path = path.join("bounds.parquet");
-    write_parquet_atomic(&parquet_path, &batch, config)
+    write_parquet_atomic(&parquet_path, &batch)
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -2364,10 +2359,8 @@ mod tests {
     fn bounds_parquet_roundtrip() {
         let system = make_system_1h_2stages(100.0, 500.0);
         let tmp = tempfile::tempdir().unwrap();
-        let config = ParquetWriterConfig::default();
 
-        write_bounds_parquet(tmp.path(), &system, &config)
-            .expect("write_bounds_parquet must succeed");
+        write_bounds_parquet(tmp.path(), &system).expect("write_bounds_parquet must succeed");
 
         let path = tmp.path().join("bounds.parquet");
         assert!(path.exists(), "bounds.parquet must exist");
@@ -2445,10 +2438,8 @@ mod tests {
     fn bounds_parquet_emits_no_block_rows_when_overlay_empty() {
         let system = make_system_2h_2t_blocks(ResolvedBlockBounds::empty());
         let tmp = tempfile::tempdir().unwrap();
-        let config = ParquetWriterConfig::default();
 
-        write_bounds_parquet(tmp.path(), &system, &config)
-            .expect("write_bounds_parquet must succeed");
+        write_bounds_parquet(tmp.path(), &system).expect("write_bounds_parquet must succeed");
 
         let batch = read_first_batch(&tmp.path().join("bounds.parquet"));
 
@@ -2475,10 +2466,8 @@ mod tests {
     fn bounds_parquet_emits_per_block_override_rows() {
         let system = make_system_2h_2t_blocks(make_two_block_overrides());
         let tmp = tempfile::tempdir().unwrap();
-        let config = ParquetWriterConfig::default();
 
-        write_bounds_parquet(tmp.path(), &system, &config)
-            .expect("write_bounds_parquet must succeed");
+        write_bounds_parquet(tmp.path(), &system).expect("write_bounds_parquet must succeed");
 
         let batch = read_first_batch(&tmp.path().join("bounds.parquet"));
 
@@ -2627,17 +2616,15 @@ mod tests {
                 .collect()
         }
 
-        let config = ParquetWriterConfig::default();
-
         let empty_system = make_system_2h_2t_blocks(ResolvedBlockBounds::empty());
         let tmp_empty = tempfile::tempdir().unwrap();
-        write_bounds_parquet(tmp_empty.path(), &empty_system, &config)
+        write_bounds_parquet(tmp_empty.path(), &empty_system)
             .expect("write_bounds_parquet must succeed");
         let empty_rows = read_null_block_rows(&tmp_empty.path().join("bounds.parquet"));
 
         let overlaid_system = make_system_2h_2t_blocks(make_two_block_overrides());
         let tmp_overlaid = tempfile::tempdir().unwrap();
-        write_bounds_parquet(tmp_overlaid.path(), &overlaid_system, &config)
+        write_bounds_parquet(tmp_overlaid.path(), &overlaid_system)
             .expect("write_bounds_parquet must succeed");
         let overlaid_rows = read_null_block_rows(&tmp_overlaid.path().join("bounds.parquet"));
 
@@ -2653,10 +2640,8 @@ mod tests {
             make_line_pumping_contract_block_overrides(),
         );
         let tmp = tempfile::tempdir().unwrap();
-        let config = ParquetWriterConfig::default();
 
-        write_bounds_parquet(tmp.path(), &system, &config)
-            .expect("write_bounds_parquet must succeed");
+        write_bounds_parquet(tmp.path(), &system).expect("write_bounds_parquet must succeed");
 
         let batch = read_first_batch(&tmp.path().join("bounds.parquet"));
 
@@ -2903,10 +2888,8 @@ mod tests {
     fn bounds_parquet_group_rows_report_resolved_values_with_hydro_id() {
         let system = make_system_1h_2groups(ResolvedHydroUnitGroupBounds::empty());
         let tmp = tempfile::tempdir().unwrap();
-        let config = ParquetWriterConfig::default();
 
-        write_bounds_parquet(tmp.path(), &system, &config)
-            .expect("write_bounds_parquet must succeed");
+        write_bounds_parquet(tmp.path(), &system).expect("write_bounds_parquet must succeed");
 
         let (batch, entity_type_col, entity_id_col) =
             read_bounds_parquet_columns(&tmp.path().join("bounds.parquet"));
@@ -3019,10 +3002,8 @@ mod tests {
 
         let system = make_system_1h_2groups(overlay);
         let tmp = tempfile::tempdir().unwrap();
-        let config = ParquetWriterConfig::default();
 
-        write_bounds_parquet(tmp.path(), &system, &config)
-            .expect("write_bounds_parquet must succeed");
+        write_bounds_parquet(tmp.path(), &system).expect("write_bounds_parquet must succeed");
 
         let (batch, entity_type_col, entity_id_col) =
             read_bounds_parquet_columns(&tmp.path().join("bounds.parquet"));

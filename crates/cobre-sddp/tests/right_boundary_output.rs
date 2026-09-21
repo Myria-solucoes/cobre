@@ -29,7 +29,6 @@ use cobre_core::{
     PostStudyThermalBound, PumpingBlockBounds, ResolvedBounds, System, SystemBuilder,
     ThermalBlockBounds, ThermalStageBounds,
 };
-use cobre_io::ParquetWriterConfig;
 use cobre_io::config::SimulationSelection;
 use cobre_io::output::simulation_writer::{ScenarioWritePayload, SimulationParquetWriter};
 use cobre_sddp::{SimulationScenarioResult, StudySetup};
@@ -451,13 +450,8 @@ mod inert_without_commitment {
         let results = simulate_sorted(&mut setup, 1);
 
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
-        let parquet_config = ParquetWriterConfig::default();
-        let mut writer = SimulationParquetWriter::new(
-            tmp.path(),
-            &build_system(false, 0.0, 0.0),
-            &parquet_config,
-        )
-        .expect("SimulationParquetWriter::new must succeed");
+        let mut writer = SimulationParquetWriter::new(tmp.path(), &build_system(false, 0.0, 0.0))
+            .expect("SimulationParquetWriter::new must succeed");
 
         for scenario in results {
             writer
@@ -486,15 +480,13 @@ mod shared_writer_parity {
 
     #[test]
     fn identical_runs_produce_byte_identical_anticipated_lanes_parquet() {
-        let parquet_config = ParquetWriterConfig::default();
-
         let write_once = |tmp_path: &std::path::Path| {
             let system = build_system(true, PINNED_MW, PINNED_MW);
             let mut setup =
                 build_setup_in_code(build_system(true, PINNED_MW, PINNED_MW), &config(1));
             let results = simulate_sorted(&mut setup, 1);
 
-            let mut writer = SimulationParquetWriter::new(tmp_path, &system, &parquet_config)
+            let mut writer = SimulationParquetWriter::new(tmp_path, &system)
                 .expect("SimulationParquetWriter::new must succeed");
             for scenario in results {
                 writer

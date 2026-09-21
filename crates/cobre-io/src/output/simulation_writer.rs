@@ -56,7 +56,6 @@ use crate::MetadataSimulationSolveStats;
 use crate::output::SimulationOutput;
 use crate::output::atomic::write_parquet_atomic;
 use crate::output::error::OutputError;
-use crate::output::parquet_config::ParquetWriterConfig;
 use crate::output::schemas::{
     anticipated_lanes_schema, buses_schema, contracts_schema, costs_schema, exchanges_schema,
     generic_violations_schema, hydro_bus_generation_schema, hydros_schema, in_transit_schema,
@@ -523,19 +522,16 @@ pub struct SimulationPathRecord {
 ///
 /// ```no_run
 /// use cobre_io::output::simulation_writer::SimulationParquetWriter;
-/// use cobre_io::ParquetWriterConfig;
 /// use std::path::Path;
 ///
 /// # fn main() -> Result<(), cobre_io::OutputError> {
 /// # let system = unimplemented!();
-/// let config = ParquetWriterConfig::default();
-/// let writer = SimulationParquetWriter::new(Path::new("/tmp/out"), system, &config)?;
+/// let writer = SimulationParquetWriter::new(Path::new("/tmp/out"), system)?;
 /// # Ok(())
 /// # }
 /// ```
 pub struct SimulationParquetWriter {
     output_dir: PathBuf,
-    config: ParquetWriterConfig,
     /// Hours, indexed `[stage_position][block_index]`; `stage_position` is the
     /// 0-based index into `system.stages()` (sorted by stage ID), which the
     /// simulation's 0-based `stage_id` values match for study stages (ID >= 0).
@@ -566,11 +562,7 @@ impl SimulationParquetWriter {
     /// # Errors
     ///
     /// - [`OutputError::IoError`] if any directory cannot be created.
-    pub fn new(
-        output_dir: &Path,
-        system: &System,
-        config: &ParquetWriterConfig,
-    ) -> Result<Self, OutputError> {
+    pub fn new(output_dir: &Path, system: &System) -> Result<Self, OutputError> {
         let sim_dir = output_dir.join("simulation");
 
         let block_durations: Vec<Vec<f64>> = system
@@ -594,7 +586,6 @@ impl SimulationParquetWriter {
 
         Ok(Self {
             output_dir: output_dir.to_path_buf(),
-            config: config.clone(),
             block_durations,
             loss_factors,
             scenarios_written: 0,
@@ -625,7 +616,7 @@ impl SimulationParquetWriter {
             .join(suffix);
         std::fs::create_dir_all(&part_dir).map_err(|e| OutputError::io(&part_dir, e))?;
         let file_path = part_dir.join("data.parquet");
-        write_parquet_atomic(&file_path, batch, &self.config)?;
+        write_parquet_atomic(&file_path, batch)?;
         Ok(())
     }
 
@@ -1184,11 +1175,7 @@ pub fn write_paths(
 
     let sim_dir = output_dir.join("simulation");
     std::fs::create_dir_all(&sim_dir).map_err(|e| OutputError::io(&sim_dir, e))?;
-    write_parquet_atomic(
-        &sim_dir.join("paths.parquet"),
-        &batch,
-        &ParquetWriterConfig::default(),
-    )
+    write_parquet_atomic(&sim_dir.join("paths.parquet"), &batch)
 }
 
 /// Write the run-level, unpartitioned `simulation/scenario_summary.parquet` from
@@ -1233,11 +1220,7 @@ pub fn write_scenario_summary(
 
     let sim_dir = output_dir.join("simulation");
     std::fs::create_dir_all(&sim_dir).map_err(|e| OutputError::io(&sim_dir, e))?;
-    write_parquet_atomic(
-        &sim_dir.join("scenario_summary.parquet"),
-        &batch,
-        &ParquetWriterConfig::default(),
-    )
+    write_parquet_atomic(&sim_dir.join("scenario_summary.parquet"), &batch)
 }
 
 // ---------------------------------------------------------------------------
@@ -1270,7 +1253,7 @@ fn build_costs_batch<'a>(
     scenario_id: i32,
     n: usize,
 ) -> Result<RecordBatch, OutputError> {
-    let schema = Arc::new(costs_schema());
+    let schema = costs_schema();
 
     let mut scenario_id_col = Int32Builder::with_capacity(n);
     let mut stage_id = Int32Builder::with_capacity(n);
@@ -1532,7 +1515,7 @@ fn build_hydros_batch<'a>(
     block_durations: &[Vec<f64>],
     n: usize,
 ) -> Result<RecordBatch, OutputError> {
-    let schema = Arc::new(hydros_schema());
+    let schema = hydros_schema();
     let mut b = HydroBuilders::with_capacity(n);
     fill_hydro_builders(records, scenario_id, block_durations, &mut b);
     RecordBatch::try_new(
@@ -1589,7 +1572,7 @@ fn build_hydro_bus_generation_batch<'a>(
     block_durations: &[Vec<f64>],
     n: usize,
 ) -> Result<RecordBatch, OutputError> {
-    let schema = Arc::new(hydro_bus_generation_schema());
+    let schema = hydro_bus_generation_schema();
 
     let mut scenario_id_col = Int32Builder::with_capacity(n);
     let mut stage_id = Int32Builder::with_capacity(n);
@@ -1640,7 +1623,7 @@ fn build_thermals_batch<'a>(
     block_durations: &[Vec<f64>],
     n: usize,
 ) -> Result<RecordBatch, OutputError> {
-    let schema = Arc::new(thermals_schema());
+    let schema = thermals_schema();
 
     let mut scenario_id_col = Int32Builder::with_capacity(n);
     let mut stage_id = Int32Builder::with_capacity(n);
@@ -1712,7 +1695,7 @@ fn build_exchanges_batch<'a>(
     loss_factors: &HashMap<i32, f64>,
     n: usize,
 ) -> Result<RecordBatch, OutputError> {
-    let schema = Arc::new(exchanges_schema());
+    let schema = exchanges_schema();
 
     let mut scenario_id_col = Int32Builder::with_capacity(n);
     let mut stage_id = Int32Builder::with_capacity(n);
@@ -1784,7 +1767,7 @@ fn build_buses_batch<'a>(
     block_durations: &[Vec<f64>],
     n: usize,
 ) -> Result<RecordBatch, OutputError> {
-    let schema = Arc::new(buses_schema());
+    let schema = buses_schema();
 
     let mut scenario_id_col = Int32Builder::with_capacity(n);
     let mut stage_id = Int32Builder::with_capacity(n);
@@ -1854,7 +1837,7 @@ fn build_pumping_batch<'a>(
     block_durations: &[Vec<f64>],
     n: usize,
 ) -> Result<RecordBatch, OutputError> {
-    let schema = Arc::new(pumping_stations_schema());
+    let schema = pumping_stations_schema();
 
     let mut scenario_id_col = Int32Builder::with_capacity(n);
     let mut stage_id = Int32Builder::with_capacity(n);
@@ -1911,7 +1894,7 @@ fn build_contracts_batch<'a>(
     block_durations: &[Vec<f64>],
     n: usize,
 ) -> Result<RecordBatch, OutputError> {
-    let schema = Arc::new(contracts_schema());
+    let schema = contracts_schema();
 
     let mut scenario_id_col = Int32Builder::with_capacity(n);
     let mut stage_id = Int32Builder::with_capacity(n);
@@ -1966,7 +1949,7 @@ fn build_non_controllables_batch<'a>(
     block_durations: &[Vec<f64>],
     n: usize,
 ) -> Result<RecordBatch, OutputError> {
-    let schema = Arc::new(non_controllables_schema());
+    let schema = non_controllables_schema();
 
     let mut scenario_id_col = Int32Builder::with_capacity(n);
     let mut stage_id = Int32Builder::with_capacity(n);
@@ -2023,7 +2006,7 @@ fn build_inflow_lags_batch<'a>(
     scenario_id: i32,
     n: usize,
 ) -> Result<RecordBatch, OutputError> {
-    let schema = Arc::new(inflow_lags_schema());
+    let schema = inflow_lags_schema();
 
     let mut scenario_id_col = Int32Builder::with_capacity(n);
     let mut stage_id = Int32Builder::with_capacity(n);
@@ -2061,7 +2044,7 @@ fn build_in_transit_batch<'a>(
     scenario_id: i32,
     n: usize,
 ) -> Result<RecordBatch, OutputError> {
-    let schema = Arc::new(in_transit_schema());
+    let schema = in_transit_schema();
 
     let mut scenario_id_col = Int32Builder::with_capacity(n);
     let mut stage_id = Int32Builder::with_capacity(n);
@@ -2102,7 +2085,7 @@ fn build_transit_seed_batch<'a>(
     scenario_id: i32,
     n: usize,
 ) -> Result<RecordBatch, OutputError> {
-    let schema = Arc::new(transit_seed_schema());
+    let schema = transit_seed_schema();
 
     let mut scenario_id_col = Int32Builder::with_capacity(n);
     let mut hydro_id = Int32Builder::with_capacity(n);
@@ -2137,7 +2120,7 @@ fn build_generic_violations_batch<'a>(
     scenario_id: i32,
     n: usize,
 ) -> Result<RecordBatch, OutputError> {
-    let schema = Arc::new(generic_violations_schema());
+    let schema = generic_violations_schema();
 
     let mut scenario_id_col = Int32Builder::with_capacity(n);
     let mut stage_id = Int32Builder::with_capacity(n);
@@ -2178,7 +2161,7 @@ fn build_anticipated_lanes_batch<'a>(
     scenario_id: i32,
     n: usize,
 ) -> Result<RecordBatch, OutputError> {
-    let schema = Arc::new(anticipated_lanes_schema());
+    let schema = anticipated_lanes_schema();
 
     let mut scenario_id_col = Int32Builder::with_capacity(n);
     let mut stage_id = Int32Builder::with_capacity(n);
@@ -2799,10 +2782,9 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
 
         let system = make_test_system();
-        let config = ParquetWriterConfig::default();
 
         let mut writer =
-            SimulationParquetWriter::new(tmp.path(), &system, &config).expect("new must succeed");
+            SimulationParquetWriter::new(tmp.path(), &system).expect("new must succeed");
 
         let payload = make_scenario_payload(0, 2);
         writer
@@ -2836,9 +2818,8 @@ mod tests {
         // make_test_system() declares no nodes[]; make_scenario_payload stamps the
         // degenerate per-stage node id (node_id == stage_id). scenario_id = 3.
         let system = make_test_system();
-        let config = ParquetWriterConfig::default();
         let mut writer =
-            SimulationParquetWriter::new(tmp.path(), &system, &config).expect("new must succeed");
+            SimulationParquetWriter::new(tmp.path(), &system).expect("new must succeed");
         writer
             .write_scenario(make_scenario_payload(3, 2))
             .expect("write_scenario must succeed");
@@ -3095,10 +3076,9 @@ mod tests {
 
         // System with no contracts, pumping stations, non-controllables, or generics.
         let system = make_test_system();
-        let config = ParquetWriterConfig::default();
 
         let mut writer =
-            SimulationParquetWriter::new(tmp.path(), &system, &config).expect("new must succeed");
+            SimulationParquetWriter::new(tmp.path(), &system).expect("new must succeed");
 
         let payload = make_scenario_payload(0, 2);
         writer
@@ -3135,10 +3115,9 @@ mod tests {
             system.n_pumping_stations() > 0,
             "fixture must have a pumping station so the directory gate fires"
         );
-        let config = ParquetWriterConfig::default();
 
         let mut writer =
-            SimulationParquetWriter::new(tmp.path(), &system, &config).expect("new must succeed");
+            SimulationParquetWriter::new(tmp.path(), &system).expect("new must succeed");
 
         // One stage (stage 0, block 0, duration 720h) with two populated pumping
         // rows. block_id = Some(0) so the writer's block-duration lookup resolves
@@ -3254,10 +3233,9 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
 
         let system = make_test_system();
-        let config = ParquetWriterConfig::default();
 
         let mut writer =
-            SimulationParquetWriter::new(tmp.path(), &system, &config).expect("new must succeed");
+            SimulationParquetWriter::new(tmp.path(), &system).expect("new must succeed");
 
         writer
             .write_scenario(make_scenario_payload(0, 1))
@@ -3278,10 +3256,9 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
 
         let system = make_test_system();
-        let config = ParquetWriterConfig::default();
 
         let mut writer =
-            SimulationParquetWriter::new(tmp.path(), &system, &config).expect("new must succeed");
+            SimulationParquetWriter::new(tmp.path(), &system).expect("new must succeed");
 
         // 2 stages, 1 cost record per stage → 2 rows
         let payload = make_scenario_payload(0, 2);
@@ -3303,10 +3280,9 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
 
         let system = make_test_system();
-        let config = ParquetWriterConfig::default();
 
         let mut writer =
-            SimulationParquetWriter::new(tmp.path(), &system, &config).expect("new must succeed");
+            SimulationParquetWriter::new(tmp.path(), &system).expect("new must succeed");
 
         // 2 stages x 2 hydros = 4 rows in hydros parquet.
         let payload = make_scenario_payload(0, 2);
@@ -3362,10 +3338,9 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
 
         let system = make_test_system();
-        let config = ParquetWriterConfig::default();
 
         let mut writer =
-            SimulationParquetWriter::new(tmp.path(), &system, &config).expect("new must succeed");
+            SimulationParquetWriter::new(tmp.path(), &system).expect("new must succeed");
 
         let payload = make_scenario_payload(0, 1);
         writer
@@ -3389,10 +3364,9 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
 
         let system = make_test_system();
-        let config = ParquetWriterConfig::default();
 
         let mut writer =
-            SimulationParquetWriter::new(tmp.path(), &system, &config).expect("new must succeed");
+            SimulationParquetWriter::new(tmp.path(), &system).expect("new must succeed");
 
         // 3 stages × 1 cost + 2 hydros each.
         let payload = make_scenario_payload(0, 3);
@@ -3470,10 +3444,9 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
 
         let system = make_test_system();
-        let config = ParquetWriterConfig::default();
 
         let mut writer =
-            SimulationParquetWriter::new(tmp.path(), &system, &config).expect("new must succeed");
+            SimulationParquetWriter::new(tmp.path(), &system).expect("new must succeed");
 
         // Single payload using make_hydro_record which sets distinct values:
         // equivalent_productivity_mw_per_m3s = 0.9
@@ -3563,9 +3536,8 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
 
         let system = make_test_system();
-        let config = ParquetWriterConfig::default();
         let mut writer =
-            SimulationParquetWriter::new(tmp.path(), &system, &config).expect("new must succeed");
+            SimulationParquetWriter::new(tmp.path(), &system).expect("new must succeed");
 
         assert!(
             !tmp.path().join("simulation/in_transit").exists(),
@@ -3609,9 +3581,8 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
 
         let system = make_test_system_with_travel_time();
-        let config = ParquetWriterConfig::default();
         let mut writer =
-            SimulationParquetWriter::new(tmp.path(), &system, &config).expect("new must succeed");
+            SimulationParquetWriter::new(tmp.path(), &system).expect("new must succeed");
 
         assert!(
             tmp.path().join("simulation/in_transit").exists(),
@@ -3709,9 +3680,8 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
 
         let system = make_test_system();
-        let config = ParquetWriterConfig::default();
         let mut writer =
-            SimulationParquetWriter::new(tmp.path(), &system, &config).expect("new must succeed");
+            SimulationParquetWriter::new(tmp.path(), &system).expect("new must succeed");
 
         writer
             .write_scenario(make_scenario_payload(0, 2))
@@ -3738,9 +3708,8 @@ mod tests {
             system.n_hydros() > 0,
             "fixture must have a hydro so the directory gate fires"
         );
-        let config = ParquetWriterConfig::default();
         let mut writer =
-            SimulationParquetWriter::new(tmp.path(), &system, &config).expect("new must succeed");
+            SimulationParquetWriter::new(tmp.path(), &system).expect("new must succeed");
 
         assert!(
             tmp.path().join("simulation/hydro_bus_generation").is_dir(),
@@ -3832,9 +3801,8 @@ mod tests {
         // bus_ids (11, 22). Stage 1 (block 0, duration 744h): a row whose
         // stage_id/block_id/hydro_id/bus_id are mutually distinct (1, 0, 5, 9).
         let system = make_test_system();
-        let config = ParquetWriterConfig::default();
         let mut writer =
-            SimulationParquetWriter::new(tmp.path(), &system, &config).expect("new must succeed");
+            SimulationParquetWriter::new(tmp.path(), &system).expect("new must succeed");
 
         let stage0 = StageWritePayload {
             stage_id: 0,

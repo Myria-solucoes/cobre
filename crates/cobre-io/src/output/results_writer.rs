@@ -11,7 +11,6 @@ use super::manifest::{
     MetadataProblemDimensions, MetadataRowPool, MetadataScenarios, OutputContext,
     SimulationMetadata, TrainingMetadata, write_simulation_metadata, write_training_metadata,
 };
-use super::parquet_config::ParquetWriterConfig;
 use super::training_writer::TrainingParquetWriter;
 use super::{SimulationOutput, TrainingOutput};
 use crate::Config;
@@ -42,8 +41,7 @@ pub fn write_training_results(
 
     write_dictionaries(&output_dir.join("training/dictionaries"), system)?;
 
-    let parquet_config = ParquetWriterConfig::default();
-    let writer = TrainingParquetWriter::new(output_dir, &parquet_config)?;
+    let writer = TrainingParquetWriter::new(output_dir)?;
     writer.write(training_output)?;
 
     let converged_at = training_output

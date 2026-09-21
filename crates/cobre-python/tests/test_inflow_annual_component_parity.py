@@ -9,7 +9,7 @@ Verifies that ``cobre.run.run()`` and the ``cobre`` CLI produce byte-identical
 (annual coefficient, annual mean, and annual standard deviation per hydro per
 stage).  It carries no wall-clock timing data.  Both the CLI and Python paths
 write the file through the same Rust writer (``write_inflow_annual_component``
-in ``cobre-io``) using ``ParquetWriterConfig::default()`` and
+in ``cobre-io``) using the crate's frozen Parquet encoding and
 ``write_parquet_atomic``, which is byte-deterministic by construction.
 
 Byte equality is therefore the correct and tightest correctness gate:

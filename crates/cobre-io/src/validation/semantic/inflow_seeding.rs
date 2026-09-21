@@ -27,10 +27,11 @@ use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 
 /// Rules 29-34 (see the module table above for the row-to-check mapping).
 pub(super) fn validate_inflow_seeding(data: &ParsedData, ctx: &mut ValidationContext) {
+    let merged_by_hydro = merged_windows_by_hydro(data);
     warn_unresolvable_first_stage_season(data, ctx);
     check_conditioning_window_bound(data, ctx);
-    check_inprogress_partial_coverage(data, ctx);
-    check_slot_coverage(data, ctx);
+    check_inprogress_partial_coverage(data, ctx, &merged_by_hydro);
+    check_slot_coverage(data, ctx, &merged_by_hydro);
     report_negative_realized_inflows(data, ctx);
     check_annual_component_monthly_only(data, ctx);
 }
@@ -176,10 +177,63 @@ fn finalizing_period_count(data: &ParsedData) -> usize {
         .count()
 }
 
-/// `hydro_id`'s layered windows: `inflow_history` (record) shadowed day-wise
-/// by `recent_observations` (conditioning) — the same construction
-/// [`cobre_stochastic::derive_inflow_seeds`] uses per hydro.
-fn merged_windows_for_hydro(data: &ParsedData, hydro_id: EntityId) -> Vec<RealizedWindow> {
+/// Buckets `inflow_history` (record) and `recent_observations`
+/// (conditioning) by hydro in one pass each, merging every hydro's bucket
+/// once via [`merge_layered_windows`] — the same layered construction
+/// [`cobre_stochastic::derive_inflow_seeds`] uses per hydro — instead of
+/// re-scanning both slices per hydro. Each bucket keeps `data`'s declared row
+/// order, the same order a per-hydro filter would produce: an overlap
+/// resolves to the first-listed covering window, so sorting a bucket (e.g. by
+/// date) would silently change which value wins an overlap. Absent from the
+/// map for a hydro with no record and no conditioning windows.
+fn merged_windows_by_hydro(data: &ParsedData) -> HashMap<EntityId, Vec<RealizedWindow>> {
+    let mut record: HashMap<EntityId, Vec<RealizedWindow>> = HashMap::new();
+    for row in &data.inflow_history {
+        record
+            .entry(row.hydro_id)
+            .or_default()
+            .push(RealizedWindow {
+                start_date: row.start_date,
+                end_date: row.end_date,
+                value_m3s: row.value_m3s,
+            });
+    }
+    let mut conditioning: HashMap<EntityId, Vec<RealizedWindow>> = HashMap::new();
+    for obs in &data.initial_conditions.recent_observations {
+        conditioning
+            .entry(obs.hydro_id)
+            .or_default()
+            .push(RealizedWindow {
+                start_date: obs.start_date,
+                end_date: obs.end_date,
+                value_m3s: obs.value_m3s,
+            });
+    }
+
+    let mut merged: HashMap<EntityId, Vec<RealizedWindow>> =
+        HashMap::with_capacity(record.len().max(conditioning.len()));
+    for (hydro_id, record_windows) in record.drain() {
+        let conditioning_windows = conditioning.remove(&hydro_id).unwrap_or_default();
+        merged.insert(
+            hydro_id,
+            merge_layered_windows(&record_windows, &conditioning_windows),
+        );
+    }
+    for (hydro_id, conditioning_windows) in conditioning.drain() {
+        merged.insert(hydro_id, merge_layered_windows(&[], &conditioning_windows));
+    }
+    merged
+}
+
+/// Reference oracle for [`merged_windows_by_hydro`]: the retired per-hydro
+/// filtered scan, kept to prove the bucketed map's merged windows are
+/// identical, hydro-for-hydro and window-for-window, to a direct per-hydro
+/// filter-then-merge.
+#[cfg(test)]
+fn merged_windows_for_hydro_reference(
+    data: &ParsedData,
+    hydro_id: EntityId,
+) -> Vec<RealizedWindow> {
     let record: Vec<RealizedWindow> = data
         .inflow_history
         .iter()
@@ -213,7 +267,11 @@ fn merged_windows_for_hydro(data: &ParsedData, hydro_id: EntityId) -> Vec<Realiz
 /// — that path has no load-time-knowable AR order and is already guarded by
 /// the record-coverage rules gating estimation itself.
 #[allow(clippy::float_cmp)] // cast's whole-day-hours arithmetic keeps a full-coverage ratio bit-exact
-fn check_slot_coverage(data: &ParsedData, ctx: &mut ValidationContext) {
+fn check_slot_coverage(
+    data: &ParsedData,
+    ctx: &mut ValidationContext,
+    merged_by_hydro: &HashMap<EntityId, Vec<RealizedWindow>>,
+) {
     if data.inflow_ar_coefficients.is_empty() {
         return;
     }
@@ -239,19 +297,22 @@ fn check_slot_coverage(data: &ParsedData, ctx: &mut ValidationContext) {
     let full_coverage_upper = max_ar_order.max(l_state.saturating_sub(n_fin));
 
     let anchor = season_period_window(season_map, season_def, first_stage);
-    let merged_by_hydro: Vec<(i32, Vec<RealizedWindow>)> = data
+    let coverage_by_hydro: Vec<(i32, &[RealizedWindow])> = data
         .hydros
         .iter()
-        .map(|h| (h.id.0, merged_windows_for_hydro(data, h.id)))
+        .map(|h| {
+            let windows: &[RealizedWindow] = merged_by_hydro.get(&h.id).map_or(&[], Vec::as_slice);
+            (h.id.0, windows)
+        })
         .collect();
 
     for k in 1..=l_state {
         let Some(occurrence) = nth_previous_occurrence(season_map, season_def, &anchor, k) else {
             continue;
         };
-        let gapped: Vec<i32> = merged_by_hydro
+        let gapped: Vec<i32> = coverage_by_hydro
             .iter()
-            .filter(|(_, windows)| cast(windows, &occurrence).coverage != 1.0)
+            .filter(|&(_, windows)| cast(windows, &occurrence).coverage != 1.0)
             .map(|(id, _)| *id)
             .collect();
         if gapped.is_empty() {
@@ -320,7 +381,11 @@ fn check_conditioning_window_bound(data: &ParsedData, ctx: &mut ValidationContex
 /// strictly between 0 and 1 is legitimate (that is the accumulator's
 /// purpose) but worth a per-hydro advisory naming the fraction; full or zero
 /// coverage is silent.
-fn check_inprogress_partial_coverage(data: &ParsedData, ctx: &mut ValidationContext) {
+fn check_inprogress_partial_coverage(
+    data: &ParsedData,
+    ctx: &mut ValidationContext,
+    merged_by_hydro: &HashMap<EntityId, Vec<RealizedWindow>>,
+) {
     let Some(season_map) = &data.stages.policy_graph.season_map else {
         return;
     };
@@ -337,8 +402,8 @@ fn check_inprogress_partial_coverage(data: &ParsedData, ctx: &mut ValidationCont
     let in_progress = season_period_window(season_map, season_def, first_stage);
 
     for hydro in &data.hydros {
-        let merged = merged_windows_for_hydro(data, hydro.id);
-        let projection = cast(&merged, &in_progress);
+        let windows: &[RealizedWindow] = merged_by_hydro.get(&hydro.id).map_or(&[], Vec::as_slice);
+        let projection = cast(windows, &in_progress);
         if !(projection.coverage > 0.0 && projection.coverage < 1.0) {
             continue;
         }
@@ -1005,6 +1070,86 @@ mod tests {
             ctx.warnings().is_empty(),
             "no negative value must produce no warning, got: {:?}",
             ctx.warnings()
+        );
+    }
+
+    // ── merged_windows_by_hydro: bucketed-map equivalence ──────────────────
+
+    /// The bucketed one-pass map's merged windows must match, hydro-for-hydro
+    /// and window-for-window, the retired per-hydro filter-then-merge
+    /// ([`merged_windows_for_hydro_reference`]). Hydro 1's two overlapping
+    /// `inflow_history` rows make this discriminating: [`merge_layered_windows`]
+    /// resolves an overlap to the first-listed covering window, so a bucket
+    /// that reordered its rows would silently pick the second row's value
+    /// (999.0) instead of the first's (100.0).
+    #[test]
+    fn test_bucketed_merged_windows_match_per_hydro_reference() {
+        let stages = make_stages_with_seasons(3, true);
+        let mut data = make_data(
+            vec![make_hydro(1, None), make_hydro(2, None)],
+            vec![],
+            vec![],
+            stages,
+            vec![],
+            vec![],
+        );
+        data.inflow_history = vec![
+            crate::InflowHistoryRow {
+                hydro_id: EntityId::from(1),
+                start_date: d(1999, 10, 1),
+                end_date: d(1999, 12, 1),
+                value_m3s: 100.0,
+            },
+            crate::InflowHistoryRow {
+                hydro_id: EntityId::from(2),
+                start_date: d(1999, 10, 1),
+                end_date: d(2000, 1, 1),
+                value_m3s: 700.0,
+            },
+            crate::InflowHistoryRow {
+                hydro_id: EntityId::from(1),
+                start_date: d(1999, 10, 15),
+                end_date: d(1999, 11, 1),
+                value_m3s: 999.0,
+            },
+        ];
+        data.initial_conditions.recent_observations = vec![RecentObservation {
+            hydro_id: EntityId::from(1),
+            start_date: d(1999, 12, 1),
+            end_date: d(2000, 1, 1),
+            value_m3s: 50.0,
+        }];
+
+        let bucketed = merged_windows_by_hydro(&data);
+
+        for hydro_id in [EntityId::from(1), EntityId::from(2)] {
+            let expected = merged_windows_for_hydro_reference(&data, hydro_id);
+            let actual: &[RealizedWindow] = bucketed.get(&hydro_id).map_or(&[], Vec::as_slice);
+            assert_eq!(
+                actual.len(),
+                expected.len(),
+                "hydro {hydro_id}: window count mismatch"
+            );
+            for (a, e) in actual.iter().zip(&expected) {
+                assert_eq!(
+                    (a.start_date, a.end_date, a.value_m3s),
+                    (e.start_date, e.end_date, e.value_m3s),
+                    "hydro {hydro_id}: window mismatch"
+                );
+            }
+        }
+
+        let hydro1_windows: &[RealizedWindow] =
+            bucketed.get(&EntityId::from(1)).map_or(&[], Vec::as_slice);
+        assert!(
+            hydro1_windows
+                .iter()
+                .any(|w| w.start_date == d(1999, 10, 15) && w.value_m3s == 100.0),
+            "expected the overlap to resolve to the first-declared row, got: {:?}",
+            hydro1_windows
+                .iter()
+                .map(|w| (w.start_date, w.end_date, w.value_m3s))
+                .collect::<Vec<_>>()
         );
     }
 

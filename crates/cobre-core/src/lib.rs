@@ -105,6 +105,7 @@ pub use model::temporal::{
     Block, BlockMode, CalendarMonth, Node, NoiseMethod, PolicyGraphType, ScenarioSourceConfig,
     SeasonCycleType, SeasonDefinition, SeasonMap, Stage, StageId, StageRiskConfig,
     StageStateConfig, StudyPos, Transition, month_of, window_period_overlaps,
+    window_period_reach_depth, window_reaches_any_period,
 };
 pub use stats::welford::WelfordAccumulator;
 pub use system::{System, SystemBuilder};

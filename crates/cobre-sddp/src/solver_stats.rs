@@ -280,7 +280,7 @@ impl SolverStatsLogEntry {
 pub fn delta_to_stats_row(
     iteration: Option<i32>,
     scenario_id: Option<i32>,
-    phase: &str,
+    phase: &'static str,
     stage_id: Option<i32>,
     opening_index: Option<i32>,
     rank: Option<i32>,
@@ -290,7 +290,7 @@ pub fn delta_to_stats_row(
     SolverStatsRow {
         iteration,
         scenario_id,
-        phase: phase.to_string(),
+        phase,
         stage_id,
         opening_index,
         rank,

@@ -10,7 +10,6 @@ use console::Term;
 use cobre_core::System;
 use cobre_io::Config;
 use cobre_io::OutputContext;
-use cobre_io::ParquetWriterConfig;
 use cobre_io::SimulationOutput;
 use cobre_io::SolverStatsRow;
 use cobre_io::TrainingOutput;
@@ -139,13 +138,8 @@ pub(super) fn write_training_outputs(args: &WriteTrainingArgs<'_>) -> Result<(),
     }
 
     if !args.training_output.cut_selection_records.is_empty() {
-        let parquet_config = ParquetWriterConfig::default();
-        write_row_selection_records(
-            args.output_dir,
-            &args.training_output.cut_selection_records,
-            &parquet_config,
-        )
-        .map_err(CliError::from)?;
+        write_row_selection_records(args.output_dir, &args.training_output.cut_selection_records)
+            .map_err(CliError::from)?;
     }
 
     if !args.quiet {

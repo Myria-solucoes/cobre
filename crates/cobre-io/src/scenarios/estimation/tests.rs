@@ -2712,18 +2712,27 @@ fn test_estimation_partial_occurrence_skipped_and_counted() {
     let template = partial_year_stages(0, 1, 2000).remove(0);
     let hydro_id = EntityId(1);
 
-    let mut history: Vec<InflowHistoryRow> = (1..=12u32)
-        .filter(|&month| month != 4)
-        .map(|month| full_month_row(hydro_id, 2000, month, 100.0 + f64::from(month)))
-        .collect();
-
-    // April (30 days): only the first 15 days are present.
-    history.push(InflowHistoryRow {
-        hydro_id,
-        start_date: NaiveDate::from_ymd_opt(2000, 4, 1).unwrap(),
-        end_date: NaiveDate::from_ymd_opt(2000, 4, 16).unwrap(),
-        value_m3s: 999.0,
-    });
+    // History is built in ascending start-date order per hydro, matching
+    // `parse_inflow_history`'s output contract that `resolve_coverage_gated_observations`
+    // relies on. April (30 days) has only its first 15 days present.
+    let mut history: Vec<InflowHistoryRow> = Vec::new();
+    for month in 1..=12u32 {
+        if month == 4 {
+            history.push(InflowHistoryRow {
+                hydro_id,
+                start_date: NaiveDate::from_ymd_opt(2000, 4, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2000, 4, 16).unwrap(),
+                value_m3s: 999.0,
+            });
+        } else {
+            history.push(full_month_row(
+                hydro_id,
+                2000,
+                month,
+                100.0 + f64::from(month),
+            ));
+        }
+    }
 
     let (observations, skipped_partial) =
         resolve_coverage_gated_observations(&history, Some(&season_map), Some(&template));
@@ -2975,4 +2984,74 @@ fn test_conditioning_window_does_not_change_fitted_statistics() {
              recent_observations conditioning window"
         );
     }
+}
+
+/// The two-pointer forward-sweep cursor's contiguous `&windows[lo..hi]` must
+/// equal, window-for-window, the per-occurrence `filter(...).collect()` set
+/// on a hydro whose windows straddle multiple monthly season occurrences.
+#[test]
+fn cursor_subslice_matches_filter_collect_across_straddling_occurrences() {
+    let season_map = monthly_season_map();
+    let template = partial_year_stages(0, 1, 2000).remove(0);
+
+    let windows = vec![
+        RealizedWindow {
+            start_date: NaiveDate::from_ymd_opt(2000, 1, 10).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2000, 2, 10).unwrap(),
+            value_m3s: 10.0,
+        },
+        RealizedWindow {
+            start_date: NaiveDate::from_ymd_opt(2000, 2, 10).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2000, 3, 10).unwrap(),
+            value_m3s: 20.0,
+        },
+        RealizedWindow {
+            start_date: NaiveDate::from_ymd_opt(2000, 3, 10).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2000, 4, 10).unwrap(),
+            value_m3s: 30.0,
+        },
+    ];
+
+    let occurrences = discover_hydro_occurrences(&season_map, &template, &windows);
+    assert!(
+        occurrences.len() >= 4,
+        "fixture must straddle at least 4 monthly occurrences, got {}",
+        occurrences.len()
+    );
+
+    let mut lo = 0usize;
+    let mut max_overlap = 0usize;
+    for occurrence in &occurrences {
+        let filtered: Vec<(NaiveDate, NaiveDate, f64)> = windows
+            .iter()
+            .filter(|w| w.start_date < occurrence.end && w.end_date > occurrence.start)
+            .map(|w| (w.start_date, w.end_date, w.value_m3s))
+            .collect();
+
+        while lo < windows.len() && windows[lo].end_date <= occurrence.start {
+            lo += 1;
+        }
+        let mut hi = lo;
+        while hi < windows.len() && windows[hi].start_date < occurrence.end {
+            hi += 1;
+        }
+        let cursor: Vec<(NaiveDate, NaiveDate, f64)> = windows[lo..hi]
+            .iter()
+            .map(|w| (w.start_date, w.end_date, w.value_m3s))
+            .collect();
+
+        max_overlap = max_overlap.max(cursor.len());
+        assert_eq!(
+            cursor, filtered,
+            "cursor subslice must match filter-and-collect window-for-window \
+             for the occurrence starting {}",
+            occurrence.start
+        );
+    }
+
+    assert!(
+        max_overlap >= 2,
+        "fixture must exercise a straddling occurrence overlapped by \
+         multiple windows, got a max of {max_overlap}"
+    );
 }

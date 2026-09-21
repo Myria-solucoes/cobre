@@ -22,7 +22,7 @@ use cobre_io::output::simulation_writer::{
     HydroBusWriteRecord, HydroWriteRecord, ScenarioWritePayload, SimulationParquetWriter,
     StageWritePayload, write_paths,
 };
-use cobre_io::{ParquetWriterConfig, load_case, validate_case};
+use cobre_io::{load_case, validate_case};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use tempfile::TempDir;
 
@@ -1143,8 +1143,7 @@ fn write_and_read_hydro_batches(
     stages: Vec<StageWritePayload>,
 ) -> (RecordBatch, RecordBatch) {
     let tmp = TempDir::new().unwrap();
-    let config = ParquetWriterConfig::default();
-    let mut writer = SimulationParquetWriter::new(tmp.path(), system, &config)
+    let mut writer = SimulationParquetWriter::new(tmp.path(), system)
         .unwrap_or_else(|e| panic!("SimulationParquetWriter::new must succeed: {e}"));
     writer
         .write_scenario(ScenarioWritePayload {
@@ -1313,8 +1312,7 @@ fn test_paths_join_to_entity_file_on_scenario_and_stage() {
     let system = load_case(case_dir).unwrap_or_else(|e| panic!("d02 load_case must succeed: {e}"));
 
     let tmp = TempDir::new().unwrap();
-    let config = ParquetWriterConfig::default();
-    let mut writer = SimulationParquetWriter::new(tmp.path(), &system, &config)
+    let mut writer = SimulationParquetWriter::new(tmp.path(), &system)
         .unwrap_or_else(|e| panic!("SimulationParquetWriter::new must succeed: {e}"));
 
     // Two scenarios; the node id visited at stage 1 differs across scenarios (a

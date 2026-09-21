@@ -255,12 +255,13 @@ fn check_realization_rules(
     else {
         return;
     };
+    let occupancy = stage_slot_occupancy(data, &source, resolver);
 
     for node in nodes {
-        if resolver.resolve(node.stage_id).is_none() {
+        let Some(idx) = resolver.resolve(node.stage_id) else {
             continue;
-        }
-        let classes = slot_occupying_classes(data, &source, node.stage_id);
+        };
+        let classes = &occupancy[idx];
 
         match (classes.is_empty(), node.scenario_id) {
             (false, None) => ctx.add_error(
@@ -287,7 +288,7 @@ fn check_realization_rules(
         }
 
         if let Some(k) = node.scenario_id {
-            for (class_name, raw_c) in &classes {
+            for (class_name, raw_c) in classes {
                 if usize::try_from(k).map_or(true, |ku| ku >= *raw_c) {
                     ctx.add_error(
                         ErrorKind::InvalidValue,
@@ -305,58 +306,73 @@ fn check_realization_rules(
     }
 }
 
-/// The external classes that occupy a realization slot at `stage_id`: those set
-/// to the external scheme in the training scenario source (the phase that
-/// governs slot occupancy) that also carry at least one row there, paired with
-/// their per-stage raw column count.
-fn slot_occupying_classes(
+/// The external classes that occupy a realization slot at each resolved study
+/// stage: those set to the external scheme in the training scenario source (the
+/// phase that governs slot occupancy) that also carry at least one row there,
+/// paired with their per-stage raw column count. Indexed by resolved
+/// study-stage index (`resolver.resolve(stage_id)`); one pass over each
+/// external table fills every stage's entry.
+fn stage_slot_occupancy(
     data: &ParsedData,
     source: &ScenarioSource,
-    stage_id: i32,
-) -> Vec<(&'static str, usize)> {
-    // raw_c is the distinct scenario_id count among a class's rows at this declared
-    // study stage — a per-class count, deliberately NOT rows / n_entities; the
-    // cross-class agreement and the exact {0..raw_c-1} set are enforced by the
-    // library-consistency validation layer, not here.
-    let mut out = Vec::new();
+    resolver: &StageIdResolver,
+) -> Vec<Vec<(&'static str, usize)>> {
+    let mut occupancy = vec![Vec::new(); resolver.study_stage_ids().len()];
     if source.inflow_scheme == SamplingScheme::External {
-        let raw_c = distinct_count(
+        accumulate_slot_occupancy(
+            &mut occupancy,
+            resolver,
+            "inflow",
             data.external_scenarios
                 .iter()
-                .filter(|r| r.stage_id == stage_id)
-                .map(|r| r.scenario_id),
+                .map(|r| (r.stage_id, r.scenario_id)),
         );
-        if raw_c > 0 {
-            out.push(("inflow", raw_c));
-        }
     }
     if source.load_scheme == SamplingScheme::External {
-        let raw_c = distinct_count(
+        accumulate_slot_occupancy(
+            &mut occupancy,
+            resolver,
+            "load",
             data.external_load_scenarios
                 .iter()
-                .filter(|r| r.stage_id == stage_id)
-                .map(|r| r.scenario_id),
+                .map(|r| (r.stage_id, r.scenario_id)),
         );
-        if raw_c > 0 {
-            out.push(("load", raw_c));
-        }
     }
     if source.ncs_scheme == SamplingScheme::External {
-        let raw_c = distinct_count(
+        accumulate_slot_occupancy(
+            &mut occupancy,
+            resolver,
+            "ncs",
             data.external_ncs_scenarios
                 .iter()
-                .filter(|r| r.stage_id == stage_id)
-                .map(|r| r.scenario_id),
+                .map(|r| (r.stage_id, r.scenario_id)),
         );
-        if raw_c > 0 {
-            out.push(("ncs", raw_c));
-        }
     }
-    out
+    occupancy
 }
 
-fn distinct_count(scenario_ids: impl Iterator<Item = i32>) -> usize {
-    scenario_ids.collect::<HashSet<i32>>().len()
+fn accumulate_slot_occupancy(
+    occupancy: &mut [Vec<(&'static str, usize)>],
+    resolver: &StageIdResolver,
+    class_name: &'static str,
+    rows: impl Iterator<Item = (i32, i32)>,
+) {
+    // raw_c is the distinct scenario_id count among a class's rows at a stage —
+    // a per-class count, deliberately NOT rows / n_entities; the cross-class
+    // agreement and the exact {0..raw_c-1} set are enforced by the
+    // library-consistency validation layer, not here.
+    let mut seen = vec![HashSet::new(); occupancy.len()];
+    for (stage_id, scenario_id) in rows {
+        if let Some(idx) = resolver.resolve(stage_id) {
+            seen[idx].insert(scenario_id);
+        }
+    }
+    for (idx, ids) in seen.into_iter().enumerate() {
+        let raw_c = ids.len();
+        if raw_c > 0 {
+            occupancy[idx].push((class_name, raw_c));
+        }
+    }
 }
 
 /// Rule 38 (empty stage): every study stage must carry at least one node.
@@ -587,7 +603,7 @@ fn check_recombinable_signature(
 /// (no slot-occupying external class) and rejected as meaningless where a stage
 /// carries only external openings. Declared `nodes[]` only — the chain dialect's
 /// requiredness is a parse-layer check ([`crate::stages::parse_stages`]). Generated
-/// openings are determined by [`slot_occupying_classes`], the same authoritative
+/// openings are determined by [`stage_slot_occupancy`], the same authoritative
 /// external-class machinery rule 36 uses.
 pub(super) fn check_num_openings_declaration(data: &ParsedData, ctx: &mut ValidationContext) {
     let graph = &data.stages.policy_graph;
@@ -608,6 +624,7 @@ pub(super) fn check_num_openings_declaration(data: &ParsedData, ctx: &mut Valida
         .map(|s| s.id)
         .collect();
     let resolver = StageIdResolver::from_study_stage_ids(&study_ids);
+    let occupancy = stage_slot_occupancy(data, &source, &resolver);
 
     let mut staged: Vec<i32> = graph
         .nodes
@@ -620,7 +637,10 @@ pub(super) fn check_num_openings_declaration(data: &ParsedData, ctx: &mut Valida
     staged.sort_unstable();
 
     for stage_id in staged {
-        let generated = slot_occupying_classes(data, &source, stage_id).is_empty();
+        let Some(idx) = resolver.resolve(stage_id) else {
+            continue;
+        };
+        let generated = occupancy[idx].is_empty();
         let declared = data.stages.openings_declared.contains(&stage_id);
         match (generated, declared) {
             (true, false) => ctx.add_error(
@@ -736,6 +756,9 @@ pub(super) fn check_sampling_method_meaningfulness(data: &ParsedData, ctx: &mut 
         .map(|s| s.id)
         .collect();
     let resolver = StageIdResolver::from_study_stage_ids(&study_ids);
+    let occupancy = source
+        .as_ref()
+        .map(|s| stage_slot_occupancy(data, s, &resolver));
 
     let mut node_count: HashMap<i32, usize> = HashMap::new();
     for n in &graph.nodes {
@@ -748,9 +771,11 @@ pub(super) fn check_sampling_method_meaningfulness(data: &ParsedData, ctx: &mut 
 
     for stage_id in staged {
         let multi_node = node_count[&stage_id] >= 2;
-        let external = source
-            .as_ref()
-            .is_some_and(|s| !slot_occupying_classes(data, s, stage_id).is_empty());
+        let external = occupancy.as_ref().is_some_and(|occ| {
+            resolver
+                .resolve(stage_id)
+                .is_some_and(|idx| !occ[idx].is_empty())
+        });
         if multi_node || external {
             ctx.add_warning(
                 ErrorKind::ModelQuality,
@@ -1154,6 +1179,96 @@ mod tests {
 
     fn errs_contain(ctx: &ValidationContext, needle: &str) -> bool {
         ctx.errors().iter().any(|e| e.message.contains(needle))
+    }
+
+    /// The once-computed `stage_slot_occupancy` vector must agree, for a stage
+    /// carrying multiple sibling nodes, with an independent per-node recompute
+    /// over the raw external rows — and every sibling must read the same answer
+    /// from the shared vector, not a per-node-drifted one.
+    #[test]
+    fn test_stage_slot_occupancy_matches_independent_per_node_recompute() {
+        let mut data = node_graph_data(
+            2,
+            vec![
+                node(0, 0, None),
+                node(1, 1, Some(0)),
+                node(2, 1, Some(1)),
+                node(3, 1, Some(2)),
+            ],
+            vec![
+                edge(0, 1, 1.0 / 3.0),
+                edge(0, 2, 1.0 / 3.0),
+                edge(0, 3, 1.0 / 3.0),
+            ],
+        );
+        data.config = config_enumerated_external_inflow();
+        // Two hydros duplicate the same scenario_id set at stage 1: raw_c counts
+        // distinct scenario ids, not rows, so a row-count bug would read 6 here.
+        data.external_scenarios = vec![
+            ext_inflow(1, 0),
+            ext_inflow(1, 1),
+            ext_inflow(1, 2),
+            ExternalScenarioRow {
+                stage_id: 1,
+                scenario_id: 0,
+                hydro_id: EntityId::from(2),
+                value_m3s: 1.0,
+            },
+            ExternalScenarioRow {
+                stage_id: 1,
+                scenario_id: 1,
+                hydro_id: EntityId::from(2),
+                value_m3s: 1.0,
+            },
+            ExternalScenarioRow {
+                stage_id: 1,
+                scenario_id: 2,
+                hydro_id: EntityId::from(2),
+                value_m3s: 1.0,
+            },
+        ];
+        data.stages.openings_declared = [0].into_iter().collect();
+        data.inflow_seasonal_stats = vec![InflowSeasonalStatsRow {
+            hydro_id: EntityId::from(1),
+            stage_id: 1,
+            mean_m3s: 100.0,
+            std_m3s: 5.0,
+        }];
+
+        let resolver = crate::StageIdResolver::from_study_stage_ids(&[0, 1]);
+        let source = data
+            .config
+            .training_scenario_source(std::path::Path::new("config.json"))
+            .unwrap();
+        let occupancy = super::stage_slot_occupancy(&data, &source, &resolver);
+        let idx = resolver.resolve(1).unwrap();
+
+        let per_node_raw_c = data
+            .external_scenarios
+            .iter()
+            .filter(|r| r.stage_id == 1)
+            .map(|r| r.scenario_id)
+            .collect::<std::collections::HashSet<i32>>()
+            .len();
+        assert_eq!(
+            occupancy[idx],
+            vec![("inflow", per_node_raw_c)],
+            "once-computed occupancy must match the independent per-node recompute: {:?}",
+            occupancy[idx]
+        );
+        assert_eq!(
+            per_node_raw_c, 3,
+            "raw_c counts distinct ids, not the 6 rows"
+        );
+
+        // All three siblings share stage 1 and read the same vector entry; with
+        // scenario_id 0, 1, 2 all below raw_c 3, none should be rejected.
+        let ctx = run(&data);
+        assert!(
+            !ctx.has_errors(),
+            "sibling nodes sharing a stage must all validate against the same occupancy: {:?}",
+            ctx.errors()
+        );
     }
 
     /// A K-fan (root → K distinct-realization leaves) and a 3-stage binary tree

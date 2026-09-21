@@ -60,6 +60,7 @@ use cobre_io::PolicyMode::Resume;
 use cobre_io::PolicyMode::WarmStart;
 use cobre_io::ReportEntry;
 use cobre_io::SetupTimings;
+use cobre_io::SolverStatsRow;
 use cobre_io::TrainingOutput;
 use cobre_io::get_hostname;
 use cobre_io::now_iso8601;
@@ -82,7 +83,6 @@ use cobre_io::write_simulation_results;
 use cobre_io::write_simulation_solver_stats;
 use cobre_io::write_solver_stats;
 use cobre_io::write_training_results;
-use cobre_io::{ParquetWriterConfig, SolverStatsRow};
 use cobre_sddp::BoundaryLoadRequest;
 use cobre_sddp::FullFcf;
 use cobre_sddp::FutureCostFunction;
@@ -534,12 +534,8 @@ pub(crate) fn write_training_artifacts(
     }
 
     if !training.output.cut_selection_records.is_empty() {
-        write_row_selection_records(
-            output_dir,
-            &training.output.cut_selection_records,
-            &ParquetWriterConfig::default(),
-        )
-        .map_err(|e| format!("{OUTPUT_WRITE_ERROR_PREFIX}: cut selection output: {e}"))?;
+        write_row_selection_records(output_dir, &training.output.cut_selection_records)
+            .map_err(|e| format!("{OUTPUT_WRITE_ERROR_PREFIX}: cut selection output: {e}"))?;
     }
 
     let training_ctx = OutputContext {
@@ -688,9 +684,8 @@ pub(crate) fn run_simulation_phase_py(
         })?;
     let (result_tx, result_rx) = mpsc::sync_channel(io_capacity.max(1));
 
-    let sim_writer =
-        SimulationParquetWriter::new(output_dir, system, &ParquetWriterConfig::default())
-            .map_err(|e| format!("{SIMULATION_WRITER_INIT_ERROR_PREFIX}: {e}"))?;
+    let sim_writer = SimulationParquetWriter::new(output_dir, system)
+        .map_err(|e| format!("{SIMULATION_WRITER_INIT_ERROR_PREFIX}: {e}"))?;
 
     let drain_handle = std::thread::spawn(move || {
         let mut writer = sim_writer;

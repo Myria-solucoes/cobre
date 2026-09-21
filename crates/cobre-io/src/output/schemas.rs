@@ -5,7 +5,13 @@
 //! [`OUTPUT_SCHEMAS`], the crate-internal registry that pairs each schema with
 //! the relative path of the file it describes; that table is the single
 //! source both the axis-spelling gate test and `variables.csv` generation
-//! derive from.
+//! derive from. The per-scenario simulation entity schemas are cached behind a
+//! process-lifetime [`LazyLock`] and returned as `Arc<Schema>`, since
+//! `simulation_writer`'s `build_*_batch` functions build one per scenario;
+//! `OUTPUT_SCHEMAS` still registers each one's uncached builder so the table's
+//! `fn() -> Schema` entries stay uniform.
+
+use std::sync::{Arc, LazyLock};
 
 use arrow::datatypes::{DataType, Field, Schema};
 
@@ -22,10 +28,7 @@ fn simulation_row_prefix() -> Vec<Field> {
     ]
 }
 
-/// Schema for `simulation/costs/` — stage and block-level cost breakdown.
-///
-/// See output-schemas.md SS5.1.
-pub(crate) fn costs_schema() -> Schema {
+fn build_costs_schema() -> Schema {
     let mut fields = simulation_row_prefix();
     fields.extend([
         Field::new("block_id", DataType::Int32, true),
@@ -58,10 +61,16 @@ pub(crate) fn costs_schema() -> Schema {
     Schema::new(fields)
 }
 
-/// Schema for `simulation/hydros/` — hydro plant dispatch results.
+static COSTS_SCHEMA: LazyLock<Arc<Schema>> = LazyLock::new(|| Arc::new(build_costs_schema()));
+
+/// Schema for `simulation/costs/` — stage and block-level cost breakdown.
 ///
-/// See output-schemas.md SS5.2.
-pub(crate) fn hydros_schema() -> Schema {
+/// See output-schemas.md SS5.1.
+pub(crate) fn costs_schema() -> Arc<Schema> {
+    Arc::clone(&COSTS_SCHEMA)
+}
+
+fn build_hydros_schema() -> Schema {
     let mut fields = simulation_row_prefix();
     fields.extend([
         Field::new("block_id", DataType::Int32, true),
@@ -118,10 +127,16 @@ pub(crate) fn hydros_schema() -> Schema {
     Schema::new(fields)
 }
 
-/// Schema for `simulation/hydro_bus_generation/` — per-cell hydro dispatch results.
+static HYDROS_SCHEMA: LazyLock<Arc<Schema>> = LazyLock::new(|| Arc::new(build_hydros_schema()));
+
+/// Schema for `simulation/hydros/` — hydro plant dispatch results.
 ///
-/// One row per (stage, block, hydro, bus) — one LP cell.
-pub(crate) fn hydro_bus_generation_schema() -> Schema {
+/// See output-schemas.md SS5.2.
+pub(crate) fn hydros_schema() -> Arc<Schema> {
+    Arc::clone(&HYDROS_SCHEMA)
+}
+
+fn build_hydro_bus_generation_schema() -> Schema {
     let mut fields = simulation_row_prefix();
     fields.extend([
         Field::new("block_id", DataType::Int32, true),
@@ -134,10 +149,17 @@ pub(crate) fn hydro_bus_generation_schema() -> Schema {
     Schema::new(fields)
 }
 
-/// Schema for `simulation/thermals/` — thermal unit dispatch results.
+static HYDRO_BUS_GENERATION_SCHEMA: LazyLock<Arc<Schema>> =
+    LazyLock::new(|| Arc::new(build_hydro_bus_generation_schema()));
+
+/// Schema for `simulation/hydro_bus_generation/` — per-cell hydro dispatch results.
 ///
-/// See output-schemas.md SS5.3.
-pub(crate) fn thermals_schema() -> Schema {
+/// One row per (stage, block, hydro, bus) — one LP cell.
+pub(crate) fn hydro_bus_generation_schema() -> Arc<Schema> {
+    Arc::clone(&HYDRO_BUS_GENERATION_SCHEMA)
+}
+
+fn build_thermals_schema() -> Schema {
     let mut fields = simulation_row_prefix();
     fields.extend([
         Field::new("block_id", DataType::Int32, true),
@@ -153,10 +175,16 @@ pub(crate) fn thermals_schema() -> Schema {
     Schema::new(fields)
 }
 
-/// Schema for `simulation/exchanges/` — transmission line flow results.
+static THERMALS_SCHEMA: LazyLock<Arc<Schema>> = LazyLock::new(|| Arc::new(build_thermals_schema()));
+
+/// Schema for `simulation/thermals/` — thermal unit dispatch results.
 ///
-/// See output-schemas.md SS5.4.
-pub(crate) fn exchanges_schema() -> Schema {
+/// See output-schemas.md SS5.3.
+pub(crate) fn thermals_schema() -> Arc<Schema> {
+    Arc::clone(&THERMALS_SCHEMA)
+}
+
+fn build_exchanges_schema() -> Schema {
     let mut fields = simulation_row_prefix();
     fields.extend([
         Field::new("block_id", DataType::Int32, true),
@@ -173,10 +201,17 @@ pub(crate) fn exchanges_schema() -> Schema {
     Schema::new(fields)
 }
 
-/// Schema for `simulation/buses/` — bus load balance results.
+static EXCHANGES_SCHEMA: LazyLock<Arc<Schema>> =
+    LazyLock::new(|| Arc::new(build_exchanges_schema()));
+
+/// Schema for `simulation/exchanges/` — transmission line flow results.
 ///
-/// See output-schemas.md SS5.5.
-pub(crate) fn buses_schema() -> Schema {
+/// See output-schemas.md SS5.4.
+pub(crate) fn exchanges_schema() -> Arc<Schema> {
+    Arc::clone(&EXCHANGES_SCHEMA)
+}
+
+fn build_buses_schema() -> Schema {
     let mut fields = simulation_row_prefix();
     fields.extend([
         Field::new("block_id", DataType::Int32, true),
@@ -192,10 +227,16 @@ pub(crate) fn buses_schema() -> Schema {
     Schema::new(fields)
 }
 
-/// Schema for `simulation/pumping_stations/` — pumping station results.
+static BUSES_SCHEMA: LazyLock<Arc<Schema>> = LazyLock::new(|| Arc::new(build_buses_schema()));
+
+/// Schema for `simulation/buses/` — bus load balance results.
 ///
-/// See output-schemas.md SS5.6.
-pub(crate) fn pumping_stations_schema() -> Schema {
+/// See output-schemas.md SS5.5.
+pub(crate) fn buses_schema() -> Arc<Schema> {
+    Arc::clone(&BUSES_SCHEMA)
+}
+
+fn build_pumping_stations_schema() -> Schema {
     let mut fields = simulation_row_prefix();
     fields.extend([
         Field::new("block_id", DataType::Int32, true),
@@ -210,10 +251,17 @@ pub(crate) fn pumping_stations_schema() -> Schema {
     Schema::new(fields)
 }
 
-/// Schema for `simulation/contracts/` — energy contract results.
+static PUMPING_STATIONS_SCHEMA: LazyLock<Arc<Schema>> =
+    LazyLock::new(|| Arc::new(build_pumping_stations_schema()));
+
+/// Schema for `simulation/pumping_stations/` — pumping station results.
 ///
-/// See output-schemas.md SS5.7.
-pub(crate) fn contracts_schema() -> Schema {
+/// See output-schemas.md SS5.6.
+pub(crate) fn pumping_stations_schema() -> Arc<Schema> {
+    Arc::clone(&PUMPING_STATIONS_SCHEMA)
+}
+
+fn build_contracts_schema() -> Schema {
     let mut fields = simulation_row_prefix();
     fields.extend([
         Field::new("block_id", DataType::Int32, true),
@@ -227,10 +275,17 @@ pub(crate) fn contracts_schema() -> Schema {
     Schema::new(fields)
 }
 
-/// Schema for `simulation/non_controllables/` — non-controllable source results.
+static CONTRACTS_SCHEMA: LazyLock<Arc<Schema>> =
+    LazyLock::new(|| Arc::new(build_contracts_schema()));
+
+/// Schema for `simulation/contracts/` — energy contract results.
 ///
-/// See output-schemas.md SS5.8.
-pub(crate) fn non_controllables_schema() -> Schema {
+/// See output-schemas.md SS5.7.
+pub(crate) fn contracts_schema() -> Arc<Schema> {
+    Arc::clone(&CONTRACTS_SCHEMA)
+}
+
+fn build_non_controllables_schema() -> Schema {
     let mut fields = simulation_row_prefix();
     fields.extend([
         Field::new("block_id", DataType::Int32, true),
@@ -246,10 +301,17 @@ pub(crate) fn non_controllables_schema() -> Schema {
     Schema::new(fields)
 }
 
-/// Schema for `simulation/inflow_lags/` — autoregressive inflow state variables.
+static NON_CONTROLLABLES_SCHEMA: LazyLock<Arc<Schema>> =
+    LazyLock::new(|| Arc::new(build_non_controllables_schema()));
+
+/// Schema for `simulation/non_controllables/` — non-controllable source results.
 ///
-/// See output-schemas.md SS5.10.
-pub(crate) fn inflow_lags_schema() -> Schema {
+/// See output-schemas.md SS5.8.
+pub(crate) fn non_controllables_schema() -> Arc<Schema> {
+    Arc::clone(&NON_CONTROLLABLES_SCHEMA)
+}
+
+fn build_inflow_lags_schema() -> Schema {
     let mut fields = simulation_row_prefix();
     fields.extend([
         Field::new("hydro_id", DataType::Int32, false),
@@ -259,11 +321,17 @@ pub(crate) fn inflow_lags_schema() -> Schema {
     Schema::new(fields)
 }
 
-/// Schema for `simulation/in_transit/` — travel-time in-transit water volumes.
+static INFLOW_LAGS_SCHEMA: LazyLock<Arc<Schema>> =
+    LazyLock::new(|| Arc::new(build_inflow_lags_schema()));
+
+/// Schema for `simulation/inflow_lags/` — autoregressive inflow state variables.
 ///
-/// One row per (stage, downstream plant, maturity lag). Written only when the
-/// system declares a travel-time arc.
-pub(crate) fn in_transit_schema() -> Schema {
+/// See output-schemas.md SS5.10.
+pub(crate) fn inflow_lags_schema() -> Arc<Schema> {
+    Arc::clone(&INFLOW_LAGS_SCHEMA)
+}
+
+fn build_in_transit_schema() -> Schema {
     let mut fields = simulation_row_prefix();
     fields.extend([
         Field::new("hydro_id", DataType::Int32, false),
@@ -274,14 +342,18 @@ pub(crate) fn in_transit_schema() -> Schema {
     Schema::new(fields)
 }
 
-/// Schema for `simulation/transit_seed/` — rolling release-window seed for a
-/// continuing run's own upstream-release input.
+static IN_TRANSIT_SCHEMA: LazyLock<Arc<Schema>> =
+    LazyLock::new(|| Arc::new(build_in_transit_schema()));
+
+/// Schema for `simulation/in_transit/` — travel-time in-transit water volumes.
 ///
-/// Scenario-level: unlike every other simulation partition, a window's own
-/// `[start_date, end_date)` span anchors the row, not a stage/node index, so
-/// this schema carries `scenario_id` alone (no `stage_id`/`node_id`). Written
-/// only when the system declares a travel-time arc.
-pub(crate) fn transit_seed_schema() -> Schema {
+/// One row per (stage, downstream plant, maturity lag). Written only when the
+/// system declares a travel-time arc.
+pub(crate) fn in_transit_schema() -> Arc<Schema> {
+    Arc::clone(&IN_TRANSIT_SCHEMA)
+}
+
+fn build_transit_seed_schema() -> Schema {
     Schema::new(vec![
         Field::new("scenario_id", DataType::Int32, false),
         Field::new("hydro_id", DataType::Int32, false),
@@ -289,6 +361,20 @@ pub(crate) fn transit_seed_schema() -> Schema {
         Field::new("end_date", DataType::Date32, false),
         Field::new("value_m3s", DataType::Float64, false),
     ])
+}
+
+static TRANSIT_SEED_SCHEMA: LazyLock<Arc<Schema>> =
+    LazyLock::new(|| Arc::new(build_transit_seed_schema()));
+
+/// Schema for `simulation/transit_seed/` — rolling release-window seed for a
+/// continuing run's own upstream-release input.
+///
+/// Scenario-level: unlike every other simulation partition, a window's own
+/// `[start_date, end_date)` span anchors the row, not a stage/node index, so
+/// this schema carries `scenario_id` alone (no `stage_id`/`node_id`). Written
+/// only when the system declares a travel-time arc.
+pub(crate) fn transit_seed_schema() -> Arc<Schema> {
+    Arc::clone(&TRANSIT_SEED_SCHEMA)
 }
 
 /// Schema for `anticipated/fixed_deliveries.parquet` — the run-level echo of
@@ -310,12 +396,7 @@ pub(crate) fn fixed_delivery_schema() -> Schema {
     ])
 }
 
-/// Schema for `simulation/anticipated_lanes/` — post-horizon commitment lane
-/// results, keyed `(thermal_id, delivery_date)`.
-///
-/// One row per resolved post-study commitment lane per terminal scenario,
-/// written only when the system declares `post_study_stages`.
-pub(crate) fn anticipated_lanes_schema() -> Schema {
+fn build_anticipated_lanes_schema() -> Schema {
     let mut fields = simulation_row_prefix();
     fields.extend([
         Field::new("thermal_id", DataType::Int32, false),
@@ -326,10 +407,19 @@ pub(crate) fn anticipated_lanes_schema() -> Schema {
     Schema::new(fields)
 }
 
-/// Schema for `simulation/violations/generic/` — generic constraint violations.
+static ANTICIPATED_LANES_SCHEMA: LazyLock<Arc<Schema>> =
+    LazyLock::new(|| Arc::new(build_anticipated_lanes_schema()));
+
+/// Schema for `simulation/anticipated_lanes/` — post-horizon commitment lane
+/// results, keyed `(thermal_id, delivery_date)`.
 ///
-/// See output-schemas.md SS5.11.
-pub(crate) fn generic_violations_schema() -> Schema {
+/// One row per resolved post-study commitment lane per terminal scenario,
+/// written only when the system declares `post_study_stages`.
+pub(crate) fn anticipated_lanes_schema() -> Arc<Schema> {
+    Arc::clone(&ANTICIPATED_LANES_SCHEMA)
+}
+
+fn build_generic_violations_schema() -> Schema {
     let mut fields = simulation_row_prefix();
     fields.extend([
         Field::new("block_id", DataType::Int32, true),
@@ -338,6 +428,16 @@ pub(crate) fn generic_violations_schema() -> Schema {
         Field::new("slack_cost", DataType::Float64, false),
     ]);
     Schema::new(fields)
+}
+
+static GENERIC_VIOLATIONS_SCHEMA: LazyLock<Arc<Schema>> =
+    LazyLock::new(|| Arc::new(build_generic_violations_schema()));
+
+/// Schema for `simulation/violations/generic/` — generic constraint violations.
+///
+/// See output-schemas.md SS5.11.
+pub(crate) fn generic_violations_schema() -> Arc<Schema> {
+    Arc::clone(&GENERIC_VIOLATIONS_SCHEMA)
 }
 
 /// Schema for `simulation/paths.parquet` — the per-scenario node-path trace.
@@ -696,55 +796,55 @@ pub(crate) struct SchemaRegistryEntry {
 pub(crate) const OUTPUT_SCHEMAS: &[SchemaRegistryEntry] = &[
     SchemaRegistryEntry {
         csv_label: Some("costs"),
-        schema_fn: costs_schema,
+        schema_fn: build_costs_schema,
     },
     SchemaRegistryEntry {
         csv_label: Some("hydros"),
-        schema_fn: hydros_schema,
+        schema_fn: build_hydros_schema,
     },
     SchemaRegistryEntry {
         csv_label: Some("hydro_bus_generation"),
-        schema_fn: hydro_bus_generation_schema,
+        schema_fn: build_hydro_bus_generation_schema,
     },
     SchemaRegistryEntry {
         csv_label: Some("thermals"),
-        schema_fn: thermals_schema,
+        schema_fn: build_thermals_schema,
     },
     SchemaRegistryEntry {
         csv_label: Some("exchanges"),
-        schema_fn: exchanges_schema,
+        schema_fn: build_exchanges_schema,
     },
     SchemaRegistryEntry {
         csv_label: Some("buses"),
-        schema_fn: buses_schema,
+        schema_fn: build_buses_schema,
     },
     SchemaRegistryEntry {
         csv_label: Some("pumping_stations"),
-        schema_fn: pumping_stations_schema,
+        schema_fn: build_pumping_stations_schema,
     },
     SchemaRegistryEntry {
         csv_label: Some("contracts"),
-        schema_fn: contracts_schema,
+        schema_fn: build_contracts_schema,
     },
     SchemaRegistryEntry {
         csv_label: Some("non_controllables"),
-        schema_fn: non_controllables_schema,
+        schema_fn: build_non_controllables_schema,
     },
     SchemaRegistryEntry {
         csv_label: Some("inflow_lags"),
-        schema_fn: inflow_lags_schema,
+        schema_fn: build_inflow_lags_schema,
     },
     SchemaRegistryEntry {
         csv_label: Some("in_transit"),
-        schema_fn: in_transit_schema,
+        schema_fn: build_in_transit_schema,
     },
     SchemaRegistryEntry {
         csv_label: Some("transit_seed"),
-        schema_fn: transit_seed_schema,
+        schema_fn: build_transit_seed_schema,
     },
     SchemaRegistryEntry {
         csv_label: Some("generic_violations"),
-        schema_fn: generic_violations_schema,
+        schema_fn: build_generic_violations_schema,
     },
     SchemaRegistryEntry {
         csv_label: Some("paths"),
@@ -788,7 +888,7 @@ pub(crate) const OUTPUT_SCHEMAS: &[SchemaRegistryEntry] = &[
     },
     SchemaRegistryEntry {
         csv_label: None,
-        schema_fn: anticipated_lanes_schema,
+        schema_fn: build_anticipated_lanes_schema,
     },
     SchemaRegistryEntry {
         csv_label: None,
@@ -855,16 +955,6 @@ mod tests {
             .field_with_name(name)
             .unwrap_or_else(|_| panic!("field '{name}' not found in schema"))
             .is_nullable()
-    }
-
-    #[test]
-    fn parquet_writer_config_default_values() {
-        use crate::output::parquet_config::ParquetWriterConfig;
-        use parquet::basic::Compression;
-        let cfg = ParquetWriterConfig::default();
-        assert_eq!(cfg.row_group_size, 100_000);
-        assert!(cfg.dictionary_encoding);
-        assert!(matches!(cfg.compression, Compression::ZSTD(_)));
     }
 
     #[test]
@@ -1558,7 +1648,7 @@ mod tests {
 
     #[test]
     fn all_schema_functions_return_valid_schemas() {
-        let schemas: Vec<(Schema, &str)> = vec![
+        let schemas: Vec<(Arc<Schema>, &str)> = vec![
             (costs_schema(), "costs"),
             (hydros_schema(), "hydros"),
             (hydro_bus_generation_schema(), "hydro_bus_generation"),
@@ -1571,14 +1661,17 @@ mod tests {
             (inflow_lags_schema(), "inflow_lags"),
             (in_transit_schema(), "in_transit"),
             (generic_violations_schema(), "generic_violations"),
-            (paths_schema(), "paths"),
-            (convergence_schema(), "convergence"),
-            (iteration_timing_schema(), "iteration_timing"),
-            (rank_timing_schema(), "rank_timing"),
-            (row_selection_schema(), "cut_selection"),
-            (solver_iterations_schema(), "solver_iterations"),
-            (retry_histogram_schema(), "retry_histogram"),
-            (generic_constraint_echo_schema(), "generic_constraint_echo"),
+            (Arc::new(paths_schema()), "paths"),
+            (Arc::new(convergence_schema()), "convergence"),
+            (Arc::new(iteration_timing_schema()), "iteration_timing"),
+            (Arc::new(rank_timing_schema()), "rank_timing"),
+            (Arc::new(row_selection_schema()), "cut_selection"),
+            (Arc::new(solver_iterations_schema()), "solver_iterations"),
+            (Arc::new(retry_histogram_schema()), "retry_histogram"),
+            (
+                Arc::new(generic_constraint_echo_schema()),
+                "generic_constraint_echo",
+            ),
         ];
         for (schema, name) in &schemas {
             assert!(

@@ -20,7 +20,7 @@ pub mod fixed_delivery;
 pub mod generic_constraints_echo;
 pub mod hydro_models;
 pub mod manifest;
-pub mod parquet_config;
+pub(crate) mod parquet_config;
 pub mod policy;
 pub mod provenance;
 pub mod results_writer;
@@ -47,7 +47,6 @@ pub use manifest::{
     get_hostname, now_iso8601, read_simulation_metadata, read_training_metadata,
     write_simulation_metadata, write_training_metadata,
 };
-pub use parquet_config::ParquetWriterConfig;
 pub use provenance::write_provenance_report;
 pub use results_writer::{write_results, write_simulation_results, write_training_results};
 pub use scaling_report::write_scaling_report;
