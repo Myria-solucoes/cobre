@@ -1305,7 +1305,7 @@ pub fn chain_node_graph(stochastic: &StochasticContext) -> NodeGraph {
 }
 
 /// Test-support view of the crate-internal per-node prefix count `π(n)`
-/// ([`enumerated_node_visit_counts`]) — the value oracle's R4 expander-coverage
+/// ([`enumerated_node_visit_counts`]) — the value oracle's expander-coverage
 /// self-check compares the expander's one-copy-per-node construction against it.
 ///
 /// # Errors
@@ -1317,7 +1317,7 @@ pub fn node_prefix_counts(graph: &NodeGraph) -> Result<Vec<u64>, SddpError> {
 }
 
 /// Test-support view of the crate-internal enumerated scenario count
-/// ([`enumerated_scenario_count`]) — the root→leaf path count the R4 self-check
+/// ([`enumerated_scenario_count`]) — the root→leaf path count the self-check
 /// matches against the graph's leaf count.
 ///
 /// # Errors
@@ -2957,7 +2957,7 @@ fn branching_tree_policy_graph(reversed: bool) -> HorizonGraph {
     }
     // A reversed declaration order must resolve to the identical canonical node
     // graph (build_node_graph sorts nodes by id, out-edges by target) — the input
-    // for R4's declaration-order-invariance gate.
+    // for the declaration-order-invariance gate.
     if reversed {
         nodes.reverse();
         transitions.reverse();
@@ -2972,7 +2972,7 @@ fn branching_tree_policy_graph(reversed: bool) -> HorizonGraph {
     }
 }
 
-/// Per-study-stage `state_config` for the R1 fixture — the non-uniform
+/// Per-study-stage `state_config` for the branching-tree fixture — the non-uniform
 /// cut-state-projection axis (`d43-storage-only-cut`'s technique, lifted from
 /// chain to branching). `build_cut_state_layouts` sizes a non-leaf node's pool
 /// from its SUCCESSOR's stage config: stage 1 (fan level) sizes the ROOT's
@@ -3006,7 +3006,7 @@ fn non_uniform_branching_stage_configs() -> [StageStateConfig; 3] {
     ]
 }
 
-/// The R1 fixture's [`System`]: [`branching_tree_policy_graph`] over the shared
+/// The branching-tree fixture's [`System`]: [`branching_tree_policy_graph`] over the shared
 /// single-hydro/single-bus [`fan_or_chain_system_ext`] boilerplate, with
 /// [`non_uniform_branching_stage_configs`]. Zero inflow/load std and a wide
 /// (non-binding) reservoir — Generated, `branching_factor: 1`, the
@@ -3047,7 +3047,7 @@ pub fn non_uniform_branching_setup(forward_passes: u32, max_iterations: u32) -> 
 }
 
 /// [`non_uniform_branching_setup`] with the node/transition declaration order
-/// reversed — the R1 fixture's own declaration-order-invariance probe (R4).
+/// reversed — the branching-tree fixture's own declaration-order-invariance probe.
 /// `build_node_graph`'s canonical sort must recover the identical graph, so
 /// training over this fixture is bit-for-bit identical to
 /// [`non_uniform_branching_setup`].
@@ -3138,7 +3138,7 @@ pub fn branching_tree_setup_enumerated(max_iterations: u32) -> StudySetup {
 }
 
 /// Per-pool cut-state dimension (`CutStateProjection::n_slots`), pool-id-indexed
-/// — the R1 fixture's power self-check reads this to confirm the projection
+/// — the branching-tree fixture's power self-check reads this to confirm the projection
 /// genuinely varies across pools (`build_cut_state_layouts` sizes each non-leaf
 /// pool from its successor's `state_config`). `StageData::cut_state_layouts`
 /// itself is `pub(crate)`, unreachable from an integration test without this
@@ -3364,7 +3364,7 @@ const DUAL_FOLDING_PSI: f64 = 0.5;
 /// series — still accepts it.
 const DUAL_FOLDING_INFLOW_STD: f64 = 1e-10;
 /// Terminal-fan width — `≥ 2` non-uniform successors so the fan is genuine (the
-/// R4 power precondition asserts this at run time).
+/// power precondition asserts this at run time).
 const DUAL_FOLDING_FAN_K: usize = 3;
 /// Constant hydro productivity (MW per m³/s) for the dual-folding hydro —
 /// nonzero so turbined inflow generates real MW against the load, giving both the
@@ -3817,7 +3817,7 @@ mod trunk_fan_tests {
         }
     }
 
-    /// Power self-check (R1): `n_nonleaf_nodes` equals `t_trunk` (every trunk
+    /// Power self-check: `n_nonleaf_nodes` equals `t_trunk` (every trunk
     /// node is non-leaf; the last one owns the terminal fan) and the terminal
     /// fan has exactly `k` leaves — asserted against the fixture's own
     /// resolved graph, never a hard-coded literal — plus a training smoke

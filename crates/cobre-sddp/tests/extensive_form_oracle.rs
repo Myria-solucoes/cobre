@@ -94,7 +94,7 @@ fn train_bounds(setup: &mut StudySetup) -> (f64, f64) {
     (outcome.result.final_lb, outcome.result.final_ub)
 }
 
-/// R4 — assert `graph`'s reachable `(node, realization)` prefix set matches
+/// Assert `graph`'s reachable `(node, realization)` prefix set matches
 /// [`extensive_form_optimum`]'s one-column-block-per-node expansion: every node
 /// must be reached by EXACTLY one root-to-node prefix
 /// ([`node_prefix_counts`] `== 1` everywhere), which is what makes "one LP column
@@ -138,7 +138,7 @@ fn assert_reachable_prefixes_match(graph: &NodeGraph) {
     );
 }
 
-/// R3 — cross-check the reachable prefixes (R4), solve the extensive-form LP, train
+/// Cross-check the reachable prefixes, solve the extensive-form LP, train
 /// `enumerated` to convergence, and assert both `final_lb` and `final_ub` close to
 /// the LP optimum within [`REL_TOL`]/[`ABS_TOL`].
 fn assert_closes_to_extensive_form(mut setup: StudySetup, fixture: &str) {
@@ -157,7 +157,7 @@ fn assert_closes_to_extensive_form(mut setup: StudySetup, fixture: &str) {
     );
 }
 
-// ── R3 — three-fixture convergence gate ──────────────────────────────────────
+// ── Three-fixture convergence gate ──────────────────────────────────────
 
 #[test]
 fn k_fan_matches_extensive_form() {
@@ -180,7 +180,7 @@ fn chain_matches_extensive_form() {
     assert_closes_to_extensive_form(setup, "chain");
 }
 
-// ── R4 — reachable-prefix cross-check failure path ───────────────────────────
+// ── Reachable-prefix cross-check failure path ───────────────────────────
 
 /// A 4-node fan-then-recombine `NodeGraph`, hand-built (bypassing `StudySetup`,
 /// which `enumerated`'s own admission guard would reject before construction

@@ -3282,7 +3282,7 @@ fn simulate_with_empty_stage_bases_cold_starts() {
     );
 }
 
-// ── R7: node-keyed simulation warm-basis cache (branching K-fan) ───────────
+// ── Node-keyed simulation warm-basis cache (branching K-fan) ───────────
 
 /// A 2-stage K-fan: a stage-0 root (node 0) branching 50/50 into two stage-1
 /// leaves (node 1, node 2) — the minimal shape where node position and stage
@@ -3350,7 +3350,7 @@ fn warm_basis_for_node(node_id: NodeId) -> CapturedBasis {
     cb
 }
 
-/// R7 acceptance: a branching simulation warm-starts from the VISITED node's
+/// Acceptance: a branching simulation warm-starts from the VISITED node's
 /// own basis, not whichever node's basis happens to land at that stage index.
 /// The pre-fix, stage-keyed lookup (`stage_bases.get(t)`) would resolve node
 /// 2's stage-1 solve to `node_bases[1]` — leaf A's basis, whose `node_id`

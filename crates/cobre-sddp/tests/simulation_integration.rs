@@ -1833,7 +1833,7 @@ fn as_enumerated_census(mut setup: StudySetup) -> StudySetup {
 /// results (canonical `scenario_id` order), the aggregated summary and
 /// gathered `(scenario_id, cost, probability)` rows, and the total realized
 /// LP-solve count across every workspace this run used (the dedup-scale
-/// invariant R3 checks) — measured via the solver-statistics delta around
+/// invariant checks) — measured via the solver-statistics delta around
 /// `simulate()`, the same source `run_worker_scenarios` uses, since
 /// `SimulationRunResult::solver_stats` is per-LEAF (a shared node's stats are
 /// replicated into every leaf that visits it) and cannot answer "how many
@@ -2026,7 +2026,7 @@ fn enumerated_census_pool_fill_warms_previously_cold_leaves() {
     );
 }
 
-/// R1 — value oracle. `branching_tree_setup_enumerated` branches at BOTH
+/// Value oracle. `branching_tree_setup_enumerated` branches at BOTH
 /// interior stages under non-uniform weights (the shape a shape-based
 /// admission clause would have rejected — see `extensive_form_oracle.rs`);
 /// trained to convergence, its census `mean_cost` must close to the
@@ -2048,7 +2048,7 @@ fn census_mean_cost_closes_to_extensive_form_value() {
     );
 }
 
-/// R2 — exact mean + variance on the DECOMP K-fan's known per-leaf weights.
+/// Exact mean + variance on the DECOMP K-fan's known per-leaf weights.
 /// `k_fan_policy_graph`'s leaf `i` (`1..=k`) carries the declared, non-uniform
 /// edge probability `i / Σj` — hand-derived here from the fixture's own
 /// documented construction, independent of the engine's plan weights — and
@@ -2199,7 +2199,7 @@ fn census_distinct_cost_mean_and_variance_match_hand_computed_weighted_formula()
     );
 }
 
-/// R3 — dedup correctness + solve count, on a trunk-then-fan graph whose
+/// Dedup correctness + solve count, on a trunk-then-fan graph whose
 /// `t_trunk` trunk nodes are shared by every one of the `k` leaves.
 ///
 /// (a) Extract-once identity: every leaf's stage-`t` per-entity row for a
@@ -2252,7 +2252,7 @@ fn census_shared_trunk_rows_extract_once_and_solve_count_matches_dedup() {
 }
 
 /// A [`cobre_core::System`] whose only purpose is driving
-/// [`SimulationParquetWriter::new`]'s directory/block-hours setup for R4's
+/// [`SimulationParquetWriter::new`]'s directory/block-hours setup for the
 /// byte-comparison — the writer reads only `system.stages()` (block hours)
 /// and entity counts, never the policy graph, so this need not reproduce a
 /// census fixture's branching structure. Mirrors the single-hydro/single-bus,
@@ -2350,7 +2350,7 @@ fn write_census_parquet_outputs(
     (summary_bytes, hydro_bytes)
 }
 
-/// R4 — thread bit-invariance. For a fixed `K >= 2` census, `mean_cost`/
+/// Thread bit-invariance. For a fixed `K >= 2` census, `mean_cost`/
 /// `std_cost` (`to_bits()`), the `scenario_summary.parquet` bytes (including
 /// the `probability` column), and a per-entity (hydros) Parquet file must be
 /// bit-identical across `--threads 1`, `2`, and `4` — the replicate model's

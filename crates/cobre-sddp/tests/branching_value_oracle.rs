@@ -155,7 +155,7 @@ fn train_backward_basis_signal(setup: &mut StudySetup) -> (f64, u64, u64) {
     (result.final_lb, bwd_solves, bwd_basis_offered)
 }
 
-/// Assert the expander's own coverage (R4): its one-column-block-per-node
+/// Assert the expander's own coverage: its one-column-block-per-node
 /// construction matches the graph's own enumerated counts, and the leaf visit
 /// probabilities sum to 1.
 ///
@@ -233,7 +233,7 @@ fn terminal_generated_fan_control_matches_extensive_form_and_ub() {
     let k = 3;
     let mut setup = terminal_generated_fan_setup(k, 30);
 
-    // Power self-check (R9): interchangeable leaves share ONE pool.
+    // Power self-check: interchangeable leaves share ONE pool.
     let g = &setup.node_graph;
     let leaf_pools: Vec<usize> = (0..g.nodes.len())
         .map(NodePos)
@@ -274,7 +274,7 @@ fn interior_sibling_generated_fan_value_matches_oracle() {
     let k = 3;
     let mut fixture = k_fan_setup(k, 6, 25);
 
-    // Power self-check (R9): the fan children own DISTINCT pools.
+    // Power self-check: the fan children own DISTINCT pools.
     let g = &fixture.setup.node_graph;
     let fan_pools: Vec<usize> = (0..g.nodes.len())
         .map(NodePos)
@@ -309,7 +309,7 @@ fn dcs_arm_generated_fan_value_matches_oracle() {
     let k = 3;
     let mut fixture = dcs_k_fan_setup(k, 6, 25);
 
-    // Power self-check (R4): the target fan node has pool_id != stage.
+    // Power self-check: the target fan node has pool_id != stage.
     let g = &fixture.setup.node_graph;
     let mismatched = (0..g.nodes.len())
         .map(NodePos)
@@ -324,7 +324,7 @@ fn dcs_arm_generated_fan_value_matches_oracle() {
     let optimum = extensive_form_optimum(&fixture.setup);
     let (lb, bwd_solves, bwd_basis_offered) = train_backward_basis_signal(&mut fixture.setup);
 
-    // Power self-check (R4): DCS genuinely engaged its lazy backward path, not
+    // Power self-check: DCS genuinely engaged its lazy backward path, not
     // merely configured it. The Lazy (DCS) backward loads a cut-free core and
     // captures/offers NO frozen warm basis; the Frozen (non-DCS) backward
     // warm-starts from a captured basis on every cross-iteration solve (hundreds

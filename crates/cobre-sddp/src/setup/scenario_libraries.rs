@@ -585,7 +585,7 @@ mod tests {
             .build()
             .expect("system must build");
 
-        // Training's own scheme is InSample: R2's default std_mw > 0.0 rule
+        // Training's own scheme is InSample: default std_mw > 0.0 rule
         // excludes this sigma=0 bus from noise membership entirely, so
         // context.rs's non-External branch builds normal_lp over an empty
         // entity list for this bus.
@@ -604,7 +604,7 @@ mod tests {
         )
         .expect("normal_lp must build");
 
-        // Simulation's own scheme is External: R2's external-additive
+        // Simulation's own scheme is External: external-additive
         // membership widens this library's own bus_ids to include the
         // sigma=0 bus, strictly wider than normal_load_bus_ids above --
         // exactly the divergent-scheme case the fix must not mis-standardize.

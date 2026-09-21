@@ -9235,7 +9235,7 @@ mod visit_bound_overflow_guard {
     const FORWARD_PASSES: u32 = 8;
     const MAX_ITERATIONS: u32 = 30;
 
-    /// R2: constructs a fixture whose capped stride sits strictly below a
+    /// Constructs a fixture whose capped stride sits strictly below a
     /// realizable routed count, drives training past it, and asserts the
     /// named rejection.
     #[test]
@@ -9294,7 +9294,7 @@ mod visit_bound_overflow_guard {
         }
     }
 
-    /// R3 (chain half): every shipped chain deterministic case already routes
+    /// Chain half: every shipped chain deterministic case already routes
     /// through the guard on every level; `run_deterministic_with_setup`
     /// asserts `outcome.error.is_none()` internally, so a misfiring guard
     /// would already fail this call. Additionally asserts the arithmetic
@@ -9318,7 +9318,7 @@ mod visit_bound_overflow_guard {
         }
     }
 
-    /// R3 (enumerated half): the K-fan trained fully enumerated
+    /// Enumerated half: the K-fan trained fully enumerated
     /// (`forward_passes` resolved to the graph's exact path count) must
     /// never trip the guard — every reachable pool's `pool_cut_stride`
     /// margin structurally upper-bounds its exact, deterministic enumerated
@@ -9345,7 +9345,7 @@ mod visit_bound_overflow_guard {
 }
 
 mod heterogeneous_visit_bound_resume {
-    //! R4/R5: `FutureCostFunction::new_with_warm_start` threads the study's
+    //! `FutureCostFunction::new_with_warm_start` threads the study's
     //! per-pool state-dimension and visit-bound arrays — the same per-pool
     //! contract `new_per_pool` takes — so a resumed run's pool geometry
     //! matches the cold-start run's. Exercised on the K-fan's HETEROGENEOUS
@@ -10216,7 +10216,7 @@ mod dual_folding_f34 {
             "folded and unfolded share one graph, so their trunk pools coincide"
         );
 
-        // ── R4: power preconditions — the agreement must not be vacuous ──
+        // ── Power preconditions — the agreement must not be vacuous ──
         assert!(
             fan_width(&folded.setup) >= 2,
             "terminal fan must carry >= 2 successors (got {})",
@@ -10255,7 +10255,7 @@ mod dual_folding_f34 {
             );
         }
 
-        // ── R3: trunk agreement ──
+        // ── Trunk agreement ──
         // (1) Trunk cut coefficients: the storage subgradient is bit-identical. The
         //     two builds solve one identical stage LP over one identical deterministic
         //     trajectory; only the cut projection differs, so the incoming-storage
@@ -10497,7 +10497,7 @@ mod enumerated_checkpoint {
         );
 
         let fcf = &fixture.setup.fcf;
-        // R1: the stride that drives the enumerated cut_id numbering.
+        // The stride that drives the enumerated cut_id numbering.
         for &p in &nonleaf_pools {
             assert_eq!(
                 fcf.pools[p].visit_stride, 1,

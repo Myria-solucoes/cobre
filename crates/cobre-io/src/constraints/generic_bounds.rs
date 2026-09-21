@@ -373,7 +373,7 @@ mod tests {
 
     /// A file with neither endpoint column present is not a reader error: every
     /// row's endpoints read `None` (referential validation is the layer that
-    /// rejects the both-absent shape, R4).
+    /// rejects the both-absent shape).
     #[test]
     fn test_parse_missing_endpoint_columns_yields_none_endpoints() {
         let batch = RecordBatch::try_new(

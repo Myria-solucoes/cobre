@@ -1391,7 +1391,7 @@ mod tests {
         );
     }
 
-    /// R2: a `std_mw = 0.0` load bus is excluded by default (`std_mw > 0.0`
+    /// A `std_mw = 0.0` load bus is excluded by default (`std_mw > 0.0`
     /// only, unchanged), but included once its class scheme is `External` --
     /// membership becomes external-additive without touching inflow
     /// (all-hydros) or NCS (unfiltered, the C5 invariant above).

@@ -379,7 +379,7 @@ mod tests {
     /// Independent `partition_point` + bound-check oracle for
     /// [`resolve_stage_position`], kept duplicate so a regression in the
     /// shared helper cannot also corrupt the reference it's checked against.
-    fn reference_resolve_stage_position(
+    fn resolve_stage_position_reference(
         stage_index: &[(chrono::NaiveDate, chrono::NaiveDate, usize)],
         date: chrono::NaiveDate,
     ) -> Option<usize> {
@@ -1654,7 +1654,7 @@ mod tests {
     /// `check_season_observation_coverage`, and
     /// `scenarios::check_estimation_prerequisites`) must resolve every history
     /// row's stage position identically to the independent
-    /// `reference_resolve_stage_position` oracle; `estimation_active` must
+    /// `resolve_stage_position_reference` oracle; `estimation_active` must
     /// match the inline `has_history && !(has_stats && has_ar)` predicate.
     #[test]
     fn shared_stage_index_helper_matches_pre_share_inline_builds() {
@@ -1680,7 +1680,7 @@ mod tests {
             let resolved = resolve_stage_position(&stage_index, row.start_date);
             assert_eq!(
                 resolved,
-                reference_resolve_stage_position(&stage_index, row.start_date),
+                resolve_stage_position_reference(&stage_index, row.start_date),
                 "resolved stage position for {:?} must match the pre-share inline build",
                 row.start_date
             );

@@ -273,7 +273,7 @@ mod anticipated_backward_cut {
 
         assert!(
             thermal_reg.id.0 < thermal_ant.id.0,
-            "R7: T_reg.id ({}) must be strictly less than T_ant.id ({}) so that \
+            "T_reg.id ({}) must be strictly less than T_ant.id ({}) so that \
          System::build's sort_by_key aligns thermal_idx with the bounds table",
             thermal_reg.id.0,
             thermal_ant.id.0,

@@ -205,7 +205,7 @@ fn trunk_fan_fixture_has_the_declared_shape() {
     );
 }
 
-// ── R2 + R3 + R4 (enumerated leg): the headline linear-work + bound gate ────
+// ── Enumerated leg: the headline linear-work + bound gate ────
 
 /// The headline regression gate: trains the trunk+fan fixture `enumerated`
 /// and asserts, per iteration, that backward `lp_solves` equals the
@@ -296,7 +296,7 @@ fn enumerated_backward_is_linear_and_bound_closes() {
     );
 }
 
-// ── R4 (sampled leg): bound closes under both backward schedulers ──────────
+// ── Sampled leg: bound closes under both backward schedulers ──────────
 
 /// `Traversal::Enumerated` ignores `backward_scheduler` entirely (it always
 /// dispatches to the node-native backward), so the by-scenario/by-node
@@ -352,7 +352,7 @@ fn sampled_trunk_fan_bound_closes_under_by_scenario_and_by_node() {
     );
 }
 
-// ── R5: thread-shape reproducibility ────────────────────────────────────────
+// ── Thread-shape reproducibility ────────────────────────────────────────
 
 /// `final_lb`/`final_ub` must be bitwise identical across `--threads 1`/`2`/`4`
 /// on the enumerated trunk+fan fixture (the satisfiable thread-shape axis;

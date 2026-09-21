@@ -9663,7 +9663,7 @@ fn terminal_fan_tree_node_graph() -> super::NodeGraph {
 }
 
 /// A `K = 3` branching tree is admitted for TRAINING through the shared
-/// guard — unchanged behavior, pinning the R1/R2 refactor byte-neutral.
+/// guard — unchanged behavior, pinning the refactor byte-neutral.
 #[test]
 fn resolve_enumerated_training_count_admits_branching_tree() {
     let ng = terminal_fan_tree_node_graph();
