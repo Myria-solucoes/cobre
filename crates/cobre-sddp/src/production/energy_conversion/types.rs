@@ -27,6 +27,8 @@ pub struct EnergyConversion {
 pub struct EnergyConversionSet {
     per_hydro_stage: Vec<Vec<EnergyConversion>>,
     accumulated: Vec<Vec<f64>>,
+    integrated_equivalent: Vec<Vec<f64>>,
+    integrated_accumulated: Vec<Vec<f64>>,
     n_hydros: usize,
     n_stages: usize,
 }
@@ -63,12 +65,63 @@ impl EnergyConversionSet {
             accumulated.iter().all(|row| row.len() == n_stages),
             "each accumulated row must have length n_stages"
         );
+        let integrated_equivalent = per_hydro_stage
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|c| c.equivalent_productivity_mw_per_m3s)
+                    .collect()
+            })
+            .collect();
+        let integrated_accumulated = accumulated.clone();
         Self {
             per_hydro_stage,
             accumulated,
+            integrated_equivalent,
+            integrated_accumulated,
             n_hydros,
             n_stages,
         }
+    }
+
+    /// Install the two integrated-productivity grids, overriding the
+    /// `new(...)` reference-point defaults.
+    ///
+    /// # Panics
+    ///
+    /// In debug builds, panics if either grid's outer length does not equal
+    /// `n_hydros` or any inner row's length does not equal `n_stages`.
+    #[must_use]
+    pub fn with_integrated(
+        mut self,
+        integrated_equivalent: Vec<Vec<f64>>,
+        integrated_accumulated: Vec<Vec<f64>>,
+    ) -> Self {
+        debug_assert_eq!(
+            integrated_equivalent.len(),
+            self.n_hydros,
+            "integrated_equivalent outer length must equal n_hydros"
+        );
+        debug_assert!(
+            integrated_equivalent
+                .iter()
+                .all(|row| row.len() == self.n_stages),
+            "each integrated_equivalent row must have length n_stages"
+        );
+        debug_assert_eq!(
+            integrated_accumulated.len(),
+            self.n_hydros,
+            "integrated_accumulated outer length must equal n_hydros"
+        );
+        debug_assert!(
+            integrated_accumulated
+                .iter()
+                .all(|row| row.len() == self.n_stages),
+            "each integrated_accumulated row must have length n_stages"
+        );
+        self.integrated_equivalent = integrated_equivalent;
+        self.integrated_accumulated = integrated_accumulated;
+        self
     }
 
     /// Return the [`EnergyConversion`] for `(hydro, stage)`.
@@ -109,6 +162,46 @@ impl EnergyConversionSet {
             self.n_stages
         );
         self.accumulated[hydro][stage]
+    }
+
+    /// Return the own-scope, mean-evaluator integrated productivity for `(hydro, stage)`.
+    ///
+    /// # Panics
+    ///
+    /// In debug builds, panics on out-of-range indices.
+    #[must_use]
+    pub fn integrated_equivalent_productivity(&self, hydro: usize, stage: usize) -> f64 {
+        debug_assert!(
+            hydro < self.n_hydros,
+            "hydro index {hydro} out of bounds (n_hydros = {})",
+            self.n_hydros
+        );
+        debug_assert!(
+            stage < self.n_stages,
+            "stage index {stage} out of bounds (n_stages = {})",
+            self.n_stages
+        );
+        self.integrated_equivalent[hydro][stage]
+    }
+
+    /// Return the cascade-scope, mean-evaluator integrated productivity for `(hydro, stage)`.
+    ///
+    /// # Panics
+    ///
+    /// In debug builds, panics on out-of-range indices.
+    #[must_use]
+    pub fn integrated_accumulated_productivity(&self, hydro: usize, stage: usize) -> f64 {
+        debug_assert!(
+            hydro < self.n_hydros,
+            "hydro index {hydro} out of bounds (n_hydros = {})",
+            self.n_hydros
+        );
+        debug_assert!(
+            stage < self.n_stages,
+            "stage index {stage} out of bounds (n_stages = {})",
+            self.n_stages
+        );
+        self.integrated_accumulated[hydro][stage]
     }
 
     /// Number of hydro plants (outer grid dimension).
@@ -295,5 +388,36 @@ mod tests {
         assert_eq!(set.conversion(1, 0).reference_outflow_m3s, 70.0);
         assert_eq!(set.accumulated_productivity(0, 0), 3.5);
         assert_eq!(set.accumulated_productivity(1, 0), 2.5);
+    }
+
+    #[test]
+    fn new_defaults_integrated_grids_to_reference_point_grids() {
+        let grid = vec![
+            vec![EnergyConversion {
+                equivalent_productivity_mw_per_m3s: 0.5,
+                reference_volume_hm3: 100.0,
+                reference_outflow_m3s: 50.0,
+            }],
+            vec![EnergyConversion {
+                equivalent_productivity_mw_per_m3s: 0.9,
+                reference_volume_hm3: 180.0,
+                reference_outflow_m3s: 70.0,
+            }],
+        ];
+        let acc = vec![vec![3.5_f64], vec![2.5_f64]];
+        let set = EnergyConversionSet::new(grid, acc, 2, 1);
+
+        for h in 0..2 {
+            assert_eq!(
+                set.integrated_equivalent_productivity(h, 0).to_bits(),
+                set.conversion(h, 0)
+                    .equivalent_productivity_mw_per_m3s
+                    .to_bits()
+            );
+            assert_eq!(
+                set.integrated_accumulated_productivity(h, 0).to_bits(),
+                set.accumulated_productivity(h, 0).to_bits()
+            );
+        }
     }
 }

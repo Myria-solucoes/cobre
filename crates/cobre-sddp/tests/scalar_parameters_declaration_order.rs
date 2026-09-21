@@ -10,7 +10,7 @@
     clippy::float_cmp
 )]
 
-use cobre_core::{EntityId, ParameterKind, ScalarParameter, StageId};
+use cobre_core::{EntityId, ParameterKind, ResolvedBounds, ScalarParameter, StageId};
 use cobre_sddp::build_resolved_parameters;
 use cobre_sddp::energy_conversion::{EnergyConversionSet, HydroEnergyProductivityOverride};
 
@@ -80,8 +80,8 @@ fn scalar_parameters_resolution_is_declaration_order_invariant() {
         &stage_to_season,
         &stage_ids,
         &stage_block_counts,
-        n_stages,
         1_000_000.0,
+        &ResolvedBounds::empty(),
     )
     .expect("ResolvedParameters builds for order_a");
     let resolved_b = build_resolved_parameters(
@@ -92,8 +92,8 @@ fn scalar_parameters_resolution_is_declaration_order_invariant() {
         &stage_to_season,
         &stage_ids,
         &stage_block_counts,
-        n_stages,
         1_000_000.0,
+        &ResolvedBounds::empty(),
     )
     .expect("ResolvedParameters builds for order_b");
 

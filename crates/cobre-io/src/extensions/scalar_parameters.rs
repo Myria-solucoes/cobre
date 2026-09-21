@@ -57,6 +57,9 @@
 //! | `min_storage`             | Minimum operational storage              |
 //! | `max_storage`             | Maximum operational storage              |
 //! | `specific_productivity`   | Specific productivity                    |
+//! | `integrated_equivalent_productivity`  | Storage-range mean equivalent productivity  |
+//! | `integrated_accumulated_productivity` | Storage-range mean accumulated productivity |
+//! | `max_stored_energy`                   | Maximum stored energy over the physical per-stage storage range |
 //!
 //! ## Rejection rules
 //!

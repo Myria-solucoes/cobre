@@ -400,6 +400,43 @@ impl ForebayTable {
         self.heights[i] + t * (self.heights[i + 1] - self.heights[i])
     }
 
+    /// Volume-averaged forebay elevation over `[v_lo, v_hi]` (m): the exact integral
+    /// of the piecewise-linear `height` curve. Returns `height(v_lo)` for a
+    /// zero-width (or single-row) range.
+    pub(crate) fn mean_height(&self, v_lo: f64, v_hi: f64) -> f64 {
+        if self.volumes.len() == 1 {
+            return self.heights[0];
+        }
+
+        let v_lo = v_lo.clamp(self.v_min(), self.v_max());
+        let v_hi = v_hi.clamp(self.v_min(), self.v_max());
+        if v_hi <= v_lo {
+            return self.height(v_lo);
+        }
+
+        let (seg_lo, frac_lo) = self.locate(v_lo);
+        let (seg_hi, frac_hi) = self.locate(v_hi);
+        let height_lo =
+            self.heights[seg_lo] + frac_lo * (self.heights[seg_lo + 1] - self.heights[seg_lo]);
+        let height_hi =
+            self.heights[seg_hi] + frac_hi * (self.heights[seg_hi + 1] - self.heights[seg_hi]);
+
+        if seg_lo == seg_hi {
+            return 0.5 * (height_lo + height_hi);
+        }
+
+        let mut integral =
+            0.5 * (height_lo + self.heights[seg_lo + 1]) * (self.volumes[seg_lo + 1] - v_lo);
+        for seg in (seg_lo + 1)..seg_hi {
+            integral += 0.5
+                * (self.heights[seg] + self.heights[seg + 1])
+                * (self.volumes[seg + 1] - self.volumes[seg]);
+        }
+        integral += 0.5 * (self.heights[seg_hi] + height_hi) * (v_hi - self.volumes[seg_hi]);
+
+        integral / (v_hi - v_lo)
+    }
+
     /// Find the segment index `i` and the fractional position `t` within it.
     ///
     /// Returns `(i, t)` such that:
@@ -484,4 +521,199 @@ fn locate_tailrace(points: &[cobre_core::TailracePoint], q: f64) -> (usize, f64)
     let dq = points[i + 1].outflow_m3s - points[i].outflow_m3s;
     let t = (q - points[i].outflow_m3s) / dq;
     (i, t)
+}
+
+#[cfg(test)]
+mod tests {
+    use cobre_core::EntityId;
+    use cobre_io::extensions::HydroGeometryRow;
+    use proptest::prelude::*;
+    use proptest::test_runner::RngSeed;
+
+    use super::ForebayTable;
+
+    fn row(volume_hm3: f64, height_m: f64) -> HydroGeometryRow {
+        HydroGeometryRow {
+            hydro_id: EntityId::from(1),
+            volume_hm3,
+            height_m,
+            area_km2: 0.0,
+        }
+    }
+
+    /// Non-uniform 4-point table: segment widths 100/200/700 hm3.
+    fn non_uniform_table() -> ForebayTable {
+        ForebayTable::new(
+            &[
+                row(0.0, 10.0),
+                row(100.0, 20.0),
+                row(300.0, 50.0),
+                row(1000.0, 80.0),
+            ],
+            "NonUniform",
+        )
+        .expect("strictly increasing volumes and non-decreasing heights")
+    }
+
+    fn assert_relative_close(actual: f64, expected: f64, msg: &str) {
+        const REL_TOL: f64 = 1e-9;
+        let scale = expected.abs().max(1.0);
+        assert!(
+            (actual - expected).abs() <= REL_TOL * scale,
+            "{msg}: got {actual}, expected {expected}"
+        );
+    }
+
+    #[test]
+    fn mean_height_single_row_returns_constant_height_for_any_range() {
+        let table = ForebayTable::new(&[row(1500.0, 386.5)], "RunOfRiver").unwrap();
+        assert_eq!(table.mean_height(0.0, 3000.0), 386.5);
+        assert_eq!(table.mean_height(1500.0, 1500.0), 386.5);
+        assert_eq!(table.mean_height(2000.0, 1000.0), 386.5);
+    }
+
+    #[test]
+    fn mean_height_zero_width_range_returns_height_at_point() {
+        let table = non_uniform_table();
+        let v = 150.0;
+        assert_eq!(table.mean_height(v, v), table.height(v));
+    }
+
+    #[test]
+    fn mean_height_inverted_range_returns_height_at_clamped_lo() {
+        let table = non_uniform_table();
+        // v_lo clamps to v_max (1000.0), which then exceeds the clamped v_hi.
+        assert_eq!(table.mean_height(1500.0, 50.0), table.height(1000.0));
+    }
+
+    #[test]
+    fn mean_height_clamps_both_sides_matches_full_table_integral() {
+        let table = non_uniform_table();
+        let expected = (0.5 * (10.0 + 20.0) * 100.0
+            + 0.5 * (20.0 + 50.0) * 200.0
+            + 0.5 * (50.0 + 80.0) * 700.0)
+            / 1000.0;
+        assert_relative_close(
+            table.mean_height(-500.0, 5000.0),
+            expected,
+            "clamped both sides",
+        );
+    }
+
+    #[test]
+    fn mean_height_breakpoint_aligned_endpoints_matches_single_segment_average() {
+        let table = non_uniform_table();
+        assert_relative_close(table.mean_height(100.0, 300.0), 35.0, "breakpoint-aligned");
+    }
+
+    #[test]
+    fn mean_height_mid_segment_endpoints_spans_partial_and_full_segments() {
+        let table = non_uniform_table();
+        let height_lo = table.height(50.0);
+        let height_hi = table.height(500.0);
+        let expected = (0.5 * (height_lo + 20.0) * 50.0
+            + 0.5 * (20.0 + 50.0) * 200.0
+            + 0.5 * (50.0 + height_hi) * 200.0)
+            / 450.0;
+        assert_relative_close(
+            table.mean_height(50.0, 500.0),
+            expected,
+            "mid-segment endpoints",
+        );
+    }
+
+    #[test]
+    fn mean_height_non_uniform_grid_spans_multiple_interior_segments() {
+        let table = ForebayTable::new(
+            &[
+                row(0.0, 5.0),
+                row(50.0, 15.0),
+                row(200.0, 45.0),
+                row(250.0, 50.0),
+                row(800.0, 90.0),
+                row(1000.0, 100.0),
+            ],
+            "MultiSegment",
+        )
+        .expect("strictly increasing volumes and non-decreasing heights");
+
+        let height_lo = table.height(20.0);
+        let height_hi = table.height(900.0);
+        let expected = (0.5 * (height_lo + 15.0) * (50.0 - 20.0)
+            + 0.5 * (15.0 + 45.0) * (200.0 - 50.0)
+            + 0.5 * (45.0 + 50.0) * (250.0 - 200.0)
+            + 0.5 * (50.0 + 90.0) * (800.0 - 250.0)
+            + 0.5 * (90.0 + height_hi) * (900.0 - 800.0))
+            / (900.0 - 20.0);
+
+        assert_relative_close(
+            table.mean_height(20.0, 900.0),
+            expected,
+            "non-uniform grid spanning multiple interior segments",
+        );
+    }
+
+    /// A `ForebayTable` built from strictly-increasing volumes and non-decreasing
+    /// heights (2 to 6 rows), generated from positive deltas so `new` never rejects.
+    fn forebay_table_strategy() -> impl Strategy<Value = ForebayTable> {
+        (2usize..=6).prop_flat_map(|n| {
+            (
+                prop::collection::vec(0.01f64..100.0, n),
+                prop::collection::vec(0.0f64..50.0, n),
+            )
+                .prop_map(move |(volume_deltas, height_deltas)| {
+                    let mut volume = 0.0;
+                    let mut height = 100.0;
+                    let rows: Vec<HydroGeometryRow> = (0..n)
+                        .map(|idx| {
+                            volume += volume_deltas[idx];
+                            height += height_deltas[idx];
+                            row(volume, height)
+                        })
+                        .collect();
+                    ForebayTable::new(&rows, "PropTest")
+                        .expect("strictly increasing volumes and non-decreasing heights")
+                })
+        })
+    }
+
+    fn table_and_three_volumes_strategy() -> impl Strategy<Value = (ForebayTable, f64, f64, f64)> {
+        forebay_table_strategy().prop_flat_map(|table| {
+            let lo = table.v_min();
+            let hi = table.v_max();
+            (Just(table), lo..=hi, lo..=hi, lo..=hi)
+        })
+    }
+
+    /// Fixed cases/seed so a failing shrink is reproducible run-to-run.
+    fn fixed_config() -> ProptestConfig {
+        ProptestConfig {
+            cases: 256,
+            rng_seed: RngSeed::Fixed(42),
+            ..ProptestConfig::default()
+        }
+    }
+
+    proptest! {
+        #![proptest_config(fixed_config())]
+
+        /// `mean_height` over `[a, c]` equals the width-weighted combination of
+        /// `[a, b]` and `[b, c]` for any `a <= b <= c`: the split reorders the
+        /// trapezoid sum and interpolates an extra height at `b`, so the two
+        /// sides agree only up to floating-point tolerance, never bit-exact `==`.
+        #[test]
+        fn mean_height_partition_additivity(
+            (table, x, y, z) in table_and_three_volumes_strategy()
+        ) {
+            let mut volumes = [x, y, z];
+            volumes.sort_by(|p, q| p.partial_cmp(q).expect("proptest never generates NaN"));
+            let [a, b, c] = volumes;
+
+            let lhs = table.mean_height(a, c) * (c - a);
+            let rhs = table.mean_height(a, b) * (b - a) + table.mean_height(b, c) * (c - b);
+            let scale = lhs.abs().max(rhs.abs()).max(1.0);
+
+            prop_assert!((lhs - rhs).abs() <= 1e-9 * scale);
+        }
+    }
 }

@@ -63,6 +63,12 @@ pub enum BroadcastComputedParameter {
     MaxStorage(EntityId),
     /// Specific productivity (`ρ_esp`).
     SpecificProductivity(EntityId),
+    /// Storage-range mean equivalent productivity (own scope).
+    IntegratedEquivalentProductivity(EntityId),
+    /// Storage-range mean accumulated productivity (cascade scope).
+    IntegratedAccumulatedProductivity(EntityId),
+    /// Maximum stored energy over the physical per-stage storage range.
+    MaxStoredEnergy(EntityId),
 }
 
 impl From<&ScalarParameter> for BroadcastScalarParameter {
@@ -129,6 +135,13 @@ impl From<ComputedParameter> for BroadcastComputedParameter {
             ComputedParameter::SpecificProductivity { hydro_id } => {
                 Self::SpecificProductivity(hydro_id)
             }
+            ComputedParameter::IntegratedEquivalentProductivity { hydro_id } => {
+                Self::IntegratedEquivalentProductivity(hydro_id)
+            }
+            ComputedParameter::IntegratedAccumulatedProductivity { hydro_id } => {
+                Self::IntegratedAccumulatedProductivity(hydro_id)
+            }
+            ComputedParameter::MaxStoredEnergy { hydro_id } => Self::MaxStoredEnergy(hydro_id),
         }
     }
 }
@@ -152,6 +165,15 @@ impl From<BroadcastComputedParameter> for ComputedParameter {
             BroadcastComputedParameter::MaxStorage(hydro_id) => Self::MaxStorage { hydro_id },
             BroadcastComputedParameter::SpecificProductivity(hydro_id) => {
                 Self::SpecificProductivity { hydro_id }
+            }
+            BroadcastComputedParameter::IntegratedEquivalentProductivity(hydro_id) => {
+                Self::IntegratedEquivalentProductivity { hydro_id }
+            }
+            BroadcastComputedParameter::IntegratedAccumulatedProductivity(hydro_id) => {
+                Self::IntegratedAccumulatedProductivity { hydro_id }
+            }
+            BroadcastComputedParameter::MaxStoredEnergy(hydro_id) => {
+                Self::MaxStoredEnergy { hydro_id }
             }
         }
     }
@@ -465,6 +487,79 @@ mod tests {
         let bytes_a = postcard::to_allocvec(&mirror).unwrap();
         let bytes_b = postcard::to_allocvec(&mirror).unwrap();
         assert_eq!(bytes_a, bytes_b);
+    }
+
+    /// Pins the postcard discriminant (first byte) of every
+    /// `BroadcastComputedParameter` variant. Postcard encodes the variant index
+    /// as a varint; for indices `< 0x80` the first byte equals the index. The
+    /// integrated tags and `MaxStoredEnergy` are appended at the tail (0x07,
+    /// 0x08, 0x09), so every existing variant keeps its byte and a previously
+    /// serialized parameter still decodes.
+    #[test]
+    fn broadcast_computed_parameter_postcard_discriminant_pin() {
+        let cases: &[(BroadcastComputedParameter, u8)] = &[
+            (
+                BroadcastComputedParameter::EquivalentProductivity(EntityId(0)),
+                0x00,
+            ),
+            (
+                BroadcastComputedParameter::AccumulatedProductivity(EntityId(0)),
+                0x01,
+            ),
+            (
+                BroadcastComputedParameter::ReferenceVolume(EntityId(0)),
+                0x02,
+            ),
+            (
+                BroadcastComputedParameter::ReferenceTurbine(EntityId(0)),
+                0x03,
+            ),
+            (BroadcastComputedParameter::MinStorage(EntityId(0)), 0x04),
+            (BroadcastComputedParameter::MaxStorage(EntityId(0)), 0x05),
+            (
+                BroadcastComputedParameter::SpecificProductivity(EntityId(0)),
+                0x06,
+            ),
+            (
+                BroadcastComputedParameter::IntegratedEquivalentProductivity(EntityId(0)),
+                0x07,
+            ),
+            (
+                BroadcastComputedParameter::IntegratedAccumulatedProductivity(EntityId(0)),
+                0x08,
+            ),
+            (
+                BroadcastComputedParameter::MaxStoredEnergy(EntityId(0)),
+                0x09,
+            ),
+        ];
+        for (variant, discriminant) in cases {
+            let bytes = postcard::to_allocvec(variant).unwrap();
+            assert_eq!(
+                bytes[0], *discriminant,
+                "{variant:?} must serialize to postcard discriminant {discriminant:#04x}"
+            );
+        }
+    }
+
+    #[test]
+    fn broadcast_computed_parameter_integrated_tags_round_trip() {
+        for variant in [
+            BroadcastComputedParameter::IntegratedEquivalentProductivity(EntityId(11)),
+            BroadcastComputedParameter::IntegratedAccumulatedProductivity(EntityId(13)),
+        ] {
+            let bytes = postcard::to_allocvec(&variant).unwrap();
+            let restored: BroadcastComputedParameter = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(restored, variant);
+        }
+    }
+
+    #[test]
+    fn broadcast_computed_parameter_max_stored_energy_round_trip() {
+        let variant = BroadcastComputedParameter::MaxStoredEnergy(EntityId(17));
+        let bytes = postcard::to_allocvec(&variant).unwrap();
+        let restored: BroadcastComputedParameter = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(restored, variant);
     }
 
     #[test]

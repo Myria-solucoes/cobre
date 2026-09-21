@@ -1792,8 +1792,8 @@ fn resolved_params_single_stage(
         &[0_i32],
         &[StageId(0)],
         &[n_blks],
-        n_stages,
         COST_SCALE_FACTOR,
+        &ResolvedBounds::empty(),
     )
     .expect("resolved parameters build")
 }

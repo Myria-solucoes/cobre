@@ -57,9 +57,9 @@ pub enum CoefficientRef {
 
 /// A Cobre-computed quantity indexed by hydro plant.
 ///
-/// Each variant names one of the seven scalar quantities that the resolver
-/// derives from hydro geometry and operational data. All variants carry a
-/// single `hydro_id` field identifying the hydro plant.
+/// Each variant names a scalar quantity that the resolver derives from hydro
+/// geometry and operational data. All variants carry a single `hydro_id` field
+/// identifying the hydro plant.
 ///
 /// # Examples
 ///
@@ -111,6 +111,26 @@ pub enum ComputedParameter {
     },
     /// Specific productivity (`ρ_esp`).
     SpecificProductivity {
+        /// Hydro plant identifier.
+        hydro_id: EntityId,
+    },
+    /// Equivalent productivity evaluated as the mean over the plant's storage
+    /// range rather than at the reference volume (own scope).
+    IntegratedEquivalentProductivity {
+        /// Hydro plant identifier.
+        hydro_id: EntityId,
+    },
+    /// Accumulated productivity evaluated as the mean over the plant's storage
+    /// range rather than at the reference volume (cascade scope).
+    IntegratedAccumulatedProductivity {
+        /// Hydro plant identifier.
+        hydro_id: EntityId,
+    },
+    /// Maximum stored energy: `integrated_accumulated_productivity * (V_hi -
+    /// V_lo)` over the hydro plant's physical per-stage storage range. Unit is
+    /// productivity `[MW/(m3/s)]` times volume `[hm3]` — the same unit as a
+    /// productivity-times-storage-volume constraint term, not `MWh`.
+    MaxStoredEnergy {
         /// Hydro plant identifier.
         hydro_id: EntityId,
     },
@@ -423,7 +443,7 @@ mod tests {
     use super::{CoefficientRef, ComputedParameter, EntityId, ParameterKind};
 
     #[test]
-    fn seven_computed_parameter_variants() {
+    fn computed_parameter_variant_coverage_is_exhaustive() {
         let variants = [
             ComputedParameter::EquivalentProductivity {
                 hydro_id: EntityId(1),
@@ -446,12 +466,21 @@ mod tests {
             ComputedParameter::SpecificProductivity {
                 hydro_id: EntityId(7),
             },
+            ComputedParameter::IntegratedEquivalentProductivity {
+                hydro_id: EntityId(8),
+            },
+            ComputedParameter::IntegratedAccumulatedProductivity {
+                hydro_id: EntityId(9),
+            },
+            ComputedParameter::MaxStoredEnergy {
+                hydro_id: EntityId(10),
+            },
         ];
 
         assert_eq!(
             variants.len(),
-            7,
-            "ComputedParameter must have exactly 7 variants"
+            10,
+            "ComputedParameter must have exactly 10 variants"
         );
 
         // No `_` arm: adding a variant without updating here is a compile error.
@@ -464,6 +493,13 @@ mod tests {
                 ComputedParameter::MinStorage { .. } => "MinStorage",
                 ComputedParameter::MaxStorage { .. } => "MaxStorage",
                 ComputedParameter::SpecificProductivity { .. } => "SpecificProductivity",
+                ComputedParameter::IntegratedEquivalentProductivity { .. } => {
+                    "IntegratedEquivalentProductivity"
+                }
+                ComputedParameter::IntegratedAccumulatedProductivity { .. } => {
+                    "IntegratedAccumulatedProductivity"
+                }
+                ComputedParameter::MaxStoredEnergy { .. } => "MaxStoredEnergy",
             };
         }
     }
@@ -587,6 +623,66 @@ mod tests {
         );
         let roundtrip: ParameterKind = serde_json::from_str(&json).unwrap();
         assert_eq!(roundtrip, kind);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn computed_parameter_integrated_tags_serialize_to_snake_case() {
+        let eq = ComputedParameter::IntegratedEquivalentProductivity {
+            hydro_id: EntityId(3),
+        };
+        let json = serde_json::to_string(&eq).unwrap();
+        assert_eq!(
+            json,
+            r#"{"tag":"integrated_equivalent_productivity","hydro_id":3}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<ComputedParameter>(&json).unwrap(),
+            eq
+        );
+
+        let acum = ComputedParameter::IntegratedAccumulatedProductivity {
+            hydro_id: EntityId(5),
+        };
+        let json = serde_json::to_string(&acum).unwrap();
+        assert_eq!(
+            json,
+            r#"{"tag":"integrated_accumulated_productivity","hydro_id":5}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<ComputedParameter>(&json).unwrap(),
+            acum
+        );
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn computed_parameter_max_stored_energy_serializes_to_snake_case() {
+        let p = ComputedParameter::MaxStoredEnergy {
+            hydro_id: EntityId(4),
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        assert_eq!(json, r#"{"tag":"max_stored_energy","hydro_id":4}"#);
+        assert_eq!(serde_json::from_str::<ComputedParameter>(&json).unwrap(), p);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn computed_parameter_existing_tags_are_byte_identical() {
+        let eq = ComputedParameter::EquivalentProductivity {
+            hydro_id: EntityId(7),
+        };
+        assert_eq!(
+            serde_json::to_string(&eq).unwrap(),
+            r#"{"tag":"equivalent_productivity","hydro_id":7}"#
+        );
+        let acum = ComputedParameter::AccumulatedProductivity {
+            hydro_id: EntityId(7),
+        };
+        assert_eq!(
+            serde_json::to_string(&acum).unwrap(),
+            r#"{"tag":"accumulated_productivity","hydro_id":7}"#
+        );
     }
 
     #[cfg(feature = "serde")]
