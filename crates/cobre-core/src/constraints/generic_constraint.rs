@@ -10,7 +10,7 @@
 //!
 //! # Variable Reference Catalog
 //!
-//! [`VariableRef`] covers all 24 LP variable types defined in the spec (§15).
+//! [`VariableRef`] covers every LP variable type defined in the spec (§15).
 //! Each variant carries the entity ID and, for block-capable variables, an
 //! optional block ID. `Some(i)` references block `i`. `None` is not
 //! block-specific and resolves by the variable's nature: per-block flows (e.g.
