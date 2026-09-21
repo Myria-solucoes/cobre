@@ -280,6 +280,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `cobre validate` now classifies top-level parse, schema, and policy-compatibility
+  load failures as validation errors (exit 1), matching `cobre run`, instead of
+  internal errors (exit 4). Filesystem failures remain exit 2, and the validation
+  report and JSON error format are unchanged.
+
 - **`cobre validate` and `cobre.io.validate` now reject a boundary-configured
   study whose scalar-parameter table has a genuine gap, instead of silently
   passing.** Both entry points build the study against the loaded
