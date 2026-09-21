@@ -1,5 +1,8 @@
 # Full-case profiling and progressive population — in progress
 
+Latest native server validation: [2026-09-21 manager report](v3-manager-2026-09-21.md).
+The historical sections below retain the state and limitations at each experiment.
+
 The converted round-1687 input was recovered from its archived evidence and copied
 to `/home/jackson/tmp/cobre-optimization-next/real-1687` on the manager. It has
 112 stages, 157 hydros, 158 thermals, five buses and six lines. Validation reported

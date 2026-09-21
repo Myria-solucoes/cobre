@@ -1,0 +1,44 @@
+[
+  {
+    "arm": "baseline",
+    "repeat": 0,
+    "threads": 4,
+    "wall_seconds": 690.9442458500271,
+    "exit_code": 0,
+    "command": [
+      "/home/jackson/tmp/cobre-opt3-20260921/artifacts/cobre",
+      "run",
+      "/home/jackson/tmp/cobre-opt3-20260921/real-1687-2x8/0-baseline/case",
+      "--output",
+      "/home/jackson/tmp/cobre-opt3-20260921/real-1687-2x8/0-baseline/output",
+      "--threads",
+      "4",
+      "--comm-backend",
+      "local",
+      "--color",
+      "never"
+    ],
+    "binary_sha256": "b4b9325257484200861e9be419894b64f59608bde55818945a910cc6dfcae19b"
+  },
+  {
+    "arm": "candidate",
+    "repeat": 0,
+    "threads": 8,
+    "wall_seconds": 420.6895390209975,
+    "exit_code": 0,
+    "command": [
+      "/home/jackson/tmp/cobre-opt3-20260921/artifacts/cobre",
+      "run",
+      "/home/jackson/tmp/cobre-opt3-20260921/real-1687-2x8/0-candidate/case",
+      "--output",
+      "/home/jackson/tmp/cobre-opt3-20260921/real-1687-2x8/0-candidate/output",
+      "--threads",
+      "8",
+      "--comm-backend",
+      "local",
+      "--color",
+      "never"
+    ],
+    "binary_sha256": "b4b9325257484200861e9be419894b64f59608bde55818945a910cc6dfcae19b"
+  }
+]

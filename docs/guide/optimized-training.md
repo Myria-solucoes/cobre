@@ -172,7 +172,12 @@ Keep fixed population, all backward points and independent chains as the startin
 configuration. In the short round-1687 local comparison, increasing four to eight
 workers reduced training time 38.44% with identical exported cut files; exact
 state deduplication removed no work. This is a short-run observation, not a
-server capacity recommendation or converged-policy validation.
+server capacity recommendation or converged-policy validation. Native manager
+validation of the same short protocol measured 39.34% less training time with
+eight workers and identical 112 cut files. The compact progressive combination
+measured 60.24% less time on that server, but increased mean cost 0.07286%
+and deficit 0.29649%; keep it experimental. See the
+[manager report](../benchmarks/training-optimized-2026-09-20/v3-manager-2026-09-21.md).
 
 For a compact experimental comparison, eight workers with 24 initial forwards,
 doubling every eight iterations to 96 by iteration 17, and all backward points
