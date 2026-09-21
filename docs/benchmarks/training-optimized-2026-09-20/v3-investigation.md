@@ -303,3 +303,15 @@ of operational or nested-CVaR non-inferiority. Retain fixed population as the
 default and validate risk and individual-reservoir trajectories before promotion.
 These are local measurements; manager validation remains pending SSH access.
 Evidence: `v3-conservative-combined-seed-*-{runs,summary}.json`.
+
+
+## Paired deficit follow-up
+
+For the local conservative three-seed comparison, summing deficit per common
+scenario before computing paired differences gives 95% normal intervals of
+[-0.3187%, +0.2783%], [+0.2664%, +0.5227%], and [-0.0751%, +0.1680%],
+respectively. The seed-7 increase is therefore not merely an unquantified point
+estimate; its paired interval excludes zero. These intervals are conditional on
+the trained policies, without adjustment for multiple comparisons, and are not
+a nested-risk test. Keep the conservative ramp experimental. The adjacent
+`v3-conservative-paired-deficit.json` preserves scenario counts and MWh intervals.

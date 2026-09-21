@@ -1,0 +1,128 @@
+[
+  {
+    "arm": "baseline",
+    "repeat": 0,
+    "threads": 4,
+    "wall_seconds": 41.420062716002576,
+    "exit_code": 0,
+    "command": [
+      "/home/jackson/tmp/cobre-opt3-20260921/artifacts/cobre",
+      "run",
+      "/home/jackson/tmp/cobre-opt3-20260921/compact-conservative-seed42/0-baseline/case",
+      "--output",
+      "/home/jackson/tmp/cobre-opt3-20260921/compact-conservative-seed42/0-baseline/output",
+      "--threads",
+      "4",
+      "--comm-backend",
+      "local",
+      "--color",
+      "never"
+    ],
+    "binary_sha256": "b4b9325257484200861e9be419894b64f59608bde55818945a910cc6dfcae19b"
+  },
+  {
+    "arm": "candidate",
+    "repeat": 0,
+    "threads": 8,
+    "wall_seconds": 18.658287986996584,
+    "exit_code": 0,
+    "command": [
+      "/home/jackson/tmp/cobre-opt3-20260921/artifacts/cobre",
+      "run",
+      "/home/jackson/tmp/cobre-opt3-20260921/compact-conservative-seed42/0-candidate/case",
+      "--output",
+      "/home/jackson/tmp/cobre-opt3-20260921/compact-conservative-seed42/0-candidate/output",
+      "--threads",
+      "8",
+      "--comm-backend",
+      "local",
+      "--color",
+      "never"
+    ],
+    "binary_sha256": "b4b9325257484200861e9be419894b64f59608bde55818945a910cc6dfcae19b"
+  },
+  {
+    "arm": "candidate",
+    "repeat": 1,
+    "threads": 8,
+    "wall_seconds": 18.862786139012314,
+    "exit_code": 0,
+    "command": [
+      "/home/jackson/tmp/cobre-opt3-20260921/artifacts/cobre",
+      "run",
+      "/home/jackson/tmp/cobre-opt3-20260921/compact-conservative-seed42/1-candidate/case",
+      "--output",
+      "/home/jackson/tmp/cobre-opt3-20260921/compact-conservative-seed42/1-candidate/output",
+      "--threads",
+      "8",
+      "--comm-backend",
+      "local",
+      "--color",
+      "never"
+    ],
+    "binary_sha256": "b4b9325257484200861e9be419894b64f59608bde55818945a910cc6dfcae19b"
+  },
+  {
+    "arm": "baseline",
+    "repeat": 1,
+    "threads": 4,
+    "wall_seconds": 41.718068988004234,
+    "exit_code": 0,
+    "command": [
+      "/home/jackson/tmp/cobre-opt3-20260921/artifacts/cobre",
+      "run",
+      "/home/jackson/tmp/cobre-opt3-20260921/compact-conservative-seed42/1-baseline/case",
+      "--output",
+      "/home/jackson/tmp/cobre-opt3-20260921/compact-conservative-seed42/1-baseline/output",
+      "--threads",
+      "4",
+      "--comm-backend",
+      "local",
+      "--color",
+      "never"
+    ],
+    "binary_sha256": "b4b9325257484200861e9be419894b64f59608bde55818945a910cc6dfcae19b"
+  },
+  {
+    "arm": "baseline",
+    "repeat": 2,
+    "threads": 4,
+    "wall_seconds": 41.61653253401164,
+    "exit_code": 0,
+    "command": [
+      "/home/jackson/tmp/cobre-opt3-20260921/artifacts/cobre",
+      "run",
+      "/home/jackson/tmp/cobre-opt3-20260921/compact-conservative-seed42/2-baseline/case",
+      "--output",
+      "/home/jackson/tmp/cobre-opt3-20260921/compact-conservative-seed42/2-baseline/output",
+      "--threads",
+      "4",
+      "--comm-backend",
+      "local",
+      "--color",
+      "never"
+    ],
+    "binary_sha256": "b4b9325257484200861e9be419894b64f59608bde55818945a910cc6dfcae19b"
+  },
+  {
+    "arm": "candidate",
+    "repeat": 2,
+    "threads": 8,
+    "wall_seconds": 18.651096208952367,
+    "exit_code": 0,
+    "command": [
+      "/home/jackson/tmp/cobre-opt3-20260921/artifacts/cobre",
+      "run",
+      "/home/jackson/tmp/cobre-opt3-20260921/compact-conservative-seed42/2-candidate/case",
+      "--output",
+      "/home/jackson/tmp/cobre-opt3-20260921/compact-conservative-seed42/2-candidate/output",
+      "--threads",
+      "8",
+      "--comm-backend",
+      "local",
+      "--color",
+      "never"
+    ],
+    "binary_sha256": "b4b9325257484200861e9be419894b64f59608bde55818945a910cc6dfcae19b"
+  }
+]
