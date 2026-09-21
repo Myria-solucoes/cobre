@@ -54,7 +54,7 @@
 //! threshold, then estimates coefficients at the selected order using the periodic
 //! YW system.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use chrono::{Months, NaiveDate};
@@ -828,10 +828,8 @@ fn check_std_ratio_divergence(
         est_std.entry((s.entity_id, season_id)).or_insert(s.std);
     }
 
-    let user_hydros: std::collections::BTreeSet<EntityId> =
-        user_std.keys().map(|(h, _)| *h).collect();
-    let est_hydros: std::collections::BTreeSet<EntityId> =
-        est_std.keys().map(|(h, _)| *h).collect();
+    let user_hydros: BTreeSet<EntityId> = user_std.keys().map(|(h, _)| *h).collect();
+    let est_hydros: BTreeSet<EntityId> = est_std.keys().map(|(h, _)| *h).collect();
     let common_hydros: Vec<EntityId> = user_hydros.intersection(&est_hydros).copied().collect();
 
     let mut warnings: Vec<StdRatioDivergence> = Vec::new();

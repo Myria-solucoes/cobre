@@ -296,8 +296,6 @@ fn make_monthly_stages_for_annual(n_years: usize) -> Vec<Stage> {
 }
 
 /// Build `n_years * 12` synthetic monthly observations for `hydro_id`.
-///
-/// Formula: `z[year*12 + month] = base + (month+1) * scale + year * drift`.
 fn synthetic_monthly_obs(
     hydro_id: EntityId,
     n_years: usize,

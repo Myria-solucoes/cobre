@@ -763,8 +763,8 @@ mod multi_resolution_integration {
 
         // Monthly stages 0-5 each pair a unique season_id with a unique year, so each
         // gets its own group ID — hence 6 distinct values.
-        let monthly_groups: Vec<u32> = groups[..6].to_vec();
-        let mut unique_monthly: Vec<u32> = monthly_groups.clone();
+        let monthly_groups = &groups[..6];
+        let mut unique_monthly: Vec<u32> = monthly_groups.to_vec();
         unique_monthly.sort_unstable();
         unique_monthly.dedup();
         assert_eq!(

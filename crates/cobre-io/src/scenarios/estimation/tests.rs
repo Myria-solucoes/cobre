@@ -408,7 +408,6 @@ fn write_unit_test_inflow_history(path: &std::path::Path, hydro_id: i32, n_years
 /// `inflow_ar_coefficients.parquet` (the `PartialEstimation` precondition).
 #[allow(clippy::cast_possible_wrap)]
 fn build_system_with_user_stats(n_years: usize) -> System {
-    use cobre_core::entities::hydro::HydroGenerationModel;
     use cobre_core::scenario::InflowModel;
     use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder};
 
@@ -451,52 +450,7 @@ fn build_system_with_user_stats(n_years: usize) -> System {
         })
         .collect();
 
-    let mut hydro = Hydro {
-        unit_groups: Vec::new(),
-        id: hydro_id,
-        name: "H1".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        downstream_id: None,
-        travel_time_hours: None,
-        entry_stage_id: None,
-        exit_stage_id: None,
-        min_storage_hm3: 0.0,
-        max_storage_hm3: 5000.0,
-        min_outflow_m3s: 0.0,
-        max_outflow_m3s: None,
-        generation_model: HydroGenerationModel::ConstantProductivity,
-        min_turbined_m3s: 0.0,
-        max_turbined_m3s: 1000.0,
-        specific_productivity_mw_per_m3s_per_m: None,
-        min_generation_mw: 0.0,
-        max_generation_mw: 900.0,
-        tailrace: None,
-        hydraulic_losses: None,
-        efficiency: None,
-        evaporation_coefficients_mm: None,
-        evaporation_reference_volumes_hm3: None,
-        diversion: None,
-        filling: None,
-        penalties: HydroPenalties {
-            spillage_cost: 0.0,
-            diversion_cost: 0.0,
-            turbined_cost: 0.0,
-            storage_violation_below_cost: 1000.0,
-            filling_target_violation_cost: 0.0,
-            turbined_violation_below_cost: 0.0,
-            outflow_violation_below_cost: 0.0,
-            outflow_violation_above_cost: 0.0,
-            generation_violation_below_cost: 0.0,
-            evaporation_violation_cost: 0.0,
-            water_withdrawal_violation_cost: 0.0,
-            water_withdrawal_violation_pos_cost: 0.0,
-            water_withdrawal_violation_neg_cost: 0.0,
-            evaporation_violation_pos_cost: 0.0,
-            evaporation_violation_neg_cost: 0.0,
-            inflow_nonnegativity_cost: 1000.0,
-        },
-    };
-    hydro.declare_mirror_unit_group(EntityId(10));
+    let hydro = make_hydro(hydro_id, EntityId(10));
 
     SystemBuilder::new()
         .buses(vec![bus])
@@ -1430,7 +1384,6 @@ fn write_unit_test_ar_coefficients(
 /// `UserArHistoryStats` case), where `assemble_inflow_models` returns empty.
 #[allow(clippy::cast_possible_wrap)]
 fn build_system_empty_models(n_years: usize) -> System {
-    use cobre_core::entities::hydro::HydroGenerationModel;
     use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder};
 
     let hydro_id = EntityId(1);
@@ -1459,52 +1412,7 @@ fn build_system_empty_models(n_years: usize) -> System {
         ));
     }
 
-    let mut hydro = Hydro {
-        unit_groups: Vec::new(),
-        id: hydro_id,
-        name: "H1".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        downstream_id: None,
-        travel_time_hours: None,
-        entry_stage_id: None,
-        exit_stage_id: None,
-        min_storage_hm3: 0.0,
-        max_storage_hm3: 5000.0,
-        min_outflow_m3s: 0.0,
-        max_outflow_m3s: None,
-        generation_model: HydroGenerationModel::ConstantProductivity,
-        min_turbined_m3s: 0.0,
-        max_turbined_m3s: 1000.0,
-        specific_productivity_mw_per_m3s_per_m: None,
-        min_generation_mw: 0.0,
-        max_generation_mw: 900.0,
-        tailrace: None,
-        hydraulic_losses: None,
-        efficiency: None,
-        evaporation_coefficients_mm: None,
-        evaporation_reference_volumes_hm3: None,
-        diversion: None,
-        filling: None,
-        penalties: HydroPenalties {
-            spillage_cost: 0.0,
-            diversion_cost: 0.0,
-            turbined_cost: 0.0,
-            storage_violation_below_cost: 1000.0,
-            filling_target_violation_cost: 0.0,
-            turbined_violation_below_cost: 0.0,
-            outflow_violation_below_cost: 0.0,
-            outflow_violation_above_cost: 0.0,
-            generation_violation_below_cost: 0.0,
-            evaporation_violation_cost: 0.0,
-            water_withdrawal_violation_cost: 0.0,
-            water_withdrawal_violation_pos_cost: 0.0,
-            water_withdrawal_violation_neg_cost: 0.0,
-            evaporation_violation_pos_cost: 0.0,
-            evaporation_violation_neg_cost: 0.0,
-            inflow_nonnegativity_cost: 1000.0,
-        },
-    };
-    hydro.declare_mirror_unit_group(EntityId(10));
+    let hydro = make_hydro(hydro_id, EntityId(10));
 
     SystemBuilder::new()
         .buses(vec![bus])
@@ -2986,32 +2894,48 @@ fn test_conditioning_window_does_not_change_fitted_statistics() {
     }
 }
 
-/// The two-pointer forward-sweep cursor's contiguous `&windows[lo..hi]` must
-/// equal, window-for-window, the per-occurrence `filter(...).collect()` set
-/// on a hydro whose windows straddle multiple monthly season occurrences.
+/// `resolve_coverage_gated_observations`'s internal cursor sweep must select
+/// the same per-occurrence window subset as an independent per-occurrence
+/// filter, for a hydro whose windows straddle multiple monthly season
+/// occurrences with more than one window overlapping a single occurrence.
 #[test]
 fn cursor_subslice_matches_filter_collect_across_straddling_occurrences() {
     let season_map = monthly_season_map();
     let template = partial_year_stages(0, 1, 2000).remove(0);
+    let hydro_id = EntityId(1);
 
-    let windows = vec![
-        RealizedWindow {
+    let history = vec![
+        InflowHistoryRow {
+            hydro_id,
             start_date: NaiveDate::from_ymd_opt(2000, 1, 10).unwrap(),
             end_date: NaiveDate::from_ymd_opt(2000, 2, 10).unwrap(),
             value_m3s: 10.0,
         },
-        RealizedWindow {
+        InflowHistoryRow {
+            hydro_id,
             start_date: NaiveDate::from_ymd_opt(2000, 2, 10).unwrap(),
             end_date: NaiveDate::from_ymd_opt(2000, 3, 10).unwrap(),
             value_m3s: 20.0,
         },
-        RealizedWindow {
+        InflowHistoryRow {
+            hydro_id,
             start_date: NaiveDate::from_ymd_opt(2000, 3, 10).unwrap(),
             end_date: NaiveDate::from_ymd_opt(2000, 4, 10).unwrap(),
             value_m3s: 30.0,
         },
     ];
 
+    let (observations, skipped_partial) =
+        resolve_coverage_gated_observations(&history, Some(&season_map), Some(&template));
+
+    let windows: Vec<RealizedWindow> = history
+        .iter()
+        .map(|row| RealizedWindow {
+            start_date: row.start_date,
+            end_date: row.end_date,
+            value_m3s: row.value_m3s,
+        })
+        .collect();
     let occurrences = discover_hydro_occurrences(&season_map, &template, &windows);
     assert!(
         occurrences.len() >= 4,
@@ -3019,39 +2943,43 @@ fn cursor_subslice_matches_filter_collect_across_straddling_occurrences() {
         occurrences.len()
     );
 
-    let mut lo = 0usize;
+    let mut reference_observations = Vec::new();
+    let mut reference_skip_count = 0usize;
     let mut max_overlap = 0usize;
     for occurrence in &occurrences {
-        let filtered: Vec<(NaiveDate, NaiveDate, f64)> = windows
+        let overlapping: Vec<RealizedWindow> = windows
             .iter()
             .filter(|w| w.start_date < occurrence.end && w.end_date > occurrence.start)
-            .map(|w| (w.start_date, w.end_date, w.value_m3s))
+            .map(|w| RealizedWindow {
+                start_date: w.start_date,
+                end_date: w.end_date,
+                value_m3s: w.value_m3s,
+            })
             .collect();
+        max_overlap = max_overlap.max(overlapping.len());
 
-        while lo < windows.len() && windows[lo].end_date <= occurrence.start {
-            lo += 1;
+        let projection = cast(&overlapping, occurrence);
+        if projection.coverage == 1.0 {
+            reference_observations.push((hydro_id, occurrence.start, projection.value));
+        } else if projection.coverage > 0.0 {
+            reference_skip_count += 1;
         }
-        let mut hi = lo;
-        while hi < windows.len() && windows[hi].start_date < occurrence.end {
-            hi += 1;
-        }
-        let cursor: Vec<(NaiveDate, NaiveDate, f64)> = windows[lo..hi]
-            .iter()
-            .map(|w| (w.start_date, w.end_date, w.value_m3s))
-            .collect();
-
-        max_overlap = max_overlap.max(cursor.len());
-        assert_eq!(
-            cursor, filtered,
-            "cursor subslice must match filter-and-collect window-for-window \
-             for the occurrence starting {}",
-            occurrence.start
-        );
     }
+    reference_observations.sort_by_key(|(id, date, _)| (id.0, *date));
 
     assert!(
         max_overlap >= 2,
         "fixture must exercise a straddling occurrence overlapped by \
          multiple windows, got a max of {max_overlap}"
+    );
+    assert_eq!(
+        observations, reference_observations,
+        "resolve_coverage_gated_observations's cursor-selected windows must produce \
+         the same observations as an independent per-occurrence filter"
+    );
+    assert_eq!(
+        skipped_partial.get(&hydro_id).copied().unwrap_or(0),
+        reference_skip_count,
+        "skipped-partial count must match the independent filter-based reference"
     );
 }

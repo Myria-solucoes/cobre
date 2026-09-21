@@ -331,7 +331,6 @@ mod partition_row_keying {
             row.carried_committed_mw
         );
 
-        // No other stage emits a row for this fixture's sole window.
         for stage in &scenario.stages {
             if stage.stage_id != DECIDER_STAGE {
                 assert!(

@@ -910,7 +910,7 @@ impl PrefixWalk {
     /// Extends the walk to cover `0..=sn` unless a disagreement is already
     /// cached (it is necessarily the first one, valid for any larger `sn`)
     /// or that depth was already walked. Stops at the first disagreement
-    /// found, matching the per-edge scan it replaces.
+    /// found.
     fn extend_to(&mut self, class: &ClassExternal, cn: i32, cm: i32, sn: usize) {
         if self.disagreement.is_some() {
             return;

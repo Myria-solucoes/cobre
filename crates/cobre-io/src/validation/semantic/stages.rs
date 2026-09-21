@@ -142,14 +142,7 @@ pub(super) fn check_node_graph(data: &ParsedData, ctx: &mut ValidationContext) {
     let nodes = &graph.nodes;
     let transitions = &graph.transitions;
 
-    let study_ids: Vec<i32> = data
-        .stages
-        .stages
-        .iter()
-        .filter(|s| s.id >= 0)
-        .map(|s| s.id)
-        .collect();
-    let resolver = StageIdResolver::from_study_stage_ids(&study_ids);
+    let (study_ids, resolver) = study_stage_ids_and_resolver(data);
     let n_stages = study_ids.len();
 
     let stage_index: Vec<Option<usize>> = nodes
@@ -232,6 +225,18 @@ pub(super) fn check_node_graph(data: &ParsedData, ctx: &mut ValidationContext) {
             check_recombinable_signature(nodes, &children, &stage_index, &study_ids, ctx);
         }
     }
+}
+
+fn study_stage_ids_and_resolver(data: &ParsedData) -> (Vec<i32>, StageIdResolver) {
+    let study_ids: Vec<i32> = data
+        .stages
+        .stages
+        .iter()
+        .filter(|s| s.id >= 0)
+        .map(|s| s.id)
+        .collect();
+    let resolver = StageIdResolver::from_study_stage_ids(&study_ids);
+    (study_ids, resolver)
 }
 
 /// Rules 36 and 37, applied
@@ -616,14 +621,7 @@ pub(super) fn check_num_openings_declaration(data: &ParsedData, ctx: &mut Valida
     else {
         return;
     };
-    let study_ids: Vec<i32> = data
-        .stages
-        .stages
-        .iter()
-        .filter(|s| s.id >= 0)
-        .map(|s| s.id)
-        .collect();
-    let resolver = StageIdResolver::from_study_stage_ids(&study_ids);
+    let (_, resolver) = study_stage_ids_and_resolver(data);
     let occupancy = stage_slot_occupancy(data, &source, &resolver);
 
     let mut staged: Vec<i32> = graph
@@ -748,14 +746,7 @@ pub(super) fn check_sampling_method_meaningfulness(data: &ParsedData, ctx: &mut 
         .config
         .training_scenario_source(Path::new("config.json"))
         .ok();
-    let study_ids: Vec<i32> = data
-        .stages
-        .stages
-        .iter()
-        .filter(|s| s.id >= 0)
-        .map(|s| s.id)
-        .collect();
-    let resolver = StageIdResolver::from_study_stage_ids(&study_ids);
+    let (_, resolver) = study_stage_ids_and_resolver(data);
     let occupancy = source
         .as_ref()
         .map(|s| stage_slot_occupancy(data, s, &resolver));

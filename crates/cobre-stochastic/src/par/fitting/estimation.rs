@@ -318,8 +318,8 @@ fn estimate_ar_with_pacf_annual(
     let (stage_index, stats_map, n_seasons) = build_pacf_stage_lookups(stages, seasonal_stats);
 
     let group_obs = group_observations_by_season(observations, hydro_ids, &stage_index, season_map);
+    let entity_set: HashSet<EntityId> = hydro_ids.iter().copied().collect();
     let group_z_year_starts: HashMap<(EntityId, usize), i32> = {
-        let entity_set: HashSet<EntityId> = hydro_ids.iter().copied().collect();
         let mut starts: HashMap<(EntityId, usize), i32> = HashMap::new();
         for &(entity_id, date, _value) in observations {
             if !entity_set.contains(&entity_id) {
@@ -345,8 +345,6 @@ fn estimate_ar_with_pacf_annual(
 
     // Rolling-window A_t groups must reproduce the chronological grouping of
     // `estimate_annual_seasonal_stats` so A and Z align by season.
-    let entity_set: HashSet<EntityId> = hydro_ids.iter().copied().collect();
-
     let mut entity_obs: HashMap<EntityId, Vec<(NaiveDate, f64)>> = HashMap::new();
     for &(entity_id, date, value) in observations {
         if entity_set.contains(&entity_id) {
@@ -551,42 +549,7 @@ fn apply_annual_prepass_reductions(
 ) -> HashMap<EntityId, Vec<ContributionReduction>> {
     let mut all_reductions: HashMap<EntityId, Vec<ContributionReduction>> = HashMap::new();
 
-    if let Some(threshold) = max_coeff_magnitude {
-        for est in estimates.iter_mut() {
-            let has_explosive = est.coefficients.iter().any(|c| c.abs() > threshold);
-            if has_explosive {
-                let original_order = est.coefficients.len();
-                all_reductions
-                    .entry(est.hydro_id)
-                    .or_default()
-                    .push(ContributionReduction {
-                        season_id: est.season_id,
-                        original_order,
-                        reduced_order: 0,
-                        contributions: Vec::new(),
-                        reason: ReductionReason::MagnitudeBound,
-                    });
-                est.coefficients.clear();
-            }
-        }
-    }
-
-    for est in estimates.iter_mut() {
-        if has_negative_phi1(&est.coefficients) {
-            let original_order = est.coefficients.len();
-            all_reductions
-                .entry(est.hydro_id)
-                .or_default()
-                .push(ContributionReduction {
-                    season_id: est.season_id,
-                    original_order,
-                    reduced_order: 0,
-                    contributions: Vec::new(),
-                    reason: ReductionReason::Phi1Negative,
-                });
-            est.coefficients.clear();
-        }
-    }
+    apply_prepass_reductions(estimates, max_coeff_magnitude, &mut all_reductions);
 
     let mut hydro_indices: BTreeMap<EntityId, Vec<usize>> = BTreeMap::new();
     for (idx, est) in estimates.iter().enumerate() {
@@ -1029,10 +992,10 @@ struct PacfReductionParams {
 /// Apply magnitude-bound and `phi_1` pre-passes, recording reductions in `all_reductions`.
 fn apply_prepass_reductions(
     estimates: &mut [ArCoefficientEstimate],
-    params: &PacfReductionParams,
+    max_coeff_magnitude: Option<f64>,
     all_reductions: &mut HashMap<EntityId, Vec<ContributionReduction>>,
 ) {
-    if let Some(threshold) = params.max_coeff_magnitude {
+    if let Some(threshold) = max_coeff_magnitude {
         for est in estimates.iter_mut() {
             let has_explosive = est.coefficients.iter().any(|c| c.abs() > threshold);
             if has_explosive {
@@ -1214,7 +1177,7 @@ fn iterative_pacf_reduction(
 ) -> HashMap<EntityId, Vec<ContributionReduction>> {
     let mut all_reductions: HashMap<EntityId, Vec<ContributionReduction>> = HashMap::new();
 
-    apply_prepass_reductions(estimates, params, &mut all_reductions);
+    apply_prepass_reductions(estimates, params.max_coeff_magnitude, &mut all_reductions);
 
     let mut hydro_indices: BTreeMap<EntityId, Vec<usize>> = BTreeMap::new();
     for (idx, est) in estimates.iter().enumerate() {

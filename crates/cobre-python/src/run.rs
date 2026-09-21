@@ -495,7 +495,7 @@ fn single_process_distribution(n_threads: usize) -> DistributionInfo {
         thread_level: None,
         slurm_job_id: None,
         hosts: vec![cobre_io::HostLayout {
-            hostname: cobre_io::get_hostname(),
+            hostname: get_hostname(),
             ranks: vec![0],
         }],
     }

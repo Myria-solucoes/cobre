@@ -62,6 +62,7 @@ pub(crate) fn find_season_year_monthly(
 
 /// Concrete `[start, end)` calendar window for one occurrence of a season
 /// period, plus its total duration in hours.
+#[derive(Clone)]
 pub struct SeasonPeriodWindow {
     /// Inclusive window start.
     pub start: NaiveDate,
@@ -296,11 +297,7 @@ pub fn nth_previous_occurrence(
     anchor: &SeasonPeriodWindow,
     k: usize,
 ) -> Option<SeasonPeriodWindow> {
-    let mut window = SeasonPeriodWindow {
-        start: anchor.start,
-        end: anchor.end,
-        hours: anchor.hours,
-    };
+    let mut window = anchor.clone();
     let mut current_id = season_def.id;
     for _ in 0..k {
         let current_def = season_map.seasons.iter().find(|s| s.id == current_id)?;
@@ -634,11 +631,7 @@ impl<'a> StageCalendar<'a> {
         let mut window = season_period_window(season_map, season_def, anchor_stage);
         let mut current_id = season_def.id;
         let mut occurrences = Vec::with_capacity(max_k + 1);
-        occurrences.push(SeasonPeriodWindow {
-            start: window.start,
-            end: window.end,
-            hours: window.hours,
-        });
+        occurrences.push(window.clone());
 
         for _ in 0..max_k {
             let Some(current_def) = season_map.seasons.iter().find(|s| s.id == current_id) else {
@@ -653,11 +646,7 @@ impl<'a> StageCalendar<'a> {
             };
             current_id = next_id;
             window = previous;
-            occurrences.push(SeasonPeriodWindow {
-                start: window.start,
-                end: window.end,
-                hours: window.hours,
-            });
+            occurrences.push(window.clone());
         }
 
         Some(occurrences)
@@ -721,8 +710,7 @@ mod tests {
         Block, BlockMode, NoiseMethod, ScenarioSourceConfig, StageRiskConfig, StageStateConfig,
     };
 
-    #[test]
-    fn test_season_period_window_monthly_april_stage() {
+    fn twelve_month_season_map() -> SeasonMap {
         let seasons: Vec<SeasonDefinition> = (0..12u32)
             .map(|i| SeasonDefinition {
                 id: i as usize,
@@ -733,10 +721,15 @@ mod tests {
                 day_end: None,
             })
             .collect();
-        let season_map = SeasonMap {
+        SeasonMap {
             cycle_type: SeasonCycleType::Monthly,
             seasons,
-        };
+        }
+    }
+
+    #[test]
+    fn test_season_period_window_monthly_april_stage() {
+        let season_map = twelve_month_season_map();
         let season_def = &season_map.seasons[3];
 
         let start = NaiveDate::from_ymd_opt(2026, 4, 4).unwrap();
@@ -773,20 +766,7 @@ mod tests {
 
     #[test]
     fn test_previous_occurrence_monthly_walks_back() {
-        let seasons: Vec<SeasonDefinition> = (0..12u32)
-            .map(|i| SeasonDefinition {
-                id: i as usize,
-                label: format!("Month{}", i + 1),
-                month_start: i + 1,
-                day_start: None,
-                month_end: None,
-                day_end: None,
-            })
-            .collect();
-        let season_map = SeasonMap {
-            cycle_type: SeasonCycleType::Monthly,
-            seasons,
-        };
+        let season_map = twelve_month_season_map();
         let season_def = &season_map.seasons[3];
 
         let start = NaiveDate::from_ymd_opt(2026, 4, 4).unwrap();
@@ -882,20 +862,7 @@ mod tests {
 
     #[test]
     fn test_nth_previous_occurrence_k_zero_is_identity() {
-        let seasons: Vec<SeasonDefinition> = (0..12u32)
-            .map(|i| SeasonDefinition {
-                id: i as usize,
-                label: format!("Month{}", i + 1),
-                month_start: i + 1,
-                day_start: None,
-                month_end: None,
-                day_end: None,
-            })
-            .collect();
-        let season_map = SeasonMap {
-            cycle_type: SeasonCycleType::Monthly,
-            seasons,
-        };
+        let season_map = twelve_month_season_map();
         let season_def = &season_map.seasons[3];
         let anchor = SeasonPeriodWindow {
             start: NaiveDate::from_ymd_opt(2026, 4, 1).unwrap(),
@@ -1298,20 +1265,7 @@ mod tests {
     #[test]
     #[allow(clippy::float_cmp)] // both paths run the identical arithmetic; the comparison must be bit-exact
     fn test_season_occurrence_matches_pre_refactor_helper_sequence() {
-        let seasons: Vec<SeasonDefinition> = (0..12u32)
-            .map(|i| SeasonDefinition {
-                id: i as usize,
-                label: format!("Month{}", i + 1),
-                month_start: i + 1,
-                day_start: None,
-                month_end: None,
-                day_end: None,
-            })
-            .collect();
-        let season_map = SeasonMap {
-            cycle_type: SeasonCycleType::Monthly,
-            seasons,
-        };
+        let season_map = twelve_month_season_map();
         let season_def = &season_map.seasons[3];
         let first_stage = stage_with_width(0, NaiveDate::from_ymd_opt(2026, 4, 4).unwrap(), 28);
         let stages = [first_stage];
@@ -1340,20 +1294,7 @@ mod tests {
     #[test]
     #[allow(clippy::float_cmp)] // both paths run the identical arithmetic; the comparison must be bit-exact
     fn test_season_occurrences_matches_per_k_restart_sequence() {
-        let seasons: Vec<SeasonDefinition> = (0..12u32)
-            .map(|i| SeasonDefinition {
-                id: i as usize,
-                label: format!("Month{}", i + 1),
-                month_start: i + 1,
-                day_start: None,
-                month_end: None,
-                day_end: None,
-            })
-            .collect();
-        let season_map = SeasonMap {
-            cycle_type: SeasonCycleType::Monthly,
-            seasons,
-        };
+        let season_map = twelve_month_season_map();
         let season_def = &season_map.seasons[3];
         let first_stage = stage_with_width(0, NaiveDate::from_ymd_opt(2026, 4, 4).unwrap(), 28);
         let stages = [first_stage];

@@ -32,12 +32,9 @@ pub fn write_training_results(
     config: &Config,
     ctx: &OutputContext,
 ) -> Result<(), OutputError> {
-    std::fs::create_dir_all(output_dir.join("training/dictionaries"))
-        .map_err(|e| OutputError::io(output_dir.join("training/dictionaries"), e))?;
-    std::fs::create_dir_all(output_dir.join("training/timing"))
-        .map_err(|e| OutputError::io(output_dir.join("training/timing"), e))?;
-    std::fs::create_dir_all(output_dir.join("simulation"))
-        .map_err(|e| OutputError::io(output_dir.join("simulation"), e))?;
+    create_output_dir(&output_dir.join("training/dictionaries"))?;
+    create_output_dir(&output_dir.join("training/timing"))?;
+    create_output_dir(&output_dir.join("simulation"))?;
 
     write_dictionaries(&output_dir.join("training/dictionaries"), system)?;
 
@@ -192,6 +189,10 @@ fn extract_max_iterations(config: &Config) -> Option<u32> {
             StoppingRuleConfig::IterationLimit { limit } => Some(*limit),
             _ => None,
         })
+}
+
+fn create_output_dir(dir: &Path) -> Result<(), OutputError> {
+    std::fs::create_dir_all(dir).map_err(|e| OutputError::io(dir, e))
 }
 
 #[cfg(test)]

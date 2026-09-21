@@ -143,7 +143,9 @@ fn season_id_for_date(
 /// Whether the history-based PAR(p) estimation path is active: history rows
 /// are present, and not both `inflow_seasonal_stats` and
 /// `inflow_ar_coefficients` are already supplied. Shared cross-module with
-/// `scenarios::check_estimation_prerequisites`.
+/// `scenarios::check_estimation_prerequisites`, and must keep agreeing with
+/// which [`crate::scenarios::estimation::EstimationPath::resolve`] variants
+/// actually run estimation rather than returning the system unchanged.
 pub(super) fn estimation_active(data: &ParsedData) -> bool {
     let has_history = !data.inflow_history.is_empty();
     let has_stats = !data.inflow_seasonal_stats.is_empty();
@@ -374,9 +376,9 @@ mod tests {
 
     // ── Local helpers ─────────────────────────────────────────────────────────
 
-    /// Reference: `check_estimation_prerequisites` (scenarios.rs) inlined this
-    /// partition_point + bound check before it was lifted into the shared
-    /// [`resolve_stage_position`].
+    /// Independent `partition_point` + bound-check oracle for
+    /// [`resolve_stage_position`], kept duplicate so a regression in the
+    /// shared helper cannot also corrupt the reference it's checked against.
     fn reference_resolve_stage_position(
         stage_index: &[(chrono::NaiveDate, chrono::NaiveDate, usize)],
         date: chrono::NaiveDate,
@@ -1648,12 +1650,12 @@ mod tests {
         );
     }
 
-    /// `resolve_stage_position` (the shared helper now consumed by
-    /// `season_id_for_date`, `check_season_observation_coverage`, and
+    /// `resolve_stage_position` (the shared helper behind `season_id_for_date`,
+    /// `check_season_observation_coverage`, and
     /// `scenarios::check_estimation_prerequisites`) must resolve every history
-    /// row's stage position identically to the `partition_point` + bound-check
-    /// each of the three call sites inlined before the share; `estimation_active`
-    /// must match the inline `has_history && !(has_stats && has_ar)` predicate.
+    /// row's stage position identically to the independent
+    /// `reference_resolve_stage_position` oracle; `estimation_active` must
+    /// match the inline `has_history && !(has_stats && has_ar)` predicate.
     #[test]
     fn shared_stage_index_helper_matches_pre_share_inline_builds() {
         let stages = make_stages_with_seasons(12, /*with_season_map=*/ true);

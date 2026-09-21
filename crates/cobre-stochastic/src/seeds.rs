@@ -135,6 +135,7 @@ pub fn derive_inflow_seeds(
     }
 
     let mut seeds = DerivedInflowSeeds::zero(n_hydros, l_state);
+    let occurrences = calendar.season_occurrences(season_map, season_def, l_state);
 
     for (pos, hydro) in hydros.iter().enumerate() {
         let record_windows = record_by_hydro
@@ -149,7 +150,7 @@ pub fn derive_inflow_seeds(
         seeds.accum[pos] = in_progress_projection.value * in_progress_projection.coverage;
         seeds.weight[pos] = in_progress_projection.coverage;
 
-        if let Some(occurrences) = calendar.season_occurrences(season_map, season_def, l_state) {
+        if let Some(occurrences) = &occurrences {
             for (k, occurrence) in occurrences.iter().enumerate().skip(1) {
                 seeds.lag_values[pos * l_state + (k - 1)] = cast(&merged, occurrence).value;
             }

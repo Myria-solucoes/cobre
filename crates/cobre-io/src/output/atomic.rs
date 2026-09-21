@@ -109,9 +109,8 @@ fn serialize_json_then_flush<W: Write>(
 
 /// Write a `RecordBatch` to `path` as a Parquet file, atomically.
 ///
-/// Uses the crate-wide frozen encoding (Zstd level 3, 100_000-row groups,
-/// dictionary encoding enabled — see [`super::parquet_config`]). The parent
-/// directory must already exist.
+/// Uses the crate-wide frozen encoding — see [`super::parquet_config`] for
+/// the parameters. The parent directory must already exist.
 ///
 /// # Errors
 ///

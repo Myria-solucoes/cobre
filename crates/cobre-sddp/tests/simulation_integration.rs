@@ -22,6 +22,7 @@ use chrono::NaiveDate;
 use cobre_comm::Communicator;
 use cobre_core::{
     DeficitSegment, EntityId, SystemBuilder, TrainingEvent,
+    entities::bus::Bus,
     scenario::{
         CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile, LoadModel,
         SamplingScheme,
@@ -124,6 +125,44 @@ fn study_dims_for(
     }
 }
 
+fn default_bus() -> Bus {
+    make_bus(
+        EntityId(0),
+        BusSpec {
+            name: "B0".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 1000.0,
+            }],
+            excess_cost: 0.0,
+            ..Default::default()
+        },
+    )
+}
+
+fn default_correlation_model() -> CorrelationModel {
+    let mut profiles = BTreeMap::new();
+    profiles.insert(
+        "default".to_string(),
+        CorrelationProfile {
+            groups: vec![CorrelationGroup {
+                name: "g1".to_string(),
+                entities: vec![CorrelationEntity {
+                    entity_type: "inflow".to_string(),
+                    id: EntityId(1),
+                }],
+                matrix: vec![vec![1.0]],
+            }],
+        },
+    );
+    CorrelationModel {
+        method: "spectral".to_string(),
+        profiles,
+        schedule: vec![],
+    }
+}
+
 struct MockSolver {
     objectives: Vec<f64>,
     call_count: usize,
@@ -189,19 +228,7 @@ fn make_stochastic_context(n_stages: usize, n_openings: usize) -> StochasticCont
     use cobre_core::entities::hydro::{HydroGenerationModel, HydroPenalties};
     use cobre_core::scenario::InflowModel;
 
-    let bus = make_bus(
-        EntityId(0),
-        BusSpec {
-            name: "B0".to_string(),
-            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            deficit_segments: vec![DeficitSegment {
-                depth_mw: None,
-                cost_per_mwh: 1000.0,
-            }],
-            excess_cost: 0.0,
-            ..Default::default()
-        },
-    );
+    let bus = default_bus();
     let hydro = make_hydro(
         EntityId(1),
         HydroSpec {
@@ -291,25 +318,7 @@ fn make_stochastic_context(n_stages: usize, n_openings: usize) -> StochasticCont
         })
         .collect();
 
-    let mut profiles = BTreeMap::new();
-    profiles.insert(
-        "default".to_string(),
-        CorrelationProfile {
-            groups: vec![CorrelationGroup {
-                name: "g1".to_string(),
-                entities: vec![CorrelationEntity {
-                    entity_type: "inflow".to_string(),
-                    id: EntityId(1),
-                }],
-                matrix: vec![vec![1.0]],
-            }],
-        },
-    );
-    let correlation = CorrelationModel {
-        method: "spectral".to_string(),
-        profiles,
-        schedule: vec![],
-    };
+    let correlation = default_correlation_model();
 
     let system = SystemBuilder::new()
         .buses(vec![bus])
@@ -471,19 +480,7 @@ fn make_system() -> cobre_core::System {
     use cobre_core::entities::hydro::{HydroGenerationModel, HydroPenalties};
     use cobre_core::scenario::InflowModel;
 
-    let bus = make_bus(
-        EntityId(0),
-        BusSpec {
-            name: "B0".to_string(),
-            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            deficit_segments: vec![DeficitSegment {
-                depth_mw: None,
-                cost_per_mwh: 1000.0,
-            }],
-            excess_cost: 0.0,
-            ..Default::default()
-        },
-    );
+    let bus = default_bus();
     let hydro = make_hydro(
         EntityId(1),
         HydroSpec {
@@ -573,25 +570,7 @@ fn make_system() -> cobre_core::System {
         })
         .collect();
 
-    let mut profiles = BTreeMap::new();
-    profiles.insert(
-        "default".to_string(),
-        CorrelationProfile {
-            groups: vec![CorrelationGroup {
-                name: "g1".to_string(),
-                entities: vec![CorrelationEntity {
-                    entity_type: "inflow".to_string(),
-                    id: EntityId(1),
-                }],
-                matrix: vec![vec![1.0]],
-            }],
-        },
-    );
-    let correlation = CorrelationModel {
-        method: "spectral".to_string(),
-        profiles,
-        schedule: vec![],
-    };
+    let correlation = default_correlation_model();
 
     SystemBuilder::new()
         .buses(vec![bus])
@@ -1104,19 +1083,7 @@ fn make_min_outflow_system() -> cobre_core::System {
         ResolvedPenalties, ThermalBlockBounds, ThermalStageBounds,
     };
 
-    let bus = make_bus(
-        EntityId(0),
-        BusSpec {
-            name: "B0".to_string(),
-            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            deficit_segments: vec![DeficitSegment {
-                depth_mw: None,
-                cost_per_mwh: 1000.0,
-            }],
-            excess_cost: 0.0,
-            ..Default::default()
-        },
-    );
+    let bus = default_bus();
 
     let hydro = make_hydro(
         EntityId(1),
@@ -1295,25 +1262,7 @@ fn make_min_outflow_system() -> cobre_core::System {
         },
     );
 
-    let mut profiles = BTreeMap::new();
-    profiles.insert(
-        "default".to_string(),
-        CorrelationProfile {
-            groups: vec![CorrelationGroup {
-                name: "g1".to_string(),
-                entities: vec![CorrelationEntity {
-                    entity_type: "inflow".to_string(),
-                    id: EntityId(1),
-                }],
-                matrix: vec![vec![1.0]],
-            }],
-        },
-    );
-    let correlation = CorrelationModel {
-        method: "spectral".to_string(),
-        profiles,
-        schedule: vec![],
-    };
+    let correlation = default_correlation_model();
 
     SystemBuilder::new()
         .buses(vec![bus])
@@ -1612,8 +1561,6 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
 /// coincide exactly.
 #[test]
 fn enumerated_census_k1_matches_sampled_single_scenario() {
-    use cobre_sddp::setup::node_graph::Traversal;
-
     let fx = Fixture::new(2);
     let mut fcf = make_fcf(fx.n_stages);
     let mut solver = MockSolver::with_fixed(100.0);

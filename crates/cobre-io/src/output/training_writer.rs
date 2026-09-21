@@ -101,10 +101,10 @@ impl TrainingParquetWriter {
     ///   cannot be constructed (e.g., array length mismatch).
     /// - [`OutputError::IoError`] if any filesystem operation fails.
     pub fn write(&self, training_output: &TrainingOutput) -> Result<(), OutputError> {
-        let records = &training_output.convergence_records;
-
-        let convergence_batch =
-            build_convergence_batch(records, &training_output.final_upper_bound_kind)?;
+        let convergence_batch = build_convergence_batch(
+            &training_output.convergence_records,
+            &training_output.final_upper_bound_kind,
+        )?;
         let convergence_path = self.output_dir.join("training/convergence.parquet");
         write_parquet_atomic(&convergence_path, &convergence_batch)?;
 
