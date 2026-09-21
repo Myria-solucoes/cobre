@@ -363,12 +363,17 @@ would do.
   inverse-direction trap** ("divided by `col_scale`, not multiplied"). This is the
   one comment a self-documenting field name usually cannot carry.
 - **D4 — Rationale above suppression.** Every `#[allow(...)]` for a refactor-decision
-  lint (`clippy::too_many_arguments`, `too_many_lines`, `type_complexity`,
-  `dead_code`, `unused_*`) and every borrow-checker workaround carries a rationale:
-  why the refactor that removes the lint is inappropriate. `// Rationale:`,
-  `// RATIONALE:`, and inline-trailing forms count. For `dead_code`/`unused_*` it
-  **is** Voice 4. (`missing_docs` is **not** on this list — never allow it to delete
-  an obvious field's doc; write the one terse line per §0.)
+  lint on the **closed list** (`clippy::too_many_arguments`, `too_many_lines`,
+  `type_complexity`, `dead_code`, `unused_*`) and every borrow-checker workaround
+  carries a rationale: why the refactor that removes the lint is inappropriate.
+  `// Rationale:`, `// RATIONALE:`, and inline-trailing forms count. For
+  `dead_code`/`unused_*` it **is** Voice 4. The list is closed: numeric-cast lints
+  (`cast_possible_truncation`, `cast_precision_loss`, `cast_sign_loss`,
+  `cast_possible_wrap`), `needless_pass_by_value`, and `missing_docs` are **not** on
+  it, so D4 mandates no rationale for a suppression of one of those — such an
+  `#[allow]` may still be load-bearing (CI's zero-warning bar needs it), but a bare
+  opener there is not a D4 violation. `missing_docs` in particular is never the
+  escape hatch to delete an obvious field's doc; write the one terse line per §0.
 - **D5 — Determinism.** Where solve/thread order is deliberately decoupled from
   aggregation order (stable sort after a parallel region, canonical iteration,
   online accumulator), say why — it upholds the declaration-order hard rule.

@@ -331,18 +331,16 @@ touches many sites next to a protected hot path.
 **Trigger.** The planned traversal-stride index rename lands in the same
 neighborhood (a deliberate typed-index sweep of the cut-pool indices).
 
-### Superseded cut-sync public methods
+### Superseded cut-sync public methods — RESOLVED
 
-**What it is.** Three methods on `CutSyncBuffers` — `sync_cuts`,
-`pack_local_records`, `sync_packed_records` — have no production call site (they
-are the legacy single-pool exchange, superseded by the per-level batched
-`sync_level_records`), yet remain re-exported public API on a published crate,
-so removal is a breaking change. Their test suite gives false "still used"
-confidence.
+**What it was.** Three methods on `CutSyncBuffers` — `sync_cuts`,
+`pack_local_records`, `sync_packed_records` — were the legacy single-pool
+exchange, superseded by the per-level batched `sync_level_records` but still
+re-exported public API on a published crate, so removing them was a breaking
+change; their test suite gave false "still used" confidence.
 
-**Owner.** The comm / training owner.
-
-**Trigger.** The next licensed public-API break.
+**Resolution.** The three methods and their tests are removed in a licensed
+public-API break; `sync_level_records` is the sole cut-exchange path.
 
 ### Python-binding Rust tests invisible to CI
 
@@ -1294,6 +1292,137 @@ Setup-time performance items below the sweep threshold; the generalization-align
 the alignment station adjudicates before any code; and the test-corpus sweep, which follows the
 fixture surface above.
 
+## Deferred-debt register — 2026-09 quality evaluation (remaining stations)
+
+This section mirrors the fixed items from the 2026-09 quality evaluation's remaining
+stations — the SDDP engine, the CLI/Python facade, the solver backends, the comm
+layer and the build/CI surface. Every item was re-derived against the live tree
+before it was fixed; the finding ledger and per-finding evidence live in the
+evaluation's own plan directory, and this section is the behaviour-described mirror,
+recorded so a future audit does not re-raise these items.
+
+### Fixed — validate-time rejections replace mid-run and silent failures (2026-09-21)
+
+- **The `--json` error vocabulary has one owner across both front ends.** One
+  `LoadError`→kind map in `cobre-io` is called by the CLI and the Python
+  `cobre.io.validate` binding, every CLI early return under `--json` routes through
+  the shared `emit_validate_json` (carrying `error.phase` for `ParseError` /
+  `SchemaError`), and the standalone `CaseValidationError` kind is retired with no
+  alias — a documented `--json` contract change.
+- **The boundary-preparation reject is a first-class preparation phase.**
+  `PrepPhase` gains a fourth `Boundary` variant, so both front ends route a boundary
+  reject through the shared `PrepPhase` / `prep_phase_metadata` (a fourth metadata
+  row) and `validate --json` emits the error object, matching the documented four
+  preparation steps.
+- **The scalar-parameter table is a `StudySetup` constructor input and its
+  resolution gaps fail loud.** The three `ResolvedParametersError` classes
+  (`MissingSeason`, `PerStageBlockCoverage`, `MissingSpecificProductivity`) are
+  raised at the LP-build / admission site, so both `cobre validate` and Python
+  `cobre.io.validate` reject an unresolvable generic-constraint scalar parameter
+  instead of exiting cleanly and failing later at run; `ResolvedParameters::get`
+  stays infallible.
+- **An enumerated-traversal study that also configures dynamic cut selection is
+  rejected at setup.** A typed admission-gate arm refuses `Traversal::Enumerated`
+  combined with dynamic cut selection beside the existing enumerated preconditions,
+  with a named regression and a `.claude/rules/sddp.md` contract entry, rather than
+  silently exercising an untested cut-eviction path.
+- **A negative FPHA discretization count is rejected at the input boundary.**
+  `cobre-io` validates the four count fields (`volume_discretization_points`,
+  `turbine_discretization_points`, `spillage_discretization_points`,
+  `max_planes_per_hydro`) non-negative when present, so a declared negative count
+  fails validation instead of wrapping past the `< 2` / `< 1` grid guards into
+  `build_grid`.
+
+**Owner.** The `cobre-sddp`, `cobre-io`, `cobre-cli` and `cobre-python` owners (as
+executed). **Trigger.** None — done.
+
+### Fixed — one owner for each duplicated front-end computation (2026-09-21)
+
+- **The run-phase plan is one owned value both front ends consume.** The engine
+  answers the run-phase plan once and the CLI and Python entry points consume it,
+  replacing the two non-equivalent simulate-arm gate copies; the per-front-end
+  no-op rendering is kept.
+- **The solver-stats log-to-totals fold has one home.** `solver_stats.rs` in
+  `cobre-sddp` folds `&[SolverStatsLogEntry]` with the rank filter as an argument,
+  called by both the CLI and Python; the `total_lp_solves` caveat is a doc line
+  pinned by a named regression.
+- **The simulation entity-family names are declared once.** The Python simulation
+  readers iterate the `cobre-io` family declaration instead of a hand-kept copy, so
+  no second enumeration exists to drift.
+- **The convergence-output reader keys off the schema.** The Python convergence
+  reader asserts its keys equal the declared schema fields rather than a fixed
+  hand-listed column set.
+
+**Owner.** The `cobre-sddp`, `cobre-cli` and `cobre-python` owners (as executed).
+**Trigger.** None — done.
+
+### Fixed — LP-builder anticipated-commitment fill has one walker (2026-09-21)
+
+- **One ring-residue walker drives the anticipated-commitment fill.** A single
+  `lp/builder` walker (via `ring_index`) drives the anticipated row fill, the column
+  fill and `build_anticipated_slot_row_pos`, byte-neutral against every golden.
+- **The anticipated-commitment LP columns resolve through typed accessors.** Typed
+  `commitment_hold_incoming_col` / `commitment_hold_outgoing_col` resolvers on
+  `StateSpace` replace the untyped column recompositions in
+  `simulation/extraction.rs`, byte-neutral via an equivalence test.
+
+**Owner.** The LP-builder and simulation owners (as executed). **Trigger.** None —
+done.
+
+### Fixed — public Rust-API surfaces removed in a licensed break (2026-09-21)
+
+- **Unused and superseded public items are gone.** Removed in one licensed
+  public-API break: `CutManagementConfig::warm_start_cuts` (with its two production
+  literals, the `train_inner` reset and its tests); the `Col` / `Row` newtypes and
+  their round-trip tests, dropped from the `lp/indexer` re-export; `FphaRowRange`
+  and its smoke test; the `pub use policy::orchestration` crate-root re-export (with
+  callers moved to the owning module path); the superseded single-pool cut-sync
+  methods on `CutSyncBuffers`; and the CLP hot-start acquire half
+  (`cobre_clp_mark_hot_start`, `cobre_clp_solve_from_hot_start` and their safe
+  wrappers), with the release half kept. No deck, CLI output or Python package
+  output is affected.
+
+**Owner.** The `cobre-sddp`, `cobre-comm` and `cobre-solver` owners (as executed).
+**Trigger.** None — done.
+
+### Fixed — rustdoc and module-doc drift (2026-09-21)
+
+- **The infrastructure-crate docs read in the generic register.** The `cobre-solver`
+  doc sites are reworded to describe solver-handle properties without
+  algorithm-specific names, and the crate README's HiGHS feature-gating contract is
+  corrected (the `BasisStatus` mapping is unconditional).
+- **The stale rustdoc lines are corrected.** The
+  `CutManagementConfig::warm_start_cuts` line and the `FphaRowRange` /
+  `BlockGrid::advance_fpha_base` lines are corrected before the surfaces they
+  described are removed, and the `claim_scatter.rs` module-doc consumer list is
+  corrected to name every importer.
+
+**Owner.** The `cobre-solver` and `cobre-sddp` owners (as executed). **Trigger.**
+None — done.
+
+### Fixed — byte-neutral setup-path and output-path reductions (2026-09-21)
+
+- **The setup-path scans and allocations are bounded.** The inflow-history and
+  observation joins bucket by hydro id in one pass and borrow the contiguous
+  subslice instead of copying per occurrence; the distance-matrix fill is symmetric
+  with hoisted per-start buffers; the per-block reservation regrowth is removed so
+  each branch reserves the exact product; the coverage-gated observation join walks
+  one forward-sweep cursor; and `long_term_mean_inflow` bounds its scan to the total
+  history rows once. Each is byte-neutral against the parity goldens.
+- **The output writers allocate less.** The checkpoint write path consumes the
+  serializer's finished bytes without a `to_vec()` copy; one lazily-initialised
+  Arrow schema per output is cloned by the batch builders with `WriterProperties`
+  resolved once; `delta_to_stats_row` carries its phase as a `&'static str`
+  rather than an allocated `String`; and `build_iterations_columns` uses the
+  builder-with-capacity idiom instead of intermediate vectors.
+- **The Parquet writer configuration is frozen to internal constants.** The
+  `ParquetWriterConfig` values are an internal constant set and the threaded
+  `&ParquetWriterConfig` machinery is collapsed; no user-facing compression knob is
+  exposed.
+
+**Owner.** The `cobre-sddp`, `cobre-io` and `cobre-core` owners (as executed).
+**Trigger.** None — done.
+
 ## Audit-evidence
 
 The following mechanical checks were run against the tree at the time this
@@ -1321,13 +1450,17 @@ grep -rn '#!\?\[allow(' crates/*/src --include='*.rs'
 
 Every hit falls into one of three classes, and none is plan-dead-unconsumed:
 
-- **Load-bearing.** Numeric-cast lints (`cast_possible_truncation`,
-  `cast_precision_loss`, `cast_sign_loss`, `cast_possible_wrap`) and
-  refactor-decision lints (`too_many_arguments`, `too_many_lines`,
-  `type_complexity`, `struct_field_names`, `implicit_hasher`,
-  `needless_pass_by_value`, and similar) on production code, each carrying a
-  `// Rationale:` comment naming the non-obvious choice the lint would
-  otherwise flag — the majority of the census.
+- **Load-bearing.** Refactor-decision lints on `.claude/rules/comments.md` D4's
+  closed list (`too_many_arguments`, `too_many_lines`, `type_complexity`,
+  `dead_code`, `unused_*`) plus borrow-checker workarounds each carry a
+  `// Rationale:` comment naming the non-obvious choice the lint would otherwise
+  flag — the majority of the census. Numeric-cast lints
+  (`cast_possible_truncation`, `cast_precision_loss`, `cast_sign_loss`,
+  `cast_possible_wrap`), `needless_pass_by_value`, and the remaining pedantic
+  openers (`struct_field_names`, `implicit_hasher`) sit outside that closed list:
+  their suppressions are still load-bearing because CI's zero-warning bar needs
+  them, but D4 mandates no rationale on them, so a bare opener there is a
+  consistency preference rather than a rule violation.
 - **Reserved-seam (Voice 4).** `dead_code` attributes each paired with a
   comment naming what will consume the item once a specific reader lands (the
   water travel-time topology and Lipschitz entries above are examples; several
