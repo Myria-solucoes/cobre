@@ -399,6 +399,8 @@ fn unit_for(file: &str, column: &str) -> &'static str {
         ("hydros", "water_value_per_hm3") => "$/hm3",
         ("hydros", "equivalent_productivity_mw_per_m3s") => "MW/(m3/s)",
         ("hydros", "accumulated_productivity_mw_per_m3s") => "MW/(m3/s)",
+        ("hydros", "integrated_equivalent_productivity_mw_per_m3s") => "MW/(m3/s)",
+        ("hydros", "integrated_accumulated_productivity_mw_per_m3s") => "MW/(m3/s)",
         ("hydros", "incremental_inflow_energy_mw") => "MW",
         ("hydros", "stored_energy_initial_mwh") => "MWh",
         ("hydros", "stored_energy_final_mwh") => "MWh",
@@ -472,6 +474,12 @@ fn description_for(file: &str, column: &str) -> &'static str {
         }
         ("hydros", "accumulated_productivity_mw_per_m3s") => {
             "Accumulated productivity `ρ_acum` along downstream cascade"
+        }
+        ("hydros", "integrated_equivalent_productivity_mw_per_m3s") => {
+            "Equivalent productivity `ρ_eq` averaged over the reservoir storage range"
+        }
+        ("hydros", "integrated_accumulated_productivity_mw_per_m3s") => {
+            "Storage-range averaged productivity summed along the downstream cascade"
         }
         ("hydros", "incremental_inflow_energy_mw") => {
             "Incremental natural energy inflow (`ρ_acum` · incremental inflow)"
@@ -2269,8 +2277,8 @@ mod tests {
 
         let row_count = rdr.records().count();
         assert_eq!(
-            row_count, 258,
-            "variables.csv must have exactly 258 data rows (one per column across all schemas)"
+            row_count, 260,
+            "variables.csv must have exactly 260 data rows (one per column across all schemas)"
         );
     }
 

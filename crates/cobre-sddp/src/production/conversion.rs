@@ -94,6 +94,10 @@ impl IntoWriteRecord for SimulationHydroResult {
             inflow_nonnegativity_slack_m3s: s.inflow_nonnegativity_slack_m3s,
             water_withdrawal_violation_pos_m3s: s.water_withdrawal_violation_pos_m3s,
             water_withdrawal_violation_neg_m3s: s.water_withdrawal_violation_neg_m3s,
+            integrated_equivalent_productivity_mw_per_m3s: s
+                .integrated_equivalent_productivity_mw_per_m3s,
+            integrated_accumulated_productivity_mw_per_m3s: s
+                .integrated_accumulated_productivity_mw_per_m3s,
         }
     }
 }
@@ -416,6 +420,8 @@ mod tests {
             inflow_nonnegativity_slack_m3s: 0.0,
             water_withdrawal_violation_pos_m3s: 0.0,
             water_withdrawal_violation_neg_m3s: 0.0,
+            integrated_equivalent_productivity_mw_per_m3s: 0.0,
+            integrated_accumulated_productivity_mw_per_m3s: 0.0,
         }
     }
 

@@ -201,6 +201,10 @@ pub struct HydroWriteRecord {
     pub water_withdrawal_violation_pos_m3s: f64,
     /// Under-withdrawal violation in m³/s.
     pub water_withdrawal_violation_neg_m3s: f64,
+    /// Storage-range mean equivalent productivity in MW/(m³/s).
+    pub integrated_equivalent_productivity_mw_per_m3s: f64,
+    /// Storage-range mean accumulated productivity along the downstream cascade in MW/(m³/s).
+    pub integrated_accumulated_productivity_mw_per_m3s: f64,
 }
 
 /// Thermal unit result for one (stage, block, thermal) tuple.
@@ -1392,6 +1396,8 @@ struct HydroBuilders {
     inflow_nonnegativity_slack_m3s: Float64Builder,
     water_withdrawal_violation_pos_m3s: Float64Builder,
     water_withdrawal_violation_neg_m3s: Float64Builder,
+    integrated_equivalent_productivity_mw_per_m3s: Float64Builder,
+    integrated_accumulated_productivity_mw_per_m3s: Float64Builder,
 }
 
 impl HydroBuilders {
@@ -1434,6 +1440,8 @@ impl HydroBuilders {
             inflow_nonnegativity_slack_m3s: Float64Builder::with_capacity(n),
             water_withdrawal_violation_pos_m3s: Float64Builder::with_capacity(n),
             water_withdrawal_violation_neg_m3s: Float64Builder::with_capacity(n),
+            integrated_equivalent_productivity_mw_per_m3s: Float64Builder::with_capacity(n),
+            integrated_accumulated_productivity_mw_per_m3s: Float64Builder::with_capacity(n),
         }
     }
 }
@@ -1502,6 +1510,10 @@ fn fill_hydro_builders<'a>(
             .append_value(r.water_withdrawal_violation_pos_m3s);
         b.water_withdrawal_violation_neg_m3s
             .append_value(r.water_withdrawal_violation_neg_m3s);
+        b.integrated_equivalent_productivity_mw_per_m3s
+            .append_value(r.integrated_equivalent_productivity_mw_per_m3s);
+        b.integrated_accumulated_productivity_mw_per_m3s
+            .append_value(r.integrated_accumulated_productivity_mw_per_m3s);
     }
 }
 
@@ -1556,6 +1568,8 @@ fn build_hydros_batch<'a>(
             Arc::new(b.inflow_nonnegativity_slack_m3s.finish()),
             Arc::new(b.water_withdrawal_violation_pos_m3s.finish()),
             Arc::new(b.water_withdrawal_violation_neg_m3s.finish()),
+            Arc::new(b.integrated_equivalent_productivity_mw_per_m3s.finish()),
+            Arc::new(b.integrated_accumulated_productivity_mw_per_m3s.finish()),
         ],
     )
     .map_err(|e| OutputError::serialization("hydros", e.to_string()))
@@ -2498,6 +2512,8 @@ mod tests {
             inflow_nonnegativity_slack_m3s: 0.0,
             water_withdrawal_violation_pos_m3s: 0.0,
             water_withdrawal_violation_neg_m3s: 0.0,
+            integrated_equivalent_productivity_mw_per_m3s: 1.5,
+            integrated_accumulated_productivity_mw_per_m3s: 6.0,
         }
     }
 
@@ -2567,7 +2583,7 @@ mod tests {
         let batch = build_hydros_batch(records.iter().copied(), 0, &block_durations, records.len())
             .expect("hydros batch must build");
         assert_eq!(batch.num_rows(), 2);
-        assert_eq!(batch.num_columns(), 37, "hydros schema has 37 columns");
+        assert_eq!(batch.num_columns(), 39, "hydros schema has 39 columns");
 
         let gen_mwh_col = batch
             .column_by_name("generation_mwh")
@@ -3327,6 +3343,43 @@ mod tests {
             50.0 * 744.0,
             "generation_mwh at row 3 (stage 1) must equal generation_mw * 744"
         );
+
+        // The two tail-appended integrated-productivity columns round-trip as
+        // non-nullable Float64. make_hydro_record sets them to 1.5 and 6.0.
+        let schema = batch.schema();
+        for col in [
+            "integrated_equivalent_productivity_mw_per_m3s",
+            "integrated_accumulated_productivity_mw_per_m3s",
+        ] {
+            let field = schema
+                .field_with_name(col)
+                .unwrap_or_else(|_| panic!("{col} column must exist in schema"));
+            assert_eq!(
+                field.data_type(),
+                &arrow::datatypes::DataType::Float64,
+                "{col} must be Float64"
+            );
+            assert!(!field.is_nullable(), "{col} must be non-nullable");
+        }
+        let read_f64 = |col: &str| -> f64 {
+            batch
+                .column_by_name(col)
+                .unwrap_or_else(|| panic!("column {col} must exist"))
+                .as_any()
+                .downcast_ref::<arrow::array::Float64Array>()
+                .unwrap_or_else(|| panic!("column {col} must be Float64Array"))
+                .value(0)
+        };
+        assert_eq!(
+            read_f64("integrated_equivalent_productivity_mw_per_m3s"),
+            1.5,
+            "integrated_equivalent_productivity_mw_per_m3s must round-trip"
+        );
+        assert_eq!(
+            read_f64("integrated_accumulated_productivity_mw_per_m3s"),
+            6.0,
+            "integrated_accumulated_productivity_mw_per_m3s must round-trip"
+        );
     }
 
     #[test]
@@ -3399,12 +3452,12 @@ mod tests {
     }
 
     #[test]
-    fn hydros_schema_has_thirty_seven_fields() {
+    fn hydros_schema_has_thirty_nine_fields() {
         let schema = hydros_schema();
         assert_eq!(
             schema.fields().len(),
-            37,
-            "hydros_schema must have 37 fields (35 + scenario_id + node_id)"
+            39,
+            "hydros_schema must have 39 fields (37 + scenario_id + node_id)"
         );
     }
 

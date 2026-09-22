@@ -10,9 +10,10 @@ use std::collections::{BTreeMap, HashMap};
 use chrono::NaiveDate;
 
 use super::{
-    EntityCounts, HydroReverseLookup, SolutionView, StageExtractionSpec, accumulate_category_costs,
-    assign_scenarios, extract_anticipated_lanes, extract_contracts, extract_generic_violations,
-    extract_pumping_stations, extract_stage_result, extract_stub_collections,
+    EntityCounts, HydroReverseLookup, SimulationHydroResult, SolutionView, StageExtractionSpec,
+    accumulate_category_costs, assign_scenarios, extract_anticipated_lanes, extract_contracts,
+    extract_generic_violations, extract_pumping_stations, extract_stage_result,
+    extract_stub_collections,
 };
 use cobre_core::{
     Block, BlockMode, CascadeTopology, ConstraintExpression, GenericConstraint, NoiseMethod,
@@ -4692,6 +4693,145 @@ fn stage_path_propagates_productivity_values() {
         (rho_acum - 3.5).abs() < 1e-12,
         "stage rho_acum = {rho_acum}"
     );
+}
+
+#[test]
+fn integrated_productivity_columns_read_the_mean_evaluator_on_both_branches() {
+    // Reference point ρ_eq = 0.9, ρ_acum = 4.0; the mean-evaluator grids are
+    // installed distinct (1.5, 6.0) so a column reading the reference-point pair
+    // instead of the integrated accessor would fail this test.
+    let study_dims = test_support::study_dims();
+    let state = test_support::state_layout(1, 1);
+    let ec = one_hydro_energy_set(0.9, 4.0).with_integrated(vec![vec![1.5]], vec![vec![6.0]]);
+    let dual = vec![0.0; 2];
+
+    let assert_columns = |h: &SimulationHydroResult| {
+        assert!(
+            (h.equivalent_productivity_mw_per_m3s - 0.9).abs() < 1e-12,
+            "reference ρ_eq must stay unchanged, got {}",
+            h.equivalent_productivity_mw_per_m3s
+        );
+        assert!(
+            (h.accumulated_productivity_mw_per_m3s - 4.0).abs() < 1e-12,
+            "reference ρ_acum must stay unchanged, got {}",
+            h.accumulated_productivity_mw_per_m3s
+        );
+        assert!(
+            (h.integrated_equivalent_productivity_mw_per_m3s - 1.5).abs() < 1e-12,
+            "integrated ρ_eq must equal the own-scope accessor, got {}",
+            h.integrated_equivalent_productivity_mw_per_m3s
+        );
+        assert!(
+            (h.integrated_accumulated_productivity_mw_per_m3s - 6.0).abs() < 1e-12,
+            "integrated ρ_acum must equal the cascade-scope accessor, got {}",
+            h.integrated_accumulated_productivity_mw_per_m3s
+        );
+    };
+
+    // No-turbine branch: an empty `turbine` range routes `extract_hydros`
+    // through `extract_hydro_no_turbine`.
+    let primal = make_primal_1_1(120.0, 110.0, 0.0);
+    let no_turbine = extract_stage_result(
+        &SolutionView {
+            primal: &primal,
+            dual: &dual,
+            objective: 0.0,
+            objective_coeffs: &[],
+            row_lower: &[],
+        },
+        &StageExtractionSpec {
+            study_dims: &study_dims,
+            geometry: &test_support::geom(1, 1),
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
+            state: &state,
+            n_blks: 0,
+            entity_counts: &make_entity_counts_1_hydro(),
+            inflow_m3s_per_hydro: &[10.0],
+            block_hours: &[],
+            generic_constraint_entries: &[],
+            ncs_col_start: 0,
+            n_ncs: 0,
+            ncs_entity_ids: &[],
+            ncs_col_upper: &[],
+            pumping_col_start: 0,
+            n_pumping: 0,
+            pumping_consumption_mw_per_m3s: &[],
+            contract_prices: &[],
+            contract_is_import: &[],
+            diversion_upstream: &HashMap::new(),
+            hydro_productivities: &[1.0],
+            col_scale: &[],
+            row_scale: &[],
+            cumulative_discount_factor: 1.0,
+            cost_scale_factor: 1_000_000.0,
+            energy_conversion: &ec,
+            hydro_min_storage_hm3: &[100.0],
+            stage_index: 0,
+            n_stages: 1,
+            anticipated_windows: &[],
+            study_stage_ids: &[],
+        },
+        0,
+    );
+    assert_eq!(no_turbine.hydros.len(), 1);
+    assert_columns(&no_turbine.hydros[0]);
+
+    // Per-block branch: a non-empty `turbine` range with `n_blks = 1` routes
+    // `extract_hydros` through `extract_hydro_per_block`. Turbine col at index 5,
+    // spillage col at index 6, appended after the base N=1,L=1 primal.
+    let mut primal_pb = make_primal_1_1(120.0, 110.0, 0.0);
+    primal_pb.extend_from_slice(&[5.0, 0.0]);
+    let objective_coeffs = vec![0.0; primal_pb.len()];
+    let geom_pb = StageGeometry {
+        turbine: 5..6,
+        spillage: 6..7,
+        n_blks: 1,
+        ..test_support::geom(1, 1)
+    };
+    let per_block = extract_stage_result(
+        &SolutionView {
+            primal: &primal_pb,
+            dual: &dual,
+            objective: 0.0,
+            objective_coeffs: &objective_coeffs,
+            row_lower: &[],
+        },
+        &StageExtractionSpec {
+            study_dims: &study_dims,
+            geometry: &geom_pb,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
+            state: &state,
+            n_blks: 1,
+            entity_counts: &make_entity_counts_1_hydro(),
+            inflow_m3s_per_hydro: &[10.0],
+            block_hours: &[720.0],
+            generic_constraint_entries: &[],
+            ncs_col_start: 0,
+            n_ncs: 0,
+            ncs_entity_ids: &[],
+            ncs_col_upper: &[],
+            pumping_col_start: 0,
+            n_pumping: 0,
+            pumping_consumption_mw_per_m3s: &[],
+            contract_prices: &[],
+            contract_is_import: &[],
+            diversion_upstream: &HashMap::new(),
+            hydro_productivities: &[1.0],
+            col_scale: &[],
+            row_scale: &[],
+            cumulative_discount_factor: 1.0,
+            cost_scale_factor: 1_000_000.0,
+            energy_conversion: &ec,
+            hydro_min_storage_hm3: &[100.0],
+            stage_index: 0,
+            n_stages: 1,
+            anticipated_windows: &[],
+            study_stage_ids: &[],
+        },
+        0,
+    );
+    assert_eq!(per_block.hydros.len(), 1);
+    assert_columns(&per_block.hydros[0]);
 }
 
 // -------------------------------------------------------------------------

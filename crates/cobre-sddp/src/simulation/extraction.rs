@@ -873,6 +873,10 @@ fn extract_hydro_no_turbine(
         inflow_nonnegativity_slack_m3s: ctx.inflow_slack,
         water_withdrawal_violation_pos_m3s: ctx.withdrawal_pos,
         water_withdrawal_violation_neg_m3s: ctx.withdrawal_neg,
+        integrated_equivalent_productivity_mw_per_m3s: ctx
+            .integrated_equivalent_productivity_mw_per_m3s,
+        integrated_accumulated_productivity_mw_per_m3s: ctx
+            .integrated_accumulated_productivity_mw_per_m3s,
     }
 }
 
@@ -895,6 +899,8 @@ struct HydroStageContext {
     evap_local: Option<EvapLocal>,
     equivalent_productivity_mw_per_m3s: f64,
     accumulated_productivity_mw_per_m3s: f64,
+    integrated_equivalent_productivity_mw_per_m3s: f64,
+    integrated_accumulated_productivity_mw_per_m3s: f64,
     incremental_inflow_energy_mw: f64,
     /// `V_min` (hm³) and `ρ_acum`, both block-invariant, retained so the per-block
     /// closure derives each boundary's stored energy without re-querying conversions.
@@ -977,6 +983,12 @@ impl HydroStageContext {
         let rho_acum = spec
             .energy_conversion
             .accumulated_productivity(h, spec.stage_index);
+        let integrated_equivalent = spec
+            .energy_conversion
+            .integrated_equivalent_productivity(h, spec.stage_index);
+        let integrated_accumulated = spec
+            .energy_conversion
+            .integrated_accumulated_productivity(h, spec.stage_index);
         let v_min = spec.hydro_min_storage_hm3.get(h).copied().unwrap_or(0.0);
         Self {
             storage_final,
@@ -990,6 +1002,8 @@ impl HydroStageContext {
             evap_local,
             equivalent_productivity_mw_per_m3s: conv.equivalent_productivity_mw_per_m3s,
             accumulated_productivity_mw_per_m3s: rho_acum,
+            integrated_equivalent_productivity_mw_per_m3s: integrated_equivalent,
+            integrated_accumulated_productivity_mw_per_m3s: integrated_accumulated,
             incremental_inflow_energy_mw: rho_acum * incremental_inflow,
             v_min,
             rho_acum,
@@ -1161,6 +1175,10 @@ fn extract_hydro_per_block<'a>(
             inflow_nonnegativity_slack_m3s: ctx.inflow_slack,
             water_withdrawal_violation_pos_m3s: ctx.withdrawal_pos,
             water_withdrawal_violation_neg_m3s: ctx.withdrawal_neg,
+            integrated_equivalent_productivity_mw_per_m3s: ctx
+                .integrated_equivalent_productivity_mw_per_m3s,
+            integrated_accumulated_productivity_mw_per_m3s: ctx
+                .integrated_accumulated_productivity_mw_per_m3s,
         }
     })
 }
@@ -2213,6 +2231,8 @@ mod transit_seed_tests {
             inflow_nonnegativity_slack_m3s: 0.0,
             water_withdrawal_violation_pos_m3s: 0.0,
             water_withdrawal_violation_neg_m3s: 0.0,
+            integrated_equivalent_productivity_mw_per_m3s: 0.0,
+            integrated_accumulated_productivity_mw_per_m3s: 0.0,
         }
     }
 
