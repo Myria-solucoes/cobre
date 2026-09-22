@@ -75,10 +75,11 @@
 //! term list at load — see the `named_expression_inline` module for the
 //! substitution and cycle-detection rules.
 //!
-//! All 24 variable names from the variable catalog are recognised. Block-capable
+//! Every name in the LP variable catalog is recognised. Block-capable
 //! variables accept an optional second argument (`hydro_turbined`, `hydro_spillage`,
 //! `hydro_diversion`, `hydro_outflow`, `hydro_generation`, `hydro_inflow`,
-//! `hydro_evaporation`, `hydro_storage_initial`, `hydro_storage_final`, …);
+//! `hydro_evaporation`, `hydro_storage_initial`, `hydro_storage_final`,
+//! `hydro_useful_volume_initial`, `hydro_useful_volume_final`, …);
 //! stage-only variables (`hydro_storage`, `hydro_withdrawal`,
 //! `anticipated_decision`) must not have a block argument. Use
 //! `anticipated_decision(thermal_id)` to reference the per-stage commitment column of an
@@ -1568,10 +1569,10 @@ fn parse_line_bus_pair_ref(
 /// Build a [`VariableRef`] from the parsed variable name, entity ID, optional block
 /// ID, and optional bus selector.
 ///
-/// Returns `Err(String)` if the variable name is not one of the 24 known names, if a
+/// Returns `Err(String)` if the variable name is not a recognised LP variable name, if a
 /// block argument is provided for a stage-only variable, or if a `bus=` selector is
 /// provided for any variable other than `hydro_turbined`/`hydro_generation`.
-// Rationale: one exhaustive match over the 24 variable names; splitting would scatter the
+// Rationale: one exhaustive match over the LP variable catalog; splitting would scatter the
 // canonical catalog and drop the compile-time exhaustiveness check.
 #[allow(clippy::too_many_lines)]
 fn build_variable_ref(
@@ -1616,6 +1617,14 @@ fn build_variable_ref(
             block_id,
         }),
         "hydro_storage_final" => Ok(VariableRef::HydroStorageFinal {
+            hydro_id: entity_id,
+            block_id,
+        }),
+        "hydro_useful_volume_initial" => Ok(VariableRef::HydroUsefulVolumeInitial {
+            hydro_id: entity_id,
+            block_id,
+        }),
+        "hydro_useful_volume_final" => Ok(VariableRef::HydroUsefulVolumeFinal {
             hydro_id: entity_id,
             block_id,
         }),
@@ -1703,7 +1712,7 @@ fn build_variable_ref(
             })
         }
         other => Err(format!(
-            "unknown variable name \"{other}\": not one of the 24 supported LP variable types"
+            "unknown variable name \"{other}\": not a recognised LP variable name"
         )),
     }?;
 
@@ -2027,6 +2036,86 @@ mod tests {
             VariableRef::HydroStorageFinal {
                 hydro_id: EntityId(4),
                 block_id: Some(1),
+            }
+        );
+    }
+
+    /// `hydro_useful_volume_initial` is block-capable: a bare entity id threads
+    /// `block_id: None`, and a block argument threads `block_id: Some(k)`.
+    #[test]
+    fn test_build_hydro_useful_volume_initial_block_none_and_some() {
+        let none =
+            build_variable_ref("hydro_useful_volume_initial", EntityId(4), None, None).unwrap();
+        assert_eq!(
+            none,
+            VariableRef::HydroUsefulVolumeInitial {
+                hydro_id: EntityId(4),
+                block_id: None,
+            }
+        );
+        let some =
+            build_variable_ref("hydro_useful_volume_initial", EntityId(4), Some(2), None).unwrap();
+        assert_eq!(
+            some,
+            VariableRef::HydroUsefulVolumeInitial {
+                hydro_id: EntityId(4),
+                block_id: Some(2),
+            }
+        );
+    }
+
+    /// `hydro_useful_volume_final` is block-capable: a bare entity id threads
+    /// `block_id: None`, and a block argument threads `block_id: Some(k)`.
+    #[test]
+    fn test_build_hydro_useful_volume_final_block_none_and_some() {
+        let none =
+            build_variable_ref("hydro_useful_volume_final", EntityId(3), None, None).unwrap();
+        assert_eq!(
+            none,
+            VariableRef::HydroUsefulVolumeFinal {
+                hydro_id: EntityId(3),
+                block_id: None,
+            }
+        );
+        let some =
+            build_variable_ref("hydro_useful_volume_final", EntityId(3), Some(0), None).unwrap();
+        assert_eq!(
+            some,
+            VariableRef::HydroUsefulVolumeFinal {
+                hydro_id: EntityId(3),
+                block_id: Some(0),
+            }
+        );
+    }
+
+    /// Neither useful-volume boundary variable accepts a `bus=` selector — the
+    /// post-match guard rejects it the same as for the storage-pair variables.
+    #[test]
+    fn test_build_hydro_useful_volume_bus_selector_rejected() {
+        for name in ["hydro_useful_volume_final", "hydro_useful_volume_initial"] {
+            assert!(build_variable_ref(name, EntityId(3), None, Some(EntityId(1))).is_err());
+        }
+    }
+
+    /// `hydro_useful_volume_final(3, 0) >= 0`, parsed through the full expression
+    /// parser, yields a single term referencing `HydroUsefulVolumeFinal`.
+    #[test]
+    fn test_expr_hydro_useful_volume_final_full_expression() {
+        let json = r#"{
+  "constraints": [
+    { "id": 0, "name": "c0", "expression": "hydro_useful_volume_final(3, 0) >= 0", "slack": { "enabled": false } }
+  ]
+}"#;
+        let f = write_json(json);
+        let result =
+            parse_generic_constraints(f.path(), &HashMap::new(), &LineBusPairIndex::default())
+                .unwrap();
+        assert_eq!(result[0].expression.terms.len(), 1);
+        assert_eq!(
+            result[0].expression.terms[0].variable,
+            VariableRef::HydroUsefulVolumeFinal {
+                hydro_id: EntityId(3),
+                block_id: Some(0),
             }
         );
     }
@@ -2787,7 +2876,7 @@ mod tests {
     /// `bus=` is accepted only by `hydro_turbined`/`hydro_generation`; every
     /// malformed named-argument shape is rejected; and an unknown variable name
     /// reports itself, not the bus selector — the post-match guard runs AFTER
-    /// the 24-arm name match, never before it.
+    /// the name match, never before it.
     #[test]
     fn parse_bus_selector_rejections() {
         for expr in [
