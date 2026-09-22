@@ -11457,6 +11457,53 @@ mod enumerated_cvar_gap {
     }
 }
 
+/// JSON fixture text shared verbatim by
+/// [`security_curve_integrated_productivity_equivalence`] and
+/// [`stored_energy_columns_determinism`]: one bus, default penalties, and a
+/// 2-stage/730h-block calendar with hydro 0 seeded at 500 hm3 and hydro 1 at
+/// 100 hm3.
+mod stored_energy_fixture_json {
+    pub(super) const PENALTIES_JSON: &str = r#"{
+  "bus": { "deficit_segments": [ { "depth_mw": null, "cost": 1000.0 } ], "excess_cost": 0.01 },
+  "line": { "exchange_cost": 0.01 },
+  "hydro": {
+    "spillage_cost": 0.01, "turbined_cost": 0.01, "diversion_cost": 0.01,
+    "storage_violation_below_cost": 10000.0, "filling_target_violation_cost": 10000.0,
+    "turbined_violation_below_cost": 10000.0, "outflow_violation_below_cost": 10000.0,
+    "outflow_violation_above_cost": 10000.0, "generation_violation_below_cost": 10000.0,
+    "evaporation_violation_cost": 10000.0, "water_withdrawal_violation_cost": 10000.0
+  },
+  "non_controllable_source": { "curtailment_cost": 0.005 }
+}"#;
+
+    pub(super) const STAGES_JSON: &str = r#"{
+  "policy_graph": { "type": "finite_horizon", "annual_discount_rate": 0.0 },
+  "stages": [
+    { "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
+      "blocks": [ { "id": 0, "name": "SINGLE", "hours": 730 } ], "num_openings": 1 },
+    { "id": 1, "start_date": "2024-02-01", "end_date": "2024-03-01",
+      "blocks": [ { "id": 0, "name": "SINGLE", "hours": 730 } ], "num_openings": 1 }
+  ]
+}"#;
+
+    pub(super) const INITIAL_CONDITIONS_JSON: &str = r#"{
+  "storage": [
+    { "hydro_id": 0, "value_hm3": 500.0 },
+    { "hydro_id": 1, "value_hm3": 100.0 }
+  ],
+  "filling_storage": []
+}"#;
+
+    pub(super) const BUSES_JSON: &str = r#"{
+  "buses": [
+    { "id": 0, "name": "B0", "operational_start_date": "2020-01-01",
+      "deficit_segments": [ { "depth_mw": null, "cost": 1000.0 } ] }
+  ]
+}"#;
+
+    pub(super) const LINES_JSON: &str = r#"{ "lines": [] }"#;
+}
+
 /// In-code deck with real VHA geometry, an operative `hydro_bounds` ceiling
 /// below the entity's physical range, and both productivity override columns.
 mod security_curve_integrated_productivity_equivalence {
@@ -11475,6 +11522,10 @@ mod security_curve_integrated_productivity_equivalence {
 
     use crate::common::build_setup_for_case;
     use crate::common::parquet_fixtures::{write_hydro_geometry, write_seasonal_stats};
+
+    use super::stored_energy_fixture_json::{
+        BUSES_JSON, INITIAL_CONDITIONS_JSON, LINES_JSON, PENALTIES_JSON, STAGES_JSON,
+    };
 
     /// `(hydro_id, stage_id, equivalent_productivity_mw_per_m3s override,
     /// specific_productivity_mw_per_m3s_per_m override)` — `reference_outflow_m3s`
@@ -11589,46 +11640,6 @@ mod security_curve_integrated_productivity_equivalence {
   "simulation": { "enabled": false },
   "modeling": { "inflow_non_negativity": { "method": "none" } }
 }"#;
-
-    const PENALTIES_JSON: &str = r#"{
-  "bus": { "deficit_segments": [ { "depth_mw": null, "cost": 1000.0 } ], "excess_cost": 0.01 },
-  "line": { "exchange_cost": 0.01 },
-  "hydro": {
-    "spillage_cost": 0.01, "turbined_cost": 0.01, "diversion_cost": 0.01,
-    "storage_violation_below_cost": 10000.0, "filling_target_violation_cost": 10000.0,
-    "turbined_violation_below_cost": 10000.0, "outflow_violation_below_cost": 10000.0,
-    "outflow_violation_above_cost": 10000.0, "generation_violation_below_cost": 10000.0,
-    "evaporation_violation_cost": 10000.0, "water_withdrawal_violation_cost": 10000.0
-  },
-  "non_controllable_source": { "curtailment_cost": 0.005 }
-}"#;
-
-    const STAGES_JSON: &str = r#"{
-  "policy_graph": { "type": "finite_horizon", "annual_discount_rate": 0.0 },
-  "stages": [
-    { "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
-      "blocks": [ { "id": 0, "name": "SINGLE", "hours": 730 } ], "num_openings": 1 },
-    { "id": 1, "start_date": "2024-02-01", "end_date": "2024-03-01",
-      "blocks": [ { "id": 0, "name": "SINGLE", "hours": 730 } ], "num_openings": 1 }
-  ]
-}"#;
-
-    const INITIAL_CONDITIONS_JSON: &str = r#"{
-  "storage": [
-    { "hydro_id": 0, "value_hm3": 500.0 },
-    { "hydro_id": 1, "value_hm3": 100.0 }
-  ],
-  "filling_storage": []
-}"#;
-
-    const BUSES_JSON: &str = r#"{
-  "buses": [
-    { "id": 0, "name": "B0", "operational_start_date": "2020-01-01",
-      "deficit_segments": [ { "depth_mw": null, "cost": 1000.0 } ] }
-  ]
-}"#;
-
-    const LINES_JSON: &str = r#"{ "lines": [] }"#;
 
     const THERMALS_JSON: &str = r#"{
   "thermals": [
@@ -11979,6 +11990,10 @@ mod stored_energy_columns_determinism {
     use crate::common::permute::permute_case;
     use crate::common::{build_setup_for_case, run_simulation};
 
+    use super::stored_energy_fixture_json::{
+        BUSES_JSON, INITIAL_CONDITIONS_JSON, LINES_JSON, PENALTIES_JSON, STAGES_JSON,
+    };
+
     /// Fixed seed for the declaration-order-invariance probe, matching the
     /// sibling `nonzero_stage_fpha_override_regression` idiom.
     const PERMUTATION_SEED: u64 = 20_260_922;
@@ -11989,46 +12004,6 @@ mod stored_energy_columns_determinism {
   "simulation": { "enabled": false },
   "modeling": { "inflow_non_negativity": { "method": "none" } }
 }"#;
-
-    const PENALTIES_JSON: &str = r#"{
-  "bus": { "deficit_segments": [ { "depth_mw": null, "cost": 1000.0 } ], "excess_cost": 0.01 },
-  "line": { "exchange_cost": 0.01 },
-  "hydro": {
-    "spillage_cost": 0.01, "turbined_cost": 0.01, "diversion_cost": 0.01,
-    "storage_violation_below_cost": 10000.0, "filling_target_violation_cost": 10000.0,
-    "turbined_violation_below_cost": 10000.0, "outflow_violation_below_cost": 10000.0,
-    "outflow_violation_above_cost": 10000.0, "generation_violation_below_cost": 10000.0,
-    "evaporation_violation_cost": 10000.0, "water_withdrawal_violation_cost": 10000.0
-  },
-  "non_controllable_source": { "curtailment_cost": 0.005 }
-}"#;
-
-    const STAGES_JSON: &str = r#"{
-  "policy_graph": { "type": "finite_horizon", "annual_discount_rate": 0.0 },
-  "stages": [
-    { "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
-      "blocks": [ { "id": 0, "name": "SINGLE", "hours": 730 } ], "num_openings": 1 },
-    { "id": 1, "start_date": "2024-02-01", "end_date": "2024-03-01",
-      "blocks": [ { "id": 0, "name": "SINGLE", "hours": 730 } ], "num_openings": 1 }
-  ]
-}"#;
-
-    const INITIAL_CONDITIONS_JSON: &str = r#"{
-  "storage": [
-    { "hydro_id": 0, "value_hm3": 500.0 },
-    { "hydro_id": 1, "value_hm3": 100.0 }
-  ],
-  "filling_storage": []
-}"#;
-
-    const BUSES_JSON: &str = r#"{
-  "buses": [
-    { "id": 0, "name": "B0", "operational_start_date": "2020-01-01",
-      "deficit_segments": [ { "depth_mw": null, "cost": 1000.0 } ] }
-  ]
-}"#;
-
-    const LINES_JSON: &str = r#"{ "lines": [] }"#;
 
     const THERMALS_JSON: &str = r#"{
   "thermals": [
