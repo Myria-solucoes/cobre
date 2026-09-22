@@ -70,6 +70,7 @@
 //! |48 | *(retired — number never reused)* | — | — |
 //! |49 | Bound-override row `stage_id` a member of the declared study stage id set (never a `[0, n)` position test), across all six bound families (thermal, hydro, line, pumping, contract, hydro unit group); NCS keeps its Layer-3 referential stage check | `constraints/*_bounds.parquet` | `BusinessRuleViolation` |
 //! |50 | A hydro declaring `evaporation_coefficients_mm` has geometry rows in `hydro_geometry.parquet` (area-volume curve, required for evaporation linearization) | `system/hydros.json` | `BusinessRuleViolation` |
+//! |51 | A generic constraint pairs `max_stored_energy(h)` with the mismatched `accumulated_productivity(h)` coefficient for the same hydro `h` (the matching coefficient is `integrated_accumulated_productivity`) | `constraints/generic_constraints.json` | `SemanticAmbiguity` (warning) |
 //!
 //! A hydro unit group bounds row's `block_id` range and duplicate-row keying
 //! are covered by rules 35 and 36 above; a row referencing a non-existent
@@ -176,6 +177,7 @@ pub(crate) fn validate_semantic_hydro_thermal(data: &ParsedData, ctx: &mut Valid
     thermal::check_anticipated_decision_target_is_anticipated(data, ctx);
     thermal::warn_thermal_generation_on_anticipated_thermal(data, ctx);
     constraints::check_per_block_storage_interior_reference(data, ctx);
+    constraints::check_productivity_tag_pairing(data, ctx);
     block_bounds::check_bound_block_id_range(data, ctx);
     block_bounds::check_bound_stage_id_range(data, ctx);
     block_bounds::check_duplicate_bound_rows(data, ctx);
