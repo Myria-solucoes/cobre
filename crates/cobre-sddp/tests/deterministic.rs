@@ -11969,8 +11969,8 @@ mod security_curve_integrated_productivity_equivalence {
     }
 }
 
-/// The six simulation-output hydro columns the parity hash deliberately
-/// excludes (`tests/common/parity_hash.rs`'s module doc) — the four
+/// The six simulation-output hydro columns outside the parity hash's field
+/// whitelist (`tests/common/parity_hash.rs`'s module doc) — the four
 /// integrated-grid/stored-energy-power columns and the moved
 /// `stored_energy_{initial,final}_mwh` pair — must still be declaration-order
 /// invariant and run-to-run reproducible, exactly like every hashed column.
