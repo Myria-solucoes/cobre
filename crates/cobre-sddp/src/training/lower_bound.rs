@@ -21,7 +21,7 @@ use crate::{
     cut::row::build_cut_row_batch_into,
     error::SddpError,
     inflow_method::InflowNonNegativityMethod,
-    lp_builder::PatchBuffer,
+    lp::builder::PatchBuffer,
     noise::compute_effective_eta,
     rank_reconcile::reconcile_error_flag,
     risk_measure::RiskMeasure,
@@ -35,15 +35,11 @@ use crate::{
     workspace::ScratchBuffers,
 };
 
-/// Rank-0 accumulation scratch for [`evaluate_lower_bound`]'s risk-measure
-/// aggregation over stage-0 openings; reused across iterations. The
-/// noise/NCS-transform scratch every other solve site shares lives on
-/// [`ScratchBuffers`] instead — these two fields have no counterpart there.
+/// Rank-0 risk-measure aggregation scratch, reused across iterations.
 pub struct LbEvalScratch {
-    /// Per-opening objective values from the stage-0 evaluation.
+    /// Per-opening objectives.
     pub objectives_buf: Vec<f64>,
-    /// Root outcome-set product weights `P(root→n)·q_{n,ω}`, canonical order —
-    /// assembled from the node graph, never a uniform fill.
+    /// Root outcome-set product weights `P(root→n)·q_{n,ω}`.
     pub weights_buf: Vec<f64>,
 }
 
@@ -64,9 +60,8 @@ impl Default for LbEvalScratch {
     }
 }
 
-/// Groups the mutable scratch refs for [`evaluate_lower_bound`] so its signature
-/// stays under clippy's `too-many-arguments-threshold`. Build via
-/// [`LbEvalScratchBundle::from_scratch_fields`] (disjoint-borrow factory).
+/// Mutable scratch bundle for [`evaluate_lower_bound`]; build via
+/// [`LbEvalScratchBundle::from_scratch_fields`].
 pub struct LbEvalScratchBundle<'a> {
     /// Reusable LP row-bound patch buffer.
     pub patch_buf: &'a mut PatchBuffer,
@@ -163,11 +158,8 @@ fn lb_init_rank0<S: SolverInterface>(
     Ok(())
 }
 
-/// Truncation precompute (PAR lag matrix + eta floor, constant across openings),
-/// then a per-opening LP solve delegating solve-prep to [`StageSolvePrep::run`]
-/// (`load_noise = Absent`, `inflow_noise = PreBuilt`: the lower bound hand-builds
-/// `noise_buf`/`z_inflow_rhs_buf` itself and has no load-bus noise dimension),
-/// writing each objective into `objectives_buf`.
+/// Truncation precompute then per-opening stage-0 LP solve via [`StageSolvePrep::run`],
+/// writing objectives into `objectives_buf`.
 ///
 /// # Errors
 ///
@@ -303,7 +295,7 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
             training_ctx,
             StageIdx(0),
             &prep_params,
-        )?;
+        );
 
         let view = solver.solve(None).map_err(|e| match e {
             SolverError::Infeasible => SddpError::Infeasible {
@@ -349,12 +341,8 @@ fn find_root_position(node_graph: &NodeGraph) -> Result<NodePos, SddpError> {
     Ok(root_pos)
 }
 
-/// Flatten `successors` into `out`, canonical (ascending child node id) order,
-/// each entry the un-re-normalized product `P(n→child)·q_{child,ω}`, applied
-/// here at the (validated) root. Delegates to the shared
-/// [`crate::setup::node_graph::assemble_outcome_weights`] primitive — the
-/// single owner of this fill, shared with
-/// `backward_pass_state::assemble_successor_outcome_weights`.
+/// Flatten `successors` into `out`, canonical order, each entry the product
+/// `P(n→child)·q_{child,ω}`.
 fn assemble_outcome_weights(
     node_graph: &NodeGraph,
     successors: &[NodeSuccessor],
@@ -419,9 +407,6 @@ fn lb_aggregate_and_broadcast<C: Communicator>(
 }
 
 /// Evaluate the global lower bound for the current FCF approximation.
-///
-/// Only rank 0 runs the stage-0 opening loop and applies the risk measure; the
-/// resulting scalar is broadcast to all ranks. See [`LbEvalScratchBundle`].
 ///
 /// # Errors
 ///
@@ -520,15 +505,15 @@ mod tests {
         cut::FutureCostFunction,
         error::SddpError,
         horizon_mode::HorizonMode,
-        indexer::{CutStateProjection, StateSpace, StudyDimensions},
         inflow_method::InflowNonNegativityMethod,
-        lp_builder::PatchBuffer,
+        lp::builder::{PatchBuffer, StateBox},
+        lp::indexer::{CutStateProjection, StateSpace, StudyDimensions},
         risk_measure::RiskMeasure,
         setup::node_graph::StageIdx,
         setup::{
             NodeGraph, NodeId, NodeOpenings, NodePos, NodeRuntime, NodeSuccessor, OpeningSource,
         },
-        test_support,
+        test_support::{self, permissive_state_boxes},
         workspace::{ScratchBuffers, WorkspaceSizing},
     };
     use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
@@ -652,8 +637,17 @@ mod tests {
             profiles,
             schedule: vec![],
         };
-        let decomposed = DecomposedCorrelation::build(&corr_model).unwrap();
         let entity_order = vec![entity_id];
+        let decomposed = DecomposedCorrelation::build(
+            &corr_model,
+            &entity_order,
+            cobre_stochastic::ClassDimensions {
+                n_hydros: 1,
+                n_load_buses: 0,
+                n_ncs: 0,
+            },
+        )
+        .unwrap();
 
         generate_opening_tree(
             42,
@@ -957,6 +951,7 @@ mod tests {
     /// and initial state differ per test.
     struct SimpleLbFixture {
         templates: Vec<StageTemplate>,
+        state_boxes: Vec<StateBox>,
         base_rows: Vec<usize>,
         noise_scale: Vec<f64>,
         n_hydros: usize,
@@ -986,6 +981,7 @@ mod tests {
             let stochastic = wrap_opening_tree(opening_tree);
             let node_graph = test_support::chain_node_graph(&stochastic);
             Self {
+                state_boxes: permissive_state_boxes(state.n_state, 1),
                 templates: vec![template],
                 base_rows: vec![base_row],
                 noise_scale,
@@ -1003,6 +999,7 @@ mod tests {
 
         fn ctx(&self) -> StageContext<'_> {
             StageContext {
+                state_boxes: &self.state_boxes,
                 templates: &self.templates,
                 base_rows: &self.base_rows,
                 geometry_per_stage: &[],
@@ -2004,8 +2001,10 @@ mod tests {
         let ncs_stochastic_dense_col: Vec<usize> = (0..n_ncs).collect();
         let ncs_stochastic_windows: Vec<(Option<i32>, Option<i32>)> = vec![(None, None); n_ncs];
         let ncs_col_starts = vec![0_usize];
+        let state_boxes = permissive_state_boxes(state.n_state, 1);
 
         let ctx = StageContext {
+            state_boxes: &state_boxes,
             templates: &templates,
             base_rows: &base_rows,
             geometry_per_stage: &[],
@@ -2234,11 +2233,11 @@ mod tests {
         use cobre_core::{
             Block, BlockMode, BoundsCountsSpec, BoundsDefaults, Bus, BusStagePenalties,
             ContractBlockBounds, DeficitSegment, EntityId, FillingConfig, Hydro, HydroBlockBounds,
-            HydroGenerationModel, HydroPenalties, HydroStageBounds, HydroStagePenalties,
-            LineBlockBounds, LineStagePenalties, NcsStagePenalties, NoiseMethod,
-            PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
-            ResolvedPenalties, ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig,
-            SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
+            HydroGenerationModel, HydroPenalties, HydroStageBounds, LineBlockBounds,
+            LineStagePenalties, NcsStagePenalties, NoiseMethod, PenaltiesCountsSpec,
+            PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedPenalties,
+            ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig, SystemBuilder,
+            ThermalBlockBounds, ThermalStageBounds,
         };
         use cobre_stochastic::par::precompute::PrecomputedPar;
 
@@ -2346,19 +2345,18 @@ mod tests {
 
         // White-noise inflow models (non-zero std so the Operating/Filling
         // noise_scale is non-zero where the PreFilling zeroing is the contrast).
-        let inflow_models: Vec<InflowModel> = (0..n_stages)
-            .flat_map(|s| {
-                [EntityId(3), EntityId(4)]
-                    .into_iter()
-                    .map(move |hid| InflowModel {
-                        hydro_id: hid,
-                        stage_id: s as i32,
-                        mean_m3s: 80.0,
-                        std_m3s: 20.0,
-                        ar_coefficients: vec![],
-                        residual_std_ratio: 1.0,
-                        annual: None,
-                    })
+        let inflow_models: Vec<InflowModel> = [EntityId(3), EntityId(4)]
+            .into_iter()
+            .flat_map(|hid| {
+                (0..n_stages).map(move |s| InflowModel {
+                    hydro_id: hid,
+                    stage_id: s as i32,
+                    mean_m3s: 80.0,
+                    std_m3s: 20.0,
+                    ar_coefficients: vec![],
+                    residual_std_ratio: 1.0,
+                    annual: None,
+                })
             })
             .collect();
 
@@ -2379,8 +2377,8 @@ mod tests {
             }
         }
 
-        fn default_hydro_penalties() -> HydroStagePenalties {
-            HydroStagePenalties {
+        fn default_hydro_penalties() -> HydroPenalties {
+            HydroPenalties {
                 spillage_cost: 0.0,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,
@@ -2564,7 +2562,16 @@ mod tests {
             profiles,
             schedule: vec![],
         };
-        let decomposed = DecomposedCorrelation::build(&corr_model).unwrap();
+        let decomposed = DecomposedCorrelation::build(
+            &corr_model,
+            &entity_order,
+            cobre_stochastic::ClassDimensions {
+                n_hydros: 2,
+                n_load_buses: 0,
+                n_ncs: 0,
+            },
+        )
+        .unwrap();
 
         generate_opening_tree(
             42,
@@ -2707,7 +2714,7 @@ mod tests {
     /// filling structure arrives ONLY via the loaded template and the `noise_scale`
     /// vector, never via a hand-written per-opening patch.
     ///
-    /// Modeled on the `lp_builder_never_references_dual_extraction` guard: a
+    /// Modeled on the `builder_never_references_dual_extraction` guard: a
     /// future "simplification" that hand-wires a filling patch into `lb_init_rank0`
     /// / `lb_evaluate_stage_0` (mirroring the NCS per-opening patch, which filling
     /// does NOT need because it is stage-deterministic) would re-introduce the
@@ -2798,8 +2805,10 @@ mod tests {
         let opening_tree = filling_opening_tree(1);
         let rm = RiskMeasure::Expectation;
         let stochastic = wrap_opening_tree(opening_tree);
+        let state_boxes = permissive_state_boxes(state.n_state, templates.templates.len());
 
         let ctx = StageContext {
+            state_boxes: &state_boxes,
             templates: &templates.templates,
             base_rows: &templates.base_rows,
             geometry_per_stage: &templates.geometry_per_stage,
@@ -2908,8 +2917,10 @@ mod tests {
         let comm = LocalComm;
         let mut solver = MockSolver::with_objectives(vec![0.0]);
         let stochastic = wrap_opening_tree(opening_tree);
+        let state_boxes = permissive_state_boxes(state.n_state, 1);
 
         let ctx = StageContext {
+            state_boxes: &state_boxes,
             templates: &templates,
             base_rows: &base_rows,
             geometry_per_stage: &[],

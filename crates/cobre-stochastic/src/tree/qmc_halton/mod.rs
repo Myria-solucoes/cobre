@@ -4,26 +4,19 @@
 //! (2, 3, 5, …); point `n`'s coordinate in dimension `d` is
 //! `radical_inverse(n, p_d)`, with dimension 1 the van der Corput base-2 sequence.
 //!
-//! ## Entry points
+//! [`scrambled_halton_point`] generates one scenario independently of all others.
 //!
-//! - `sieve_primes` / `radical_inverse`: building blocks (the latter is pure
-//!   digit-reflection, no scrambling).
-//! - [`generate_qmc_halton`]: batch generation for all openings of a stage.
-//! - [`scrambled_halton_point`]: single-scenario point-wise generation for the
-//!   out-of-sample forward pass, independent of all other scenarios.
-//!
-//! ## Scrambling
-//!
-//! The plain Halton sequence suffers correlation artifacts in high dimensions
-//! (the "Halton curse"). Owen-style random digit scrambling breaks these by
-//! permuting each digit position per dimension via tables derived
-//! deterministically from the stage seed (so output is reproducible).
+//! Plain Halton suffers correlation artifacts in high dimensions (the "Halton
+//! curse"). Owen-style random digit scrambling breaks these by permuting each
+//! digit position per dimension via tables derived deterministically from the
+//! stage seed, so output stays reproducible.
 
 use crate::noise::{
     quantile::norm_quantile,
     rng::rng_from_seed,
     seed::{derive_opening_seed, derive_stage_seed},
 };
+use crate::tree::NoisePointSpec;
 
 use super::lhs::fisher_yates;
 
@@ -88,11 +81,9 @@ pub(crate) fn sieve_primes(count: usize) -> Vec<u32> {
 ///
 /// `base >= 2` (a `debug_assert!` enforces it; in release `base < 2` returns
 /// `0.0` without panicking).
-// Module primitive: the generators use `scrambled_radical_inverse`, so this is
-// reached only from tests until a downstream caller wires it in.
-#[allow(dead_code)]
+#[cfg(test)]
 #[must_use]
-pub(crate) fn radical_inverse(n: u32, base: u32) -> f64 {
+fn radical_inverse(n: u32, base: u32) -> f64 {
     debug_assert!(base >= 2, "radical_inverse requires base >= 2, got {base}");
 
     let mut result = 0.0_f64;
@@ -186,6 +177,12 @@ fn scrambled_radical_inverse(n: u32, base: u32, perm_table: &[Vec<u32>]) -> f64 
     result
 }
 
+fn scrambled_normal_sample(n: u32, base: u32, perm_table: &[Vec<u32>]) -> f64 {
+    let u = scrambled_radical_inverse(n, base, perm_table);
+    let u = u.clamp(f64::MIN_POSITIVE, 1.0 - f64::EPSILON);
+    norm_quantile(u)
+}
+
 /// Fill `output` with `n_openings × dim` standard-normal N(0,1) values using
 /// scrambled Halton QMC. Output layout: opening-major
 /// `output[opening * dim + entity]`. The scramble tables derive from the
@@ -221,44 +218,44 @@ pub fn generate_qmc_halton(
         #[allow(clippy::cast_possible_truncation)]
         let n_u32 = n as u32;
         for d in 0..dim {
-            let u = scrambled_radical_inverse(n_u32, primes[d], &tables[d]);
-            let u = u.clamp(f64::MIN_POSITIVE, 1.0 - f64::EPSILON);
-            output[n * dim + d] = norm_quantile(u);
+            output[n * dim + d] = scrambled_normal_sample(n_u32, primes[d], &tables[d]);
         }
     }
 }
 
-/// Configuration for single-scenario Halton point generation.
-///
-/// Bundles the parameters needed by [`scrambled_halton_point`] to generate
-/// one scenario's noise vector without inter-worker coordination.
-#[derive(Debug, Clone, Copy)]
-pub struct HaltonPointSpec {
-    /// Forward-pass base seed.
-    pub sampling_seed: u64,
-    /// Training iteration index.
-    pub iteration: u32,
-    /// Global scenario index in `0..total_scenarios`.
-    pub scenario: u32,
-    /// Stage domain identifier.
-    pub stage_id: u32,
-    /// Total forward scenarios per iteration.
-    pub total_scenarios: u32,
-    /// Noise vector dimension.
-    pub dim: usize,
+/// Prime table and scramble tables built once per
+/// (`sampling_seed`, `iteration`, `stream_id`, `dim`, `total_scenarios`) tuple and
+/// reused across all scenarios at that stage.
+#[derive(Debug, Clone)]
+pub struct HaltonPrecomputed {
+    primes: Vec<u32>,
+    tables: Vec<Vec<Vec<u32>>>,
 }
 
-/// Generate one scenario's noise vector using scrambled Halton QMC,
-/// independent of all other scenarios.
-///
-/// The scramble tables are derived from `(sampling_seed, iteration, stage_id)`
-/// and are identical for all scenarios in the same iteration and stage.
-/// Each scenario uses its own Halton index `spec.scenario`.
+impl HaltonPrecomputed {
+    /// Builds the primes and scramble tables described on [`HaltonPrecomputed`].
+    #[must_use]
+    pub fn new(
+        sampling_seed: u64,
+        iteration: u32,
+        stream_id: u32,
+        dim: usize,
+        total_scenarios: u32,
+    ) -> Self {
+        let seed = derive_opening_seed(sampling_seed, iteration, stream_id);
+        let primes = sieve_primes(dim);
+        let tables = build_scramble_tables(seed, &primes, total_scenarios as usize);
+        Self { primes, tables }
+    }
+}
+
+/// Generate one scenario's noise vector from precomputed primes and scramble
+/// tables.
 ///
 /// # Panics
 ///
 /// Panics if `output.len() < spec.dim`.
-pub fn scrambled_halton_point(spec: &HaltonPointSpec, output: &mut [f64]) {
+pub fn scrambled_halton_point(spec: &NoisePointSpec, ctx: &HaltonPrecomputed, output: &mut [f64]) {
     assert!(
         output.len() >= spec.dim,
         "output too short: need {}, got {}",
@@ -277,7 +274,38 @@ pub fn scrambled_halton_point(spec: &HaltonPointSpec, output: &mut [f64]) {
         return;
     }
 
-    let seed = derive_opening_seed(spec.sampling_seed, spec.iteration, spec.stage_id);
+    for (d, out) in output.iter_mut().enumerate().take(spec.dim) {
+        *out = scrambled_normal_sample(spec.scenario, ctx.primes[d], &ctx.tables[d]);
+    }
+}
+
+/// Derives the primes and scramble tables per call; this is the reference
+/// `scrambled_halton_point` is tested against.
+///
+/// # Panics
+///
+/// Panics if `output.len() < spec.dim`.
+#[cfg(test)]
+pub(crate) fn scrambled_halton_point_reference(spec: &NoisePointSpec, output: &mut [f64]) {
+    assert!(
+        output.len() >= spec.dim,
+        "output too short: need {}, got {}",
+        spec.dim,
+        output.len(),
+    );
+
+    debug_assert!(
+        spec.scenario < spec.total_scenarios,
+        "scenario {} out of range 0..{}",
+        spec.scenario,
+        spec.total_scenarios,
+    );
+
+    if spec.dim == 0 {
+        return;
+    }
+
+    let seed = derive_opening_seed(spec.sampling_seed, spec.iteration, spec.stream_id);
     let primes = sieve_primes(spec.dim);
     let tables = build_scramble_tables(seed, &primes, spec.total_scenarios as usize);
 
@@ -297,7 +325,8 @@ pub fn scrambled_halton_point(spec: &HaltonPointSpec, output: &mut [f64]) {
 )]
 mod tests {
     use super::{
-        HaltonPointSpec, generate_qmc_halton, radical_inverse, scrambled_halton_point, sieve_primes,
+        HaltonPrecomputed, NoisePointSpec, generate_qmc_halton, radical_inverse,
+        scrambled_halton_point, scrambled_halton_point_reference, sieve_primes,
     };
 
     #[test]
@@ -346,11 +375,7 @@ mod tests {
 
     #[test]
     fn test_radical_inverse_base3_known_values() {
-        // Base-3 radical inverse first 4 values.
-        // n=0 -> 0.0
-        // n=1 -> 1/3
-        // n=2 -> 2/3
-        // n=3 -> ternary "10" -> 0.01 in ternary = 1/9
+        // n=3 is ternary "10", reflecting to 0.01 ternary = 1/9.
         let expected = [
             (0_u32, 0.0_f64),
             (1, 1.0 / 3.0),
@@ -378,7 +403,6 @@ mod tests {
 
     #[test]
     fn test_radical_inverse_range() {
-        // For bases 2, 3, 5, 7 and n in 1..100, all results must be in (0.0, 1.0).
         for base in [2_u32, 3, 5, 7] {
             for n in 1_u32..100 {
                 let v = radical_inverse(n, base);
@@ -392,7 +416,6 @@ mod tests {
 
     // --- Batch generator tests ---
 
-    /// Same inputs produce bitwise identical output (determinism).
     #[test]
     fn test_halton_batch_determinism() {
         let n_openings = 64;
@@ -404,7 +427,6 @@ mod tests {
         assert_eq!(out1, out2, "generate_qmc_halton is not deterministic");
     }
 
-    /// Different `base_seed` values must produce different output.
     #[test]
     fn test_halton_batch_different_seeds_differ() {
         let n_openings = 64;
@@ -416,7 +438,6 @@ mod tests {
         assert_ne!(out1, out2, "different seeds produced identical output");
     }
 
-    /// All output values must be finite for N=64, dim=5.
     #[test]
     fn test_halton_batch_all_finite() {
         let n_openings = 64;
@@ -428,10 +449,7 @@ mod tests {
         }
     }
 
-    /// All output values must be in the finite range expected for N(0,1).
-    ///
-    /// The BSM approximation clamps at ±8.22; all values must be within
-    /// that range and finite.
+    /// The BSM approximation clamps at ±8.22.
     #[test]
     fn test_halton_batch_values_in_range() {
         let n_openings = 64;
@@ -447,7 +465,6 @@ mod tests {
         }
     }
 
-    /// Output must fill exactly `n_openings * dim` elements.
     #[test]
     fn test_halton_batch_correct_length() {
         let n_openings = 32;
@@ -457,7 +474,6 @@ mod tests {
         assert_eq!(output.len(), n_openings * dim);
     }
 
-    /// `n_openings == 0` must not panic and must be a no-op.
     #[test]
     fn test_halton_batch_zero_openings() {
         let mut output: Vec<f64> = vec![];
@@ -465,7 +481,6 @@ mod tests {
         assert!(output.is_empty());
     }
 
-    /// `dim == 0` must not panic and must be a no-op.
     #[test]
     fn test_halton_batch_zero_dim() {
         let mut output: Vec<f64> = vec![];
@@ -475,42 +490,40 @@ mod tests {
 
     // --- Point-wise generator tests ---
 
-    /// Same `HaltonPointSpec` produces bitwise identical output (determinism).
     #[test]
     fn test_halton_point_determinism() {
         let dim = 2;
-        let spec = HaltonPointSpec {
+        let spec = NoisePointSpec {
             sampling_seed: 42,
             iteration: 0,
             scenario: 0,
-            stage_id: 0,
+            stream_id: 0,
             total_scenarios: 64,
             dim,
         };
         let mut out1 = vec![0.0_f64; dim];
         let mut out2 = vec![0.0_f64; dim];
-        scrambled_halton_point(&spec, &mut out1);
-        scrambled_halton_point(&spec, &mut out2);
+        scrambled_halton_point_reference(&spec, &mut out1);
+        scrambled_halton_point_reference(&spec, &mut out2);
         assert_eq!(out1, out2, "scrambled_halton_point is not deterministic");
     }
 
-    /// Different `sampling_seed` values must produce different output.
     #[test]
     fn test_halton_point_different_seeds_differ() {
         let dim = 3;
-        let base_spec = HaltonPointSpec {
+        let base_spec = NoisePointSpec {
             sampling_seed: 42,
             iteration: 0,
             scenario: 5,
-            stage_id: 0,
+            stream_id: 0,
             total_scenarios: 64,
             dim,
         };
         let mut out1 = vec![0.0_f64; dim];
         let mut out2 = vec![0.0_f64; dim];
-        scrambled_halton_point(&base_spec, &mut out1);
-        scrambled_halton_point(
-            &HaltonPointSpec {
+        scrambled_halton_point_reference(&base_spec, &mut out1);
+        scrambled_halton_point_reference(
+            &NoisePointSpec {
                 sampling_seed: 43,
                 ..base_spec
             },
@@ -522,28 +535,55 @@ mod tests {
         );
     }
 
-    /// All values must be finite for all scenarios 0..N.
     #[test]
     fn test_halton_point_all_finite() {
         let n = 64_usize;
         let dim = 4;
         for scenario in 0..n {
-            let spec = HaltonPointSpec {
+            let spec = NoisePointSpec {
                 sampling_seed: 42,
                 iteration: 0,
                 #[allow(clippy::cast_possible_truncation)]
                 scenario: scenario as u32,
-                stage_id: 1,
+                stream_id: 1,
                 #[allow(clippy::cast_possible_truncation)]
                 total_scenarios: n as u32,
                 dim,
             };
             let mut output = vec![0.0_f64; dim];
-            scrambled_halton_point(&spec, &mut output);
+            scrambled_halton_point_reference(&spec, &mut output);
             for (d, &v) in output.iter().enumerate() {
                 assert!(
                     v.is_finite(),
                     "non-finite at scenario={scenario}, dim={d}: {v}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn halton_point_matches_reference() {
+        for (dim, total_scenarios) in [(1_usize, 4_u32), (2, 16), (5, 8)] {
+            let ctx = HaltonPrecomputed::new(42, 1, 3, dim, total_scenarios);
+            let mut precomputed_out = vec![0.0_f64; dim];
+            let mut direct_out = vec![0.0_f64; dim];
+
+            for scenario in 0..total_scenarios {
+                let spec = NoisePointSpec {
+                    sampling_seed: 42,
+                    iteration: 1,
+                    scenario,
+                    stream_id: 3,
+                    total_scenarios,
+                    dim,
+                };
+
+                scrambled_halton_point(&spec, &ctx, &mut precomputed_out);
+                scrambled_halton_point_reference(&spec, &mut direct_out);
+
+                assert_eq!(
+                    precomputed_out, direct_out,
+                    "mismatch at dim={dim}, total_scenarios={total_scenarios}, scenario={scenario}"
                 );
             }
         }

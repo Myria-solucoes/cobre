@@ -7,14 +7,13 @@
 use std::ops::Range;
 
 use cobre_core::WorkerPhaseTimings;
-use cobre_solver::SolverStatistics;
-use cobre_solver::{Basis, BasisStatus, ProfiledSolver, SolverInterface};
+use cobre_solver::{Basis, BasisStatus, ProfiledSolver, SolverInterface, SolverStatistics};
 
 use crate::SddpError;
 use crate::SddpError::Validation;
 use crate::backward::{OpeningOutcome, StagedCut};
 use crate::dcs::DcsSolveScratch;
-use crate::lp_builder::PatchBuffer;
+use crate::lp::builder::PatchBuffer;
 use crate::risk_measure::{BackwardOutcome, RiskMeasureScratch};
 use crate::setup::{NodeId, NodePos};
 use crate::solve::partition;
@@ -42,7 +41,7 @@ use crate::solver_stats::SolverStatsDelta;
 /// self-describing rather than positionally filled.
 #[derive(Clone, Debug)]
 pub struct CapturedBasis {
-    /// The underlying solver basis (row and column statuses).
+    /// Row and column statuses from the solver.
     pub basis: Basis,
     /// Number of template (non-cut) LP rows at capture time; row statuses at
     /// `0..base_row_count` are template rows.
@@ -53,7 +52,7 @@ pub struct CapturedBasis {
     /// State vector `x_hat` at capture, the operating point for evaluating newly
     /// added cuts on the backward warm-start.
     pub state_at_capture: Vec<f64>,
-    /// Declared node id (`NodeGraph::node_ids[node]`) this basis was captured at.
+    /// Node this basis was captured at (`NodeGraph::node_ids[node]`).
     pub node_id: NodeId,
 }
 
@@ -76,27 +75,21 @@ pub struct CapturedBasis {
 /// so there the field is never part of a consumed warm-start.
 pub const BASIS_BROADCAST_FORMAT_TAG: i32 = 2;
 
-/// Widens [`BasisStatus::to_discriminant_code`] to the `i32` the broadcast payload
-/// carries; that method is the single owner of the numeric mapping (injective, so
-/// a CLP-captured `Superbasic`/`Fixed` round-trips). The payload byte layout stays
-/// owned by [`CapturedBasis::to_broadcast_payload`] /
-/// [`CapturedBasis::try_from_broadcast_payload`].
+/// Converts via [`BasisStatus::to_discriminant_code`], the single owner of the numeric
+/// mapping (injective for round-trip). Payload byte layout owned by the
+/// `to_broadcast_payload`/`try_from_broadcast_payload` pair.
 fn basis_status_to_wire_code(status: BasisStatus) -> i32 {
     i32::from(status.to_discriminant_code())
 }
 
-/// Inverse of [`basis_status_to_wire_code`] via [`BasisStatus::from_discriminant_code`];
-/// any `i32` outside the discriminant range decodes to [`BasisStatus::Nonbasic`]
-/// without panicking.
+/// Out-of-range codes decode to [`BasisStatus::Nonbasic`] via
+/// [`BasisStatus::from_discriminant_code`].
 fn basis_status_from_wire_code(code: i32) -> BasisStatus {
     u8::try_from(code).map_or(BasisStatus::Nonbasic, BasisStatus::from_discriminant_code)
 }
 
 impl CapturedBasis {
-    /// Construct an empty `CapturedBasis` with the given capacities.
-    ///
-    /// `cut_row_slots` and `state_at_capture` are pre-sized to
-    /// `cut_slot_capacity` / `n_state` but start empty (length 0).
+    /// Pre-sizes `cut_row_slots` and `state_at_capture` but leaves them empty (length 0).
     #[must_use]
     pub fn new(
         num_cols: usize,
@@ -115,9 +108,7 @@ impl CapturedBasis {
         }
     }
 
-    /// Clear slot and state metadata in place, retaining capacity.
-    ///
-    /// Does **not** touch `basis` — the next `get_basis` overwrites it.
+    /// Retains capacity. Does not touch `basis` (next `get_basis` overwrites it).
     pub fn clear(&mut self) {
         self.cut_row_slots.clear();
         self.state_at_capture.clear();
@@ -125,10 +116,7 @@ impl CapturedBasis {
 
     /// Append this basis's wire-format payload to the output buffers.
     ///
-    /// The layout mirrors the pack loop in
-    /// `broadcast_basis_cache` (`training/training.rs`). This method is the
-    /// type-level owner of the wire format; any future change must
-    /// update both this method and
+    /// Single owner of the wire format; any change must update both this method and
     /// [`CapturedBasis::try_from_broadcast_payload`] together.
     ///
     /// Pushes the following into `i32_buf` in order:
@@ -344,8 +332,7 @@ impl CapturedBasis {
 /// on-demand via the growth-only resize semantics. Pass `0` for the backward
 /// fields (`max_openings`, `initial_pool_capacity`, `n_state`) on
 /// simulation-only workspaces, and for the forward fields (`max_local_fwd`,
-/// `total_forward_passes`, `noise_dim`) on backward-only or simulation-only
-/// workspaces.
+/// `noise_dim`) on backward-only or simulation-only workspaces.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WorkspaceSizing {
     /// Number of hydro plants in the study.
@@ -374,9 +361,6 @@ pub struct WorkspaceSizing {
     /// Maximum forward-pass scenarios assigned to this rank; pre-sizes
     /// `ScratchBuffers::trajectory_costs_buf`.
     pub max_local_fwd: usize,
-    /// Total forward passes across all MPI ranks; pre-sizes
-    /// `ScratchBuffers::perm_scratch`.
-    pub total_forward_passes: usize,
     /// Noise dimension for forward-pass sampling; pre-sizes
     /// `ScratchBuffers::raw_noise_buf`.
     pub noise_dim: usize,
@@ -702,9 +686,11 @@ pub struct ScratchBuffers {
     /// inflow-patch path); the two never overlap within one `SolverWorkspace`.
     pub(crate) raw_noise_buf: Vec<f64>,
 
-    /// Per-worker permutation scratch for the forward-pass sampler and simulation
-    /// worker loop. Pre-sized to `total_forward_passes.max(1)`.
-    pub(crate) perm_scratch: Vec<usize>,
+    /// Per-worker gather and correlate scratch for a correlation group wider
+    /// than the applier's stack bound, sized `2 * noise_dim`: a group's width
+    /// never exceeds its class dimension, hence never `noise_dim`, and the
+    /// applier needs one gather array and one correlate array of that width.
+    pub(crate) corr_scratch: Vec<f64>,
 
     /// Per-trajectory sampled-walk node carrier: `current_node_buf[local_m]` is
     /// trajectory `local_m`'s [`crate::setup::node_graph::NodeGraph`] position at
@@ -805,7 +791,6 @@ impl ScratchBuffers {
             downstream_par_order,
             initial_pool_capacity,
             max_local_fwd,
-            total_forward_passes,
             noise_dim,
             // `n_anticipated`/`k_max` size the `PatchBuffer` anticipated region
             // (constructed separately); `n_state` and `max_openings` size
@@ -849,7 +834,7 @@ impl ScratchBuffers {
             recon_slot_lookup: vec![None; initial_pool_capacity],
             trajectory_costs_buf: Vec::with_capacity(max_local_fwd),
             raw_noise_buf: Vec::with_capacity(noise_dim),
-            perm_scratch: Vec::with_capacity(total_forward_passes.max(1)),
+            corr_scratch: Vec::with_capacity(2 * noise_dim),
             current_node_buf: Vec::with_capacity(max_local_fwd),
         }
     }
@@ -868,6 +853,29 @@ pub struct WorkspacePool<S: SolverInterface> {
 }
 
 impl<S: SolverInterface> WorkspacePool<S> {
+    /// Build one workspace: size its [`PatchBuffer`] from `sizing` and
+    /// construct the [`SolverWorkspace`]. Shared tail of [`WorkspacePool::new`]
+    /// and [`WorkspacePool::try_new`], which differ only in how they obtain
+    /// `worker_id` and `solver`.
+    fn build_workspace(
+        rank: i32,
+        worker_id: i32,
+        solver: S,
+        n_state: usize,
+        sizing: WorkspaceSizing,
+    ) -> SolverWorkspace<S> {
+        let patch_buf = PatchBuffer::new(
+            sizing.hydro_count,
+            sizing.max_par_order,
+            sizing.n_load_buses,
+            sizing.max_blocks,
+            sizing.n_buckets,
+            sizing.n_anticipated,
+            sizing.k_max,
+        );
+        SolverWorkspace::new(rank, worker_id, solver, patch_buf, n_state, sizing)
+    }
+
     /// Construct a pool of `n_threads` independently allocated workspaces, each
     /// with a sequentially assigned `worker_id` in `0..n_threads` and a fresh
     /// solver from `solver_factory` (called once per thread).
@@ -890,16 +898,7 @@ impl<S: SolverInterface> WorkspacePool<S> {
                 let worker_id =
                     i32::try_from(idx).expect("worker_id fits in i32 (rayon pools are small)");
                 let solver = solver_factory();
-                let patch_buf = PatchBuffer::new(
-                    sizing.hydro_count,
-                    sizing.max_par_order,
-                    sizing.n_load_buses,
-                    sizing.max_blocks,
-                    sizing.n_buckets,
-                    sizing.n_anticipated,
-                    sizing.k_max,
-                );
-                SolverWorkspace::new(rank, worker_id, solver, patch_buf, n_state, sizing)
+                Self::build_workspace(rank, worker_id, solver, n_state, sizing)
             })
             .collect();
         Self { workspaces }
@@ -929,17 +928,8 @@ impl<S: SolverInterface> WorkspacePool<S> {
             let worker_id =
                 i32::try_from(idx).expect("worker_id fits in i32 (rayon pools are small)");
             let solver = solver_factory()?;
-            let patch_buf = PatchBuffer::new(
-                sizing.hydro_count,
-                sizing.max_par_order,
-                sizing.n_load_buses,
-                sizing.max_blocks,
-                sizing.n_buckets,
-                sizing.n_anticipated,
-                sizing.k_max,
-            );
-            workspaces.push(SolverWorkspace::new(
-                rank, worker_id, solver, patch_buf, n_state, sizing,
+            workspaces.push(Self::build_workspace(
+                rank, worker_id, solver, n_state, sizing,
             ));
         }
         Ok(Self { workspaces })
@@ -1081,7 +1071,6 @@ impl BasisStore {
         debug_assert!(n_workers > 0, "n_workers must be > 0");
         let mut slices = Vec::with_capacity(n_workers);
         let mut bases_rem = &mut self.bases[..total_scenarios * self.num_nodes];
-        let mut offset = 0usize;
 
         for w in 0..n_workers {
             let (start, end) = partition(total_scenarios, n_workers, w);
@@ -1091,10 +1080,9 @@ impl BasisStore {
             bases_rem = bases_rest;
             slices.push(BasisStoreSliceMut {
                 bases: bases_left,
-                scenario_offset: offset,
+                scenario_offset: start,
                 num_nodes: self.num_nodes,
             });
-            offset += count;
         }
         slices
     }

@@ -7,7 +7,7 @@ use cobre_comm::CommError::CollectiveFailed;
 use cobre_solver::SolverError;
 use cobre_solver::freeze_rows_into_template;
 
-use crate::indexer::CutSlot;
+use crate::lp::indexer::CutSlot;
 
 use crate::cut_selection::CutSelectionStrategy::Dominated;
 use crate::cut_selection::CutSelectionStrategy::Dynamic;
@@ -30,7 +30,7 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc::Sender;
 use std::time::Instant;
 
-use cobre_comm::{Communicator, ReduceOp};
+use cobre_comm::{Communicator, ReduceOp, per_rank_counts};
 use cobre_core::{StageRowSelectionRecord, TrainingEvent};
 use cobre_solver::SolverInterface;
 
@@ -235,7 +235,6 @@ where
                 initial_pool_capacity: max_pool_capacity,
                 n_state: ranks.n_state,
                 max_local_fwd: ranks.max_local_fwd,
-                total_forward_passes,
                 noise_dim: training_ctx.stochastic.dim(),
                 n_anticipated: state.n_anticipated,
                 k_max: state.k_max,
@@ -270,7 +269,7 @@ where
         // the chain) so the backward warm-start keys by successor node position.
         let basis_store = BasisStore::new(ranks.max_local_fwd, training_ctx.node_graph.nodes.len());
 
-        let actual_per_rank = ranks.actual_per_rank(total_forward_passes);
+        let actual_per_rank = per_rank_counts(total_forward_passes, ranks.num_ranks);
         let exchange_bufs = ExchangeBuffers::with_actual_counts(
             ranks.n_state,
             ranks.max_local_fwd,
@@ -519,13 +518,11 @@ where
 
         self.run_cut_management(iteration)?;
 
-        let node_graph = self.training_ctx.node_graph;
-        let num_stages = self.ranks.num_stages;
         grow_pools_for_next_iteration(
             self.fcf,
             u64::from(self.config.loop_config.forward_passes),
-            node_graph,
-            num_stages,
+            self.training_ctx.node_graph,
+            self.ranks.num_stages,
         );
         // Growth-only: a pool `grow_pools_for_next_iteration` just grew may now
         // exceed what the DCS scratch covers; re-reserve before the next
@@ -1609,15 +1606,16 @@ mod tests {
         cut::fcf::FutureCostFunction,
         error::SddpError,
         horizon_mode::HorizonMode,
-        indexer::{CutStateProjection, StateSpace, StudyDimensions},
         inflow_method::InflowNonNegativityMethod,
+        lp::builder::StateBox,
+        lp::indexer::{CutStateProjection, StateSpace, StudyDimensions},
         risk_measure::RiskMeasure,
         setup::node_graph::StageIdx,
         setup::{
             NodeGraph, NodeId, NodeOpenings, NodePos, NodeRuntime, NodeSuccessor, OpeningSource,
         },
         solver_stats::WORKER_STATS_ENTRY_STRIDE,
-        test_support,
+        test_support::{self, permissive_state_boxes},
     };
 
     // ── Shared helpers (mirrors training.rs test helpers) ──────────────────
@@ -1965,7 +1963,6 @@ mod tests {
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                warm_start_cuts: 0,
                 risk_measures: vec![RiskMeasure::Expectation; n_stages],
             },
             events: EventConfig {
@@ -1981,10 +1978,12 @@ mod tests {
         templates: &'a [StageTemplate],
         base_rows: &'a [usize],
         block_counts: &'a [usize],
+        state_boxes: &'a [StateBox],
     ) -> StageContext<'a> {
         StageContext {
             geometry_per_stage: &[],
             templates,
+            state_boxes,
             base_rows,
             noise_scale: &[],
             n_hydros: 0,
@@ -2063,7 +2062,8 @@ mod tests {
         let mut solver = MockSolver::with_fixed(100.0);
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
-        let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
+        let state_boxes = permissive_state_boxes(templates[0].n_state, n_stages);
+        let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts, &state_boxes);
         let study_dims = test_support::study_dims();
         let cut_state_layouts = test_support::all_enabled_cut_state_layouts(&state, n_stages);
         let node_graph_fixture = test_support::chain_node_graph(&stochastic);
@@ -2143,7 +2143,8 @@ mod tests {
         let mut solver = MockSolver::with_fixed(100.0);
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
-        let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
+        let state_boxes = permissive_state_boxes(templates[0].n_state, n_stages);
+        let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts, &state_boxes);
         let study_dims = test_support::study_dims();
         let cut_state_layouts = test_support::all_enabled_cut_state_layouts(&state, n_stages);
         let node_graph_fixture = test_support::chain_node_graph(&stochastic);
@@ -2235,7 +2236,8 @@ mod tests {
         let mut solver = MockSolver::with_fixed(100.0);
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
-        let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
+        let state_boxes = permissive_state_boxes(templates[0].n_state, n_stages);
+        let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts, &state_boxes);
         let study_dims = test_support::study_dims();
         let cut_state_layouts = test_support::all_enabled_cut_state_layouts(&state, n_stages);
         let node_graph_fixture = test_support::chain_node_graph(&stochastic);
@@ -2300,7 +2302,8 @@ mod tests {
         let mut solver = MockSolver::with_fixed(100.0);
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
-        let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
+        let state_boxes = permissive_state_boxes(templates[0].n_state, n_stages);
+        let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts, &state_boxes);
         let study_dims = test_support::study_dims();
         let cut_state_layouts = test_support::all_enabled_cut_state_layouts(&state, n_stages);
         let node_graph_fixture = test_support::chain_node_graph(&stochastic);
@@ -2366,7 +2369,8 @@ mod tests {
         let mut solver = MockSolver::with_fixed(100.0);
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
-        let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
+        let state_boxes = permissive_state_boxes(templates[0].n_state, n_stages);
+        let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts, &state_boxes);
         let study_dims = test_support::study_dims();
         let cut_state_layouts = test_support::all_enabled_cut_state_layouts(&state, n_stages);
         let node_graph_fixture = test_support::chain_node_graph(&stochastic);
@@ -2423,7 +2427,8 @@ mod tests {
         let mut solver = MockSolver::with_fixed(100.0);
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
-        let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
+        let state_boxes = permissive_state_boxes(templates[0].n_state, n_stages);
+        let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts, &state_boxes);
         let study_dims = test_support::study_dims();
         let cut_state_layouts = test_support::all_enabled_cut_state_layouts(&state, n_stages);
         let node_graph_fixture = test_support::chain_node_graph(&stochastic);
@@ -2497,7 +2502,8 @@ mod tests {
         let mut solver = MockSolver::with_fixed(100.0);
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
-        let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
+        let state_boxes = permissive_state_boxes(templates[0].n_state, n_stages);
+        let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts, &state_boxes);
         let study_dims = test_support::study_dims();
         let cut_state_layouts = test_support::all_enabled_cut_state_layouts(&state, n_stages);
         let node_graph_fixture = test_support::chain_node_graph(&stochastic);
@@ -2986,7 +2992,8 @@ mod tests {
         let mut solver = MockSolver::with_fixed(100.0);
         let comm = Rank0Of2;
         let block_counts = vec![1usize; n_stages];
-        let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
+        let state_boxes = permissive_state_boxes(templates[0].n_state, n_stages);
+        let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts, &state_boxes);
         let study_dims = test_support::study_dims();
         let cut_state_layouts =
             test_support::all_enabled_cut_state_layouts(&state, node_graph.n_pools);
@@ -3062,7 +3069,8 @@ mod tests {
         let mut solver = MockSolver::with_fixed(100.0);
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
-        let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
+        let state_boxes = permissive_state_boxes(templates[0].n_state, n_stages);
+        let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts, &state_boxes);
         let study_dims = test_support::study_dims();
         let cut_state_layouts =
             test_support::all_enabled_cut_state_layouts(&state, node_graph.n_pools);
@@ -3117,7 +3125,8 @@ mod tests {
         let mut solver = MockSolver::with_fixed(100.0);
         let comm = Rank0Of2;
         let block_counts = vec![1usize; n_stages];
-        let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
+        let state_boxes = permissive_state_boxes(templates[0].n_state, n_stages);
+        let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts, &state_boxes);
         let study_dims = test_support::study_dims();
         let cut_state_layouts =
             test_support::all_enabled_cut_state_layouts(&state, node_graph.n_pools);

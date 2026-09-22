@@ -83,7 +83,6 @@ pub fn resolve_production_models_from_artifacts(
 
     let prod_configs: &[ProductionModelConfig] = &artifacts.production_models;
 
-    // `None` skips the merge pass entirely.
     let plane_reduction: Option<&PlaneReductionConfig> = artifacts.plane_reduction.as_ref();
 
     let config_map: HashMap<EntityId, &ProductionModelConfig> =
@@ -108,13 +107,18 @@ pub fn resolve_production_models_from_artifacts(
         HashMap::new()
     };
 
-    // A plant absent from this map falls back to its entity `TailraceModel`.
     let families_map: HashMap<EntityId, TailraceFamilies> =
         if uses_computed_fpha && !artifacts.tailrace_curves.is_empty() {
             build_tailrace_families_map(&artifacts.tailrace_curves)?
         } else {
             HashMap::new()
         };
+
+    let long_term_mean_inflow_table: HashMap<EntityId, f64> = if uses_computed_fpha {
+        build_long_term_mean_inflow_table(system)
+    } else {
+        HashMap::new()
+    };
 
     let study_stages: Vec<&Stage> = system.stages().iter().filter(|s| s.id >= 0).collect();
     let n_stages = study_stages.len();
@@ -175,21 +179,15 @@ pub fn resolve_production_models_from_artifacts(
                 system,
                 n_stages,
                 collect_deviation_points,
+                &long_term_mean_inflow_table,
             )
         })
         .collect::<Result<Vec<_>, SddpError>>()?;
-    // This SEQUENTIAL flatten is the ordering anchor for the parallel fit above:
-    // it concatenates export rows, deviation-point rows, and deviations in canonical
-    // hydro then stage order, and emits the `tracing::warn!` here (not from a worker)
-    // so the carried vectors and the warning order are declaration-order invariant.
     for (hydro, fit) in system.hydros().iter().zip(fits) {
         provenance.push(fit.provenance);
         export_rows.extend(fit.export_rows);
         fpha_deviation_point_rows.extend(fit.deviation_point_rows);
         all_models.push(fit.stage_models);
-        // Push every distinct fit's deviation unconditionally (the metadata
-        // aggregate must reflect every computed-FPHA plant/stage); warn only for
-        // warn-worthy entries.
         for diag in fit.fpha_deviations {
             fpha_fit_deviations.push(FphaFitDeviationEntry {
                 hydro_id: hydro.id,
@@ -270,6 +268,7 @@ fn fit_one_hydro(
     system: &System,
     n_stages: usize,
     collect_deviation_points: bool,
+    long_term_mean_inflow_table: &HashMap<EntityId, f64>,
 ) -> Result<PerHydroFit, SddpError> {
     let config_entry = config_map.get(&hydro.id).copied();
 
@@ -286,7 +285,10 @@ fn fit_one_hydro(
         if source == ProductionModelSource::ComputedFromGeometry {
             // Drives the lateral-secant `S_max = 2·long-term mean inflow`; a
             // history-less hydro yields `0.0`, falling back to `2 × max_turbined`.
-            let long_term_mean_inflow_m3s = long_term_mean_inflow(system, hydro.id);
+            let long_term_mean_inflow_m3s = long_term_mean_inflow_table
+                .get(&hydro.id)
+                .copied()
+                .unwrap_or(0.0);
             let per_stage = fit_computed_planes_per_stage(
                 hydro,
                 config_entry,
@@ -333,7 +335,7 @@ fn fit_one_hydro(
     })
 }
 
-/// Build an `O(1)` geometry map: `hydro_id → sorted geometry row references`.
+/// O(1) lookup: `hydro_id` → geometry rows, sorted by volume.
 fn build_geometry_map(
     geometry_rows: &[HydroGeometryRow],
 ) -> HashMap<EntityId, Vec<&HydroGeometryRow>> {
@@ -378,16 +380,40 @@ fn resolve_downstream_level(
     Some(forebay.height(v_ref))
 }
 
-/// Per-hydro long-term mean natural inflow (m³/s), or `0.0` when the hydro has no
-/// inflow history. Feeds the lateral-secant `S_max = 2·mean`; the `0.0` case maps
-/// to the `2 × max_turbined` fallback in `resolve_s_max`.
+/// Long-term mean natural inflow (m³/s) for every hydro, keyed by canonical
+/// [`EntityId`], from ONE sequential pass over `System::inflow_history()`.
+/// Feeds the lateral-secant `S_max = 2·mean`; a hydro absent from the table
+/// (no history) falls back to `0.0` at the lookup site, mapping to the
+/// `2 × max_turbined` fallback in `resolve_s_max`.
 ///
 /// # Determinism
 ///
-/// A single sequential pass over `System::inflow_history()` in its stored
-/// canonical order. A partitioned-then-reduced parallel accumulator would reorder
-/// the adds and break bit-determinism.
-fn long_term_mean_inflow(system: &System, hydro_id: EntityId) -> f64 {
+/// One sequential pass in `inflow_history()`'s stored canonical order; each
+/// hydro's `(sum, count)` accumulates in that same encounter order regardless
+/// of hydro declaration order, so every mean stays bit-identical to a
+/// per-hydro filtered scan. A partitioned-then-reduced parallel accumulator
+/// would reorder the adds and break bit-determinism.
+fn build_long_term_mean_inflow_table(system: &System) -> HashMap<EntityId, f64> {
+    let mut acc: HashMap<EntityId, (f64, u64)> = HashMap::new();
+    for row in system.inflow_history() {
+        let entry = acc.entry(row.hydro_id).or_insert((0.0, 0));
+        entry.0 += row.value_m3s;
+        entry.1 += 1;
+    }
+    acc.into_iter()
+        .map(|(hydro_id, (sum, count))| {
+            #[allow(clippy::cast_precision_loss)]
+            let mean = sum / (count as f64);
+            (hydro_id, mean)
+        })
+        .collect()
+}
+
+/// Reference oracle for [`build_long_term_mean_inflow_table`]: the retired
+/// per-hydro filtered scan, kept to prove the one-pass batch table's mean is
+/// bit-identical to a direct per-hydro `inflow_history()` scan.
+#[cfg(test)]
+fn long_term_mean_inflow_reference(system: &System, hydro_id: EntityId) -> f64 {
     let mut sum = 0.0_f64;
     let mut count = 0_u64;
     for row in system.inflow_history() {
@@ -604,7 +630,7 @@ fn fit_computed_planes_per_stage(
             // Rationale: plane counts are bounded by max_planes_per_hydro (default
             // <= 30), far below i32::MAX, so truncation and wrap are unreachable.
             #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-            export_rows.push(cobre_io::FphaHyperplaneRow {
+            export_rows.push(FphaHyperplaneRow {
                 hydro_id: hydro.id,
                 stage_id: Some(stage.id),
                 plane_id: plane_id as i32,

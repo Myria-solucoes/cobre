@@ -22,9 +22,7 @@ use cobre_io::output::simulation_writer::{
     HydroBusWriteRecord, HydroWriteRecord, ScenarioWritePayload, SimulationParquetWriter,
     StageWritePayload, write_paths,
 };
-use cobre_io::{
-    ParquetWriterConfig, deserialize_system, load_case, serialize_system, validate_case,
-};
+use cobre_io::{load_case, validate_case};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use tempfile::TempDir;
 
@@ -408,6 +406,29 @@ fn test_inflow_history_wired_into_system() {
             "every inflow_history row must have a finite value_m3s"
         );
     }
+
+    assert!(
+        system
+            .inflow_models()
+            .iter()
+            .any(|m| !m.ar_coefficients.is_empty()),
+        "the deck must produce at least one order-bearing inflow model, or the \
+         residual_std_ratio check below passes vacuously"
+    );
+    for model in system.inflow_models() {
+        if model.ar_coefficients.is_empty() {
+            continue;
+        }
+        assert!(
+            model.residual_std_ratio > 0.0 && model.residual_std_ratio < 1.0,
+            "order-bearing model for hydro {:?} stage {} must have a closure-derived \
+             residual_std_ratio in (0, 1), not the assemble_inflow_models placeholder \
+             1.0; got {}",
+            model.hydro_id,
+            model.stage_id,
+            model.residual_std_ratio
+        );
+    }
 }
 
 // ── test_external_scenarios_wired_into_system ─────────────────────────────────
@@ -723,12 +744,7 @@ fn test_external_ncs_scenarios_wired_into_system() {
 
 // ── test_lead_time_single_decider_on_disk_load ────────────────────────────────
 
-/// Pins the on-disk `LeadTime` load path (`pipeline.rs`'s `k_max` computation
-/// for `resolve_bounds`): a single-decider `LeadTime(744.0)` thermal on a
-/// uniform 3×744h calendar must load via `load_case` with no panic, and the
-/// anticipated plant's resolved bounds must be correct at every study stage
-/// (all of which are legitimate delivery-stage indices for the ring),
-/// demonstrating a correct study, not merely a non-panicking one.
+/// Single-decider `LeadTime` thermal loads and produces correct resolved bounds at every study stage.
 #[test]
 fn test_lead_time_single_decider_on_disk_load() {
     // SystemBuilder sorts thermals by (operational_start_date, id); both
@@ -864,9 +880,7 @@ fn test_lead_time_single_decider_on_disk_load() {
 
 // ── LeadStages full-anticipation: load_case ↔ validate_case agreement ────────
 
-/// Write `system/thermals.json` declaring a single `LeadStages`-configured
-/// anticipated thermal on bus 1, on top of [`helpers::make_minimal_case`]'s
-/// single 744h study stage.
+/// Write `system/thermals.json` with a single `LeadStages` anticipated thermal.
 fn write_lead_stages_anticipated_thermal(root: &Path, lead_stages: u32) {
     helpers::write_file(
         root,
@@ -889,10 +903,7 @@ fn write_lead_stages_anticipated_thermal(root: &Path, lead_stages: u32) {
     );
 }
 
-/// Write `initial_conditions.json` tiling the minimal case's single study
-/// stage (id 0, `[2024-01-01, 2024-02-01)`) and, when `with_post_study_window`
-/// is set, also the post-study stage `[2024-02-01, 2024-03-01)` — the window a
-/// `lead_stages: 2` thermal's extended lead decides pre-study.
+/// Write `initial_conditions.json` with past commitments for the study stage and optionally the post-study window.
 fn write_ic_for_full_anticipation(root: &Path, with_post_study_window: bool) {
     let mut windows = vec![
         r#"{ "thermal_id": 1, "start_date": "2024-01-01", "end_date": "2024-02-01", "value_mw": 0.0 }"#
@@ -918,12 +929,7 @@ fn write_ic_for_full_anticipation(root: &Path, with_post_study_window: bool) {
     );
 }
 
-/// Given a `LeadStages(2)` thermal on the minimal case's single 744h study
-/// stage (`n_stages = 1`) whose extended lead reaches only a declared
-/// post-study stage tiled by `past_anticipated_commitments` (the
-/// full-anticipation regime), both `load_case` and `validate_case` accept the
-/// case identically — they share the same six-layer pipeline, so a fix to the
-/// `lead_stages` horizon guard cannot make them disagree.
+/// `LeadStages(2)` thermal reaching only a tiled post-study stage is accepted by both `load_case` and `validate_case`.
 #[test]
 fn test_full_anticipation_lead_stages_reaching_only_post_study_loads() {
     let dir = TempDir::new().unwrap();
@@ -949,10 +955,7 @@ fn test_full_anticipation_lead_stages_reaching_only_post_study_loads() {
     });
 }
 
-/// The same `LeadStages(2)` thermal with NO `post_study_stages.json`
-/// declared: the plant genuinely can never deliver, and both `load_case` and
-/// `validate_case` reject it identically — the guard widening is scoped to a
-/// reachable post-study stage, never a blanket relaxation of the horizon cap.
+/// `LeadStages` exceeding horizon without post-study stages is rejected by both entry points.
 #[test]
 fn test_lead_stages_exceeding_horizon_without_post_study_stages_rejected_by_both_entry_points() {
     let dir = TempDir::new().unwrap();
@@ -986,13 +989,13 @@ fn test_postcard_round_trip() {
     let original = load_case(dir.path())
         .unwrap_or_else(|e| panic!("load_case should succeed for minimal case, got: {e}"));
 
-    let bytes = serialize_system(&original)
-        .unwrap_or_else(|e| panic!("serialize_system should succeed, got: {e}"));
+    let bytes = postcard::to_allocvec(&original)
+        .unwrap_or_else(|e| panic!("postcard serialization should succeed, got: {e}"));
 
     assert!(!bytes.is_empty(), "serialized bytes should be non-empty");
 
-    let deserialized = deserialize_system(&bytes)
-        .unwrap_or_else(|e| panic!("deserialize_system should succeed, got: {e}"));
+    let deserialized = postcard::from_bytes::<System>(&bytes)
+        .unwrap_or_else(|e| panic!("postcard deserialization should succeed, got: {e}"));
 
     assert_eq!(
         deserialized.n_buses(),
@@ -1073,6 +1076,10 @@ fn make_hydro_write_record(
         inflow_nonnegativity_slack_m3s: 0.0,
         water_withdrawal_violation_pos_m3s: 0.0,
         water_withdrawal_violation_neg_m3s: 0.0,
+        integrated_equivalent_productivity_mw_per_m3s: 0.0,
+        integrated_accumulated_productivity_mw_per_m3s: 0.0,
+        stored_energy_initial_mw: 0.0,
+        stored_energy_final_mw: 0.0,
     }
 }
 
@@ -1122,8 +1129,7 @@ fn write_and_read_hydro_batches(
     stages: Vec<StageWritePayload>,
 ) -> (RecordBatch, RecordBatch) {
     let tmp = TempDir::new().unwrap();
-    let config = ParquetWriterConfig::default();
-    let mut writer = SimulationParquetWriter::new(tmp.path(), system, &config)
+    let mut writer = SimulationParquetWriter::new(tmp.path(), system)
         .unwrap_or_else(|e| panic!("SimulationParquetWriter::new must succeed: {e}"));
     writer
         .write_scenario(ScenarioWritePayload {
@@ -1172,8 +1178,6 @@ fn hydro_key_set(batch: &RecordBatch) -> HashSet<(i32, Option<i32>, i32)> {
         .collect()
 }
 
-/// `(stage_id, block_id, hydro_id, bus_id)` key set of a
-/// `hydro_bus_generation`-shaped batch.
 fn hydro_bus_key_set(batch: &RecordBatch) -> HashSet<(i32, Option<i32>, i32, i32)> {
     let stage = i32_column(batch, "stage_id");
     let block = i32_column(batch, "block_id");
@@ -1292,8 +1296,7 @@ fn test_paths_join_to_entity_file_on_scenario_and_stage() {
     let system = load_case(case_dir).unwrap_or_else(|e| panic!("d02 load_case must succeed: {e}"));
 
     let tmp = TempDir::new().unwrap();
-    let config = ParquetWriterConfig::default();
-    let mut writer = SimulationParquetWriter::new(tmp.path(), &system, &config)
+    let mut writer = SimulationParquetWriter::new(tmp.path(), &system)
         .unwrap_or_else(|e| panic!("SimulationParquetWriter::new must succeed: {e}"));
 
     // Two scenarios; the node id visited at stage 1 differs across scenarios (a
@@ -1440,8 +1443,7 @@ fn test_single_bus_hydro_bus_generation_output_shape() {
 
 // ── block-axis bound-row validation message shape ────────────────────────────
 
-/// Writes `constraints/thermal_bounds.parquet` at `dir` from explicit rows —
-/// shared by the three block-axis rejection tests below.
+/// Writes `constraints/thermal_bounds.parquet` from explicit rows.
 fn write_thermal_bounds_parquet(dir: &Path, rows: &[ThermalBoundsRow]) {
     use arrow::array::Float64Array;
     use arrow::datatypes::{DataType, Field, Schema};
@@ -1489,10 +1491,7 @@ fn write_thermal_bounds_parquet(dir: &Path, rows: &[ThermalBoundsRow]) {
     writer.close().unwrap();
 }
 
-/// A `block_id` outside the stage's declared block range fails `load_case`
-/// naming the entity, the stage, and the offending `block_id`.
-/// `make_multi_entity_case`'s stage 0 declares exactly 1 block (id 0), so
-/// `block_id=5` is out of range.
+/// Out-of-range `block_id` in thermal bounds is rejected naming the entity, stage, and block.
 #[test]
 fn test_thermal_bounds_block_id_out_of_range_rejected_by_load_case() {
     let dir = TempDir::new().unwrap();
@@ -1530,10 +1529,7 @@ fn test_thermal_bounds_block_id_out_of_range_rejected_by_load_case() {
     }
 }
 
-/// A duplicate `(entity, stage, block, column)` bound row fails `load_case`
-/// naming the entity, the stage, and the colliding column. Two stage-wide
-/// (`block_id = NULL`) rows both set `max_generation_mw` for the same
-/// `(thermal_id, stage_id)`.
+/// Duplicate thermal bound row is rejected naming the entity, stage, and colliding column.
 #[test]
 fn test_thermal_bounds_duplicate_row_rejected_by_load_case() {
     let dir = TempDir::new().unwrap();
@@ -1581,10 +1577,7 @@ fn test_thermal_bounds_duplicate_row_rejected_by_load_case() {
     }
 }
 
-/// A `block_id` on a stage-level-only column fails `load_case` naming the
-/// entity, the stage, and the offending column. Thermal `cost_per_mwh` has
-/// no per-block LP variable (contract `price_per_mwh` is the block-eligible
-/// counterpart, deliberately asymmetric with this one).
+/// `block_id` on stage-level-only `cost_per_mwh` column is rejected naming the entity and stage.
 #[test]
 fn test_thermal_bounds_block_id_on_stage_level_cost_column_rejected_by_load_case() {
     let dir = TempDir::new().unwrap();
@@ -1624,8 +1617,7 @@ fn test_thermal_bounds_block_id_on_stage_level_cost_column_rejected_by_load_case
     }
 }
 
-/// Recursively copies `src` into `dst`, skipping any `output` directory —
-/// mirrors `crates/cobre-sddp/tests/deterministic.rs`'s `copy_case_dir`.
+/// Recursively copies `src` into `dst`, skipping `output` directories.
 fn copy_case_dir_into(src: &Path, dst: &Path) {
     std::fs::create_dir_all(dst).unwrap();
     for entry in std::fs::read_dir(src).unwrap() {
@@ -1643,12 +1635,7 @@ fn copy_case_dir_into(src: &Path, dst: &Path) {
     }
 }
 
-/// D56 (c): copying the committed `d56-external-authoritative` deck into a
-/// `TempDir` and dropping in the committed AR(1) reject fixture as
-/// `scenarios/inflow_ar_coefficients.parquet` makes hydro 1 AR(1) while its
-/// external inflow column stays constant (sigma=0). `validate_case` rejects
-/// it naming the deterministic PAR output reason, never the retired
-/// "inversion is undefined" phrasing.
+/// AR(1) model with sigma=0 external inflow is rejected naming the deterministic PAR output reason.
 #[test]
 fn test_d56_ar1_sigma_zero_inflow_rejected_by_validate_case() {
     let src = Path::new("../../examples/deterministic/d56-external-authoritative");

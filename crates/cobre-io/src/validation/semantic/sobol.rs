@@ -5,7 +5,7 @@
 
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 
-/// Warns when a stage uses `QmcSobol` with a non-power-of-2 `branching_factor`.
+/// Rule 25: warns when a stage uses `QmcSobol` with a non-power-of-2 `branching_factor`.
 ///
 /// Sobol sequences achieve optimal low-discrepancy uniformity only when the
 /// number of sample points is a power of 2. A non-power-of-2 value produces
@@ -56,8 +56,8 @@ pub(super) fn check_sobol_power_of_2(data: &ParsedData, ctx: &mut ValidationCont
     clippy::cast_sign_loss
 )]
 mod tests {
-    use super::super::test_support::*;
     use super::super::validate_semantic_stages_penalties_scenarios;
+    use crate::test_support::*;
     use cobre_core::temporal::{NoiseMethod, ScenarioSourceConfig};
 
     use crate::validation::{ErrorKind, ValidationContext};

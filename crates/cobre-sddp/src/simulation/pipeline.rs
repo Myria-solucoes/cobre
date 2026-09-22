@@ -13,19 +13,18 @@ use cobre_core::commissioning::commissioning_active;
 use cobre_core::{EntityId, HydroPastDefluence, TrainingEvent};
 use cobre_solver::ActiveProfile;
 use cobre_solver::{SolverInterface, StageTemplate};
-use cobre_stochastic::{ClassSampleRequest, ForwardSampler, SampleRequest};
+use cobre_stochastic::{ClassSampleRequest, ForwardNoiseTables, ForwardSampler, SampleRequest};
 
 use crate::energy_conversion::EnergyConversionSet;
 use crate::error::SddpError::Infeasible;
 use crate::error::SddpError::Solver;
-use crate::indexer::StudyDimensions;
-use crate::lp_builder::GenericConstraintRowEntry;
-use crate::lp_builder::StageGeometry;
+use crate::lp::builder::GenericConstraintRowEntry;
+use crate::lp::builder::StageGeometry;
+use crate::lp::indexer::StudyDimensions;
 use crate::noise::DownstreamAccumState;
 use crate::noise::LagAccumState;
-use crate::noise::accumulate_and_shift_lag_state;
 use crate::stage_solve::StageInputs;
-use crate::stage_solve::debug_assert_bucket_copy_gap_intact;
+use crate::stage_solve::assemble_outgoing_state;
 use crate::stage_solve::fill_unscaled;
 use crate::stage_solve::fill_unscaled_dual;
 use crate::stage_solve::run_stage_solve;
@@ -33,7 +32,7 @@ use crate::{
     FutureCostFunction, SddpError,
     context::{StageContext, TrainingContext},
     dcs::{DcsSolveContext, build_initial_resident_set, lazy_solve_preloaded},
-    indexer::{HydroCellIndex, StateSpace},
+    lp::indexer::{HydroCellIndex, StateSpace},
     setup::node_graph::{NodeId, NodePos, StageIdx, Traversal, advance_sampled_node},
     simulation::{
         config::SimulationConfig,
@@ -201,16 +200,17 @@ pub(crate) struct ScenarioIds<'a> {
     /// the transition draw — the scenario's own native id, mirroring how a
     /// training forward pass's global scenario index plays the same role.
     pub(crate) global_scenario: u32,
-    /// Total number of stages in the planning horizon.
     pub(crate) num_stages: usize,
     /// Total simulation scenario count, passed to `SampleRequest::total_scenarios`.
     pub(crate) total_scenarios: u32,
     /// Caller-owned buffer for raw noise output (reused across stages).
     pub(crate) raw_noise_buf: &'a mut [f64],
-    /// Caller-owned permutation scratch for LHS generation (reused across stages).
-    pub(crate) perm_scratch: &'a mut [usize],
+    /// Caller-owned gather/correlate scratch for wide correlation groups (reused across stages).
+    pub(crate) corr_scratch: &'a mut [f64],
     /// Noise sampler used to draw per-stage stochastic values.
     pub(crate) sampler: &'a ForwardSampler<'a>,
+    /// Per-run scenario-invariant tables backing `sampler`'s `OutOfSample` draws.
+    pub(crate) noise_tables: &'a ForwardNoiseTables,
     /// The stage-0 root's canonical `NodeGraph` position — this scenario's
     /// sampled walk starts here, mirroring the training forward pass.
     pub(crate) root_node: NodePos,
@@ -437,8 +437,7 @@ pub(crate) fn solve_simulation_stage<S: SolverInterface>(
         training_ctx,
         t,
         &prep_params,
-    )
-    .map_err(|e| SimulationError::SolvePrep(e.to_string()))?;
+    );
     // stage_id (the commissioning key the dormancy predicate compares NCS windows
     // against), NOT the stage index `t`: they differ when negative-id placeholder
     // stages are filtered out.
@@ -451,8 +450,8 @@ pub(crate) fn solve_simulation_stage<S: SolverInterface>(
 
     // mem::take (capacity retained) so these can be filled from `view` slices tied
     // to `ws` while `&mut ws` is live; restored at function end for buffer reuse.
-    let mut unscaled_primal: Vec<f64> = std::mem::take(&mut ws.scratch.unscaled_primal);
-    let mut unscaled_dual: Vec<f64> = std::mem::take(&mut ws.scratch.unscaled_dual);
+    let mut unscaled_primal = std::mem::take(&mut ws.scratch.unscaled_primal);
+    let mut unscaled_dual = std::mem::take(&mut ws.scratch.unscaled_dual);
 
     let col_scale = &ctx.template(t).col_scale;
     let row_scale = &ctx.template(t).row_scale;
@@ -563,10 +562,6 @@ pub(crate) fn solve_simulation_stage<S: SolverInterface>(
         .lag_matrix_buf
         .extend_from_slice(&ws.current_state[lag_start..lag_start + lag_len]);
 
-    ws.current_state.clear();
-    ws.current_state
-        .extend_from_slice(&ws.scratch.unscaled_primal[..state.n_state]);
-
     let stage_lag = ctx.stage_lag(t);
     let downstream_par_order = ws
         .scratch
@@ -577,12 +572,13 @@ pub(crate) fn solve_simulation_stage<S: SolverInterface>(
     // Pass unscaled_primal as a separate borrow so the borrow checker sees it is
     // disjoint from the &mut ws.scratch.lag_* fields passed alongside it.
     let unscaled_primal_ref: &[f64] = &ws.scratch.unscaled_primal;
-    accumulate_and_shift_lag_state(
+    assemble_outgoing_state(
         &mut ws.current_state,
-        &ws.scratch.lag_matrix_buf,
         unscaled_primal_ref,
+        &ws.scratch.lag_matrix_buf,
         state,
-        &stage_lag,
+        ctx.state_box(t),
+        stage_lag,
         &mut LagAccumState {
             accumulator: &mut ws.scratch.lag_accumulator,
             weight_accum: &mut ws.scratch.lag_weight_accum,
@@ -595,7 +591,6 @@ pub(crate) fn solve_simulation_stage<S: SolverInterface>(
             par_order: downstream_par_order,
         },
     );
-    debug_assert_bucket_copy_gap_intact(&ws.current_state, unscaled_primal_ref, state);
 
     Ok((immediate_cost, result))
 }
@@ -675,11 +670,8 @@ pub(crate) fn extract_sim_stage_result(
     let ncs_n = output.n_ncs;
     let ncs_col_start = output.ncs_col_starts.get(t.0).copied().unwrap_or(0);
     let stage_n_blks = ctx.block_count(t);
-    // Pumping-flow column base for this stage; `StageLayout` is its sole owner.
     let pumping_col_start = output.pumping_col_starts.get(t.0).copied().unwrap_or(0);
     let n_pumping = output.n_pumping;
-    // Per-stage geometry: a single global stage-0 geometry would mis-stride any
-    // stage with a differing block count.
     debug_assert!(
         output.geometry_per_stage.is_empty()
             || output.geometry_per_stage.len() == ctx.templates.len(),
@@ -931,12 +923,13 @@ pub(crate) fn process_scenario_stages<S: SolverInterface>(
             stage: stage_seed,
             stage_idx: t.0,
             noise_buf: ids.raw_noise_buf,
-            perm_scratch: ids.perm_scratch,
+            corr_scratch: ids.corr_scratch,
             total_scenarios: ids.total_scenarios,
             noise_group_id: ctx.noise_group_id_at(t),
             node_opening_offset,
             node_opening_len,
             pinned_scenario: node_graph.node_pinned_scenario(node),
+            tables: ids.noise_tables,
         })?;
         let raw_noise = noise.as_slice();
 
@@ -1067,7 +1060,7 @@ where
     use crate::simulation::state::{SimulationInputs, SimulationState};
     let mut state = SimulationState::new(training_ctx.horizon.num_stages());
     state.set_profile(config.profile);
-    state.run(&mut SimulationInputs::new(
+    state.run(&mut SimulationInputs {
         workspaces,
         ctx,
         fcf,
@@ -1078,7 +1071,7 @@ where
         node_bases,
         comm,
         traversal,
-    ))
+    })
 }
 
 #[cfg(test)]

@@ -39,13 +39,12 @@
 //! - At-least-one-endpoint-present and `bound_upper >= bound_lower` (referential).
 
 use arrow::array::Array;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use std::fs::File;
 use std::path::Path;
 
 use crate::LoadError;
 use crate::parquet_helpers::{
     extract_optional_float64, extract_optional_int32, extract_required_int32,
+    open_record_batch_reader,
 };
 
 /// A single row from `constraints/generic_constraint_bounds.parquet`.
@@ -110,14 +109,7 @@ pub struct GenericConstraintBoundsRow {
 pub fn parse_generic_constraint_bounds(
     path: &Path,
 ) -> Result<Vec<GenericConstraintBoundsRow>, LoadError> {
-    let file = File::open(path).map_err(|e| LoadError::io(path, e))?;
-
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
-
-    let reader = builder
-        .build()
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
+    let reader = open_record_batch_reader(path)?;
 
     let mut rows: Vec<GenericConstraintBoundsRow> = Vec::new();
 
@@ -180,7 +172,6 @@ pub fn parse_generic_constraint_bounds(
         }
     }
 
-    // None block (= applies to all blocks) sorts before Some.
     rows.sort_by(|a, b| {
         a.constraint_id
             .cmp(&b.constraint_id)
@@ -208,12 +199,11 @@ pub fn parse_generic_constraint_bounds(
 )]
 mod tests {
     use super::*;
+    use crate::test_support::write_parquet;
     use arrow::array::{Float64Array, Int32Array};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
-    use parquet::arrow::ArrowWriter;
     use std::sync::Arc;
-    use tempfile::NamedTempFile;
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -232,15 +222,6 @@ mod tests {
             Field::new("constraint_id", DataType::Int32, false),
             Field::new("stage_id", DataType::Int32, false),
         ]))
-    }
-
-    fn write_parquet(batch: &RecordBatch) -> NamedTempFile {
-        let tmp = NamedTempFile::new().expect("tempfile");
-        let mut writer = ArrowWriter::try_new(tmp.reopen().expect("reopen"), batch.schema(), None)
-            .expect("ArrowWriter");
-        writer.write(batch).expect("write batch");
-        writer.close().expect("close writer");
-        tmp
     }
 
     /// Build a full 5-column batch: `constraint_id`, `stage_id`, `block_id`,
@@ -285,8 +266,6 @@ mod tests {
 
         assert_eq!(rows.len(), 3);
 
-        // After sorting by (constraint_id, stage_id, block_id):
-        // (0, 0, None) < (0, 0, Some(0)) < (1, 2, Some(1))
         assert_eq!(rows[0].constraint_id, 0);
         assert_eq!(rows[0].stage_id, 0);
         assert_eq!(rows[0].block_id, None);
@@ -392,7 +371,7 @@ mod tests {
 
     /// A file with neither endpoint column present is not a reader error: every
     /// row's endpoints read `None` (referential validation is the layer that
-    /// rejects the both-absent shape, R4).
+    /// rejects the both-absent shape).
     #[test]
     fn test_parse_missing_endpoint_columns_yields_none_endpoints() {
         let batch = RecordBatch::try_new(
@@ -434,7 +413,6 @@ mod tests {
         let rows = parse_generic_constraint_bounds(tmp.path()).unwrap();
 
         assert_eq!(rows.len(), 4);
-        // Expected order: (0,0,None), (0,1,Some(0)), (1,0,None), (2,0,None)
         assert_eq!(
             (rows[0].constraint_id, rows[0].stage_id, rows[0].block_id),
             (0, 0, None)
@@ -517,9 +495,8 @@ mod tests {
         let rows = parse_generic_constraint_bounds(tmp.path()).unwrap();
 
         assert_eq!(rows.len(), 4);
-        // Expected order: (0,0,None), (0,1,Some(0)), (1,0,None), (2,0,None) —
-        // identical to the no-endpoint ordering test, proving the endpoint values
-        // do not perturb the sort.
+        // Proves endpoint values do not perturb the sort (order identical to
+        // test_parse_sort_order_invariance).
         assert_eq!(
             (rows[0].constraint_id, rows[0].stage_id, rows[0].block_id),
             (0, 0, None)

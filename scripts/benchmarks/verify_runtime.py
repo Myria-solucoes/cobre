@@ -60,7 +60,7 @@ def main():
             cli_lb = meta['bounds']['final_lower_bound']
             assert math.isfinite(cli_lb)
             py_results = [cobre.run.run(str(case), output_dir=str(root / f'{case.name}-py-{threads}'),
-                                       threads=threads, skip_simulation=True) for threads in (1, 2)]
+                                       threads=threads) for threads in (1, 2)]
             for result in py_results:
                 assert result['iterations'] == 4, result
                 assert math.isclose(result['lower_bound'], cli_lb, rel_tol=1e-8), (result, cli_lb)

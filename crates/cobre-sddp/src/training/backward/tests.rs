@@ -49,15 +49,15 @@ use crate::{
     cut_sync::CutSyncBuffers,
     forward::EnumeratedForwardScratch,
     horizon_mode::HorizonMode,
-    indexer::{CutStateProjection, StateDim},
     inflow_method::InflowNonNegativityMethod,
-    lp_builder::PatchBuffer,
+    lp::builder::PatchBuffer,
+    lp::indexer::{CutStateProjection, StateDim},
     risk_measure::{BackwardOutcome, RiskMeasure},
     setup::NodeId,
     setup::node_graph::{NodePos, StageIdx, Traversal},
     solver_stats::SolverStatsDelta,
     state_exchange::ExchangeBuffers,
-    test_support,
+    test_support::{self, permissive_state_boxes},
     trajectory::TrajectoryRecord,
     workspace::{BackwardAccumulators, BasisStore, CapturedBasis, ScratchBuffers, SolverWorkspace},
 };
@@ -583,7 +583,7 @@ fn single_workspace<S: SolverInterface + Send>(
             recon_slot_lookup: Vec::new(),
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
-            perm_scratch: Vec::new(),
+            corr_scratch: Vec::new(),
             current_node_buf: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
@@ -634,7 +634,7 @@ fn transit_bucket_only_workspace(
             recon_slot_lookup: Vec::new(),
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
-            perm_scratch: Vec::new(),
+            corr_scratch: Vec::new(),
             current_node_buf: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
@@ -949,8 +949,6 @@ fn dual_extraction_formula_coefficients_are_negated_duals() {
 #[test]
 fn intercept_formula_matches_spec() {
     // alpha = Q - pi^T * x_hat
-    // Given: objective=50.0, pi=[2.0, -1.0], x_hat=[10.0, 5.0]
-    // Expected: alpha = 50.0 - (2.0*10.0 + (-1.0)*5.0) = 50.0 - 15.0 = 35.0
     let objective = 50.0_f64;
     let coefficients = [2.0_f64, -1.0_f64];
     let x_hat = [10.0_f64, 5.0_f64];
@@ -992,11 +990,13 @@ fn single_stage_system_produces_no_cuts() {
     let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
 
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
+    let state_boxes = permissive_state_boxes(n_state, n_stages);
     let result = run_backward_pass(&mut BackwardPassInputs {
         backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -1080,7 +1080,6 @@ fn two_stage_system_two_trial_states_generates_two_cuts_at_stage_0() {
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
 
-    // Two trial points with states [10.0] and [20.0] at stage 0.
     let (mut exchange, records) =
         exchange_and_records(n_state, &[vec![10.0], vec![20.0]], n_stages);
 
@@ -1089,9 +1088,6 @@ fn two_stage_system_two_trial_states_generates_two_cuts_at_stage_0() {
     };
     let risk_measures = vec![RiskMeasure::Expectation; n_stages];
 
-    // MockSolver returns objective=100.0, dual[0]=-5.0 for every solve.
-    // With x_hat=[10.0]: pi=[5.0], alpha = 100 - 5*10 = 50.
-    // With x_hat=[20.0]: pi=[5.0], alpha = 100 - 5*20 = 0 (could be negative).
     let solution = solution_1_0(100.0, -5.0);
     let solver = MockSolver::always_ok(solution);
     let comm = StubComm;
@@ -1099,11 +1095,13 @@ fn two_stage_system_two_trial_states_generates_two_cuts_at_stage_0() {
     let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
 
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
+    let state_boxes = permissive_state_boxes(n_state, n_stages);
     let result = run_backward_pass(&mut BackwardPassInputs {
         backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -1209,11 +1207,13 @@ fn cut_inserted_with_correct_stage_iteration_and_forward_pass_index() {
     let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
 
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
+    let state_boxes = permissive_state_boxes(n_state, n_stages);
     let _ = run_backward_pass(&mut BackwardPassInputs {
         backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -1313,11 +1313,13 @@ fn no_cuts_generated_at_last_stage() {
     let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
 
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
+    let state_boxes = permissive_state_boxes(n_state, n_stages);
     let result = run_backward_pass(&mut BackwardPassInputs {
         backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -1418,11 +1420,13 @@ fn elapsed_ms_is_non_negative() {
     let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
 
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
+    let state_boxes = permissive_state_boxes(n_state, n_stages);
     let result = run_backward_pass(&mut BackwardPassInputs {
         backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -1518,11 +1522,13 @@ fn infeasible_solver_returns_sddp_infeasible_error() {
     let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
 
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
+    let state_boxes = permissive_state_boxes(n_state, n_stages);
     let result = run_backward_pass(&mut BackwardPassInputs {
         backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -1595,8 +1601,6 @@ fn infeasible_solver_returns_sddp_infeasible_error() {
 
 #[test]
 fn expectation_aggregation_mean_of_per_opening_intercepts() {
-    // Given 3 openings with uniform probability 1/3 and per-opening
-    // intercepts [10.0, 20.0, 30.0], the aggregated intercept must be 20.0.
     use BackwardOutcome as BO;
 
     let outcomes = vec![
@@ -1629,18 +1633,8 @@ fn expectation_aggregation_mean_of_per_opening_intercepts() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn cut_coefficients_and_intercept_match_dual_extraction_formula() {
-    // Integration test: verify that the backward pass uses the correct
-    // dual extraction formula by checking cuts in the FCF.
-    //
-    // Setup: 2-stage, N=1, L=0, 1 opening, 1 trial point.
-    //   dual[0] = -3.0 (storage-fixing dual from MockSolver)
-    //   objective = 80.0
-    //   x_hat = [10.0]
-    //
-    // Expected (coefficients = dual, not -dual):
-    //   pi[0] = dual[0] = -3.0
-    //   intercept = 80.0 - (-3.0) * 10.0 = 110.0
-    //   coefficients = [-3.0]
+    // Cut coefficients equal the raw dual, not its negation (sddp.md
+    // Benders cut sign & subgradient extraction).
     let n_stages = 2_usize;
     let stochastic = make_stochastic_context(n_stages, 1);
     let state = test_support::state_layout(1, 0);
@@ -1658,7 +1652,6 @@ fn cut_coefficients_and_intercept_match_dual_extraction_formula() {
     };
     let risk_measures = vec![RiskMeasure::Expectation; n_stages];
 
-    // dual[0] = -3.0, objective = 80.0
     let solution = solution_1_0(80.0, -3.0);
     let solver = MockSolver::always_ok(solution);
     let comm = StubComm;
@@ -1666,11 +1659,13 @@ fn cut_coefficients_and_intercept_match_dual_extraction_formula() {
     let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
 
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
+    let state_boxes = permissive_state_boxes(n_state, n_stages);
     let _ = run_backward_pass(&mut BackwardPassInputs {
         backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -1755,17 +1750,9 @@ fn cut_coefficients_and_intercept_match_dual_extraction_formula() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn cut_gradient_sign_physically_correct() {
-    // Regression test for the Benders cut sign bug.
-    //
-    // Physical invariant: more initial storage → lower future cost.
-    // The storage-fixing dual π is negative (shadow price of relaxing
-    // the fixing constraint increases cost when storage decreases).
-    //
-    // Correct: coefficient = π < 0, so the cut slope is negative
-    //   (more storage → lower cut value → lower theta → lower total cost).
-    //
-    // Old bug: coefficient = -π > 0, so the cut slope was positive
-    //   (more storage → higher cut value → wrong incentive).
+    // Physical invariant: more initial storage → lower future cost, so the
+    // storage-fixing dual π (negative) is kept as the cut coefficient, not
+    // negated (sddp.md Benders cut sign & subgradient extraction).
     let n_stages = 2_usize;
     let stochastic = make_stochastic_context(n_stages, 1);
     let state = test_support::state_layout(1, 0);
@@ -1783,8 +1770,6 @@ fn cut_gradient_sign_physically_correct() {
     };
     let risk_measures = vec![RiskMeasure::Expectation; n_stages];
 
-    // dual[0] = -2.0 (negative: more storage → less cost)
-    // objective = 100.0, x_hat = 50.0
     let solution = solution_1_0(100.0, -2.0);
     let solver = MockSolver::always_ok(solution);
     let comm = StubComm;
@@ -1792,11 +1777,13 @@ fn cut_gradient_sign_physically_correct() {
     let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
 
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
+    let state_boxes = permissive_state_boxes(n_state, n_stages);
     let _ = run_backward_pass(&mut BackwardPassInputs {
         backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -1866,8 +1853,6 @@ fn cut_gradient_sign_physically_correct() {
     assert_eq!(cuts.len(), 1, "expected exactly one cut");
     let (_, _intercept, coefficients) = &cuts[0];
 
-    // The coefficient must be negative (same sign as the dual).
-    // The old bug would produce +2.0 here instead of -2.0.
     assert!(
         coefficients[0] < 0.0,
         "cut coefficient must be negative (more storage → less future cost), \
@@ -1894,8 +1879,6 @@ fn cut_is_tight_at_trial_state() {
     //
     // If the sign is wrong (coefficient = -π instead of π), then:
     //   intercept + (-π) * x̂ ≠ Q(x̂) in general
-    //
-    // This test verifies the tightness property.
     let n_stages = 2_usize;
     let stochastic = make_stochastic_context(n_stages, 1);
     let state = test_support::state_layout(1, 0);
@@ -1923,11 +1906,13 @@ fn cut_is_tight_at_trial_state() {
     let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
 
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
+    let state_boxes = permissive_state_boxes(n_state, n_stages);
     let _ = run_backward_pass(&mut BackwardPassInputs {
         backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -2040,11 +2025,13 @@ fn single_rank_backward_pass_with_local_backend_produces_correct_fcf() {
     let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
 
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
+    let state_boxes = permissive_state_boxes(n_state, n_stages);
     let result = run_backward_pass(&mut BackwardPassInputs {
         backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -2168,11 +2155,13 @@ fn forward_pass_index_matches_global_scenario_index() {
     let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
 
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
+    let state_boxes = permissive_state_boxes(n_state, n_stages);
     let _ = run_backward_pass(&mut BackwardPassInputs {
         backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -2282,11 +2271,13 @@ fn warm_start_uses_prepopulated_forward_basis() {
     let mut basis_store = basis_store_with_one(exchange.local_count(), n_stages, 0, 1, pre_basis);
 
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
+    let state_boxes = permissive_state_boxes(n_state, n_stages);
     let _ = run_backward_pass(&mut BackwardPassInputs {
         backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -2389,11 +2380,13 @@ fn multi_opening_subsequent_openings_use_internal_hotstart() {
     let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
 
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
+    let state_boxes = permissive_state_boxes(n_state, n_stages);
     let _ = run_backward_pass(&mut BackwardPassInputs {
         backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -2502,11 +2495,13 @@ fn backward_solver_error_propagates() {
     let mut basis_store = basis_store_with_one(exchange.local_count(), n_stages, 0, 1, pre_basis);
 
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
+    let state_boxes = permissive_state_boxes(n_state, n_stages);
     let result = run_backward_pass(&mut BackwardPassInputs {
         backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -2659,7 +2654,7 @@ fn test_backward_pass_parallel_cut_determinism() {
             recon_slot_lookup: Vec::new(),
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
-            perm_scratch: Vec::new(),
+            corr_scratch: Vec::new(),
             current_node_buf: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
@@ -2667,7 +2662,9 @@ fn test_backward_pass_parallel_cut_determinism() {
         worker_timing_buf: WorkerPhaseTimings::default(),
     }];
     let mut basis_store_1 = empty_basis_store(exchange.local_count(), n_stages);
+    let state_boxes = permissive_state_boxes(n_state, n_stages);
     let ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -2778,7 +2775,7 @@ fn test_backward_pass_parallel_cut_determinism() {
                 recon_slot_lookup: Vec::new(),
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
-                perm_scratch: Vec::new(),
+                corr_scratch: Vec::new(),
                 current_node_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
@@ -3146,7 +3143,7 @@ fn backward_pass_load_patches_applied() {
             recon_slot_lookup: Vec::new(),
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
-            perm_scratch: Vec::new(),
+            corr_scratch: Vec::new(),
             current_node_buf: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
@@ -3164,11 +3161,13 @@ fn backward_pass_load_patches_applied() {
     let block_counts_per_stage = vec![1_usize; n_stages];
 
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
+    let state_boxes = permissive_state_boxes(n_state, n_stages);
     let _ = run_backward_pass(&mut BackwardPassInputs {
         backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -3334,7 +3333,7 @@ fn backward_pass_no_load_buses_unchanged() {
             recon_slot_lookup: Vec::new(),
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
-            perm_scratch: Vec::new(),
+            corr_scratch: Vec::new(),
             current_node_buf: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
@@ -3346,11 +3345,13 @@ fn backward_pass_no_load_buses_unchanged() {
     let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
 
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
+    let state_boxes = permissive_state_boxes(n_state, n_stages);
     let _ = run_backward_pass(&mut BackwardPassInputs {
         backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -3517,7 +3518,7 @@ fn backward_pass_cut_coefficients_unaffected() {
             recon_slot_lookup: Vec::new(),
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
-            perm_scratch: Vec::new(),
+            corr_scratch: Vec::new(),
             current_node_buf: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
@@ -3533,11 +3534,13 @@ fn backward_pass_cut_coefficients_unaffected() {
     let block_counts_per_stage = vec![1_usize; n_stages];
 
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
+    let state_boxes = permissive_state_boxes(n_state, n_stages);
     let result = run_backward_pass(&mut BackwardPassInputs {
         backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -3630,7 +3633,7 @@ fn backward_pass_cut_coefficients_unaffected() {
 ///    without sync, because single-rank sync is a no-op that does not change
 ///    results but exercises the code path.
 /// 3. Using `LocalBackend` (the production single-rank communicator) instead
-///    of `StubComm` exercises the full `sync_cuts` → allgatherv → deserialize
+///    of `StubComm` exercises the full `sync_level_records` → allgatherv → deserialize
 ///    path, confirming no panics or data corruption.
 ///
 /// True multi-rank correctness testing requires actual MPI and is out of
@@ -3667,11 +3670,13 @@ fn per_stage_cut_sync_invariant_after_bug1_fix() {
     let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
 
     let mut csb = CutSyncBuffers::new(n_state, forward_passes as usize, 1);
+    let state_boxes = permissive_state_boxes(n_state, n_stages);
     let result = run_backward_pass(&mut BackwardPassInputs {
         backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -3752,7 +3757,7 @@ fn per_stage_cut_sync_invariant_after_bug1_fix() {
     );
 
     // Verify cut_sync_time_ms was captured (structural evidence that
-    // sync_cuts was called inside the backward loop).
+    // sync_level_records was called inside the backward loop).
     // For single-rank LocalBackend, sync is a no-op, so time should be
     // very small but the field must be populated (not default/garbage).
     // We just verify it's a valid non-negative value.
@@ -3806,6 +3811,7 @@ fn metadata_sync_updates_active_count_and_last_active_iter() {
     let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
 
     let mut csb = CutSyncBuffers::new(n_state, forward_passes as usize, 1);
+    let state_boxes = permissive_state_boxes(n_state, n_stages);
 
     // Run a single backward iteration. The backward loop visits t=1
     // (cuts go to pool[1]), then t=0 (cuts go to pool[0], binding
@@ -3815,6 +3821,7 @@ fn metadata_sync_updates_active_count_and_last_active_iter() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -3995,7 +4002,7 @@ fn run_backward_pass_with_n_workers(n_workers: usize) -> FutureCostFunction {
                 recon_slot_lookup: Vec::new(),
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
-                perm_scratch: Vec::new(),
+                corr_scratch: Vec::new(),
                 current_node_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
@@ -4007,12 +4014,14 @@ fn run_backward_pass_with_n_workers(n_workers: usize) -> FutureCostFunction {
     let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
     let comm = StubComm;
     let mut csb = CutSyncBuffers::new(n_state, local_work, 1);
+    let state_boxes = permissive_state_boxes(n_state, n_stages);
 
     let result = run_backward_pass(&mut BackwardPassInputs {
         backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -4206,7 +4215,6 @@ fn decompose_overhead(
 /// Scheduling = 250 - 200 = 50.
 #[test]
 fn decompose_four_workers_different_solve_times() {
-    // All setup times are zero; use only solve time to isolate imbalance.
     let zero = SolverStatistics::default();
     let pairs = vec![
         (zero.clone(), make_stats(0.1, 0.0, 0.0, 0.0)), // 100 ms solve
@@ -4217,12 +4225,10 @@ fn decompose_four_workers_different_solve_times() {
     let (setup_ms, imbalance_ms, scheduling_ms) = decompose_overhead(&pairs, 250);
 
     assert_eq!(setup_ms, 0, "no setup work expected");
-    // f64 mean = 157.5; imbalance = trunc(200.0 - 157.5) = trunc(42.5) = 42
     assert_eq!(
         imbalance_ms, 42,
         "imbalance = trunc(max(200.0) - avg(157.5)) = trunc(42.5) = 42"
     );
-    // scheduling = 250 - 200 = 50
     assert_eq!(scheduling_ms, 50, "scheduling overhead = wall - max_worker");
 }
 
@@ -4368,7 +4374,7 @@ fn allgatherv_single_rank_two_workers_stage_stats_has_per_worker_entries() {
                 recon_slot_lookup: Vec::new(),
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
-                perm_scratch: Vec::new(),
+                corr_scratch: Vec::new(),
                 current_node_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
@@ -4381,12 +4387,14 @@ fn allgatherv_single_rank_two_workers_stage_stats_has_per_worker_entries() {
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, local_work as u32, 64, &vec![0; n_stages]);
     let mut csb = CutSyncBuffers::new(n_state, local_work, 1);
+    let state_boxes = permissive_state_boxes(n_state, n_stages);
 
     let result = run_backward_pass(&mut BackwardPassInputs {
         backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -4602,7 +4610,7 @@ fn allgatherv_dual_rank_stub_stage_stats_contains_both_ranks() {
                 recon_slot_lookup: Vec::new(),
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
-                perm_scratch: Vec::new(),
+                corr_scratch: Vec::new(),
                 current_node_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
@@ -4615,12 +4623,14 @@ fn allgatherv_dual_rank_stub_stage_stats_contains_both_ranks() {
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, local_work as u32, 64, &vec![0; n_stages]);
     let mut csb = CutSyncBuffers::new(n_state, local_work, 1);
+    let state_boxes = permissive_state_boxes(n_state, n_stages);
 
     let result = run_backward_pass(&mut BackwardPassInputs {
         backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -4750,7 +4760,9 @@ fn run_one_trial_state_with_stores(
         minimal_template_1_0(),
     ]));
     let base_rows: &'static _ = Box::leak(Box::new(vec![1_usize, 1_usize]));
+    let state_boxes: &'static _ = Box::leak(Box::new(permissive_state_boxes(n_state, n_stages)));
     let ctx: StageContext<'static> = StageContext {
+        state_boxes,
         geometry_per_stage: &[],
         templates,
         base_rows,
@@ -4911,7 +4923,9 @@ fn patch_opening_bounds_pins_transit_bucket_incoming_columns_per_stage_visit() {
 
     let templates: &'static _ = Box::leak(Box::new(vec![template]));
     let base_rows: &'static _ = Box::leak(Box::new(vec![0_usize]));
+    let state_boxes: &'static _ = Box::leak(Box::new(permissive_state_boxes(state.n_state, 1)));
     let ctx: StageContext<'static> = StageContext {
+        state_boxes,
         geometry_per_stage: &[],
         templates,
         base_rows,
@@ -4972,8 +4986,7 @@ fn patch_opening_bounds_pins_transit_bucket_incoming_columns_per_stage_visit() {
         &raw_noise,
         &x_hat,
         StageIdx(0),
-    )
-    .expect("fixture commitments are in bounds; reconciliation must not reject");
+    );
 
     let cp = ws.patch_buf.state_col_patch_count();
     assert_eq!(
@@ -5017,7 +5030,9 @@ fn per_child_backward_isolates_column_basis_and_pool_metadata() {
     let base_rows = vec![0_usize; n_stages];
     // Per-(stage, hydro) inflow noise scale; the transform indexes `stage * n_hydros + h`.
     let noise_scale = vec![1.0_f64; n_stages];
+    let state_boxes = permissive_state_boxes(n_state, n_stages);
     let ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -5402,7 +5417,7 @@ fn handshake_passes_with_local_backend() {
                 recon_slot_lookup: Vec::new(),
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
-                perm_scratch: Vec::new(),
+                corr_scratch: Vec::new(),
                 current_node_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
@@ -5414,12 +5429,14 @@ fn handshake_passes_with_local_backend() {
     let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
     let mut csb = CutSyncBuffers::new(n_state, 1, 1);
     let comm = StubComm;
+    let state_boxes = permissive_state_boxes(n_state, n_stages);
 
     let result = run_backward_pass(&mut BackwardPassInputs {
         backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -5583,12 +5600,14 @@ fn handshake_rejects_nonuniform_workers() {
         single_workspace(MockSolver::always_ok(solution_1_0(100.0, -5.0)), n_state);
     let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
     let mut csb = CutSyncBuffers::new(n_state, 1, 1);
+    let state_boxes = permissive_state_boxes(n_state, n_stages);
 
     let result = run_backward_pass(&mut BackwardPassInputs {
         backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -5816,7 +5835,6 @@ fn dcs_active_workspace() -> Vec<SolverWorkspace<ActiveSolver>> {
         initial_pool_capacity: 16,
         n_state: 1,
         max_local_fwd: 1,
-        total_forward_passes: 1,
         noise_dim: 1,
         n_anticipated: 0,
         k_max: 0,
@@ -5880,8 +5898,10 @@ fn run_dcs_backward_trial_state_at(
     let mut exchange = exchange_with_states(n_state, vec![vec![x_hat]]);
     let mut workspaces = dcs_active_workspace();
     let mut basis_store = empty_basis_store(exchange.local_count(), 2);
+    let state_boxes = permissive_state_boxes(n_state, n_stages);
 
     let ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -6405,8 +6425,10 @@ fn backward_dcs_frozen_cuts_present_no_duplicate_rows() {
     let mut exchange = exchange_with_states(n_state, vec![vec![2.0]]);
     let mut workspaces = dcs_active_workspace();
     let mut basis_store = empty_basis_store(exchange.local_count(), 2);
+    let state_boxes = permissive_state_boxes(n_state, n_stages);
 
     let ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,

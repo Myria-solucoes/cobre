@@ -425,14 +425,13 @@ mod self_reproducibility_regression {
             .simulation_scenario_source(sentinel)
             .expect("simulation_scenario_source must parse");
 
-        let params = StudyParams::from_config(&config_with_sim)
+        let params = StudyParams::from_config(&config_with_sim, Vec::new())
             .expect("StudyParams::from_config must succeed");
-        let construction = params;
 
         let mut setup = StudySetup::from_broadcast_params(
             &system,
             stochastic,
-            construction,
+            params,
             hydro_models,
             &training_source,
             &simulation_source,
@@ -791,7 +790,7 @@ mod determinism {
         horizon_mode::HorizonMode,
         indexer::{CutStateProjection, StateSpace, StudyDimensions},
         inflow_method::InflowNonNegativityMethod,
-        lp_builder::PatchBuffer,
+        lp::builder::{PatchBuffer, StateBox},
         risk_measure::RiskMeasure,
         setup::node_graph::Traversal,
         simulate,
@@ -803,8 +802,7 @@ mod determinism {
         Basis, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
     };
     use cobre_stochastic::{
-        ClassSchemes, OpeningTreeInputs, StochasticContext, SweepDirection,
-        build_stochastic_context,
+        ClassSchemes, OpeningTreeInputs, StochasticContext, build_stochastic_context,
     };
 
     // ===========================================================================
@@ -1025,8 +1023,8 @@ mod determinism {
             .collect();
 
         let mut inflow_models: Vec<InflowModel> = Vec::new();
-        for stage_idx in 0..n_stages {
-            for hydro_id in [1i32, 2, 3] {
+        for hydro_id in [1i32, 2, 3] {
+            for stage_idx in 0..n_stages {
                 inflow_models.push(InflowModel {
                     hydro_id: EntityId(hydro_id),
                     stage_id: stage_idx as i32,
@@ -1217,6 +1215,16 @@ mod determinism {
         }
     }
 
+    fn permissive_state_boxes(n_state: usize, n_stages: usize) -> Vec<StateBox> {
+        vec![
+            StateBox {
+                lower: vec![f64::NEG_INFINITY; n_state],
+                upper: vec![f64::INFINITY; n_state],
+            };
+            n_stages
+        ]
+    }
+
     // ===========================================================================
     // Helper: run training with a given number of forward-pass workspaces
     // ===========================================================================
@@ -1255,7 +1263,6 @@ mod determinism {
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                warm_start_cuts: 0,
                 risk_measures: fx.risk_measures.clone(),
             },
             events: EventConfig {
@@ -1271,6 +1278,7 @@ mod determinism {
             .build()
             .unwrap();
 
+        let state_boxes = permissive_state_boxes(fx.state.n_state, fx.n_stages);
         let stage_ctx = StageContext {
             geometry_per_stage: &[],
             templates: &fx.templates,
@@ -1281,6 +1289,7 @@ mod determinism {
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
+            state_boxes: &state_boxes,
             block_counts_per_stage: &[1usize; 5],
             ncs_col_starts: &[],
             n_ncs: 0,
@@ -1407,6 +1416,7 @@ mod determinism {
             .build()
             .unwrap();
 
+        let state_boxes = permissive_state_boxes(fx.state.n_state, fx.n_stages);
         let cost_buffer = pool
             .install(|| {
                 simulate(
@@ -1421,6 +1431,7 @@ mod determinism {
                         n_load_buses: 0,
                         load_balance_row_starts: &[],
                         load_bus_indices: &[],
+                        state_boxes: &state_boxes,
                         block_counts_per_stage: &[],
                         ncs_col_starts: &[],
                         n_ncs: 0,
@@ -1573,7 +1584,7 @@ mod determinism {
             })
             .collect();
         fx.stochastic
-            .set_solve_order(&keys, SweepDirection::Descending)
+            .set_solve_order(&keys)
             .expect("solve-order key dims match the tree");
         assert_eq!(
             fx.stochastic.tree_view().solve_order(0),
@@ -1869,7 +1880,7 @@ mod determinism {
         let mut fx = Fixture3H::with_branching(BRANCHING);
         let keys: Vec<Vec<f64>> = (0..fx.n_stages).map(|_| vec![3.0, 1.0, 4.0, 2.0]).collect();
         fx.stochastic
-            .set_solve_order(&keys, SweepDirection::Descending)
+            .set_solve_order(&keys)
             .expect("solve-order key dims match the tree");
 
         let (_training_result, fcf) = run_training(1, &fx, N_ITERATIONS);
@@ -1947,9 +1958,9 @@ mod water_travel_time_no_arc_byte_identity {
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, DeficitSegment,
         EntityId, HydroBlockBounds, HydroGenerationModel, HydroPenalties, HydroStageBounds,
-        HydroStagePenalties, HydroStorage, InitialConditions, LineBlockBounds, LineStagePenalties,
-        NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds,
-        ResolvedBounds, ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
+        HydroStorage, InitialConditions, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
+        PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
+        ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
     };
     use cobre_sddp::{
         StudySetup,
@@ -1969,27 +1980,6 @@ mod water_travel_time_no_arc_byte_identity {
 
     fn zero_hydro_penalties() -> HydroPenalties {
         HydroPenalties {
-            spillage_cost: 0.0,
-            diversion_cost: 0.0,
-            turbined_cost: 0.0,
-            storage_violation_below_cost: 0.0,
-            filling_target_violation_cost: 0.0,
-            turbined_violation_below_cost: 0.0,
-            outflow_violation_below_cost: 0.0,
-            outflow_violation_above_cost: 0.0,
-            generation_violation_below_cost: 0.0,
-            evaporation_violation_cost: 0.0,
-            water_withdrawal_violation_cost: 0.0,
-            water_withdrawal_violation_pos_cost: 0.0,
-            water_withdrawal_violation_neg_cost: 0.0,
-            evaporation_violation_pos_cost: 0.0,
-            evaporation_violation_neg_cost: 0.0,
-            inflow_nonnegativity_cost: 0.0,
-        }
-    }
-
-    fn zero_hydro_stage_penalties() -> HydroStagePenalties {
-        HydroStagePenalties {
             spillage_cost: 0.0,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -2140,7 +2130,7 @@ mod water_travel_time_no_arc_byte_identity {
                 n_stages: N_STAGES,
             },
             &PenaltiesDefaults {
-                hydro: zero_hydro_stage_penalties(),
+                hydro: zero_hydro_penalties(),
                 bus: BusStagePenalties { excess_cost: 0.0 },
                 line: LineStagePenalties { exchange_cost: 0.0 },
                 ncs: NcsStagePenalties {
@@ -2401,14 +2391,13 @@ mod water_travel_time_no_arc_byte_identity {
             .simulation_scenario_source(sentinel)
             .expect("simulation_scenario_source must parse");
 
-        let params =
-            StudyParams::from_config(&config).expect("StudyParams::from_config must succeed");
-        let construction = params;
+        let params = StudyParams::from_config(&config, Vec::new())
+            .expect("StudyParams::from_config must succeed");
 
         StudySetup::from_broadcast_params(
             &system,
             stochastic,
-            construction,
+            params,
             hydro_models,
             &training_source,
             &simulation_source,
@@ -2457,19 +2446,27 @@ mod water_travel_time_no_arc_byte_identity {
 }
 
 mod water_travel_time_gate_byte_neutrality {
-    //! Byte-neutrality of the water-travel-time terminal keep-live gate when
-    //! `config.policy.boundary` is absent, on a DECLARED-ARC case (D44,
-    //! distinct from [`super::water_travel_time_no_arc_byte_identity`]'s
-    //! no-arc D06): a gated-off study must reproduce `final_lb` bit-for-bit
-    //! across two independent, freshly-constructed runs, and the gated-off
-    //! state layout must keep every terminal deep-lag bucket slot masked
-    //! exactly as the pre-keep-live layout — the "Terminal credit deferred"
-    //! contract the gate must preserve when no boundary is loaded. The
-    //! existing water goldens' own `.sha256` reproduction
+    //! Byte-neutrality of two independent gates on the same DECLARED-ARC deck
+    //! (D44, distinct from [`super::water_travel_time_no_arc_byte_identity`]'s
+    //! no-arc D06).
+    //!
+    //! The first is the water-travel-time terminal keep-live gate when
+    //! `config.policy.boundary` is absent: a gated-off study must reproduce
+    //! `final_lb` bit-for-bit across two independent, freshly-constructed
+    //! runs, and the gated-off state layout must keep every terminal deep-lag
+    //! bucket slot masked exactly as the pre-keep-live layout — the "Terminal
+    //! credit deferred" contract the gate must preserve when no boundary is
+    //! loaded. The existing water goldens' own `.sha256` reproduction
     //! (`d06_parity_hash_matches_existing_baseline_{highs,clp}` above) is the
     //! companion evidence that no baseline moved; this module adds the
     //! run-to-run reproducibility and mask-invariance checks a golden hash
     //! alone does not pin.
+    //!
+    //! The second is the arrival-calendar gate: the topology sizing derived
+    //! from a declared post-study calendar only diverges from today's
+    //! synthetic pad when the deck actually declares one. This deck declares
+    //! none, so that gate is structurally incapable of moving these goldens —
+    //! asserted directly below rather than assumed.
 
     use std::path::Path;
 
@@ -2524,7 +2521,7 @@ mod water_travel_time_gate_byte_neutrality {
         let setup_on = fresh_setup_with(&case_dir(), |cfg| {
             cfg.policy.boundary = Some(BoundaryPolicy {
                 path: "unused".to_string(),
-                source_stage: None,
+                strict: false,
             });
         });
 
@@ -2563,6 +2560,16 @@ mod water_travel_time_gate_byte_neutrality {
             any_masked_off,
             "fixture has no power unless at least one terminal bucket slot is masked \
              [0,0] with no boundary present"
+        );
+    }
+
+    #[test]
+    fn declared_arc_golden_deck_declares_no_post_study_calendar() {
+        let system = cobre_io::load_case(&case_dir()).expect("load_case must succeed");
+        assert!(
+            system.post_study_stages().is_none(),
+            "the water goldens' deck declares no post-study calendar, so the \
+             arrival-calendar extension cannot move them"
         );
     }
 }

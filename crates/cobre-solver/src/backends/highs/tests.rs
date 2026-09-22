@@ -4,18 +4,7 @@ use crate::{
     types::{Basis, RowBatch, SolverStatistics, StageTemplate},
 };
 
-// Shared LP fixture from Solver Interface Testing SS1.1:
-// 3 variables, 2 structural constraints, 3 non-zeros.
-//
-//   min  0*x0 + 1*x1 + 50*x2
-//   s.t. x0            = 6   (state-fixing)
-//        2*x0 + x2     = 14  (power balance)
-//   x0 in [0, 10], x1 in [0, +inf), x2 in [0, 8]
-//
-// CSC matrix A = [[1, 0, 0], [2, 0, 1]]:
-//   col_starts  = [0, 2, 2, 3]
-//   row_indices = [0, 1, 1]
-//   values      = [1.0, 2.0, 1.0]
+// SS1.1 fixture: 3 vars, 2 equality rows, optimal objective = 100.
 fn make_fixture_stage_template() -> StageTemplate {
     StageTemplate {
         num_cols: 3,
@@ -39,9 +28,7 @@ fn make_fixture_stage_template() -> StageTemplate {
     }
 }
 
-// Valid-inequality fixture from Solver Interface Testing SS1.2:
-// Row 1: -5*x0 + x1 >= 20  (col_indices [0,1], values [-5, 1])
-// Row 2:  3*x0 + x1 >= 80  (col_indices [0,1], values [ 3, 1])
+// SS1.2 fixture: 2 inequality rows for add_rows tests.
 fn make_fixture_row_batch() -> RowBatch {
     RowBatch {
         num_rows: 2,
@@ -57,7 +44,6 @@ fn make_fixture_row_batch() -> RowBatch {
 fn test_highs_solver_create_and_name() {
     let solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
     assert_eq!(solver.name(), "HiGHS");
-    // Drop occurs here; verifies cobre_highs_destroy is called without crash.
 }
 
 #[test]
@@ -296,7 +282,6 @@ fn test_highs_solve_after_rhs_patch() {
     );
 }
 
-/// After two successful solves, statistics must reflect both.
 #[test]
 fn test_highs_solve_statistics_increment() {
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
@@ -310,13 +295,10 @@ fn test_highs_solve_statistics_increment() {
     assert_eq!(stats.solve_count, 2, "solve_count must be 2");
     assert_eq!(stats.success_count, 2, "success_count must be 2");
     assert_eq!(stats.failure_count, 0, "failure_count must be 0");
-    // HiGHS may solve a small equality-only LP entirely via presolve (0
-    // simplex iterations); `total_iterations` is `u64`, so any value is
-    // valid by type.
+    // Presolve may solve without simplex iterations; any u64 is valid.
     let _ = stats.total_iterations;
 }
 
-/// After a cold solve, statistics counters must reflect the single solve.
 #[test]
 fn test_highs_solve_preserves_stats() {
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
@@ -336,8 +318,7 @@ fn test_highs_solve_preserves_stats() {
     let _ = stats.total_iterations;
 }
 
-/// The first solve must complete and report an `iterations` value (any `u64`
-/// is valid — see `test_highs_solve_statistics_increment` for why).
+/// The first solve must report an `iterations` value (any `u64` is valid per presolve behavior).
 #[test]
 fn test_highs_solve_iterations_positive() {
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
@@ -348,7 +329,6 @@ fn test_highs_solve_iterations_positive() {
     let _ = solution.iterations;
 }
 
-/// The first solve must report a positive wall-clock time.
 #[test]
 fn test_highs_solve_time_positive() {
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
@@ -363,9 +343,7 @@ fn test_highs_solve_time_positive() {
     );
 }
 
-/// After one solve, `statistics()` must report `solve_count==1`,
-/// `success_count==1`, and `failure_count==0` (`total_iterations` is not
-/// asserted — see `test_highs_solve_statistics_increment` for why).
+/// After one solve, counters must be 1/1/0 (`total_iterations` not asserted per presolve behavior).
 #[test]
 fn test_highs_solve_statistics_single() {
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
@@ -421,8 +399,7 @@ fn test_highs_statistics_into_equals_statistics() {
     assert_eq!(buf.retry_level_histogram, owned.retry_level_histogram);
 }
 
-/// After `load_model` + `solve()`, `get_basis` must return statuses that are
-/// all HiGHS-representable (`from_highs_code` never yields `Superbasic`/`Fixed`).
+/// After solve, `get_basis` must return HiGHS-representable statuses (no Superbasic/Fixed).
 #[test]
 fn test_get_basis_valid_status_codes() {
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
@@ -459,8 +436,7 @@ fn test_get_basis_valid_status_codes() {
     }
 }
 
-/// Starting from an empty `Basis`, `get_basis` must resize the output
-/// buffers to match the current LP dimensions (3 cols, 2 rows for SS1.1).
+/// `get_basis` must resize empty output buffers to current LP dimensions.
 #[test]
 fn test_get_basis_resizes_output() {
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
@@ -496,8 +472,7 @@ fn test_get_basis_resizes_output() {
     );
 }
 
-/// Warm-start via `solve(Some(&basis))` on the same LP must reproduce
-/// the optimal objective and complete in at most 1 simplex iteration.
+/// Warm-start with exact basis must reproduce objective in ≤1 iteration.
 #[test]
 fn test_solve_warm_start_reproduces_cold_objective() {
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
@@ -537,13 +512,8 @@ fn test_solve_warm_start_reproduces_cold_objective() {
     );
 }
 
-/// When the offered basis has fewer rows than the current LP (2 vs 4 after
-/// `add_rows`), `solve(Some(&basis))` rejects it with
-/// `Err(SolverError::BasisRowCountMismatch)` rather than padding the missing
-/// tail with BASIC (which would be wrong for inequality-row slacks). The
-/// rejection increments `basis_consistency_failures` and leaves
-/// `basis_offered` untouched (a rejected basis was never offered to the
-/// solver).
+/// Undersized basis (2 rows vs 4 after `add_rows`) is rejected with `BasisRowCountMismatch`.
+/// Increments `basis_consistency_failures`; `basis_offered` unchanged (rejected before offer).
 #[test]
 fn test_highs_solve_rejects_undersized_row_basis() {
     use crate::types::SolverError;
@@ -571,8 +541,7 @@ fn test_highs_solve_rejects_undersized_row_basis() {
 
     let before = solver.statistics();
 
-    // Act — map Ok → () so the mutable borrow from `solve` drops before the
-    // statistics call (the error path holds no solver references).
+    // Map Ok → () so mutable borrow drops before statistics call.
     let err_variant: Result<(), SolverError> = solver.solve(Some(&basis)).map(|_| ());
 
     let after = solver.statistics();
@@ -604,13 +573,7 @@ fn test_highs_solve_rejects_undersized_row_basis() {
     }
 }
 
-/// Non-alien path accepts a self-extracted basis: counter must stay at zero.
-///
-/// Solves SS1.1 cold, extracts the optimal basis, reloads the model, and
-/// warm-starts via `solve(Some(&basis))`.  The non-alien FFI call
-/// (`cobre_highs_set_basis_non_alien`) should accept a basis that was just
-/// produced by `HiGHS` itself, so `basis_consistency_failures` must not
-/// increase.
+/// Self-extracted basis is accepted by non-alien path; `basis_consistency_failures` stays zero.
 #[test]
 fn test_solve_warm_start_non_alien_success() {
     // Arrange
@@ -639,20 +602,8 @@ fn test_solve_warm_start_non_alien_success() {
     );
 }
 
-/// `solve(Some(&basis))` returns `Err(SolverError::BasisInconsistent)` when given
-/// an inconsistent basis instead of silently falling back to the alien setter.
-///
-/// Builds a deliberately inconsistent basis (all column statuses set to
-/// `HIGHS_BASIS_STATUS_BASIC`, all row statuses `HIGHS_BASIS_STATUS_BASIC`).
-/// For the 3-column, 2-row SS1.1 LP this yields 5 basic variables against a
-/// rank of 2, which `cobre_highs_set_basis_non_alien` rejects with
-/// `HIGHS_STATUS_ERROR`.  The error is surfaced as a hard `Err` and
-/// `basis_consistency_failures` increments by 1.
-///
-/// After the call:
-/// - `basis_consistency_failures` increments by 1.
-/// - The result is `Err(SolverError::BasisInconsistent { num_row: 2,
-///   total_basic: 5, col_basic: 3, row_basic: 2 })`.
+/// Inconsistent basis (5 basic vars, rank 2) returns Err(BasisInconsistent).
+/// Increments `basis_consistency_failures` by 1.
 #[test]
 fn test_solve_warm_start_rejects_inconsistent_basis() {
     use crate::types::SolverError;
@@ -711,16 +662,7 @@ fn test_solve_warm_start_rejects_inconsistent_basis() {
     }
 }
 
-/// `terminal_status_dual_scratch` and `terminal_status_primal_scratch` are
-/// initialized as empty `Vec`s in the constructor and retain their capacity
-/// across repeated `resize` calls, matching the pattern used by
-/// `scratch_i32`, `basis_col_i32`, and `basis_row_i32`.
-///
-/// This test directly exercises the `resize`-reuse invariant without depending
-/// on a specific `HiGHS` model status. The `UNBOUNDED_OR_INFEASIBLE` branch in
-/// `interpret_terminal_status` calls `self.terminal_status_dual_scratch.resize(num_rows, 0.0)`;
-/// we verify here that repeated `resize` calls grow but never shrink capacity.
-///
+/// Terminal-status scratch buffers must retain capacity across repeated resize calls.
 #[test]
 fn interpret_terminal_status_reuses_scratch() {
     let template = make_fixture_stage_template();
@@ -783,22 +725,11 @@ fn interpret_terminal_status_reuses_scratch() {
     );
 }
 
-// ─── Research verification tests for non-optimal HiGHS model statuses ────
-//
-// These tests verify LP formulations that reliably trigger non-optimal
-// HiGHS model statuses. They use the raw FFI layer to set options not
-// exposed through SolverInterface and confirm the expected model status.
-//
-// The SS1.1 LP (3-variable, 2-constraint) is too small: HiGHS's crash
-// heuristic solves it without entering the simplex loop, so time/iteration
-// limits never fire. A 5-variable, 4-constraint "larger_lp" is required.
+// Research tests: verify non-optimal HiGHS model statuses via raw FFI.
+// SS1.1 LP is too small (crash solves it); larger_lp (5 vars, 4 rows) required.
 #[allow(clippy::doc_markdown)]
 mod research_tests {
-    // ─── Helper: load the SS1.1 LP onto an existing HiGHS handle ────────────
-    //
-    // 3 columns (x0, x1, x2), 2 equality rows, 3 non-zeros.
-    // Optimal: x0=6, x1=0, x2=2, obj=100. Requires 2 simplex iterations.
-    //
+    // Load SS1.1 LP (3 cols, 2 rows, obj=100) onto existing handle.
     // SAFETY: caller must guarantee `highs` is a valid, non-null HiGHS handle.
     unsafe fn research_load_ss11_lp(highs: *mut std::os::raw::c_void) {
         use crate::ffi;
@@ -837,11 +768,7 @@ mod research_tests {
         );
     }
 
-    /// Probe: what do time_limit=0.0 and iteration_limit=0 actually return on SS1.1?
-    ///
-    /// This test is OBSERVATIONAL -- it captures actual HiGHS behavior. The SS1.1 LP
-    /// (2 constraints, 3 variables) is solved by presolve/crash before the simplex
-    /// loop, making limits ineffective. This test documents that behavior.
+    /// Observational: SS1.1 with time/iteration limits (presolve solves before limits fire).
     #[test]
     fn test_research_probe_limit_status_on_ss11_lp() {
         use crate::ffi;
@@ -877,24 +804,7 @@ mod research_tests {
         unsafe { ffi::cobre_highs_destroy(highs) };
     }
 
-    /// Helper: load a 5-variable, 4-constraint LP that requires multiple simplex
-    /// iterations and cannot be solved by crash alone.
-    ///
-    /// LP (larger_lp):
-    ///   min  x0 + x1 + x2 + x3 + x4
-    ///   s.t. x0 + x1              >= 10
-    ///        x1 + x2              >= 8
-    ///        x2 + x3              >= 6
-    ///        x3 + x4              >= 4
-    ///   x_i in [0, 100], i = 0..4
-    ///
-    /// CSC matrix (5 cols, 4 rows, 8 non-zeros):
-    ///   col 0: rows [0]       -> a_start[0]=0, a_start[1]=1
-    ///   col 1: rows [0,1]     -> a_start[2]=3
-    ///   col 2: rows [1,2]     -> a_start[3]=5
-    ///   col 3: rows [2,3]     -> a_start[4]=7
-    ///   col 4: rows [3]       -> a_start[5]=8
-    ///
+    /// Load larger LP (5 vars, 4 rows) requiring multiple simplex iterations.
     /// SAFETY: caller must guarantee `highs` is a valid, non-null HiGHS handle.
     unsafe fn research_load_larger_lp(highs: *mut std::os::raw::c_void) {
         use crate::ffi;
@@ -934,14 +844,7 @@ mod research_tests {
         );
     }
 
-    /// Verify time_limit=0.0 triggers HIGHS_MODEL_STATUS_TIME_LIMIT (13).
-    ///
-    /// Uses a 5-variable, 4-constraint LP that cannot be trivially solved by
-    /// crash. HiGHS checks the time limit at entry to the simplex loop.
-    /// time_limit=0.0 is always exceeded by wall-clock time before any pivot.
-    ///
-    /// Observed: run_status=WARNING (1), model_status=TIME_LIMIT (13).
-    /// Confirmed in HiGHS's `check/TestQpSolver.cpp`.
+    /// time_limit=0.0 on larger LP triggers TIME_LIMIT (13) status.
     #[test]
     fn test_research_time_limit_zero_triggers_time_limit_status() {
         use crate::ffi;
@@ -976,14 +879,7 @@ mod research_tests {
         unsafe { ffi::cobre_highs_destroy(highs) };
     }
 
-    /// Verify simplex_iteration_limit=0 triggers HIGHS_MODEL_STATUS_ITERATION_LIMIT (14).
-    ///
-    /// Uses the 5-variable, 4-constraint LP with presolve disabled so that
-    /// the crash phase does not solve it, and the iteration limit check fires.
-    ///
-    /// Confirmed pattern from HiGHS's `check/TestLpSolversIterations.cpp`:
-    /// iteration_limit=0 -> HighsStatus::kWarning +
-    /// HighsModelStatus::kIterationLimit, iteration count = 0.
+    /// iteration_limit=0 with presolve=off triggers ITERATION_LIMIT (14) status.
     #[test]
     fn test_research_iteration_limit_zero_triggers_iteration_limit_status() {
         use crate::ffi;
@@ -1022,10 +918,6 @@ mod research_tests {
     }
 
     /// Observe partial solution availability after TIME_LIMIT and ITERATION_LIMIT.
-    ///
-    /// With time_limit=0.0, HiGHS halts before pivots. With iteration_limit=0
-    /// and presolve disabled, HiGHS halts at the crash-point solution.
-    /// Both tests record objective availability for documentation.
     #[test]
     fn test_research_partial_solution_availability() {
         use crate::ffi;
@@ -1068,8 +960,7 @@ mod research_tests {
         }
     }
 
-    /// Verify restore_default_settings: solve with iteration_limit=0, then solve
-    /// without limit after restoring defaults. The second solve must succeed optimally.
+    /// After iteration_limit=0 solve, restore_default_settings allows subsequent optimal solve.
     #[test]
     fn test_research_restore_defaults_allows_subsequent_optimal_solve() {
         use crate::ffi;
@@ -1162,10 +1053,7 @@ mod research_tests {
         unsafe { ffi::cobre_highs_destroy(highs) };
     }
 
-    /// Verify iteration_limit=1 also triggers ITERATION_LIMIT for SS1.1 LP.
-    ///
-    /// This verifies that limiting to a small but non-zero number of iterations
-    /// also works, providing an alternative formulation for triggering the same status.
+    /// iteration_limit=1 triggers ITERATION_LIMIT (or OPTIMAL if solved in 1 iteration).
     #[test]
     fn test_research_iteration_limit_one_triggers_iteration_limit_status() {
         use crate::ffi;
@@ -1219,20 +1107,8 @@ mod research_tests {
         unsafe { ffi::cobre_highs_destroy(highs) };
     }
 
-    /// Verify that `HighsSolver` correctly maps unbounded and infeasible statuses.
-    ///
-    /// With presolve=off and dual simplex (the default `HighsSolver` configuration),
-    /// HiGHS returns `HIGHS_MODEL_STATUS_UNBOUNDED` (10) for unbounded LPs and
-    /// `HIGHS_MODEL_STATUS_INFEASIBLE` (8) for infeasible LPs. Both are mapped to
-    /// the appropriate `SolverError` variants without entering the
-    /// `UNBOUNDED_OR_INFEASIBLE` probe branch.
-    ///
-    /// Note: `HIGHS_MODEL_STATUS_UNBOUNDED_OR_INFEASIBLE` (9) is returned only by
-    /// IPM (`IpxWrapper.cpp`) when it detects dual infeasibility, or when
-    /// `allow_unbounded_or_infeasible=true` is set with presolve=on. Neither
-    /// condition occurs in the default `HighsSolver` configuration, so the
-    /// `UNBOUNDED_OR_INFEASIBLE` branch serves as a safe fallback for retry paths
-    /// that switch to IPM.
+    /// HighsSolver maps UNBOUNDED (10) and INFEASIBLE (8) to SolverError variants.
+    /// (UNBOUNDED_OR_INFEASIBLE only appears with IPM or allow_unbounded_or_infeasible=true.)
     #[test]
     fn test_research_verify_non_optimal_highs_status_mapping() {
         use crate::SolverInterface;
@@ -1301,13 +1177,7 @@ mod research_tests {
         );
     }
 
-    /// A warm-started solve can FALSELY report INFEASIBLE on numerically hard LPs;
-    /// `solve_inner` treats an initial INFEASIBLE as retryable so the escalation's
-    /// level-0 cold restart re-solves from a cleared basis before the verdict is
-    /// trusted. This test pins both halves of that contract on a *genuinely*
-    /// infeasible LP (the case a cold restart cannot rescue): the result is still
-    /// `Err(Infeasible)`, AND the escalation actually ran (`retry_count >= 1`,
-    /// i.e. a cold-restart confirmation was attempted).
+    /// INFEASIBLE triggers cold-restart escalation before final verdict (retry_count >= 1).
     #[test]
     fn infeasible_initial_solve_runs_cold_restart_before_terminating() {
         use crate::SolverInterface;
@@ -1351,11 +1221,7 @@ mod research_tests {
         );
     }
 
-    /// Verify that a freshly constructed `HighsSolver` exposes a `current_profile`
-    /// equal to `HighsProfile::default()`.
-    ///
-    /// This ensures that callers that never call any profile setter observe the
-    /// historical hardcoded behaviour bit-for-bit.
+    /// New HighsSolver has current_profile == HighsProfile::default().
     #[test]
     fn new_highs_solver_starts_with_default_profile() {
         use crate::HighsProfile;
@@ -1367,6 +1233,111 @@ mod research_tests {
             HighsProfile::default(),
             "current_profile must equal HighsProfile::default() immediately after construction"
         );
+    }
+
+    #[test]
+    fn highs_profile_default_matches_default_options_table() {
+        use crate::HighsProfile;
+        use crate::backends::highs::config::{DefaultOption, OptionValue, default_options};
+
+        fn value_of<'a>(options: &'a [DefaultOption], name: &std::ffi::CStr) -> &'a OptionValue {
+            &options
+                .iter()
+                .find(|opt| opt.name == name)
+                .expect("default_options() must contain this entry")
+                .value
+        }
+
+        let profile = HighsProfile::default();
+        let options = default_options();
+
+        match value_of(&options, c"primal_feasibility_tolerance") {
+            OptionValue::Double(v) => assert_eq!(
+                profile.primal_feasibility_tolerance, *v,
+                "primal_feasibility_tolerance must match default_options()"
+            ),
+            _ => panic!("primal_feasibility_tolerance is not a Double option"),
+        }
+        match value_of(&options, c"dual_feasibility_tolerance") {
+            OptionValue::Double(v) => assert_eq!(
+                profile.dual_feasibility_tolerance, *v,
+                "dual_feasibility_tolerance must match default_options()"
+            ),
+            _ => panic!("dual_feasibility_tolerance is not a Double option"),
+        }
+        match value_of(&options, c"simplex_dual_edge_weight_strategy") {
+            OptionValue::Int(v) => assert_eq!(
+                profile.simplex_dual_edge_weight_strategy, *v,
+                "simplex_dual_edge_weight_strategy must match default_options()"
+            ),
+            _ => panic!("simplex_dual_edge_weight_strategy is not an Int option"),
+        }
+        match value_of(&options, c"simplex_scale_strategy") {
+            OptionValue::Int(v) => assert_eq!(
+                profile.simplex_scale_strategy, *v,
+                "simplex_scale_strategy must match default_options()"
+            ),
+            _ => panic!("simplex_scale_strategy is not an Int option"),
+        }
+        match value_of(&options, c"simplex_price_strategy") {
+            OptionValue::Int(v) => assert_eq!(
+                profile.simplex_price_strategy, *v,
+                "simplex_price_strategy must match default_options()"
+            ),
+            _ => panic!("simplex_price_strategy is not an Int option"),
+        }
+        match value_of(&options, c"presolve") {
+            OptionValue::Str(v) => assert_eq!(
+                profile.presolve.as_option(),
+                *v,
+                "presolve must match default_options()"
+            ),
+            _ => panic!("presolve is not a Str option"),
+        }
+        match value_of(&options, c"simplex_update_limit") {
+            OptionValue::Int(v) => assert_eq!(
+                i64::from(profile.simplex_update_limit),
+                i64::from(*v),
+                "simplex_update_limit must match default_options()"
+            ),
+            _ => panic!("simplex_update_limit is not an Int option"),
+        }
+        match value_of(&options, c"factor_pivot_threshold") {
+            OptionValue::Double(v) => assert_eq!(
+                profile.factor_pivot_threshold, *v,
+                "factor_pivot_threshold must match default_options()"
+            ),
+            _ => panic!("factor_pivot_threshold is not a Double option"),
+        }
+        match value_of(&options, c"use_warm_start") {
+            OptionValue::Bool(v) => assert_eq!(
+                i32::from(profile.use_warm_start),
+                *v,
+                "use_warm_start must match default_options()"
+            ),
+            _ => panic!("use_warm_start is not a Bool option"),
+        }
+        match value_of(&options, c"dual_simplex_cost_perturbation_multiplier") {
+            OptionValue::Double(v) => assert_eq!(
+                profile.cost_perturbation, *v,
+                "cost_perturbation must match default_options()"
+            ),
+            _ => panic!("dual_simplex_cost_perturbation_multiplier is not a Double option"),
+        }
+        match value_of(&options, c"rebuild_refactor_solution_error_tolerance") {
+            OptionValue::Double(v) => assert_eq!(
+                profile.refactor_error_tolerance, *v,
+                "refactor_error_tolerance must match default_options()"
+            ),
+            _ => panic!("rebuild_refactor_solution_error_tolerance is not a Double option"),
+        }
+        match value_of(&options, c"dual_steepest_edge_weight_log_error_threshold") {
+            OptionValue::Double(v) => assert_eq!(
+                profile.steepest_edge_devex_fallback_threshold, *v,
+                "steepest_edge_devex_fallback_threshold must match default_options()"
+            ),
+            _ => panic!("dual_steepest_edge_weight_log_error_threshold is not a Double option"),
+        }
     }
 }
 

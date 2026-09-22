@@ -310,7 +310,7 @@ mod tests {
 
     use cobre_core::{
         EntityId, HorizonGraph,
-        entities::{Bus, HydroGenerationModel, HydroPenalties},
+        entities::{Bus, HydroGenerationModel},
         scenario::{
             CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile,
             CorrelationScheduleEntry,
@@ -362,7 +362,7 @@ mod tests {
             evaporation_reference_volumes_hm3: None,
             diversion: None,
             filling: None,
-            penalties: penalties_default(),
+            penalties: crate::test_support::penalties_all(1.0),
         }
     }
 
@@ -423,27 +423,6 @@ mod tests {
         }
     }
 
-    fn penalties_default() -> HydroPenalties {
-        HydroPenalties {
-            spillage_cost: 1.0,
-            diversion_cost: 1.0,
-            turbined_cost: 1.0,
-            storage_violation_below_cost: 1.0,
-            filling_target_violation_cost: 1.0,
-            turbined_violation_below_cost: 1.0,
-            outflow_violation_below_cost: 1.0,
-            outflow_violation_above_cost: 1.0,
-            generation_violation_below_cost: 1.0,
-            evaporation_violation_cost: 1.0,
-            water_withdrawal_violation_cost: 1.0,
-            water_withdrawal_violation_pos_cost: 1.0,
-            water_withdrawal_violation_neg_cost: 1.0,
-            evaporation_violation_pos_cost: 1.0,
-            evaporation_violation_neg_cost: 1.0,
-            inflow_nonnegativity_cost: 1000.0,
-        }
-    }
-
     fn inflow_stats_row(hydro_id: i32, stage_id: i32) -> InflowSeasonalStatsRow {
         InflowSeasonalStatsRow {
             hydro_id: EntityId(hydro_id),
@@ -500,124 +479,11 @@ mod tests {
         }
     }
 
-    fn base_parsed_data() -> ParsedData {
-        use crate::{
-            config::{
-                Config, EstimationConfig, ExportsConfig, ModelingConfig, ParallelismConfig,
-                PolicyConfig, RowSelectionConfig, SimulationConfig, StoppingMode,
-                StoppingRuleConfig, TrainingConfig, TrainingSelection, TrainingSolverConfig,
-                UpperBoundEvaluationConfig,
-            },
-            stages::StagesData,
-        };
-        use cobre_core::{
-            entities::DeficitSegment, initial_conditions::InitialConditions,
-            penalty::GlobalPenaltyDefaults,
-        };
-
-        let config = Config {
-            schema: None,
-            modeling: ModelingConfig::default(),
-            training: TrainingConfig {
-                forward_schedule: None,
-                backward_selection: None,
-                enabled: true,
-                tree_seed: None,
-                stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 100 }]),
-                stopping_mode: StoppingMode::Any,
-                cut_selection: RowSelectionConfig::default(),
-                solver: TrainingSolverConfig::default(),
-                parallelism: ParallelismConfig::default(),
-                scenario_source: None,
-                selection: Some(TrainingSelection::Sampled { forward_passes: 10 }),
-            },
-            upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
-            policy: PolicyConfig::default(),
-            simulation: SimulationConfig::default(),
-            exports: ExportsConfig::default(),
-            estimation: EstimationConfig::default(),
-        };
-
-        ParsedData {
-            config,
-            penalties: GlobalPenaltyDefaults {
-                bus_deficit_segments: vec![DeficitSegment {
-                    depth_mw: None,
-                    cost_per_mwh: 1.0,
-                }],
-                bus_excess_cost: 1.0,
-                line_exchange_cost: 1.0,
-                hydro: HydroPenalties {
-                    spillage_cost: 1.0,
-                    diversion_cost: 1.0,
-                    turbined_cost: 1.0,
-                    storage_violation_below_cost: 1.0,
-                    filling_target_violation_cost: 1.0,
-                    turbined_violation_below_cost: 1.0,
-                    outflow_violation_below_cost: 1.0,
-                    outflow_violation_above_cost: 1.0,
-                    generation_violation_below_cost: 1.0,
-                    evaporation_violation_cost: 1.0,
-                    water_withdrawal_violation_cost: 1.0,
-                    water_withdrawal_violation_pos_cost: 1.0,
-                    water_withdrawal_violation_neg_cost: 1.0,
-                    evaporation_violation_pos_cost: 1.0,
-                    evaporation_violation_neg_cost: 1.0,
-                    inflow_nonnegativity_cost: 1000.0,
-                },
-                ncs_curtailment_cost: 1.0,
-            },
-            stages: StagesData {
-                openings_declared: std::collections::HashSet::new(),
-                stages: vec![make_stage(0), make_stage(1)],
-                policy_graph: HorizonGraph::default(),
-            },
-            initial_conditions: InitialConditions {
-                storage: vec![],
-                filling_storage: vec![],
-                past_anticipated_commitments: vec![],
-                recent_observations: vec![],
-                past_defluences: vec![],
-            },
-            post_study_stages: None,
-            buses: vec![],
-            thermals: vec![],
-            hydros: vec![],
-            lines: vec![],
-            non_controllable_sources: vec![],
-            pumping_stations: vec![],
-            energy_contracts: vec![],
-            hydro_geometry: vec![],
-            production_models: vec![],
-            plane_reduction: None,
-            hydro_energy_productivity_rows: vec![],
-            fpha_hyperplanes: vec![],
-            scalar_parameters: vec![],
-            inflow_history: vec![],
-            inflow_seasonal_stats: vec![],
-            inflow_ar_coefficients: vec![],
-            inflow_annual_components: vec![],
-            external_scenarios: vec![],
-            external_load_scenarios: vec![],
-            external_ncs_scenarios: vec![],
-            load_seasonal_stats: vec![],
-            load_factors: vec![],
-            correlation: None,
-            non_controllable_factors: vec![],
-            ncs_models: vec![],
-            thermal_bounds: vec![],
-            hydro_bounds: vec![],
-            line_bounds: vec![],
-            pumping_bounds: vec![],
-            contract_bounds: vec![],
-            generic_constraints: vec![],
-            generic_constraint_bounds: vec![],
-            penalty_overrides_bus: vec![],
-            penalty_overrides_line: vec![],
-            penalty_overrides_hydro: vec![],
-            penalty_overrides_ncs: vec![],
-            ncs_bounds: vec![],
-            hydro_unit_group_bounds: vec![],
+    fn stages() -> crate::stages::StagesData {
+        crate::stages::StagesData {
+            openings_declared: std::collections::HashSet::new(),
+            stages: vec![make_stage(0), make_stage(1)],
+            policy_graph: HorizonGraph::default(),
         }
     }
 
@@ -628,7 +494,7 @@ mod tests {
     /// `validate_dimensional_consistency` produces no errors.
     #[test]
     fn test_valid_coverage_no_errors() {
-        let mut data = base_parsed_data();
+        let mut data = crate::test_support::base_parsed_data(stages(), vec![]);
 
         // 2 hydros, 2 study stages — all 4 (hydro, stage) pairs present.
         data.hydros = vec![
@@ -659,7 +525,7 @@ mod tests {
     /// is produced with message containing "Hydro 2" and "stage 1".
     #[test]
     fn test_missing_inflow_stats_one_hydro_one_stage() {
-        let mut data = base_parsed_data();
+        let mut data = crate::test_support::base_parsed_data(stages(), vec![]);
 
         data.hydros = vec![
             make_hydro(1, HydroGenerationModel::ConstantProductivity, None, None),
@@ -706,7 +572,7 @@ mod tests {
     /// with message containing "Southeast" and "3 entities".
     #[test]
     fn test_correlation_matrix_row_count_mismatch() {
-        let mut data = base_parsed_data();
+        let mut data = crate::test_support::base_parsed_data(stages(), vec![]);
 
         let group = CorrelationGroup {
             name: "Southeast".to_string(),
@@ -757,7 +623,7 @@ mod tests {
     /// one DimensionMismatch error is produced.
     #[test]
     fn test_correlation_matrix_non_square_row() {
-        let mut data = base_parsed_data();
+        let mut data = crate::test_support::base_parsed_data(stages(), vec![]);
 
         let group = CorrelationGroup {
             name: "North".to_string(),
@@ -802,7 +668,7 @@ mod tests {
     /// errors are produced.
     #[test]
     fn test_empty_optional_data_no_false_positives() {
-        let mut data = base_parsed_data();
+        let mut data = crate::test_support::base_parsed_data(stages(), vec![]);
         data.hydros = vec![make_hydro(1, HydroGenerationModel::Fpha, None, None)];
         data.buses = vec![make_bus(1)];
 
@@ -823,7 +689,7 @@ mod tests {
     /// is produced mentioning the hydro ID and "FPHA hyperplanes".
     #[test]
     fn test_fpha_hydro_missing_hyperplane_rows() {
-        let mut data = base_parsed_data();
+        let mut data = crate::test_support::base_parsed_data(stages(), vec![]);
 
         data.hydros = vec![
             make_hydro(1, HydroGenerationModel::Fpha, None, None),
@@ -864,7 +730,7 @@ mod tests {
     /// for stage 1, not stage 0. Providing only stage 1 produces no errors.
     #[test]
     fn test_hydro_lifecycle_entry_stage_id_skips_earlier_stages() {
-        let mut data = base_parsed_data();
+        let mut data = crate::test_support::base_parsed_data(stages(), vec![]);
         data.hydros = vec![make_hydro(
             1,
             HydroGenerationModel::ConstantProductivity,
@@ -890,7 +756,7 @@ mod tests {
     /// only required for stage 0. Providing only stage 0 produces no errors.
     #[test]
     fn test_hydro_lifecycle_exit_stage_id_skips_later_stages() {
-        let mut data = base_parsed_data();
+        let mut data = crate::test_support::base_parsed_data(stages(), vec![]);
         data.hydros = vec![make_hydro(
             1,
             HydroGenerationModel::ConstantProductivity,
@@ -916,7 +782,7 @@ mod tests {
     #[test]
     fn test_pre_study_stages_not_checked() {
         use crate::stages::StagesData;
-        let mut data = base_parsed_data();
+        let mut data = crate::test_support::base_parsed_data(stages(), vec![]);
         // Include one pre-study stage (id = -1) alongside the study stages.
         data.stages = StagesData {
             openings_declared: std::collections::HashSet::new(),
@@ -949,7 +815,7 @@ mod tests {
     /// produced.
     #[test]
     fn test_load_stats_missing_for_one_stage() {
-        let mut data = base_parsed_data();
+        let mut data = crate::test_support::base_parsed_data(stages(), vec![]);
         data.buses = vec![make_bus(1), make_bus(2)];
 
         data.load_seasonal_stats = vec![
@@ -987,7 +853,7 @@ mod tests {
     /// `profiles` produces one DimensionMismatch error.
     #[test]
     fn test_correlation_schedule_missing_profile() {
-        let mut data = base_parsed_data();
+        let mut data = crate::test_support::base_parsed_data(stages(), vec![]);
 
         data.correlation = Some(make_correlation_model(
             vec![],
@@ -1019,7 +885,7 @@ mod tests {
     /// Missing rows produce a DimensionMismatch error.
     #[test]
     fn test_linearized_head_hydro_missing_geometry() {
-        let mut data = base_parsed_data();
+        let mut data = crate::test_support::base_parsed_data(stages(), vec![]);
 
         data.hydros = vec![make_hydro(
             1,
@@ -1048,7 +914,7 @@ mod tests {
     /// fit. This is the relaxation that `linearized_head` does NOT share.
     #[test]
     fn test_fpha_hydro_single_geometry_row_accepted() {
-        let mut data = base_parsed_data();
+        let mut data = crate::test_support::base_parsed_data(stages(), vec![]);
         data.hydros = vec![make_hydro(1, HydroGenerationModel::Fpha, None, None)];
         data.hydro_geometry = vec![geometry_row(1, 100.0)];
 
@@ -1066,7 +932,7 @@ mod tests {
     /// still rejected — there is no forebay to evaluate at all.
     #[test]
     fn test_fpha_hydro_zero_geometry_rows_rejected() {
-        let mut data = base_parsed_data();
+        let mut data = crate::test_support::base_parsed_data(stages(), vec![]);
         data.hydros = vec![
             make_hydro(1, HydroGenerationModel::Fpha, None, None),
             make_hydro(2, HydroGenerationModel::ConstantProductivity, None, None),
@@ -1092,7 +958,7 @@ mod tests {
     /// Errors in one rule do not suppress checking of subsequent rules.
     #[test]
     fn test_all_rules_checked_independently() {
-        let mut data = base_parsed_data();
+        let mut data = crate::test_support::base_parsed_data(stages(), vec![]);
 
         // Trigger rule 1 violation: hydro 1 missing stage 1.
         data.hydros = vec![make_hydro(

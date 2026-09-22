@@ -2,23 +2,10 @@
 //!
 //! Color output is gated on the resolved `--color` setting (the `console` crate's
 //! global stderr flag, set by `resolve_color`).
-//!
-//! # Example
-//!
-//! ```rust,no_run
-//! use console::Term;
-//! use cobre::banner;
-//!
-//! banner::print_banner(&Term::buffered_stderr());
-//! ```
 
 use console::Term;
 
 /// Render the three-line banner as a `String`.
-///
-/// When `use_color` is `true`, the returned string contains ANSI 256-color
-/// escape sequences. When `false`, the same Unicode characters are returned
-/// without any escape codes.
 pub(crate) fn render_banner_string(use_color: bool) -> String {
     let version = env!("CARGO_PKG_VERSION");
 
@@ -40,10 +27,6 @@ pub(crate) fn render_banner_string(use_color: bool) -> String {
 }
 
 /// Write the three-line Cobre banner followed by an empty line to `stderr`.
-///
-/// Color is enabled when [`console::colors_enabled_stderr`] returns `true` (the
-/// flag `resolve_color` set from `--color`). Write errors are silently ignored;
-/// the caller owns the display conditions (`--quiet`, TTY detection).
 pub fn print_banner(stderr: &Term) {
     let use_color = console::colors_enabled_stderr();
     let banner = render_banner_string(use_color);

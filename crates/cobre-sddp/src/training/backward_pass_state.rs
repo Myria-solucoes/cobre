@@ -24,16 +24,16 @@ use crate::{
     backward::{
         BackwardResult, ReplicatedScratch, StageOpeningSolver, StageWorkerOpeningDelta, StagedCut,
         SuccessorEntry, SuccessorOutcomes, SuccessorSpec, by_node_block_count, by_node_finish,
-        hardest_first_block_order, identity_block_order, merge_block_pivots,
-        process_by_scenario_backward, process_stage_backward_by_node, resolve_block_size,
-        run_backward_node_replicated,
+        by_scenario_finish, hardest_first_block_order, identity_block_order, merge_block_pivots,
+        process_by_scenario_backward, process_stage_backward_by_node, reify_successor_outcomes,
+        resolve_block_size, run_backward_node_replicated,
     },
     config::CutManagementConfig,
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
     cut_sync::CutSyncBuffers,
     error::SddpError,
-    forward::{EnumeratedForwardScratch, build_delta_cut_row_batch_into},
+    forward::EnumeratedForwardScratch,
     rank_reconcile::reconcile_result,
     risk_measure::RiskMeasure,
     solver_phase::Phase,
@@ -261,7 +261,7 @@ pub struct BackwardPassState {
     pub(crate) worker_totals: Vec<f64>,
 
     /// Cross-rank error-reconciliation scratch, reused each stage by the
-    /// pre-`sync_packed_records` reconcile so that reconciliation never allocates.
+    /// pre-`sync_level_records` reconcile so that reconciliation never allocates.
     pub(crate) reconcile_scratch: [i32; 1],
 
     /// Resolved backward-phase solver profile applied at [`Self::run`] entry.
@@ -784,10 +784,6 @@ impl BackwardPassState {
                 let n_openings = self.probabilities_buf.len();
 
                 let template_num_rows = inputs.ctx.template(successor_stage).num_rows;
-                self.successor_meta_buf.clear();
-                self.successor_active_slots_buf.clear();
-                let mut outcome_offset = 0usize;
-                let mut metadata_offset = 0usize;
                 for succ_edge in &node_graph.successors[node_pos] {
                     let child_node = succ_edge.child;
                     let parent = plan.parent[child_node];
@@ -799,41 +795,18 @@ impl BackwardPassState {
                             node_id, node_graph.node_ids[child_node], node_id,
                         )));
                     }
-                    let child_pool = node_graph.nodes[child_node].pool_id;
-                    let child_openings = node_graph.nodes[child_node].openings;
-                    let child_cut_layout = &training_ctx.cut_state_layouts[child_pool];
-                    build_delta_cut_row_batch_into(
-                        &mut inputs.cut_batches[child_pool],
-                        inputs.fcf,
-                        child_pool,
-                        training_ctx.state,
-                        child_cut_layout,
-                        &inputs.ctx.template(successor_stage).col_scale,
-                        inputs.iteration,
-                    );
-                    let num_cuts_at_successor = (inputs.frozen[child_pool].num_rows
-                        - template_num_rows)
-                        + inputs.cut_batches[child_pool].num_rows;
-                    let slots_start = self.successor_active_slots_buf.len();
-                    self.successor_active_slots_buf
-                        .extend(inputs.fcf.active_cuts(child_pool).map(|(slot, _, _)| slot));
-                    let slots_end = self.successor_active_slots_buf.len();
-                    let populated_count = inputs.fcf.pools[child_pool].populated();
-                    let outcome_len = child_openings.len;
-                    self.successor_meta_buf.push(SuccessorEntry {
-                        successor_node: child_node,
-                        successor_node_id: node_graph.node_ids[child_node],
-                        pool_id: child_pool,
-                        num_cuts_at_successor,
-                        populated_count,
-                        active_slots: slots_start..slots_end,
-                        metadata_offset,
-                        openings: child_openings,
-                        outcome_range: outcome_offset..outcome_offset + outcome_len,
-                    });
-                    outcome_offset += outcome_len;
-                    metadata_offset += populated_count;
                 }
+                reify_successor_outcomes(
+                    &mut self.successor_meta_buf,
+                    &mut self.successor_active_slots_buf,
+                    inputs.ctx,
+                    training_ctx,
+                    inputs.fcf,
+                    inputs.cut_batches,
+                    inputs.frozen,
+                    node_pos,
+                    inputs.iteration,
+                );
 
                 let outcomes = SuccessorOutcomes::new(
                     &self.successor_meta_buf,
@@ -1750,7 +1723,6 @@ fn compute_one_backward_node<S: SolverInterface + Send, C: Communicator>(
 ) -> Result<NodeCompute, SddpError> {
     let training_ctx = inputs.training_ctx;
     let ctx = inputs.ctx;
-    let cut_state = training_ctx.state;
     let node_graph = training_ctx.node_graph;
     let node_stage = node_graph.nodes[node_pos].stage;
     let successor_stage = node_stage.next();
@@ -1774,62 +1746,26 @@ fn compute_one_backward_node<S: SolverInterface + Send, C: Communicator>(
 
     let batch_start = Instant::now();
     let template_num_rows = ctx.template(successor_stage).num_rows;
-    // Build one entry per successor CHILD (never child 0 for the whole set): each
-    // child's own delta cut batch, active slots, populated count, and cut count are
-    // resolved against ITS OWN pool. A child's `num_cuts_at_successor` counts that
-    // child's frozen pool rows plus that child's delta — mixing pools corrupts
-    // warm-start slot reconstruction.
-    state.successor_meta_buf.clear();
-    state.successor_active_slots_buf.clear();
+    reify_successor_outcomes(
+        &mut state.successor_meta_buf,
+        &mut state.successor_active_slots_buf,
+        ctx,
+        training_ctx,
+        inputs.fcf,
+        inputs.cut_batches,
+        inputs.frozen,
+        node_pos,
+        inputs.iteration,
+    );
+    // Successor binding-metadata regions; kept in this caller because the enumerated
+    // fork syncs metadata through run_backward_node_replicated instead.
     let pool_regions_start = state.level_pool_regions_scratch.len();
-    let mut outcome_offset = 0usize;
-    // `metadata_offset` gives each child its own non-overlapping slot region in the
-    // binding-metadata buffers, so a child's binding activity lands in ITS OWN pool,
-    // never child 0's. Two children never share a non-empty pool, so per-child
-    // regions separate distinct pools and shared empty-pool children stay
-    // collision-free (`populated == 0`).
-    let mut metadata_offset = 0usize;
-    for succ_edge in &node_graph.successors[node_pos] {
-        let child_node = succ_edge.child;
-        let child_pool = node_graph.nodes[child_node].pool_id;
-        let child_openings = node_graph.nodes[child_node].openings;
-        let child_cut_layout = &training_ctx.cut_state_layouts[child_pool];
-        build_delta_cut_row_batch_into(
-            &mut inputs.cut_batches[child_pool],
-            inputs.fcf,
-            child_pool,
-            cut_state,
-            child_cut_layout,
-            &ctx.template(successor_stage).col_scale,
-            inputs.iteration,
-        );
-        let num_cuts_at_successor = (inputs.frozen[child_pool].num_rows - template_num_rows)
-            + inputs.cut_batches[child_pool].num_rows;
-        let slots_start = state.successor_active_slots_buf.len();
-        state
-            .successor_active_slots_buf
-            .extend(inputs.fcf.active_cuts(child_pool).map(|(slot, _, _)| slot));
-        let slots_end = state.successor_active_slots_buf.len();
-        let populated_count = inputs.fcf.pools[child_pool].populated();
-        let outcome_len = child_openings.len;
-        state.successor_meta_buf.push(SuccessorEntry {
-            successor_node: child_node,
-            successor_node_id: node_graph.node_ids[child_node],
-            pool_id: child_pool,
-            num_cuts_at_successor,
-            populated_count,
-            active_slots: slots_start..slots_end,
-            metadata_offset,
-            openings: child_openings,
-            outcome_range: outcome_offset..outcome_offset + outcome_len,
-        });
+    for entry in &state.successor_meta_buf {
         state.level_pool_regions_scratch.push(PoolRegion {
-            pool_id: child_pool,
-            region_offset: metadata_offset,
-            populated_count,
+            pool_id: entry.pool_id,
+            region_offset: entry.metadata_offset,
+            populated_count: entry.populated_count,
         });
-        outcome_offset += outcome_len;
-        metadata_offset += populated_count;
     }
     let pool_regions = pool_regions_start..state.level_pool_regions_scratch.len();
     #[allow(clippy::cast_possible_truncation)]
@@ -1970,48 +1906,17 @@ fn compute_one_backward_node<S: SolverInterface + Send, C: Communicator>(
         #[allow(clippy::cast_possible_truncation)]
         let elapsed_ms = process_start.elapsed().as_millis() as u64;
 
-        state.staged_cuts_buf.clear();
-        let mut worker_failure: Option<SddpError> = None;
-        for worker_result in worker_staged {
-            match worker_result {
-                Ok((w, cuts)) => state
-                    .staged_cuts_buf
-                    .extend(cuts.into_iter().map(|cut| (w, cut))),
-                Err(e) => {
-                    worker_failure = Some(e);
-                    break;
-                }
-            }
-        }
-
-        let result = if let Some(e) = worker_failure {
-            Err(e)
-        } else {
-            // `trial_state_idx` is the SOLE sort key: globally unique across workers
-            // (disjoint contiguous partitions), so the merge order is identical regardless
-            // of worker index.
-            state
-                .staged_cuts_buf
-                .sort_by_key(|(_, cut)| cut.trial_state_idx);
-            debug_assert_eq!(state.staged_cuts_buf.len(), trial_points.len());
-            for (w, cut) in &state.staged_cuts_buf {
-                let range = cut.coefficients_range.clone();
-                let arena = &inputs.workspaces[*w].backward_accum.agg_arena;
-                debug_assert!(
-                    range.len() == cut_state_projection.n_slots() && range.end <= arena.len(),
-                    "coefficients_range must span exactly the pool's cut n_state and lie within the worker arena"
-                );
-                inputs.fcf.add_cut(
-                    node_id,
-                    pool_id,
-                    inputs.iteration,
-                    cut.forward_pass_index,
-                    cut.intercept,
-                    &arena[range],
-                );
-            }
-            Ok(state.staged_cuts_buf.len())
-        };
+        let result = by_scenario_finish(
+            worker_staged,
+            &*inputs.workspaces,
+            trial_points,
+            cut_state_projection.n_slots(),
+            inputs.fcf,
+            node_id,
+            pool_id,
+            inputs.iteration,
+            &mut state.staged_cuts_buf,
+        );
         (result, elapsed_ms)
     };
 
@@ -2220,14 +2125,15 @@ mod tests {
         cut::FutureCostFunction,
         cut_sync::CutSyncBuffers,
         horizon_mode::HorizonMode,
-        indexer::StateSpace,
         inflow_method::InflowNonNegativityMethod,
+        lp::indexer::StateSpace,
         risk_measure::{BackwardOutcome, RiskMeasure},
         setup::node_graph::{NodeOpenings, NodeRuntime, NodeSuccessor, OpeningSource},
         solver_stats::WORKER_STATS_ENTRY_STRIDE,
         state_exchange::ExchangeBuffers,
         test_support::{
-            all_enabled_cut_state_layouts, state_layout, study_dims, trial_state_records,
+            all_enabled_cut_state_layouts, permissive_state_boxes, state_layout, study_dims,
+            trial_state_records,
         },
         trajectory::TrajectoryRecord,
         workspace::{
@@ -2429,7 +2335,7 @@ mod tests {
     }
 
     fn single_workspace(solver: MockSolver, n_state: usize) -> Vec<SolverWorkspace<MockSolver>> {
-        use crate::lp_builder::PatchBuffer;
+        use crate::lp::builder::PatchBuffer;
         vec![SolverWorkspace {
             rank: 0,
             worker_id: 0,
@@ -2465,7 +2371,7 @@ mod tests {
                 recon_slot_lookup: Vec::new(),
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
-                perm_scratch: Vec::new(),
+                corr_scratch: Vec::new(),
                 current_node_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
@@ -2732,7 +2638,9 @@ mod tests {
         let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
         let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
         let mut cut_batches = empty_cut_batches(n_stages);
+        let state_boxes = permissive_state_boxes(n_state, n_stages);
         let ctx = StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -2912,7 +2820,9 @@ mod tests {
         let mut basis_store = empty_basis_store(exchange.local_count(), node_graph.nodes.len());
         let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
         let mut cut_batches = empty_cut_batches(n_stages);
+        let state_boxes = permissive_state_boxes(n_state, n_stages);
         let ctx = StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates,
             base_rows,
@@ -3070,7 +2980,7 @@ mod tests {
                 transition(0, 2, 1.0 / 3.0),
                 transition(0, 3, 1.0 / 3.0),
             ],
-            stage_discount_rate_overrides: std::collections::HashMap::new(),
+            stage_discount_rate_overrides: std::collections::BTreeMap::new(),
             season_map: None,
         };
         let node_graph = build_node_graph(&graph, n_stages, &resolver, &stochastic)
@@ -3188,7 +3098,7 @@ mod tests {
                 transition(2, 5, 0.5),
                 transition(2, 6, 0.5),
             ],
-            stage_discount_rate_overrides: std::collections::HashMap::new(),
+            stage_discount_rate_overrides: std::collections::BTreeMap::new(),
             season_map: None,
         };
         let ng =
@@ -3324,7 +3234,9 @@ mod tests {
         let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
         // Cut-batch scratch is pool-indexed (backward writes `cut_batches[successor_pool_id]`).
         let mut cut_batches = empty_cut_batches(node_graph.n_pools);
+        let state_boxes = permissive_state_boxes(n_state, n_stages);
         let ctx = StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates,
             base_rows,
@@ -3464,7 +3376,7 @@ mod tests {
                 transition(1, 3, 1.0 / 3.0),
                 transition(1, 4, 1.0 / 3.0),
             ],
-            stage_discount_rate_overrides: std::collections::HashMap::new(),
+            stage_discount_rate_overrides: std::collections::BTreeMap::new(),
             season_map: None,
         };
         let node_graph = build_node_graph(&graph, n_stages, &resolver, &stochastic)
@@ -3518,7 +3430,7 @@ mod tests {
                 transition(1, 2, 0.5),
                 transition(1, 3, 0.5),
             ],
-            stage_discount_rate_overrides: std::collections::HashMap::new(),
+            stage_discount_rate_overrides: std::collections::BTreeMap::new(),
             season_map: None,
         };
         let node_graph = build_node_graph(&graph, n_stages, &resolver, &stochastic)
@@ -3565,7 +3477,9 @@ mod tests {
         let mut basis_store = empty_basis_store(1, node_graph.nodes.len());
         let mut csb = CutSyncBuffers::with_distribution(n_state, 64, comm.size(), comm.size());
         let mut cut_batches = empty_cut_batches(node_graph.n_pools);
+        let state_boxes = permissive_state_boxes(n_state, n_stages);
         let ctx = StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -3954,7 +3868,7 @@ mod tests {
                 transition(2, 5, 0.5),
                 transition(2, 6, 0.5),
             ],
-            stage_discount_rate_overrides: std::collections::HashMap::new(),
+            stage_discount_rate_overrides: std::collections::BTreeMap::new(),
             season_map: None,
         };
         let node_graph = build_node_graph(&graph, n_stages, &resolver, &stochastic)
@@ -4085,7 +3999,9 @@ mod tests {
         let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
         let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
         let mut cut_batches = empty_cut_batches(n_stages);
+        let state_boxes = permissive_state_boxes(n_state, n_stages);
         let ctx = StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -4236,7 +4152,9 @@ mod tests {
         let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
         let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
         let mut cut_batches = empty_cut_batches(n_stages);
+        let state_boxes = permissive_state_boxes(n_state, n_stages);
         let ctx = StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -4827,6 +4745,7 @@ mod tests {
         event_sender: Option<&Sender<TrainingEvent>>,
     ) -> BackwardResult {
         use cobre_solver::ActiveSolver;
+        use cobre_stochastic::ForwardNoiseTables;
 
         let comm = StubComm;
         let num_stages = setup.stage_data.stages.len();
@@ -4853,6 +4772,7 @@ mod tests {
 
         let stage_ctx = StageContext {
             templates: &setup.stage_data.stage_templates.templates,
+            state_boxes: &setup.stage_data.stage_templates.state_boxes,
             base_rows: &setup.stage_data.stage_templates.base_rows,
             geometry_per_stage: &setup.stage_data.stage_templates.geometry_per_stage,
             noise_scale: &setup.stage_data.stage_templates.noise_scale,
@@ -4904,6 +4824,15 @@ mod tests {
 
         let sampler =
             crate::forward::build_sampler_from_ctx(&training_ctx).expect("forward sampler");
+        let mut noise_tables = ForwardNoiseTables::default();
+        sampler
+            .rebuild_noise_tables(
+                1,
+                u32::try_from(total_forward_passes).expect("fits u32"),
+                stage_ctx.noise_group_ids,
+                &mut noise_tables,
+            )
+            .expect("test fixture never exceeds the Sobol dimension cap");
         let frozen: Vec<StageTemplate> = (0..node_graph.n_pools)
             .map(|p| stage_ctx.templates[node_graph.pool_stage[p].0].clone())
             .collect();
@@ -4928,6 +4857,7 @@ mod tests {
             fcf: &setup.fcf,
             training_ctx: &training_ctx,
             sampler: &sampler,
+            noise_tables: &noise_tables,
             dcs: None,
             event_sender,
         };

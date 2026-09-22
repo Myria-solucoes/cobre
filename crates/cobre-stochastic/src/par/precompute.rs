@@ -8,7 +8,7 @@
 //! Two-dimensional arrays are **stage-major** `array[stage * n_series + series_element]`;
 //! the three-dimensional `psi` is **stage-major, series-minor, lag-innermost**
 //! `psi[stage * n_series * max_order + series_element * max_order + lag]`. This keeps
-//! a scenario trajectory's per-stage data contiguous for the forward/backward passes.
+//! a scenario trajectory's per-stage data contiguous for sequential per-stage traversal.
 //!
 //! ## Coefficient conversion
 //!
@@ -183,20 +183,17 @@ impl PrecomputedPar {
         let n_stages = stages.len();
         let n_hydros = hydro_ids.len();
 
-        // Map hydro EntityId → canonical index (0-based, canonical sorted order).
         let hydro_index: HashMap<EntityId, usize> = hydro_ids
             .iter()
             .enumerate()
             .map(|(i, &id)| (id, i))
             .collect();
 
-        // Key inflow models by (hydro_id.0, stage_id) for O(1) lookup.
         let model_map: HashMap<(i32, i32), &InflowModel> = inflow_models
             .iter()
             .map(|m| ((m.hydro_id.0, m.stage_id), m))
             .collect();
 
-        // Determine max AR order across all inflow models.
         let classical_max_order = inflow_models
             .iter()
             .map(InflowModel::ar_order)
@@ -230,14 +227,12 @@ impl PrecomputedPar {
             }
         }
 
-        // Allocate flat output arrays.
         let n2 = n_stages * n_hydros;
         let n3 = n_stages * n_hydros * max_order;
         let mut deterministic_base = vec![0.0f64; n2];
         let mut sigma = vec![0.0f64; n2];
         let mut psi = vec![0.0f64; n3];
 
-        // Build season fallback structures and fill the flat output arrays.
         let mut bufs = StageArrayBuffers {
             deterministic_base: &mut deterministic_base,
             sigma: &mut sigma,
@@ -271,13 +266,7 @@ impl PrecomputedPar {
     // Accessors
     // -----------------------------------------------------------------------
 
-    /// Deterministic base `b_{h,m(t)}` for the given stage and series element indices.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `stage >= n_stages` or `hydro >= n_hydros`.
-    #[must_use]
-    pub fn deterministic_base(&self, stage: usize, hydro: usize) -> f64 {
+    fn debug_assert_stage_hydro(&self, stage: usize, hydro: usize) {
         debug_assert!(
             stage < self.n_stages,
             "stage index {stage} is out of bounds (n_stages = {})",
@@ -288,6 +277,24 @@ impl PrecomputedPar {
             "hydro index {hydro} is out of bounds (n_hydros = {})",
             self.n_hydros
         );
+    }
+
+    fn debug_assert_hydro(&self, hydro: usize) {
+        debug_assert!(
+            hydro < self.n_hydros,
+            "hydro index {hydro} is out of bounds (n_hydros = {})",
+            self.n_hydros
+        );
+    }
+
+    /// Deterministic base `b_{h,m(t)}` for the given stage and series element indices.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `stage >= n_stages` or `hydro >= n_hydros`.
+    #[must_use]
+    pub fn deterministic_base(&self, stage: usize, hydro: usize) -> f64 {
+        self.debug_assert_stage_hydro(stage, hydro);
         self.deterministic_base[stage * self.n_hydros + hydro]
     }
 
@@ -298,16 +305,7 @@ impl PrecomputedPar {
     /// Panics if `stage >= n_stages` or `hydro >= n_hydros`.
     #[must_use]
     pub fn sigma(&self, stage: usize, hydro: usize) -> f64 {
-        debug_assert!(
-            stage < self.n_stages,
-            "stage index {stage} is out of bounds (n_stages = {})",
-            self.n_stages
-        );
-        debug_assert!(
-            hydro < self.n_hydros,
-            "hydro index {hydro} is out of bounds (n_hydros = {})",
-            self.n_hydros
-        );
+        self.debug_assert_stage_hydro(stage, hydro);
         self.sigma[stage * self.n_hydros + hydro]
     }
 
@@ -320,16 +318,7 @@ impl PrecomputedPar {
     /// Panics if `stage >= n_stages` or `hydro >= n_hydros`.
     #[must_use]
     pub fn psi_slice(&self, stage: usize, hydro: usize) -> &[f64] {
-        debug_assert!(
-            stage < self.n_stages,
-            "stage index {stage} is out of bounds (n_stages = {})",
-            self.n_stages
-        );
-        debug_assert!(
-            hydro < self.n_hydros,
-            "hydro index {hydro} is out of bounds (n_hydros = {})",
-            self.n_hydros
-        );
+        self.debug_assert_stage_hydro(stage, hydro);
         if self.max_order == 0 {
             return &[];
         }
@@ -346,11 +335,7 @@ impl PrecomputedPar {
     /// Panics if `hydro >= n_hydros`.
     #[must_use]
     pub fn order(&self, hydro: usize) -> usize {
-        debug_assert!(
-            hydro < self.n_hydros,
-            "hydro index {hydro} is out of bounds (n_hydros = {})",
-            self.n_hydros
-        );
+        self.debug_assert_hydro(hydro);
         self.orders[hydro]
     }
 
@@ -367,11 +352,7 @@ impl PrecomputedPar {
     /// Panics if `hydro >= n_hydros`.
     #[must_use]
     pub fn effective_lag_count(&self, hydro: usize) -> usize {
-        debug_assert!(
-            hydro < self.n_hydros,
-            "hydro index {hydro} is out of bounds (n_hydros = {})",
-            self.n_hydros
-        );
+        self.debug_assert_hydro(hydro);
         if self.has_annual[hydro] {
             self.max_order
         } else {
@@ -387,11 +368,7 @@ impl PrecomputedPar {
     /// Panics if `hydro >= n_hydros`.
     #[must_use]
     pub fn has_annual(&self, hydro: usize) -> bool {
-        debug_assert!(
-            hydro < self.n_hydros,
-            "hydro index {hydro} is out of bounds (n_hydros = {})",
-            self.n_hydros
-        );
+        self.debug_assert_hydro(hydro);
         self.has_annual[hydro]
     }
 
@@ -585,8 +562,6 @@ fn fill_stage_arrays(
                         base -= psi_val * mu_lag;
                     }
 
-                    // AR order > 0 or an annual component requires a season_id for
-                    // the lag-stage stats lookup.
                     if (order > 0 || m.annual.is_some()) && stage.season_id.is_none() {
                         return Err(StochasticError::InvalidParParameters {
                             hydro_id: hydro_id.0,
@@ -613,41 +588,28 @@ fn fill_stage_arrays(
 
 #[cfg(test)]
 mod tests {
-    use chrono::NaiveDate;
     use cobre_core::{
         EntityId,
         scenario::InflowModel,
-        temporal::{
-            Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
-            StageStateConfig,
-        },
+        temporal::{NoiseMethod, ScenarioSourceConfig, Stage},
+        test_support::{StageSpec, single_block},
     };
 
     use super::{PrecomputedPar, resolve_season_id};
+    use crate::test_support::InflowModelSpec;
 
     fn make_stage(index: usize, id: i32, season_id: Option<usize>) -> Stage {
-        Stage {
-            index,
+        cobre_core::test_support::make_stage(StageSpec {
             id,
-            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+            index: Some(index),
             season_id,
-            blocks: vec![Block {
-                index: 0,
-                name: "SINGLE".to_string(),
-                duration_hours: 744.0,
-            }],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: true,
-                inflow_lags: false,
-            },
-            risk_config: StageRiskConfig::Expectation,
+            blocks: single_block("SINGLE", 744.0),
             scenario_config: ScenarioSourceConfig {
                 branching_factor: 10,
                 noise_method: NoiseMethod::Saa,
             },
-        }
+            ..Default::default()
+        })
     }
 
     fn make_model(
@@ -658,15 +620,15 @@ mod tests {
         coeffs: Vec<f64>,
         residual_ratio: f64,
     ) -> InflowModel {
-        InflowModel {
-            hydro_id: EntityId(hydro_id),
+        crate::test_support::make_inflow_model(InflowModelSpec {
+            hydro_id,
             stage_id,
             mean_m3s: mean,
             std_m3s: std,
             ar_coefficients: coeffs,
             residual_std_ratio: residual_ratio,
-            annual: None,
-        }
+            ..Default::default()
+        })
     }
 
     #[test]
@@ -1511,15 +1473,15 @@ mod tests {
         residual_ratio: f64,
         annual: AnnualComponent,
     ) -> InflowModel {
-        InflowModel {
-            hydro_id: EntityId(hydro_id),
+        crate::test_support::make_inflow_model(InflowModelSpec {
+            hydro_id,
             stage_id,
             mean_m3s: mean,
             std_m3s: std,
             ar_coefficients: coeffs,
             residual_std_ratio: residual_ratio,
             annual: Some(annual),
-        }
+        })
     }
 
     #[test]

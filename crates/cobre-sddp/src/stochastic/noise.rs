@@ -276,58 +276,54 @@ pub(crate) struct AccumSnapshot {
     downstream_n_completed: usize,
 }
 
+fn copy_vec_from_slice(dst: &mut Vec<f64>, src: &[f64]) {
+    dst.clear();
+    dst.extend_from_slice(src);
+}
+
 impl AccumSnapshot {
     pub(crate) fn capture_from(&mut self, ws_scratch: &ScratchBuffers) {
-        self.lag_accumulator.clear();
-        self.lag_accumulator
-            .extend_from_slice(&ws_scratch.lag_accumulator);
-        self.lag_weight_accum.clear();
-        self.lag_weight_accum
-            .extend_from_slice(&ws_scratch.lag_weight_accum);
-        self.downstream_accumulator.clear();
-        self.downstream_accumulator
-            .extend_from_slice(&ws_scratch.downstream_accumulator);
+        copy_vec_from_slice(&mut self.lag_accumulator, &ws_scratch.lag_accumulator);
+        copy_vec_from_slice(&mut self.lag_weight_accum, &ws_scratch.lag_weight_accum);
+        copy_vec_from_slice(
+            &mut self.downstream_accumulator,
+            &ws_scratch.downstream_accumulator,
+        );
         self.downstream_weight_accum = ws_scratch.downstream_weight_accum;
-        self.downstream_completed_lags.clear();
-        self.downstream_completed_lags
-            .extend_from_slice(&ws_scratch.downstream_completed_lags);
+        copy_vec_from_slice(
+            &mut self.downstream_completed_lags,
+            &ws_scratch.downstream_completed_lags,
+        );
         self.downstream_n_completed = ws_scratch.downstream_n_completed;
     }
 
     pub(crate) fn copy_into(&self, dst: &mut AccumSnapshot) {
-        dst.lag_accumulator.clear();
-        dst.lag_accumulator.extend_from_slice(&self.lag_accumulator);
-        dst.lag_weight_accum.clear();
-        dst.lag_weight_accum
-            .extend_from_slice(&self.lag_weight_accum);
-        dst.downstream_accumulator.clear();
-        dst.downstream_accumulator
-            .extend_from_slice(&self.downstream_accumulator);
+        copy_vec_from_slice(&mut dst.lag_accumulator, &self.lag_accumulator);
+        copy_vec_from_slice(&mut dst.lag_weight_accum, &self.lag_weight_accum);
+        copy_vec_from_slice(
+            &mut dst.downstream_accumulator,
+            &self.downstream_accumulator,
+        );
         dst.downstream_weight_accum = self.downstream_weight_accum;
-        dst.downstream_completed_lags.clear();
-        dst.downstream_completed_lags
-            .extend_from_slice(&self.downstream_completed_lags);
+        copy_vec_from_slice(
+            &mut dst.downstream_completed_lags,
+            &self.downstream_completed_lags,
+        );
         dst.downstream_n_completed = self.downstream_n_completed;
     }
 
     pub(crate) fn restore_into(&self, ws_scratch: &mut ScratchBuffers) {
-        ws_scratch.lag_accumulator.clear();
-        ws_scratch
-            .lag_accumulator
-            .extend_from_slice(&self.lag_accumulator);
-        ws_scratch.lag_weight_accum.clear();
-        ws_scratch
-            .lag_weight_accum
-            .extend_from_slice(&self.lag_weight_accum);
-        ws_scratch.downstream_accumulator.clear();
-        ws_scratch
-            .downstream_accumulator
-            .extend_from_slice(&self.downstream_accumulator);
+        copy_vec_from_slice(&mut ws_scratch.lag_accumulator, &self.lag_accumulator);
+        copy_vec_from_slice(&mut ws_scratch.lag_weight_accum, &self.lag_weight_accum);
+        copy_vec_from_slice(
+            &mut ws_scratch.downstream_accumulator,
+            &self.downstream_accumulator,
+        );
         ws_scratch.downstream_weight_accum = self.downstream_weight_accum;
-        ws_scratch.downstream_completed_lags.clear();
-        ws_scratch
-            .downstream_completed_lags
-            .extend_from_slice(&self.downstream_completed_lags);
+        copy_vec_from_slice(
+            &mut ws_scratch.downstream_completed_lags,
+            &self.downstream_completed_lags,
+        );
         ws_scratch.downstream_n_completed = self.downstream_n_completed;
     }
 }
@@ -707,7 +703,7 @@ mod tests {
             recon_slot_lookup: Vec::new(),
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
-            perm_scratch: Vec::new(),
+            corr_scratch: Vec::new(),
             current_node_buf: Vec::new(),
         }
     }
@@ -1034,6 +1030,7 @@ mod tests {
         let inflow_method = InflowNonNegativityMethod::None;
         let horizon = HorizonMode::Finite { num_stages: 1 };
         let ctx = StageContext {
+            state_boxes: &[],
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -1119,6 +1116,7 @@ mod tests {
         let inflow_method = InflowNonNegativityMethod::Truncation;
         let horizon = HorizonMode::Finite { num_stages: 1 };
         let ctx = StageContext {
+            state_boxes: &[],
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -1204,6 +1202,7 @@ mod tests {
         let inflow_method = InflowNonNegativityMethod::Truncation;
         let horizon = HorizonMode::Finite { num_stages: 1 };
         let ctx = StageContext {
+            state_boxes: &[],
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -1532,6 +1531,32 @@ mod tests {
         }
     }
 
+    fn identity_stage_lag() -> StageLagTransition {
+        StageLagTransition {
+            accumulate_weight: 1.0,
+            spillover_weight: 0.0,
+            finalize_period: true,
+            accumulate_downstream: false,
+            downstream_accumulate_weight: 0.0,
+            downstream_spillover_weight: 0.0,
+            downstream_finalize: false,
+            rebuild_from_downstream: false,
+        }
+    }
+
+    fn rebuild_stage_lag() -> StageLagTransition {
+        StageLagTransition {
+            accumulate_weight: 1.0,
+            spillover_weight: 0.0,
+            finalize_period: false,
+            accumulate_downstream: false,
+            downstream_accumulate_weight: 0.0,
+            downstream_spillover_weight: 0.0,
+            downstream_finalize: false,
+            rebuild_from_downstream: true,
+        }
+    }
+
     /// Monthly identity: `accumulate_weight=1.0`, `spillover_weight=0.0`, `finalize_period=true`.
     ///
     /// With a single finalization stage the result must be bit-for-bit
@@ -1553,16 +1578,7 @@ mod tests {
         let mut state_acc = vec![500.0, 99.0];
         let mut lag_accumulator = vec![0.0_f64; 1];
         let mut lag_weight_accum = vec![0.0_f64; 1];
-        let stage_lag = StageLagTransition {
-            accumulate_weight: 1.0,
-            spillover_weight: 0.0,
-            finalize_period: true,
-            accumulate_downstream: false,
-            downstream_accumulate_weight: 0.0,
-            downstream_spillover_weight: 0.0,
-            downstream_finalize: false,
-            rebuild_from_downstream: false,
-        };
+        let stage_lag = identity_stage_lag();
         let mut ds_accum: Vec<f64> = vec![];
         let mut ds_weight = 0.0_f64;
         let mut ds_completed: Vec<f64> = vec![];
@@ -1726,16 +1742,7 @@ mod tests {
         let primal = vec![0.0; 10];
         let mut lag_accumulator: Vec<f64> = vec![]; // empty — should never be accessed
         let mut lag_weight_accum: Vec<f64> = vec![]; // empty — should never be accessed
-        let stage_lag = StageLagTransition {
-            accumulate_weight: 1.0,
-            spillover_weight: 0.0,
-            finalize_period: true,
-            accumulate_downstream: false,
-            downstream_accumulate_weight: 0.0,
-            downstream_spillover_weight: 0.0,
-            downstream_finalize: false,
-            rebuild_from_downstream: false,
-        };
+        let stage_lag = identity_stage_lag();
         let mut ds_accum: Vec<f64> = vec![];
         let mut ds_weight = 0.0_f64;
         let mut ds_completed: Vec<f64> = vec![];
@@ -1782,16 +1789,7 @@ mod tests {
         primal[layout.z_inflow.start + 1] = 60.0;
         let mut lag_accumulator = vec![0.0_f64; 2];
         let mut lag_weight_accum = vec![0.0_f64; 2];
-        let stage_lag = StageLagTransition {
-            accumulate_weight: 1.0,
-            spillover_weight: 0.0,
-            finalize_period: true,
-            accumulate_downstream: false,
-            downstream_accumulate_weight: 0.0,
-            downstream_spillover_weight: 0.0,
-            downstream_finalize: false,
-            rebuild_from_downstream: false,
-        };
+        let stage_lag = identity_stage_lag();
         let mut ds_accum: Vec<f64> = vec![];
         let mut ds_weight = 0.0_f64;
         let mut ds_completed: Vec<f64> = vec![];
@@ -1934,16 +1932,7 @@ mod tests {
 
         // Now simulate the transition stage (first quarterly stage).
         // rebuild_from_downstream=true; primary accumulation is quarterly.
-        let rebuild_lag = StageLagTransition {
-            accumulate_weight: 1.0,
-            spillover_weight: 0.0,
-            finalize_period: false,
-            accumulate_downstream: false,
-            downstream_accumulate_weight: 0.0,
-            downstream_spillover_weight: 0.0,
-            downstream_finalize: false,
-            rebuild_from_downstream: true,
-        };
+        let rebuild_lag = rebuild_stage_lag();
         run_stage(
             &mut state,
             &incoming_lags,
@@ -2066,16 +2055,7 @@ mod tests {
         assert_eq!(ds_n, 2);
 
         // Rebuild stage: lag[0] <- newest (Q4), lag[1] <- second-newest (Q3).
-        let rebuild_lag = StageLagTransition {
-            accumulate_weight: 1.0,
-            spillover_weight: 0.0,
-            finalize_period: false,
-            accumulate_downstream: false,
-            downstream_accumulate_weight: 0.0,
-            downstream_spillover_weight: 0.0,
-            downstream_finalize: false,
-            rebuild_from_downstream: true,
-        };
+        let rebuild_lag = rebuild_stage_lag();
         run_stage(
             &mut state,
             &incoming_lags,
@@ -2211,16 +2191,7 @@ mod tests {
         let mut ds_completed = vec![77.0_f64; 1]; // non-zero before rebuild
         let mut ds_n = 1_usize; // pretend one quarter was completed
 
-        let rebuild_lag = StageLagTransition {
-            accumulate_weight: 1.0,
-            spillover_weight: 0.0,
-            finalize_period: false,
-            accumulate_downstream: false,
-            downstream_accumulate_weight: 0.0,
-            downstream_spillover_weight: 0.0,
-            downstream_finalize: false,
-            rebuild_from_downstream: true,
-        };
+        let rebuild_lag = rebuild_stage_lag();
 
         run_stage(
             &mut state,
@@ -2388,16 +2359,7 @@ mod tests {
         assert_eq!(ds_n, 1);
 
         // Rebuild: both hydros rebuilt independently.
-        let rebuild_lag = StageLagTransition {
-            accumulate_weight: 1.0,
-            spillover_weight: 0.0,
-            finalize_period: false,
-            accumulate_downstream: false,
-            downstream_accumulate_weight: 0.0,
-            downstream_spillover_weight: 0.0,
-            downstream_finalize: false,
-            rebuild_from_downstream: true,
-        };
+        let rebuild_lag = rebuild_stage_lag();
         run_stage_2h(
             &mut state,
             &incoming_lags,

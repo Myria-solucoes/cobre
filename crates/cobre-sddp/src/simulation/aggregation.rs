@@ -405,7 +405,7 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_summary_carries_exactly_three_fields() {
+    fn aggregate_summary_carries_expected_fields() {
         let local_costs = vec![(0u32, 999.0, zero_cats())];
         let config = make_config(1);
         let comm = LocalBackend;

@@ -1,8 +1,8 @@
 """Tests for the cobre.io.validate full pre-solver pipeline.
 
-Verifies that validate() exercises all ten phases (path check + six cobre-io
-layers + three SDDP preparation phases) and returns a correctly shaped result
-dict without ever raising.
+Verifies that validate() exercises the full phase sequence (path check,
+cobre-io validation layers, SDDP preparation phases, and boundary
+reconciliation) and returns a correctly shaped result dict.
 
 Run with (from the repo root):
     pytest crates/cobre-python/tests/test_validate.py -v
@@ -229,7 +229,6 @@ def test_validate_never_raises_for_missing_case() -> None:
     """validate() must not raise any exception, even for bad inputs."""
     import cobre.io  # noqa: PLC0415
 
-    # Should not raise — must return a dict with valid=False.
     result = cobre.io.validate("/dev/null/this/cannot/exist")
     assert isinstance(result, dict)
     assert result["valid"] is False
@@ -303,3 +302,236 @@ def test_validate_config_overrides_unsupported_value_raises_value_error() -> Non
             VALID_CASE_1DTOY,
             config_overrides={"training.cut_selection.row_activity_tolerance": {1, 2}},
         )
+
+
+# ── Phase 11: boundary reconciliation (BoundaryReconciliationError) ───────────
+
+
+def test_validate_missing_boundary_checkpoint_returns_invalid() -> None:
+    """A case pointing to a non-existent boundary checkpoint returns valid=False
+    with a BoundaryReconciliationError naming manifest.bin.
+
+    Pre-fix: this same call returned {"valid": True, "errors": []}, diverging from
+    the CLI validate which exited 1 for the identical case.
+    """
+    import cobre.io  # noqa: PLC0415
+
+    case_dir = copy_case_to_tempdir(VALID_CASE_1DTOY)
+    try:
+        config_path = case_dir / "config.json"
+        with config_path.open() as f:
+            config = json.load(f)
+
+        policy = config.get("policy", {})
+        policy["boundary"] = {"path": str(case_dir / "no_such_policy")}
+        config["policy"] = policy
+
+        with config_path.open("w") as f:
+            json.dump(config, f)
+
+        result = cobre.io.validate(str(case_dir))
+        assert result["valid"] is False, (
+            f"expected valid=False for missing boundary checkpoint, got: {result!r}"
+        )
+        assert len(result["errors"]) == 1
+        err = result["errors"][0]
+        assert err["kind"] == "BoundaryReconciliationError"
+        assert err["message"].startswith("policy.boundary: ")
+        assert "manifest.bin" in err["message"]
+    finally:
+        shutil.rmtree(case_dir.parent, ignore_errors=True)
+
+
+def test_validate_without_boundary_policy_is_unchanged() -> None:
+    """Validate with no boundary policy skips phase 11 and returns the same
+    result as before the phase 11 addition.
+    """
+    import cobre.io  # noqa: PLC0415
+
+    result = cobre.io.validate(VALID_CASE_1DTOY)
+    assert result["valid"] is True
+    assert result["errors"] == []
+    assert isinstance(result["warnings"], list)
+
+
+# ── Phase 11: scalar-parameter table gap classes ──────────────────────────────
+#
+# `StudySetup::new_with_boundary_requirements` now receives the caller-loaded
+# `constraints/generic_parameters.json` table (never an empty placeholder), so
+# a boundary-configured study whose table has a genuine gap is rejected here
+# exactly as the CLI's `cobre validate` rejects it.
+
+
+def _build_case_with_boundary_and_scalar_parameter(
+    tmp_path: pathlib.Path, entry: dict[str, object]
+) -> pathlib.Path:
+    """Copy `examples/1dtoy`, point its boundary at a freshly trained
+    self-checkpoint, and add a single scalar-parameter `entry` to
+    `constraints/generic_parameters.json`.
+    """
+    import cobre.run  # noqa: PLC0415
+
+    source_output = tmp_path / "source"
+    cobre.run.run(VALID_CASE_1DTOY, output_dir=str(source_output))
+    source_policy_dir = source_output / "policy"
+
+    target_case = tmp_path / "target"
+    shutil.copytree(VALID_CASE_1DTOY, target_case)
+
+    config_path = target_case / "config.json"
+    config = json.loads(config_path.read_text())
+    policy = config.get("policy", {})
+    policy["boundary"] = {"path": str(source_policy_dir)}
+    config["policy"] = policy
+    config_path.write_text(json.dumps(config))
+
+    constraints_dir = target_case / "constraints"
+    constraints_dir.mkdir(exist_ok=True)
+    (constraints_dir / "generic_parameters.json").write_text(
+        json.dumps({"scalar_parameters": [entry]})
+    )
+    return target_case
+
+
+def test_validate_rejects_missing_season_scalar_parameter_gap(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A `seasonal` scalar parameter with no entry for a stage's resolved
+    season (1dtoy's stages carry no `season_id`, so every stage resolves to
+    season 0) is rejected as `BoundaryReconciliationError`.
+    """
+    import cobre.io  # noqa: PLC0415
+
+    target_case = _build_case_with_boundary_and_scalar_parameter(
+        tmp_path,
+        {"id": 1, "name": "p_season_gap", "kind": "seasonal", "values": [[5, 1.0]]},
+    )
+
+    result = cobre.io.validate(str(target_case))
+    assert result["valid"] is False, f"expected a MissingSeason reject, got: {result!r}"
+    assert any("season" in err["message"] for err in result["errors"]), (
+        f"expected an error naming the missing season, got: {result['errors']!r}"
+    )
+
+
+def test_validate_rejects_per_stage_block_coverage_gap(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A `per_stage_block` scalar parameter covering only stage 0's block
+    leaves every later stage's `(stage, block)` cell uncovered and is
+    rejected. (cobre-io's parser requires at least one entry, so the gap must
+    be a partial rather than an empty `block_values`.)
+    """
+    import cobre.io  # noqa: PLC0415
+
+    target_case = _build_case_with_boundary_and_scalar_parameter(
+        tmp_path,
+        {
+            "id": 2,
+            "name": "p_block_gap",
+            "kind": "per_stage_block",
+            "block_values": [[0, 0, 1.0]],
+        },
+    )
+
+    result = cobre.io.validate(str(target_case))
+    assert result["valid"] is False, (
+        f"expected a PerStageBlockCoverage reject, got: {result!r}"
+    )
+    assert any("not covered" in err["message"] for err in result["errors"]), (
+        f"expected an error naming the uncovered cell, got: {result['errors']!r}"
+    )
+
+
+def test_validate_rejects_missing_specific_productivity(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A `computed`/`specific_productivity` scalar parameter for a hydro with
+    no productivity override and no entity-level value is rejected. 1dtoy's
+    hydro 0 declares neither.
+    """
+    import cobre.io  # noqa: PLC0415
+
+    target_case = _build_case_with_boundary_and_scalar_parameter(
+        tmp_path,
+        {
+            "id": 3,
+            "name": "p_rho_esp_gap",
+            "kind": "computed",
+            "computed_spec": {"tag": "specific_productivity", "hydro_id": 0},
+        },
+    )
+
+    result = cobre.io.validate(str(target_case))
+    assert result["valid"] is False, (
+        f"expected a MissingSpecificProductivity reject, got: {result!r}"
+    )
+    assert any("specific productivity" in err["message"] for err in result["errors"]), (
+        f"expected an error naming the missing productivity, got: {result['errors']!r}"
+    )
+
+
+# ── Non-boundary scalar-parameter presence guard ──────────────────────────────
+#
+# A deck with no boundary policy builds no StudySetup, yet validate must still run
+# study construction's scalar-parameter guard so a gap is rejected before the
+# solver — identically to `cobre validate` (same error kind
+# GenericConstraintValidationError and the same message).
+
+
+def _write_scalar_parameters(
+    case_dir: pathlib.Path, scalar_parameters: list[dict[str, object]]
+) -> None:
+    """Write `constraints/generic_parameters.json` into an existing case dir."""
+    constraints_dir = case_dir / "constraints"
+    constraints_dir.mkdir(exist_ok=True)
+    (constraints_dir / "generic_parameters.json").write_text(
+        json.dumps({"scalar_parameters": scalar_parameters})
+    )
+
+
+def test_validate_rejects_non_boundary_scalar_parameter_gap() -> None:
+    """A non-boundary deck whose scalar-parameter table has a resolution gap (a
+    `seasonal` param with no entry for the resolved season; 1dtoy resolves every
+    stage to season 0) is rejected as GenericConstraintValidationError, closing
+    the gap that previously let it pass validate while `cobre run` failed.
+    """
+    import cobre.io  # noqa: PLC0415
+
+    case_dir = copy_case_to_tempdir(VALID_CASE_1DTOY)
+    try:
+        _write_scalar_parameters(
+            case_dir,
+            [{"id": 1, "name": "p_gap", "kind": "seasonal", "values": [[5, 1.0]]}],
+        )
+        result = cobre.io.validate(str(case_dir))
+        assert result["valid"] is False, f"expected a reject, got: {result!r}"
+        assert len(result["errors"]) == 1
+        err = result["errors"][0]
+        assert err["kind"] == "GenericConstraintValidationError", (
+            f"kind must match `cobre validate`, got: {err['kind']!r}"
+        )
+        assert err["message"] == (
+            "constraints/: configuration validation error: parameter 'p_gap': "
+            "no seasonal value for season_id=0 (needed by stage 0)"
+        ), f"message must match `cobre validate` byte-for-byte, got: {err['message']!r}"
+    finally:
+        shutil.rmtree(case_dir.parent, ignore_errors=True)
+
+
+def test_validate_accepts_non_boundary_resolved_scalar_parameter() -> None:
+    """A non-boundary deck whose scalar-parameter table resolves cleanly still
+    validates with zero errors (the new guard raises no false rejection)."""
+    import cobre.io  # noqa: PLC0415
+
+    case_dir = copy_case_to_tempdir(VALID_CASE_1DTOY)
+    try:
+        _write_scalar_parameters(
+            case_dir,
+            [{"id": 1, "name": "p_ok", "kind": "constant", "value": 1.0}],
+        )
+        result = cobre.io.validate(str(case_dir))
+        assert result["valid"] is True, f"expected valid, got: {result!r}"
+        assert result["errors"] == []
+    finally:
+        shutil.rmtree(case_dir.parent, ignore_errors=True)

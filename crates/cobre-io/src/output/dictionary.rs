@@ -10,21 +10,14 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{Float64Builder, Int8Builder, Int32Builder, RecordBatch};
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::{DataType, Schema};
 use cobre_core::System;
 
-use crate::Config;
 use crate::output::atomic::{write_bytes_atomic, write_parquet_atomic};
 use crate::output::error::OutputError;
-use crate::output::parquet_config::ParquetWriterConfig;
-use crate::output::schemas::{
-    buses_schema, contracts_schema, convergence_schema, costs_schema, exchanges_schema,
-    generic_violations_schema, hydro_bus_generation_schema, hydro_energy_productivity_schema,
-    hydros_schema, in_transit_schema, inflow_lags_schema, iteration_timing_schema,
-    non_controllables_schema, paths_schema, pumping_stations_schema, rank_timing_schema,
-    retry_histogram_schema, row_selection_schema, scenario_summary_schema,
-    solver_iterations_schema, thermals_schema, transit_seed_schema,
-};
+use crate::output::schemas::{OUTPUT_SCHEMAS, bounds_schema};
+#[cfg(test)]
+use crate::output::schemas::{hydro_bus_generation_schema, hydros_schema};
 
 // ─── Entity type codes (SS3) ─────────────────────────────────────────────────
 
@@ -65,15 +58,11 @@ const BOUND_FLOW_MAX: i8 = 9;
 /// - [`OutputError::SerializationError`] for Arrow `RecordBatch` construction
 ///   failures in `bounds.parquet`.
 /// - [`OutputError::ManifestError`] for JSON serialization failures.
-pub fn write_dictionaries(
-    path: &Path,
-    system: &System,
-    _config: &Config,
-) -> Result<(), OutputError> {
+pub fn write_dictionaries(path: &Path, system: &System) -> Result<(), OutputError> {
     write_codes_json(path)?;
     write_entities_csv(path, system)?;
     write_variables_csv(path)?;
-    write_bounds_parquet(path, system, &ParquetWriterConfig::default())?;
+    write_bounds_parquet(path, system)?;
     Ok(())
 }
 
@@ -138,6 +127,14 @@ fn write_codes_json(path: &Path) -> Result<(), OutputError> {
 
 // ─── entities.csv ────────────────────────────────────────────────────────────
 
+fn finish_csv_atomic(mut wtr: csv::Writer<Vec<u8>>, file_path: &Path) -> Result<(), OutputError> {
+    wtr.flush().map_err(|e| OutputError::io(file_path, e))?;
+    let bytes = wtr
+        .into_inner()
+        .map_err(|e| OutputError::io(file_path, std::io::Error::other(e)))?;
+    write_bytes_atomic(file_path, &bytes)
+}
+
 /// Write `entities.csv`, one row per entity, ordered by `entity_type_code`
 /// ascending then by entity ID (canonical accessor order). The
 /// `entity_type_code` 8 block breaks that second axis: a group's `entity_id`
@@ -145,8 +142,7 @@ fn write_codes_json(path: &Path) -> Result<(), OutputError> {
 /// order) then group-minor (each plant's own id-sorted `unit_groups` order).
 fn write_entities_csv(path: &Path, system: &System) -> Result<(), OutputError> {
     let file_path = path.join("entities.csv");
-    let mut wtr = csv::Writer::from_path(&file_path)
-        .map_err(|e| OutputError::io(&file_path, std::io::Error::other(e)))?;
+    let mut wtr = csv::Writer::from_writer(Vec::new());
 
     wtr.write_record([
         "entity_type_code",
@@ -210,9 +206,7 @@ fn write_entities_csv(path: &Path, system: &System) -> Result<(), OutputError> {
         }
     }
 
-    wtr.flush().map_err(|e| OutputError::io(&file_path, e))?;
-
-    Ok(())
+    finish_csv_atomic(wtr, &file_path)
 }
 
 // ─── variables.csv ───────────────────────────────────────────────────────────
@@ -220,41 +214,17 @@ fn write_entities_csv(path: &Path, system: &System) -> Result<(), OutputError> {
 /// Every `(file, schema)` pair `variables.csv` documents — the single owner of
 /// the list, shared with the no-empty-description test that guards it.
 fn variables_csv_schemas() -> Vec<(&'static str, Schema)> {
-    vec![
-        ("costs", costs_schema()),
-        ("hydros", hydros_schema()),
-        ("hydro_bus_generation", hydro_bus_generation_schema()),
-        ("thermals", thermals_schema()),
-        ("exchanges", exchanges_schema()),
-        ("buses", buses_schema()),
-        ("pumping_stations", pumping_stations_schema()),
-        ("contracts", contracts_schema()),
-        ("non_controllables", non_controllables_schema()),
-        ("inflow_lags", inflow_lags_schema()),
-        ("in_transit", in_transit_schema()),
-        ("transit_seed", transit_seed_schema()),
-        ("generic_violations", generic_violations_schema()),
-        ("paths", paths_schema()),
-        ("scenario_summary", scenario_summary_schema()),
-        ("convergence", convergence_schema()),
-        ("iteration_timing", iteration_timing_schema()),
-        ("rank_timing", rank_timing_schema()),
-        ("cut_selection", row_selection_schema()),
-        ("solver_iterations", solver_iterations_schema()),
-        ("retry_histogram", retry_histogram_schema()),
-        (
-            "hydro_energy_productivity",
-            hydro_energy_productivity_schema(),
-        ),
-    ]
+    OUTPUT_SCHEMAS
+        .iter()
+        .filter_map(|entry| entry.csv_label.map(|label| (label, (entry.schema_fn)())))
+        .collect()
 }
 
 /// Write `variables.csv`, one row per column across every output schema, grouped
 /// by file and ordered by column position within each schema.
 fn write_variables_csv(path: &Path) -> Result<(), OutputError> {
     let file_path = path.join("variables.csv");
-    let mut wtr = csv::Writer::from_path(&file_path)
-        .map_err(|e| OutputError::io(&file_path, std::io::Error::other(e)))?;
+    let mut wtr = csv::Writer::from_writer(Vec::new());
 
     wtr.write_record(["file", "column", "type", "unit", "description", "nullable"])
         .map_err(|e| OutputError::io(&file_path, std::io::Error::other(e)))?;
@@ -278,12 +248,9 @@ fn write_variables_csv(path: &Path) -> Result<(), OutputError> {
         }
     }
 
-    wtr.flush().map_err(|e| OutputError::io(&file_path, e))?;
-
-    Ok(())
+    finish_csv_atomic(wtr, &file_path)
 }
 
-/// Map an Arrow `DataType` to the string representation used in `variables.csv`.
 fn arrow_type_str(dt: &DataType) -> &'static str {
     match dt {
         DataType::Int8 => "i8",
@@ -432,9 +399,13 @@ fn unit_for(file: &str, column: &str) -> &'static str {
         ("hydros", "water_value_per_hm3") => "$/hm3",
         ("hydros", "equivalent_productivity_mw_per_m3s") => "MW/(m3/s)",
         ("hydros", "accumulated_productivity_mw_per_m3s") => "MW/(m3/s)",
+        ("hydros", "integrated_equivalent_productivity_mw_per_m3s") => "MW/(m3/s)",
+        ("hydros", "integrated_accumulated_productivity_mw_per_m3s") => "MW/(m3/s)",
         ("hydros", "incremental_inflow_energy_mw") => "MW",
         ("hydros", "stored_energy_initial_mwh") => "MWh",
         ("hydros", "stored_energy_final_mwh") => "MWh",
+        ("hydros", "stored_energy_initial_mw") => "MW",
+        ("hydros", "stored_energy_final_mw") => "MW",
         ("hydros", "generation_slack_mw") => "MW",
         _ => "",
     }
@@ -448,8 +419,7 @@ fn unit_for(file: &str, column: &str) -> &'static str {
 // per-schema divergence.
 #[allow(clippy::too_many_lines, clippy::match_same_arms)]
 fn description_for(file: &str, column: &str) -> &'static str {
-    // scenario_id/node_id return here regardless of file; a (file, column) arm
-    // for either name below is unreachable.
+    // scenario_id/node_id handled above; file-specific arms below are unreachable.
     match column {
         "scenario_id" => return "0-based scenario identifier",
         "node_id" => return "Declared node id visited at this stage",
@@ -507,11 +477,23 @@ fn description_for(file: &str, column: &str) -> &'static str {
         ("hydros", "accumulated_productivity_mw_per_m3s") => {
             "Accumulated productivity `ρ_acum` along downstream cascade"
         }
+        ("hydros", "integrated_equivalent_productivity_mw_per_m3s") => {
+            "Equivalent productivity `ρ_eq` averaged over the reservoir storage range"
+        }
+        ("hydros", "integrated_accumulated_productivity_mw_per_m3s") => {
+            "Storage-range averaged productivity summed along the downstream cascade"
+        }
         ("hydros", "incremental_inflow_energy_mw") => {
             "Incremental natural energy inflow (`ρ_acum` · incremental inflow)"
         }
         ("hydros", "stored_energy_initial_mwh") => "Stored energy at start of block",
         ("hydros", "stored_energy_final_mwh") => "Stored energy at end of block",
+        ("hydros", "stored_energy_initial_mw") => {
+            "Stored energy at start of block, averaged over the stage's total hours"
+        }
+        ("hydros", "stored_energy_final_mw") => {
+            "Stored energy at end of block, averaged over the stage's total hours"
+        }
         ("hydros", "spillage_cost") => "Spillage regularization cost",
         ("hydros", "water_value_per_hm3") => "Marginal water value",
         ("hydros", "storage_binding_code") => "Storage bound binding code",
@@ -829,11 +811,7 @@ fn description_for(file: &str, column: &str) -> &'static str {
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap
 )]
-fn write_bounds_parquet(
-    path: &Path,
-    system: &System,
-    config: &ParquetWriterConfig,
-) -> Result<(), OutputError> {
+fn write_bounds_parquet(path: &Path, system: &System) -> Result<(), OutputError> {
     let schema = Arc::new(bounds_schema());
     let n_stages = system.bounds().n_stages();
 
@@ -1346,20 +1324,7 @@ fn write_bounds_parquet(
     .map_err(|e| OutputError::serialization("bounds", e.to_string()))?;
 
     let parquet_path = path.join("bounds.parquet");
-    write_parquet_atomic(&parquet_path, &batch, config)
-}
-
-/// Build the Arrow schema for `bounds.parquet`.
-fn bounds_schema() -> Schema {
-    Schema::new(vec![
-        Field::new("entity_type_code", DataType::Int8, false),
-        Field::new("entity_id", DataType::Int32, false),
-        Field::new("hydro_id", DataType::Int32, true),
-        Field::new("stage_id", DataType::Int32, false),
-        Field::new("block_id", DataType::Int32, true),
-        Field::new("bound_type_code", DataType::Int8, false),
-        Field::new("bound_value", DataType::Float64, false),
-    ])
+    write_parquet_atomic(&parquet_path, &batch)
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -1375,6 +1340,7 @@ fn bounds_schema() -> Schema {
 )]
 mod tests {
     use super::*;
+    use crate::test_support::output::read_first_batch;
     use arrow::array::Array;
     use chrono::NaiveDate;
     use cobre_core::{
@@ -1982,6 +1948,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_entities_csv(tmp.path(), &system).expect("write_entities_csv must succeed");
 
+        assert!(
+            !tmp.path().join("entities.csv.tmp").exists(),
+            "no .tmp file must remain beside entities.csv"
+        );
+
         let content = std::fs::read_to_string(tmp.path().join("entities.csv")).unwrap();
         let mut rdr = csv::Reader::from_reader(content.as_bytes());
 
@@ -2317,13 +2288,18 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_variables_csv(tmp.path()).expect("write_variables_csv must succeed");
 
+        assert!(
+            !tmp.path().join("variables.csv.tmp").exists(),
+            "no .tmp file must remain beside variables.csv"
+        );
+
         let content = std::fs::read_to_string(tmp.path().join("variables.csv")).unwrap();
         let mut rdr = csv::Reader::from_reader(content.as_bytes());
 
         let row_count = rdr.records().count();
         assert_eq!(
-            row_count, 263,
-            "variables.csv must have exactly 263 data rows (one per column across all schemas)"
+            row_count, 267,
+            "variables.csv must have exactly 267 data rows (one per column across all schemas)"
         );
     }
 
@@ -2409,22 +2385,15 @@ mod tests {
 
     #[test]
     fn bounds_parquet_roundtrip() {
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
         let system = make_system_1h_2stages(100.0, 500.0);
         let tmp = tempfile::tempdir().unwrap();
-        let config = ParquetWriterConfig::default();
 
-        write_bounds_parquet(tmp.path(), &system, &config)
-            .expect("write_bounds_parquet must succeed");
+        write_bounds_parquet(tmp.path(), &system).expect("write_bounds_parquet must succeed");
 
         let path = tmp.path().join("bounds.parquet");
         assert!(path.exists(), "bounds.parquet must exist");
 
-        let file = std::fs::File::open(&path).unwrap();
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
-        let mut reader = builder.build().unwrap();
-        let batch = reader.next().expect("must have rows").expect("batch Ok");
+        let batch = read_first_batch(&path);
 
         // 1 hydro, 2 stages, 7 bound types per stage (no max_outflow) = 14
         // plant rows, plus `make_hydro`'s 1 mirror unit group × 2 stages × 4
@@ -2495,19 +2464,12 @@ mod tests {
 
     #[test]
     fn bounds_parquet_emits_no_block_rows_when_overlay_empty() {
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
         let system = make_system_2h_2t_blocks(ResolvedBlockBounds::empty());
         let tmp = tempfile::tempdir().unwrap();
-        let config = ParquetWriterConfig::default();
 
-        write_bounds_parquet(tmp.path(), &system, &config)
-            .expect("write_bounds_parquet must succeed");
+        write_bounds_parquet(tmp.path(), &system).expect("write_bounds_parquet must succeed");
 
-        let file = std::fs::File::open(tmp.path().join("bounds.parquet")).unwrap();
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
-        let mut reader = builder.build().unwrap();
-        let batch = reader.next().expect("must have rows").expect("batch Ok");
+        let batch = read_first_batch(&tmp.path().join("bounds.parquet"));
 
         // 2 hydros x 2 stages x 7 stage-level bounds (no max_outflow) = 28,
         // plus 2 thermals x 2 stages x 2 stage-level bounds = 8, plus each
@@ -2530,19 +2492,12 @@ mod tests {
 
     #[test]
     fn bounds_parquet_emits_per_block_override_rows() {
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
         let system = make_system_2h_2t_blocks(make_two_block_overrides());
         let tmp = tempfile::tempdir().unwrap();
-        let config = ParquetWriterConfig::default();
 
-        write_bounds_parquet(tmp.path(), &system, &config)
-            .expect("write_bounds_parquet must succeed");
+        write_bounds_parquet(tmp.path(), &system).expect("write_bounds_parquet must succeed");
 
-        let file = std::fs::File::open(tmp.path().join("bounds.parquet")).unwrap();
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
-        let mut reader = builder.build().unwrap();
-        let batch = reader.next().expect("must have rows").expect("batch Ok");
+        let batch = read_first_batch(&tmp.path().join("bounds.parquet"));
 
         let entity_type_col = batch
             .column_by_name("entity_type_code")
@@ -2640,13 +2595,8 @@ mod tests {
 
     #[test]
     fn bounds_parquet_stage_rows_unchanged_by_overlay() {
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
         fn read_null_block_rows(path: &std::path::Path) -> Vec<(i8, i32, i32, i8, u64)> {
-            let file = std::fs::File::open(path).unwrap();
-            let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
-            let mut reader = builder.build().unwrap();
-            let batch = reader.next().expect("must have rows").expect("batch Ok");
+            let batch = read_first_batch(path);
 
             let entity_type_col = batch
                 .column_by_name("entity_type_code")
@@ -2694,17 +2644,15 @@ mod tests {
                 .collect()
         }
 
-        let config = ParquetWriterConfig::default();
-
         let empty_system = make_system_2h_2t_blocks(ResolvedBlockBounds::empty());
         let tmp_empty = tempfile::tempdir().unwrap();
-        write_bounds_parquet(tmp_empty.path(), &empty_system, &config)
+        write_bounds_parquet(tmp_empty.path(), &empty_system)
             .expect("write_bounds_parquet must succeed");
         let empty_rows = read_null_block_rows(&tmp_empty.path().join("bounds.parquet"));
 
         let overlaid_system = make_system_2h_2t_blocks(make_two_block_overrides());
         let tmp_overlaid = tempfile::tempdir().unwrap();
-        write_bounds_parquet(tmp_overlaid.path(), &overlaid_system, &config)
+        write_bounds_parquet(tmp_overlaid.path(), &overlaid_system)
             .expect("write_bounds_parquet must succeed");
         let overlaid_rows = read_null_block_rows(&tmp_overlaid.path().join("bounds.parquet"));
 
@@ -2716,21 +2664,14 @@ mod tests {
 
     #[test]
     fn bounds_parquet_emits_per_block_override_rows_for_line_pumping_contract() {
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
         let system = make_system_lines_pumping_contracts_blocks(
             make_line_pumping_contract_block_overrides(),
         );
         let tmp = tempfile::tempdir().unwrap();
-        let config = ParquetWriterConfig::default();
 
-        write_bounds_parquet(tmp.path(), &system, &config)
-            .expect("write_bounds_parquet must succeed");
+        write_bounds_parquet(tmp.path(), &system).expect("write_bounds_parquet must succeed");
 
-        let file = std::fs::File::open(tmp.path().join("bounds.parquet")).unwrap();
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
-        let mut reader = builder.build().unwrap();
-        let batch = reader.next().expect("must have rows").expect("batch Ok");
+        let batch = read_first_batch(&tmp.path().join("bounds.parquet"));
 
         let entity_type_col = batch
             .column_by_name("entity_type_code")
@@ -2952,12 +2893,7 @@ mod tests {
         arrow::array::Int8Array,
         arrow::array::Int32Array,
     ) {
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
-        let file = std::fs::File::open(path).unwrap();
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
-        let mut reader = builder.build().unwrap();
-        let batch = reader.next().expect("must have rows").expect("batch Ok");
+        let batch = read_first_batch(path);
 
         let entity_type_col = batch
             .column_by_name("entity_type_code")
@@ -2980,10 +2916,8 @@ mod tests {
     fn bounds_parquet_group_rows_report_resolved_values_with_hydro_id() {
         let system = make_system_1h_2groups(ResolvedHydroUnitGroupBounds::empty());
         let tmp = tempfile::tempdir().unwrap();
-        let config = ParquetWriterConfig::default();
 
-        write_bounds_parquet(tmp.path(), &system, &config)
-            .expect("write_bounds_parquet must succeed");
+        write_bounds_parquet(tmp.path(), &system).expect("write_bounds_parquet must succeed");
 
         let (batch, entity_type_col, entity_id_col) =
             read_bounds_parquet_columns(&tmp.path().join("bounds.parquet"));
@@ -3096,10 +3030,8 @@ mod tests {
 
         let system = make_system_1h_2groups(overlay);
         let tmp = tempfile::tempdir().unwrap();
-        let config = ParquetWriterConfig::default();
 
-        write_bounds_parquet(tmp.path(), &system, &config)
-            .expect("write_bounds_parquet must succeed");
+        write_bounds_parquet(tmp.path(), &system).expect("write_bounds_parquet must succeed");
 
         let (batch, entity_type_col, entity_id_col) =
             read_bounds_parquet_columns(&tmp.path().join("bounds.parquet"));

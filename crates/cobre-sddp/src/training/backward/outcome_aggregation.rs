@@ -92,6 +92,26 @@ pub(crate) fn accumulate_dcs_binding_counts(
     }
 }
 
+/// Fold this trial point's binding-cut `slot_increments` into the accumulating
+/// `metadata_sync_contribution` over the successor pools' populated region only.
+///
+/// `populated_len` is `SuccessorOutcomes::total_metadata_len`, never the buffers'
+/// capacity: only `[0, populated_len)` is zeroed each stage and only each pool's own
+/// populated slice is reduced by `sync_stage_metadata`, so a `slot_increments.len()`
+/// bound would fold never-zeroed, never-read tail slots into the contribution.
+pub(crate) fn fold_slot_increments_into_sync(
+    slot_increments: &[u64],
+    metadata_sync_contribution: &mut [u64],
+    populated_len: usize,
+) {
+    for slot in 0..populated_len {
+        let increment = slot_increments[slot];
+        if increment > 0 {
+            metadata_sync_contribution[slot] += increment;
+        }
+    }
+}
+
 /// Write one opening's stats delta and outcome (coefficients + intercept) into
 /// the workspace accumulators, without touching binding-count metadata.
 ///

@@ -171,9 +171,6 @@ pub struct CutManagementConfig {
     /// Activity (dual-value) threshold below which a cut is a deactivation candidate.
     pub cut_activity_tolerance: f64,
 
-    /// Cuts pre-loaded from a warm-start policy; contributes to cut-pool capacity.
-    pub warm_start_cuts: u32,
-
     /// Per-stage backward-pass risk measures; length must equal `num_stages`.
     pub risk_measures: Vec<RiskMeasure>,
 }
@@ -185,7 +182,6 @@ impl Default for CutManagementConfig {
             backward_selection: None,
             budget: None,
             cut_activity_tolerance: 1e-6,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation],
         }
     }
@@ -315,23 +311,6 @@ mod tests {
         assert_eq!(config_some.events.checkpoint_interval, Some(10));
     }
 
-    #[test]
-    fn warm_start_cuts_field_accessible() {
-        let config = TrainingConfig {
-            loop_config: LoopConfig {
-                forward_passes: 1,
-                max_iterations: 10,
-                ..LoopConfig::default()
-            },
-            cut_management: CutManagementConfig {
-                warm_start_cuts: 500,
-                ..CutManagementConfig::default()
-            },
-            events: EventConfig::default(),
-        };
-        assert_eq!(config.cut_management.warm_start_cuts, 500);
-    }
-
     // ── Event sender ─────────────────────────────────────────────────────────
 
     #[test]
@@ -348,19 +327,10 @@ mod tests {
     fn event_sender_some_can_send_training_event() {
         let (tx, rx) = std::sync::mpsc::channel::<TrainingEvent>();
         let config = TrainingConfig {
-            loop_config: LoopConfig {
-                forward_passes: 4,
-                max_iterations: 200,
-                ..LoopConfig::default()
-            },
-            cut_management: CutManagementConfig {
-                warm_start_cuts: 100,
-                cut_activity_tolerance: 1e-6,
-                ..CutManagementConfig::default()
-            },
+            loop_config: LoopConfig::default(),
+            cut_management: CutManagementConfig::default(),
             events: EventConfig {
                 event_sender: Some(tx),
-                checkpoint_interval: Some(50),
                 ..EventConfig::default()
             },
         };
@@ -389,16 +359,9 @@ mod tests {
     #[test]
     fn debug_output_non_empty() {
         let config = TrainingConfig {
-            loop_config: LoopConfig {
-                forward_passes: 8,
-                max_iterations: 500,
-                ..LoopConfig::default()
-            },
+            loop_config: LoopConfig::default(),
             cut_management: CutManagementConfig::default(),
-            events: EventConfig {
-                checkpoint_interval: Some(100),
-                ..EventConfig::default()
-            },
+            events: EventConfig::default(),
         };
         let debug = format!("{config:?}");
         assert!(!debug.is_empty());

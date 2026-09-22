@@ -40,13 +40,14 @@
 //! - Family selection and downstream-level resolution — a later layer.
 //! - `hydro_id` existence in the hydro registry — Layer 3.
 
-use arrow::array::{Array, Float64Array, Int32Array};
+use arrow::array::Array;
 use cobre_core::EntityId;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use std::fs::File;
 use std::path::Path;
 
 use crate::LoadError;
+use crate::parquet_helpers::{
+    extract_required_float64, extract_required_int32, open_record_batch_reader,
+};
 
 /// A single row from `system/tailrace_curves.parquet`.
 ///
@@ -125,32 +126,25 @@ pub struct TailraceCurveRow {
 /// println!("loaded {} tailrace segments", rows.len());
 /// ```
 pub fn parse_tailrace_curves(path: &Path) -> Result<Vec<TailraceCurveRow>, LoadError> {
-    let file = File::open(path).map_err(|e| LoadError::io(path, e))?;
-
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
-
-    let reader = builder
-        .build()
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
+    let reader = open_record_batch_reader(path)?;
 
     let mut rows: Vec<TailraceCurveRow> = Vec::new();
 
     for batch_result in reader {
         let batch = batch_result.map_err(|e| LoadError::parse(path, e.to_string()))?;
 
-        let hydro_id_col = extract_int32_column(&batch, "hydro_id", path)?;
-        let family_id_col = extract_int32_column(&batch, "family_id", path)?;
-        let segment_id_col = extract_int32_column(&batch, "segment_id", path)?;
+        let hydro_id_col = extract_required_int32(&batch, "hydro_id", path)?;
+        let family_id_col = extract_required_int32(&batch, "family_id", path)?;
+        let segment_id_col = extract_required_int32(&batch, "segment_id", path)?;
         let reference_level_col =
-            extract_float64_column(&batch, "downstream_reference_level_m", path)?;
-        let q_inf_col = extract_float64_column(&batch, "outflow_min_m3s", path)?;
-        let q_sup_col = extract_float64_column(&batch, "outflow_max_m3s", path)?;
-        let coefficient_0_col = extract_float64_column(&batch, "coefficient_0", path)?;
-        let coefficient_1_col = extract_float64_column(&batch, "coefficient_1", path)?;
-        let coefficient_2_col = extract_float64_column(&batch, "coefficient_2", path)?;
-        let coefficient_3_col = extract_float64_column(&batch, "coefficient_3", path)?;
-        let coefficient_4_col = extract_float64_column(&batch, "coefficient_4", path)?;
+            extract_required_float64(&batch, "downstream_reference_level_m", path)?;
+        let q_inf_col = extract_required_float64(&batch, "outflow_min_m3s", path)?;
+        let q_sup_col = extract_required_float64(&batch, "outflow_max_m3s", path)?;
+        let coefficient_0_col = extract_required_float64(&batch, "coefficient_0", path)?;
+        let coefficient_1_col = extract_required_float64(&batch, "coefficient_1", path)?;
+        let coefficient_2_col = extract_required_float64(&batch, "coefficient_2", path)?;
+        let coefficient_3_col = extract_required_float64(&batch, "coefficient_3", path)?;
+        let coefficient_4_col = extract_required_float64(&batch, "coefficient_4", path)?;
 
         let n = batch.num_rows();
         let base_idx = rows.len();
@@ -229,54 +223,6 @@ pub fn parse_tailrace_curves(path: &Path) -> Result<Vec<TailraceCurveRow>, LoadE
     Ok(rows)
 }
 
-fn extract_int32_column<'a>(
-    batch: &'a arrow::record_batch::RecordBatch,
-    name: &str,
-    path: &Path,
-) -> Result<&'a Int32Array, LoadError> {
-    let col = batch
-        .column_by_name(name)
-        .ok_or_else(|| LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: name.to_string(),
-            message: format!("missing column \"{name}\""),
-        })?;
-    col.as_any()
-        .downcast_ref::<Int32Array>()
-        .ok_or_else(|| LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: name.to_string(),
-            message: format!(
-                "column \"{name}\" has type {} but Int32 is required",
-                col.data_type()
-            ),
-        })
-}
-
-fn extract_float64_column<'a>(
-    batch: &'a arrow::record_batch::RecordBatch,
-    name: &str,
-    path: &Path,
-) -> Result<&'a Float64Array, LoadError> {
-    let col = batch
-        .column_by_name(name)
-        .ok_or_else(|| LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: name.to_string(),
-            message: format!("missing column \"{name}\""),
-        })?;
-    col.as_any()
-        .downcast_ref::<Float64Array>()
-        .ok_or_else(|| LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: name.to_string(),
-            message: format!(
-                "column \"{name}\" has type {} but Float64 is required",
-                col.data_type()
-            ),
-        })
-}
-
 fn validate_non_negative(
     value: f64,
     row_idx: usize,
@@ -324,12 +270,12 @@ fn validate_finite(
 )]
 mod tests {
     use super::*;
+    use crate::test_support::write_parquet;
+    use crate::test_support::write_parquet_batches;
     use arrow::array::{Float64Array, Int32Array};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
-    use parquet::arrow::ArrowWriter;
     use std::sync::Arc;
-    use tempfile::NamedTempFile;
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -414,28 +360,6 @@ mod tests {
             outflow_max_m3s: 1500.0,
             a_cf: [320.0, 1.0e-3, -3.1521e-17, 0.0, 0.0],
         }
-    }
-
-    fn write_parquet(batch: &RecordBatch) -> NamedTempFile {
-        let tmp = NamedTempFile::new().expect("tempfile");
-        let mut writer = ArrowWriter::try_new(tmp.reopen().expect("reopen"), batch.schema(), None)
-            .expect("ArrowWriter");
-        writer.write(batch).expect("write batch");
-        writer.close().expect("close writer");
-        tmp
-    }
-
-    fn write_parquet_batches(batches: &[RecordBatch]) -> NamedTempFile {
-        assert!(!batches.is_empty(), "must provide at least one batch");
-        let tmp = NamedTempFile::new().expect("tempfile");
-        let mut writer =
-            ArrowWriter::try_new(tmp.reopen().expect("reopen"), batches[0].schema(), None)
-                .expect("ArrowWriter");
-        for batch in batches {
-            writer.write(batch).expect("write batch");
-        }
-        writer.close().expect("close writer");
-        tmp
     }
 
     // ── AC: multi-segment family sorted ascending by segment_id ────────────────
@@ -578,7 +502,7 @@ mod tests {
         match err {
             LoadError::SchemaError { field, message, .. } => {
                 assert_eq!(field, "coefficient_4");
-                assert!(message.contains("missing column"));
+                assert!(message.contains("missing required column"));
             }
             other => panic!("expected SchemaError, got: {other:?}"),
         }

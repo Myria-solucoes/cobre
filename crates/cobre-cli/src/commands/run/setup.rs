@@ -27,7 +27,7 @@ use cobre_sddp::EstimationPath;
 use cobre_sddp::HydroFitTimings;
 use cobre_sddp::build_provenance_report;
 use cobre_sddp::hydro_models::prepare_hydro_models_from_artifacts;
-use cobre_sddp::orchestration::export_stochastic_artifacts;
+use cobre_sddp::policy::orchestration::export_stochastic_artifacts;
 use cobre_sddp::reconcile_global_ok;
 use cobre_sddp::{
     EstimationReport, PrepareHydroModelsResult, PrepareStochasticResult, StudySetup,
@@ -92,8 +92,6 @@ fn load_case_and_config(
     if !quiet {
         let _ = stderr.write_line(&format!("Loading case: {}", args.case_dir.display()));
     }
-    // Single load: downstream consumers reuse the artifacts returned here instead
-    // of re-reading the same files from disk.
     let mut timings = SetupTimings::default();
 
     let load_start = std::time::Instant::now();
@@ -107,7 +105,7 @@ fn load_case_and_config(
     // state layout and the boundary-load reject see the identical requirements on
     // every rank.
     let boundary_requirements = resolve_boundary_state_requirements(&args.case_dir, &config)?;
-    if let (Some(d), false) = (boundary_requirements.inflow_lag_depth(), quiet) {
+    if !quiet && let Some(d) = boundary_requirements.inflow_lag_depth() {
         let _ = stderr.write_line(&format!("Boundary policy: inflow-lag depth {d}"));
     }
 
@@ -478,8 +476,6 @@ pub(super) fn run_pre_training(
     root_estimation_path: Option<EstimationPath>,
     setup_timings: Option<&SetupTimings>,
 ) -> Result<(), CliError> {
-    // Renders before the Hydro models block so the setup timings sit with the
-    // other setup summaries.
     if ctx.is_root
         && !ctx.quiet
         && let Some(timings) = setup_timings
@@ -534,8 +530,8 @@ fn run_root_exports(
     root_estimation_report: Option<&EstimationReport>,
     root_estimation_path: Option<EstimationPath>,
 ) -> Result<(), CliError> {
-    // Built regardless of `quiet`: it also feeds the persisted sidecar consumed
-    // by `cobre summary`, not just the optional print.
+    // Built regardless of `quiet`: it feeds the `training/hydro_models.json`
+    // output file, not just the optional print.
     let hydro_summary = build_hydro_model_summary(&setup.hydro_models, system);
     if !ctx.quiet {
         print_hydro_model_summary(&ctx.stderr, &hydro_summary);
@@ -555,8 +551,7 @@ fn run_root_exports(
             system.hydros().len(),
             &setup.hydro_models.provenance,
         );
-        // Fingerprint the derived lag seed (training-side library only) so
-        // stale-library detection can compare against a fresh digest on later runs.
+        // Stale-library detection compares this digest on later runs.
         provenance.inflow.historical_library_seed_digest = setup
             .scenario_libraries
             .training

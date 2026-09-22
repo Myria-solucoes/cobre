@@ -24,10 +24,10 @@
 
 use cobre_core::{
     AnticipatedConfig, BoundsCountsSpec, BoundsDefaults, Bus, BusStagePenalties,
-    ContractBlockBounds, DeficitSegment, EntityId, HydroBlockBounds, HydroStageBounds,
-    HydroStagePenalties, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
-    PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedPenalties,
-    SystemBuilder, ThermalBlockBounds, ThermalStageBounds, scenario::InflowModel,
+    ContractBlockBounds, DeficitSegment, EntityId, HydroBlockBounds, HydroPenalties,
+    HydroStageBounds, LineBlockBounds, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
+    PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder,
+    ThermalBlockBounds, ThermalStageBounds, scenario::InflowModel,
 };
 use cobre_stochastic::normal::precompute::PrecomputedNormal;
 use cobre_stochastic::par::precompute::PrecomputedPar;
@@ -40,7 +40,7 @@ use cobre_sddp::{
     },
     indexer::{BlockGrid, StateSpace},
     inflow_method::InflowNonNegativityMethod,
-    lp_builder::PatchBuffer,
+    lp::builder::PatchBuffer,
     resolved_parameters::ResolvedParameters,
 };
 
@@ -49,10 +49,10 @@ use common::builders::{
     BusSpec, HydroSpec, StageSpec, ThermalSpec, make_bus, make_hydro, make_stage, make_thermal,
 };
 
-/// LP objective cost scale factor. Matches `cobre_sddp::lp_builder::COST_SCALE_FACTOR`.
+/// LP objective cost scale factor. Matches `cobre_sddp::setup::params::DEFAULT_COST_SCALE_FACTOR`.
 const COST_SCALE_FACTOR: f64 = 1_000_000.0;
 
-/// Evaporation flow safety margin multiplier. Matches `cobre_sddp::lp_builder::EVAPORATION_FLOW_SAFETY_MARGIN`.
+/// Evaporation flow safety margin multiplier. Matches `cobre_sddp::lp::builder::EVAPORATION_FLOW_SAFETY_MARGIN`.
 const EVAPORATION_FLOW_SAFETY_MARGIN: f64 = 2.0;
 
 fn default_production(system: &cobre_core::System) -> ProductionModelSet {
@@ -97,8 +97,8 @@ fn default_hydro_block_bounds() -> HydroBlockBounds {
     }
 }
 
-fn default_hydro_penalties() -> HydroStagePenalties {
-    HydroStagePenalties {
+fn default_hydro_penalties() -> HydroPenalties {
+    HydroPenalties {
         spillage_cost: 0.01,
         diversion_cost: 0.0,
         turbined_cost: 0.0,
@@ -618,7 +618,7 @@ fn fpha_system_with_turbined_cost(
             n_stages: 1,
         },
         &PenaltiesDefaults {
-            hydro: HydroStagePenalties {
+            hydro: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
                 turbined_cost,
@@ -667,18 +667,6 @@ fn fpha_system_with_turbined_cost(
 
     (system, production)
 }
-
-// ---- turbined_cost tests -------------------------------------------
-
-// -------------------------------------------------------------------------
-// FPHA generation model validation tests
-
-// -------------------------------------------------------------------------
-// Inflow non-negativity penalty method tests
-
-// -------------------------------------------------------------------------
-// load balance row starts, n_load_buses, load_bus_indices
-// -------------------------------------------------------------------------
 
 /// Build a two-bus system with N hydros and K blocks per stage.
 /// Bus B1 (EntityId=10) has `std_mw` = 0 (no load noise).
@@ -829,22 +817,18 @@ fn two_bus_system_with_stochastic_load(
         .collect();
 
     let load_models: Vec<LoadModel> = (0..n_stages)
-        .flat_map(|s| {
-            [
-                LoadModel {
-                    bus_id: EntityId(10),
-                    stage_id: s as i32,
-                    mean_mw: 80.0,
-                    std_mw: 0.0, // B1: no noise
-                },
-                LoadModel {
-                    bus_id: EntityId(20),
-                    stage_id: s as i32,
-                    mean_mw: 120.0,
-                    std_mw: 15.0, // B2: stochastic
-                },
-            ]
+        .map(|s| LoadModel {
+            bus_id: EntityId(10),
+            stage_id: s as i32,
+            mean_mw: 80.0,
+            std_mw: 0.0, // B1: no noise
         })
+        .chain((0..n_stages).map(|s| LoadModel {
+            bus_id: EntityId(20),
+            stage_id: s as i32,
+            mean_mw: 120.0,
+            std_mw: 15.0, // B2: stochastic
+        }))
         .collect();
 
     let n_st = n_stages.max(1);
@@ -910,10 +894,6 @@ fn two_bus_system_with_stochastic_load(
     }
     builder.build().expect("two_bus_system: valid")
 }
-
-// -------------------------------------------------------------------------
-// FPHA constraint tests
-// -------------------------------------------------------------------------
 
 /// CSC coefficient at (`col`, `row`); `None` if the column has no entry in that row.
 #[allow(clippy::cast_sign_loss)] // col_starts and row_indices are non-negative by construction
@@ -1722,7 +1702,7 @@ fn evap_hydro_system_with_violation_cost(
             n_stages: 1,
         },
         &PenaltiesDefaults {
-            hydro: HydroStagePenalties {
+            hydro: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,
@@ -1867,10 +1847,6 @@ fn multi_segment_system(buses: Vec<Bus>, block_hours: f64) -> cobre_core::System
         .build()
         .expect("multi_segment_system: valid")
 }
-
-// -------------------------------------------------------------------------
-// Water withdrawal LP wiring unit tests
-// -------------------------------------------------------------------------
 
 /// `one_hydro_system` variant injecting `water_withdrawal_m3s` and
 /// `water_withdrawal_violation_cost`. One 744h block; `lag_order` adds AR lag columns.
@@ -2064,7 +2040,7 @@ fn one_hydro_system_with_withdrawal(
             n_stages: n_st,
         },
         &PenaltiesDefaults {
-            hydro: HydroStagePenalties {
+            hydro: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,
@@ -2106,8 +2082,6 @@ fn one_hydro_system_with_withdrawal(
         .build()
         .expect("one_hydro_system_with_withdrawal: valid")
 }
-
-// ── Generic constraint layout tests ──────────────────────────
 
 /// One-bus, one-stage system with `n_blks` operating blocks.
 #[allow(clippy::cast_possible_wrap)]
@@ -2773,7 +2747,7 @@ fn one_hydro_active_violations(n_stages: usize) -> cobre_core::System {
             n_stages: n_st,
         },
         &PenaltiesDefaults {
-            hydro: HydroStagePenalties {
+            hydro: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,
@@ -4088,7 +4062,7 @@ fn build_hydro_one_ant_system(
     );
 
     let policy_graph = HorizonGraph {
-        stage_discount_rate_overrides: std::collections::HashMap::new(),
+        stage_discount_rate_overrides: std::collections::BTreeMap::new(),
         graph_type: PolicyGraphType::FiniteHorizon,
         annual_discount_rate,
         transitions: vec![],

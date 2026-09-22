@@ -108,6 +108,11 @@ cargo test -p cobre-io --all-features
 cargo test -p cobre-io --all-features --test '*'
 ```
 
+cobre-io also declares a `test-support` feature (rolled into `--all-features` above),
+exposing its crate-internal fixture builders — entity, `ParsedData`, and `Config`
+construction helpers used by the semantic-validation unit tests — to `tests/`
+integration binaries and downstream crates' tests.
+
 Sample case directories are in `tests/data/`. Each follows the standard Cobre layout:
 `config.json` at the root, entity files under `buses/`, `hydros/`, `thermals/`, etc.
 When adding new parsers, add sample input files to `tests/data/` and reference them
@@ -161,6 +166,11 @@ No external dependencies or feature flags needed. Conformance tests verify PAR(p
 preprocessing (tolerance 1e-10); reproducibility tests verify seed determinism and
 declaration-order invariance.
 
+cobre-stochastic also declares a `test-support` feature, exposing its crate-internal
+fixture builders — `OpeningTree`, `SeasonMap`, and `InflowModel` construction helpers
+used by its own unit tests — to `tests/` integration binaries and downstream crates'
+tests.
+
 ### Testing cobre-sddp
 
 Initialize the HiGHS submodule first:
@@ -196,7 +206,7 @@ The CLI forwards the active backend to both `cobre-solver` and `cobre-sddp`, so 
 takes one backend at a time — not `--all-features` (see
 [Solver Backend Selection](#solver-backend-selection)). Integration tests exercise
 the binary via `assert_cmd`, organized by subcommand
-(`tests/cli_run.rs`, `tests/cli_validate.rs`, `tests/cli_report.rs`,
+(`tests/cli_run.rs`, `tests/cli_validate.rs`,
 `tests/cli_smoke.rs`). Each verifies exit codes, output, and file creation.
 
 ### Testing cobre-python
@@ -220,6 +230,102 @@ GIL-bound conversion helpers (Python↔JSON value mapping, result dict shapes) a
 covered by the pytest suite rather than Rust unit tests — extend the pytest
 suite when touching them.
 
+### Manual boundary-reduction regression
+
+`policy.boundary` reconciliation has one acceptance criterion that cannot run in CI:
+whether the total cost of a boundary-reconciled truncated study agrees with what the same
+scenarios cost against the full-horizon study it was sliced from. The deck this check needs
+is not in this repository and is not redistributable, so a maintainer runs it by hand
+against a deck of their own. Point `COBRE_BOUNDARY_DECK_ROOT` at a directory holding two
+case directories, `full/` and `reduced/`, where `reduced/config.json` sets
+`policy.boundary.path` to the checkpoint `full/` will produce. A valid deck has all four of
+these properties:
+
+- The reduced case's horizon is a strict prefix of the full case's horizon — sliced to fewer
+  stages, not an independently authored short study.
+- The reduced case's terminal stage `end_date` is the boundary date the reconciliation
+  prices against.
+- At least one thermal's `anticipated_config` (`LeadStages` or `LeadTime`) reaches past the
+  reduced horizon, so the reconciliation folds in an anticipated-family coupling, not just
+  storage state.
+- The reduced case declares `post_study_stages.json`, covering at least the ring depth of
+  its anticipated commitments — the count of simultaneously open commitments the removed
+  stages still need to represent. Without the file, case validation rejects the deck
+  outright: a thermal whose lead reaches past the horizon can never deliver, so nothing
+  loads. With the file present but short of the ring depth, the load succeeds and the
+  zero-dropped-couplings invariant below is what fails; correct the deck before drawing
+  any conclusion from the run.
+
+```bash
+export COBRE_BOUNDARY_DECK_ROOT=/path/to/your/boundary-reduction-deck  # not in this repo
+
+# 1. Train the full-horizon case first — its checkpoint is what the reduced
+#    case's policy.boundary.path reconciles against.
+cobre run "$COBRE_BOUNDARY_DECK_ROOT/full" --output "$COBRE_BOUNDARY_DECK_ROOT/full/output"
+
+# 2. Validate the reduced case: reconciles policy.boundary without solving.
+cobre validate "$COBRE_BOUNDARY_DECK_ROOT/reduced"
+
+# 3. Same check, machine-readable — assert both drop/straddle lists are empty
+#    and print the priced boundary date.
+cobre validate --json "$COBRE_BOUNDARY_DECK_ROOT/reduced" | python3 -c '
+import json, sys
+out = json.load(sys.stdin)
+assert out["configured"] is True, out
+report = out["report"]
+assert report["dropped_source_slots"] == [], report["dropped_source_slots"]
+assert report["straddling_slots"] == [], report["straddling_slots"]
+print("boundary_date:", out["boundary_date"])
+'
+
+# 4. Run the reduced case, then read both runs' mean_cost for comparison.
+cobre run "$COBRE_BOUNDARY_DECK_ROOT/reduced" --output "$COBRE_BOUNDARY_DECK_ROOT/reduced/output"
+for label in full reduced; do
+  python3 -c '
+import json, sys, os
+label = sys.argv[1]
+path = os.path.join(os.environ["COBRE_BOUNDARY_DECK_ROOT"], label, "output/simulation/metadata.json")
+with open(path) as f:
+    meta = json.load(f)
+assert meta["cost"] is not None, f"missing cost block in {label} run"
+cost_mean = meta["cost"]["mean_cost"]
+print(f"{label} mean_cost: {cost_mean}")
+' "$label"
+done
+```
+
+Confirm all four before trusting the run:
+
+- The `boundary policy priced at <date>` line `cobre validate` printed (step 2) equals the
+  reduced case's last stage `end_date`, and the `--json` object's `boundary_date` (step 3)
+  agrees with it.
+- The `--json` report's `dropped_source_slots` and `straddling_slots` are both empty — the
+  same invariant [`crates/cobre-sddp/tests/boundary_horizon_reduction.rs`](crates/cobre-sddp/tests/boundary_horizon_reduction.rs)
+  already covers in CI, restated here as a live-deck spot check.
+- Neither `cobre validate` nor `cobre run` printed a `warning:` line attributed to the
+  boundary load. One there is itself a regression: the reconciliation path only ever
+  records drops in the report or rejects outright under `policy.boundary.strict`; it never
+  warns.
+- The reduced run's total cost (`cost.mean_cost` from the run's
+  `simulation/metadata.json`, step 4) agrees with
+  the full-horizon run's cost restricted to the same stage count: from the full run's
+  `simulation/costs/` output, sum each scenario's `immediate_cost` over the stages the
+  reduced case also covers, add that last included stage's `future_cost`, and average
+  scenario-weighted — that sum is what the reduced run's boundary-priced future cost stands
+  in for.
+
+The automated suite already proves the mechanical half of this: a trained full-horizon
+checkpoint reconciled into a truncated study with zero dropped couplings, both with and
+without a season map. This manual run is the residue — expected-cost fidelity on a deck
+large enough for the comparison to be meaningful — not a re-check of the tallies above.
+
+A pre-change baseline cannot be reconstructed to diff against: the
+`policy.boundary.source_stage` key the previous implementation read was removed and is now
+rejected by `deny_unknown_fields`, and a checkpoint that implementation wrote carries a
+`format_version` that `read_policy_checkpoint` now rejects before parsing any payload. The
+check is forward-only; the off-by-one this work removed has nothing left to reproduce it
+against.
+
 ### Project Structure
 
 ```
@@ -231,7 +337,7 @@ cobre/
 │   ├── cobre-solver/       # LP solver abstraction (HiGHS backend)
 │   ├── cobre-comm/         # Communication abstraction (MPI, local)
 │   ├── cobre-sddp/         # SDDP training loop, simulation, cut management
-│   ├── cobre-cli/          # Binary: run/validate/report/init/schema/summary/version
+│   ├── cobre-cli/          # Binary: run/validate/init/schema/version
 │   ├── cobre-mcp/          # Binary: MCP server for AI agent integration (reserved)
 │   ├── cobre-python/       # cdylib: PyO3 Python bindings
 │   ├── cobre-tui/          # Library: ratatui terminal UI (reserved)
@@ -497,7 +603,10 @@ Before tagging a new release:
    then repeat clippy for the CLP backend:
    `cargo clippy --workspace --all-targets --no-default-features --features clp -- -D warnings`
    (the two backends are mutually exclusive — see [Solver Backend Selection](#solver-backend-selection))
-6. Tag: `git tag v<version>`
+6. If `policy.boundary` reconciliation changed since the last release, run the
+   [Manual boundary-reduction regression](#manual-boundary-reduction-regression) procedure
+   against your own deck before tagging
+7. Tag: `git tag v<version>`
 
 ## License
 

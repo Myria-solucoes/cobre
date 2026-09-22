@@ -1,24 +1,12 @@
 //! Integration tests for the `--color` global flag.
-//!
-//! Each test spawns a subprocess so that `console`'s global
-//! `colors_enabled_stderr` state is completely isolated from the test process.
 
 #![allow(clippy::unwrap_used)]
-
-use std::fs;
-use std::path::Path;
-use std::process::Command;
 
 use assert_cmd::prelude::*;
 use predicates::prelude::*;
 use tempfile::TempDir;
 
-fn cobre() -> Command {
-    Command::new(assert_cmd::cargo::cargo_bin!("cobre"))
-}
-
-// Minimal valid-case fixture, duplicated (not shared) with cli_run.rs to keep
-// this test module self-contained.
+mod common;
 
 const CONFIG_JSON: &str = r#"{
     "training": {
@@ -28,31 +16,6 @@ const CONFIG_JSON: &str = r#"{
         ],
         "scenario_source": { "inflow": { "scheme": "in_sample" }, "seed": 42 }
     }
-}"#;
-
-const PENALTIES_JSON: &str = r#"{
-    "bus": {
-        "deficit_segments": [
-            { "depth_mw": 500.0, "cost": 1000.0 },
-            { "depth_mw": null,  "cost": 5000.0 }
-        ],
-        "excess_cost": 100.0
-    },
-    "line": { "exchange_cost": 2.0 },
-    "hydro": {
-        "spillage_cost": 0.01,
-        "turbined_cost": 0.05,
-        "diversion_cost": 0.1,
-        "storage_violation_below_cost": 10000.0,
-        "filling_target_violation_cost": 50000.0,
-        "turbined_violation_below_cost": 500.0,
-        "outflow_violation_below_cost": 500.0,
-        "outflow_violation_above_cost": 500.0,
-        "generation_violation_below_cost": 1000.0,
-        "evaporation_violation_cost": 5000.0,
-        "water_withdrawal_violation_cost": 1000.0
-    },
-    "non_controllable_source": { "curtailment_cost": 0.005 }
 }"#;
 
 const STAGES_JSON: &str = r#"{
@@ -86,29 +49,17 @@ const LINES_JSON: &str = r#"{ "lines": [] }"#;
 const HYDROS_JSON: &str = r#"{ "hydros": [] }"#;
 const THERMALS_JSON: &str = r#"{ "thermals": [] }"#;
 
-fn write_file(root: &Path, relative: &str, content: &str) {
-    let full = root.join(relative);
-    if let Some(parent) = full.parent() {
-        fs::create_dir_all(parent).unwrap();
-    }
-    fs::write(&full, content).unwrap();
-}
-
 fn make_valid_case(dir: &TempDir) {
     let root = dir.path();
-    write_file(root, "config.json", CONFIG_JSON);
-    write_file(root, "penalties.json", PENALTIES_JSON);
-    write_file(root, "stages.json", STAGES_JSON);
-    write_file(root, "initial_conditions.json", INITIAL_CONDITIONS_JSON);
-    write_file(root, "system/buses.json", BUSES_JSON);
-    write_file(root, "system/lines.json", LINES_JSON);
-    write_file(root, "system/hydros.json", HYDROS_JSON);
-    write_file(root, "system/thermals.json", THERMALS_JSON);
+    common::write_file(root, "config.json", CONFIG_JSON);
+    common::write_file(root, "penalties.json", common::PENALTIES_JSON);
+    common::write_file(root, "stages.json", STAGES_JSON);
+    common::write_file(root, "initial_conditions.json", INITIAL_CONDITIONS_JSON);
+    common::write_file(root, "system/buses.json", BUSES_JSON);
+    common::write_file(root, "system/lines.json", LINES_JSON);
+    common::write_file(root, "system/hydros.json", HYDROS_JSON);
+    common::write_file(root, "system/thermals.json", THERMALS_JSON);
 }
-
-// ------------------------------------------------------------------
-// Tests
-// ------------------------------------------------------------------
 
 #[test]
 fn color_always_flag_forces_ansi_in_banner() {
@@ -116,7 +67,7 @@ fn color_always_flag_forces_ansi_in_banner() {
     make_valid_case(&dir);
     let out = TempDir::new().unwrap();
 
-    cobre()
+    common::cobre()
         .args([
             "run",
             "--color",
@@ -141,7 +92,7 @@ fn color_never_flag_suppresses_ansi_in_banner() {
     make_valid_case(&dir);
     let out = TempDir::new().unwrap();
 
-    cobre()
+    common::cobre()
         .args([
             "run",
             "--color",
@@ -156,14 +107,13 @@ fn color_never_flag_suppresses_ansi_in_banner() {
         .stderr(predicate::str::contains("\x1b[").not());
 }
 
-/// Accepted because the `--color` arg is declared with `global = true`.
 #[test]
 fn color_always_global_flag_before_subcommand_is_accepted() {
     let dir = TempDir::new().unwrap();
     make_valid_case(&dir);
     let out = TempDir::new().unwrap();
 
-    cobre()
+    common::cobre()
         .args([
             "--color",
             "always",

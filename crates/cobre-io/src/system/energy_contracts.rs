@@ -136,9 +136,10 @@ pub(crate) struct RawContractLimits {
 ///
 /// Reads the JSON file, deserializes it through intermediate serde types,
 /// performs post-deserialization validation, then converts to
-/// `Vec<EnergyContract>`. The result is sorted by `id` ascending, so parser output
-/// is deterministic regardless of file row order (declaration-order invariance);
-/// the builder applies the same id as its `(operational_start_date, id)` tiebreak.
+/// `Vec<EnergyContract>`. The result is sorted by `id` ascending, so parser
+/// output is deterministic regardless of file row order (declaration-order
+/// invariance); canonical order is
+/// [`SystemBuilder::build`](cobre_core::SystemBuilder::build)'s to establish.
 ///
 /// # Errors
 ///
@@ -273,15 +274,7 @@ fn convert_contracts(raw: RawContractFile, path: &Path) -> Result<Vec<EnergyCont
 #[allow(clippy::unwrap_used, clippy::panic, clippy::too_many_lines)]
 mod tests {
     use super::*;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-
-    /// Write a string to a temp file and return the file handle (keeps it alive).
-    fn write_json(content: &str) -> NamedTempFile {
-        let mut f = NamedTempFile::new().unwrap();
-        f.write_all(content.as_bytes()).unwrap();
-        f
-    }
+    use crate::test_support::write_json;
 
     // ── AC: valid contracts with import and export types ───────────────────────
 

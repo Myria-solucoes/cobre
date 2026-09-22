@@ -23,15 +23,13 @@ fn apply_contribution_validation(
 
     if let Some(threshold) = max_coeff_magnitude {
         for est in estimates.iter_mut() {
-            let has_explosive = est.coefficients.iter().any(|c| c.abs() > threshold);
-            if has_explosive {
-                let original_order = est.coefficients.len();
+            if est.coefficients.iter().any(|c| c.abs() > threshold) {
                 all_reductions
                     .entry(est.hydro_id)
                     .or_default()
                     .push(ContributionReduction {
                         season_id: est.season_id,
-                        original_order,
+                        original_order: est.coefficients.len(),
                         reduced_order: 0,
                         contributions: Vec::new(),
                         reason: ReductionReason::MagnitudeBound,
@@ -43,13 +41,12 @@ fn apply_contribution_validation(
 
     for est in estimates.iter_mut() {
         if has_negative_phi1(&est.coefficients) {
-            let original_order = est.coefficients.len();
             all_reductions
                 .entry(est.hydro_id)
                 .or_default()
                 .push(ContributionReduction {
                     season_id: est.season_id,
-                    original_order,
+                    original_order: est.coefficients.len(),
                     reduced_order: 0,
                     contributions: Vec::new(),
                     reason: ReductionReason::Phi1Negative,
@@ -299,8 +296,6 @@ fn make_monthly_stages_for_annual(n_years: usize) -> Vec<Stage> {
 }
 
 /// Build `n_years * 12` synthetic monthly observations for `hydro_id`.
-///
-/// Formula: `z[year*12 + month] = base + (month+1) * scale + year * drift`.
 fn synthetic_monthly_obs(
     hydro_id: EntityId,
     n_years: usize,
@@ -390,7 +385,6 @@ fn test_apply_contribution_validation_reduces_explosive() {
     }];
     let stats_map: HashMap<(EntityId, usize), &SeasonalStats> =
         stats.iter().map(|s| ((s.entity_id, 0_usize), s)).collect();
-    // At order 1, residual is sqrt(0.81) ~= 0.9
 
     let reductions = apply_contribution_validation(
         &mut estimates,
@@ -1023,16 +1017,12 @@ fn iterative_pacf_reduction_stable_par2_not_spuriously_reduced() {
 
     let mean_s0 = obs_s0.iter().sum::<f64>() / obs_s0.len() as f64;
     let mean_s1 = obs_s1.iter().sum::<f64>() / obs_s1.len() as f64;
-    let std_s0 = {
-        let v =
-            obs_s0.iter().map(|x| (x - mean_s0).powi(2)).sum::<f64>() / (obs_s0.len() - 1) as f64;
-        v.sqrt()
-    };
-    let std_s1 = {
-        let v =
-            obs_s1.iter().map(|x| (x - mean_s1).powi(2)).sum::<f64>() / (obs_s1.len() - 1) as f64;
-        v.sqrt()
-    };
+    let std_s0 = (obs_s0.iter().map(|x| (x - mean_s0).powi(2)).sum::<f64>()
+        / (obs_s0.len() - 1) as f64)
+        .sqrt();
+    let std_s1 = (obs_s1.iter().map(|x| (x - mean_s1).powi(2)).sum::<f64>()
+        / (obs_s1.len() - 1) as f64)
+        .sqrt();
 
     let stats_storage = vec![
         SeasonalStats {
@@ -1182,7 +1172,7 @@ fn roundtrip_estimation_two_season_par2_recovers_coefficients() {
         make_two_season_stage(1, 1, 1, ref_year, false),
     ];
 
-    // Build seasonal stats (Bessel-corrected std to match estimate_seasonal_stats).
+    // Build seasonal stats (Bessel-corrected std to match estimate_seasonal_stats_with_season_map).
     let n_f = n_years as f64;
     let mu0 = obs_s0.iter().sum::<f64>() / n_f;
     let mu1 = obs_s1.iter().sum::<f64>() / n_f;
@@ -1278,11 +1268,6 @@ fn roundtrip_estimation_two_season_par2_recovers_coefficients() {
 /// 30 years of synthetic monthly data (360 observations per hydro) gives
 /// enough rolling-window samples for `estimate_annual_seasonal_stats` to
 /// succeed and for the extended YW system to be well-conditioned.
-///
-/// Asserts:
-/// - 24 estimates returned (2 hydros × 12 seasons).
-/// - Every `estimate.annual.is_some()`.
-/// - Every `estimate.annual.as_ref().unwrap().std_m3s > 0.0`.
 #[test]
 fn estimate_ar_with_pacf_annual_two_hydros_twelve_seasons() {
     let h1 = EntityId(1);
@@ -1493,5 +1478,127 @@ fn ar_fit_is_thread_count_invariant() {
     // Compare every pool size against the single-thread baseline.
     for (estimates_n, &n) in outputs.iter().zip(&thread_counts).skip(1) {
         assert_bit_identical(&outputs[0], estimates_n, thread_counts[0], n);
+    }
+}
+
+/// The annual-path per-hydro initial fit in `estimate_ar_with_pacf_annual` is a
+/// `par_iter().flat_map_iter().collect()`, so (a) its output order must not
+/// depend on the rayon pool size for a fixed `hydro_ids` order, and (b) its
+/// per-hydro values must not depend on the order `hydro_ids` is declared in.
+/// This gate runs the annual PACF dispatch over a three-hydro, twelve-season
+/// fixture under pools of 1, 2, and 4 threads (unsorted comparison — a
+/// regression that collected via a shared `Mutex<Vec>` would reorder the
+/// stream and fail here) and again with a shuffled `hydro_ids` order compared
+/// as a `(hydro_id, season_id)`-sorted set (a regression that let one hydro's
+/// closure observe another's state would change values, not just order, and
+/// fail here too).
+#[test]
+fn annual_ar_fit_is_thread_count_and_declaration_order_invariant() {
+    let h1 = EntityId(1);
+    let h2 = EntityId(2);
+    let h3 = EntityId(3);
+    let n_years = 30;
+    let stages = make_monthly_stages_for_annual(n_years);
+
+    let mut obs = synthetic_monthly_obs(h1, n_years, 100.0, 5.0, 1.0);
+    obs.extend(synthetic_monthly_obs(h2, n_years, 200.0, 3.0, 0.5));
+    obs.extend(synthetic_monthly_obs(h3, n_years, 150.0, 4.0, 0.8));
+
+    let seasonal_stats = {
+        use crate::par::fitting::estimate_seasonal_stats_with_season_map;
+        estimate_seasonal_stats_with_season_map(&obs, &stages, &[h1, h2, h3], None).unwrap()
+    };
+
+    let fit = |hydro_ids: &[EntityId], n_threads: usize| -> Vec<ArCoefficientEstimate> {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(n_threads)
+            .build()
+            .expect("rayon pool must build")
+            .install(|| {
+                let (estimates, _report) = estimate_ar_with_pacf_annual(
+                    &obs,
+                    &seasonal_stats,
+                    &stages,
+                    hydro_ids,
+                    3,    // max_order
+                    None, // season_map
+                    None, // max_coeff_magnitude
+                )
+                .expect("estimate_ar_with_pacf_annual must succeed with 30 years of data");
+                estimates
+            })
+    };
+
+    let assert_bit_identical =
+        |label: &str, a: &[ArCoefficientEstimate], b: &[ArCoefficientEstimate]| {
+            assert_eq!(a.len(), b.len(), "{label}: estimate count mismatch");
+            for (ea, eb) in a.iter().zip(b) {
+                assert_eq!(ea.hydro_id, eb.hydro_id, "{label}: hydro_id mismatch");
+                assert_eq!(ea.season_id, eb.season_id, "{label}: season_id mismatch");
+                assert_eq!(
+                    ea.coefficients.len(),
+                    eb.coefficients.len(),
+                    "{label}: coefficient length mismatch"
+                );
+                for (ca, cb) in ea.coefficients.iter().zip(&eb.coefficients) {
+                    assert_eq!(
+                        ca.to_bits(),
+                        cb.to_bits(),
+                        "{label}: coefficient must be bit-identical"
+                    );
+                }
+                match (&ea.annual, &eb.annual) {
+                    (Some(aa), Some(ab)) => {
+                        assert_eq!(
+                            aa.coefficient.to_bits(),
+                            ab.coefficient.to_bits(),
+                            "{label}: annual.coefficient must be bit-identical"
+                        );
+                        assert_eq!(
+                            aa.mean_m3s.to_bits(),
+                            ab.mean_m3s.to_bits(),
+                            "{label}: annual.mean_m3s must be bit-identical"
+                        );
+                        assert_eq!(
+                            aa.std_m3s.to_bits(),
+                            ab.std_m3s.to_bits(),
+                            "{label}: annual.std_m3s must be bit-identical"
+                        );
+                    }
+                    (None, None) => {}
+                    _ => panic!("{label}: annual Some/None mismatch"),
+                }
+            }
+        };
+
+    let canonical = [h1, h2, h3];
+    let baseline = fit(&canonical, 1);
+    assert!(
+        baseline.iter().any(|e| !e.coefficients.is_empty()),
+        "the fixture must fit at least one non-empty coefficient vector"
+    );
+
+    // (a) Thread-count invariance at a fixed `hydro_ids` order: same order, no sort.
+    for &n in &[2usize, 4] {
+        assert_bit_identical(
+            &format!("{n}-thread pool vs 1-thread baseline"),
+            &baseline,
+            &fit(&canonical, n),
+        );
+    }
+
+    // (b) Declaration-order invariance: a shuffled `hydro_ids` legitimately
+    // reassembles in the new canonical order, so compare as sorted sets.
+    let shuffled = [h3, h1, h2];
+    let mut baseline_sorted = baseline.clone();
+    baseline_sorted.sort_by_key(|e| (e.hydro_id, e.season_id));
+    for &n in &[1usize, 4] {
+        let mut shuffled_out = fit(&shuffled, n);
+        shuffled_out.sort_by_key(|e| (e.hydro_id, e.season_id));
+        assert_bit_identical(
+            &format!("shuffled hydro_ids order, {n}-thread pool"),
+            &baseline_sorted,
+            &shuffled_out,
+        );
     }
 }

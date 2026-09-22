@@ -31,6 +31,6 @@ pub use group_bounds::{
     HydroUnitGroupBoundsCountsSpec, HydroUnitGroupOverride, ResolvedHydroUnitGroupBounds,
 };
 pub use penalties::{
-    BusStagePenalties, HydroStagePenalties, LineStagePenalties, NcsStagePenalties,
-    PenaltiesCountsSpec, PenaltiesDefaults, ResolvedPenalties,
+    BusStagePenalties, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
+    PenaltiesDefaults, ResolvedPenalties,
 };

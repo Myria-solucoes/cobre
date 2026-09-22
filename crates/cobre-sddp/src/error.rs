@@ -65,30 +65,6 @@ pub enum SddpError {
     #[error("simulation error: {0}")]
     Simulation(String),
 
-    /// A pinned anticipated commitment lies outside the delivery stage's
-    /// generation bounds by more than solver-tolerance drift, so it is a
-    /// modelling error rather than a numerical artifact. See the
-    /// `commitment_reconcile` module in the LP builder.
-    #[error(
-        "anticipated commitment {commitment} MW for thermal {thermal_index} at stage {stage} \
-         block {block} lies {drift} MW outside its delivery generation bound {bound} — beyond \
-         the solver-drift margin, so this is a genuine over-commitment, not numerical drift"
-    )]
-    AnticipatedCommitmentOutOfBounds {
-        /// Delivery stage index (0-based).
-        stage: usize,
-        /// Position in `system.thermals[]`.
-        thermal_index: usize,
-        /// Block whose generation column the commitment crossed.
-        block: usize,
-        /// The pinned commitment, in MW.
-        commitment: f64,
-        /// The enforced generation bound it crossed, in MW.
-        bound: f64,
-        /// Distance past `bound`, in MW.
-        drift: f64,
-    },
-
     /// A reconstructed warm-start basis has fewer basic variables than the LP
     /// has rows, proving the stored basis was captured against a different LP
     /// shape. See
@@ -128,6 +104,9 @@ impl From<EstimationError> for SddpError {
         match err {
             EstimationError::Load(load_err) => Self::Io(load_err),
             EstimationError::Stochastic(stoch_err) => Self::Stochastic(stoch_err),
+            EstimationError::Validation(validation_err) => {
+                Self::Validation(validation_err.to_string())
+            }
         }
     }
 }
@@ -238,8 +217,8 @@ mod tests {
 
     #[test]
     fn from_stochastic_error() {
-        let inner = StochasticError::SeedDerivationError {
-            reason: "hash overflow".to_string(),
+        let inner = StochasticError::InsufficientData {
+            context: "hydro 7 has only 2 observations".to_string(),
         };
         let err: SddpError = inner.into();
         assert!(matches!(err, SddpError::Stochastic(_)));

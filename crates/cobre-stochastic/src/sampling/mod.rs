@@ -19,6 +19,7 @@ mod eta_inversion;
 pub mod external;
 pub mod historical;
 pub mod insample;
+pub mod tables;
 pub mod window;
 
 pub use class_sampler::{ClassSampleRequest, ClassSampler, select_transition_child};
@@ -30,14 +31,18 @@ pub use external::{
 pub use historical::{
     HistoricalScenarioLibrary, standardize_historical_windows, validate_historical_library,
 };
+pub use tables::{ClassNoiseTables, ForwardNoiseTables, NoiseTable};
 pub use window::discover_historical_windows;
 pub(crate) mod out_of_sample;
 
-use cobre_core::{EntityId, scenario::SamplingScheme, temporal::NoiseMethod, temporal::Stage};
+use cobre_core::{scenario::SamplingScheme, temporal::NoiseMethod, temporal::Stage};
 
+use crate::noise::seed::derive_class_forward_seed;
 use crate::{
-    OpeningTreeView, StochasticError, context::StochasticContext,
-    correlation::resolve::DecomposedCorrelation, tree::generate::ClassDimensions,
+    OpeningTreeView, StochasticError,
+    context::StochasticContext,
+    correlation::resolve::{DecomposedCorrelation, EntityClass},
+    tree::generate::ClassDimensions,
 };
 
 // ---------------------------------------------------------------------------
@@ -63,22 +68,6 @@ impl<'b> ForwardNoise<'b> {
 }
 
 // ---------------------------------------------------------------------------
-// CorrelationRef
-// ---------------------------------------------------------------------------
-
-/// Pre-decomposed correlation matrix and entity ordering for one entity class.
-///
-/// Present (`Some`) only for `OutOfSample` samplers. `InSample`, `Historical`,
-/// and `External` samplers produce pre-correlated noise and must not apply it again.
-#[derive(Debug)]
-pub struct CorrelationRef<'a> {
-    /// Pre-decomposed spectral factors for this entity class.
-    pub decomposed: &'a DecomposedCorrelation,
-    /// Canonical entity ID ordering for the class segment.
-    pub entity_order: &'a [EntityId],
-}
-
-// ---------------------------------------------------------------------------
 // ForwardSampler
 // ---------------------------------------------------------------------------
 
@@ -97,24 +86,20 @@ pub struct ForwardSampler<'a> {
     ncs: ClassSampler<'a>,
     /// Per-class entity counts that define the buffer split.
     dims: ClassDimensions,
-    /// Correlation ref for the inflow class.
-    inflow_correlation: Option<CorrelationRef<'a>>,
-    /// Correlation ref for the load class.
-    load_correlation: Option<CorrelationRef<'a>>,
-    /// Correlation ref for the NCS class.
-    ncs_correlation: Option<CorrelationRef<'a>>,
+    inflow_correlation: Option<&'a DecomposedCorrelation>,
+    load_correlation: Option<&'a DecomposedCorrelation>,
+    ncs_correlation: Option<&'a DecomposedCorrelation>,
 }
 
 impl<'a> ForwardSampler<'a> {
-    /// Construct a [`ForwardSampler`] from its constituent parts.
     pub(crate) fn new(
         inflow: ClassSampler<'a>,
         load: ClassSampler<'a>,
         ncs: ClassSampler<'a>,
         dims: ClassDimensions,
-        inflow_correlation: Option<CorrelationRef<'a>>,
-        load_correlation: Option<CorrelationRef<'a>>,
-        ncs_correlation: Option<CorrelationRef<'a>>,
+        inflow_correlation: Option<&'a DecomposedCorrelation>,
+        load_correlation: Option<&'a DecomposedCorrelation>,
+        ncs_correlation: Option<&'a DecomposedCorrelation>,
     ) -> Self {
         Self {
             inflow,
@@ -128,7 +113,7 @@ impl<'a> ForwardSampler<'a> {
     }
 }
 
-impl std::fmt::Debug for ForwardSampler<'_> {
+impl fmt::Debug for ForwardSampler<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ForwardSampler")
             .field("dims", &self.dims)
@@ -152,8 +137,11 @@ pub struct SampleRequest<'b> {
     pub stage_idx: usize,
     /// Caller-owned buffer for fresh noise output.
     pub noise_buf: &'b mut [f64],
-    /// Caller-owned scratch for LHS permutation generation.
-    pub perm_scratch: &'b mut [usize],
+    /// Caller-owned gather/correlate scratch for wide correlation groups.
+    pub corr_scratch: &'b mut [f64],
+    /// Per-iteration scenario-invariant tables the driver owns, rebuilt once
+    /// via [`ForwardSampler::rebuild_noise_tables`].
+    pub tables: &'b ForwardNoiseTables,
     /// Total scenario count across all ranks (for LHS stratification).
     pub total_scenarios: u32,
     /// Seed-derivation identifier: stages sharing a `(season_id, year)` bucket
@@ -190,8 +178,6 @@ impl ForwardSampler<'_> {
     ///
     /// # Errors
     ///
-    /// - [`StochasticError::DimensionExceedsCapacity`] — when any `OutOfSample`
-    ///   class uses `QmcSobol` and `dim > MAX_SOBOL_DIM`.
     /// - [`StochasticError::InsufficientData`] — when `stage_idx` is out of
     ///   bounds for any per-stage noise methods.
     //
@@ -216,41 +202,121 @@ impl ForwardSampler<'_> {
             pinned_scenario: req.pinned_scenario,
         };
 
-        self.inflow.fill(&class_req, inflow_buf, req.perm_scratch)?;
-        self.load.fill(&class_req, load_buf, req.perm_scratch)?;
-        self.ncs.fill(&class_req, ncs_buf, req.perm_scratch)?;
+        self.inflow
+            .fill(&class_req, req.tables.inflow(), inflow_buf)?;
+        self.load.fill(&class_req, req.tables.load(), load_buf)?;
+        self.ncs.fill(&class_req, req.tables.ncs(), ncs_buf)?;
 
-        // Correlation is applied only where a ref is set (OutOfSample); applying
-        // it to a pre-correlated source would double-correlate.
-        #[allow(clippy::cast_possible_wrap)]
-        if let Some(ref corr) = self.inflow_correlation {
-            corr.decomposed.apply_correlation_for_class(
-                req.stage as i32,
-                inflow_buf,
-                corr.entity_order,
-                "inflow",
-            );
-        }
-        #[allow(clippy::cast_possible_wrap)]
-        if let Some(ref corr) = self.load_correlation {
-            corr.decomposed.apply_correlation_for_class(
-                req.stage as i32,
-                load_buf,
-                corr.entity_order,
-                "load",
-            );
-        }
-        #[allow(clippy::cast_possible_wrap)]
-        if let Some(ref corr) = self.ncs_correlation {
-            corr.decomposed.apply_correlation_for_class(
-                req.stage as i32,
-                ncs_buf,
-                corr.entity_order,
-                "ncs",
-            );
+        // Applied only per class whose correlation ref is set — a pre-correlated
+        // source would double-correlate otherwise. All three fields hold the same
+        // reference when present, so the profile lookup happens once per draw.
+        if let Some(correlation) = self
+            .inflow_correlation
+            .or(self.load_correlation)
+            .or(self.ncs_correlation)
+        {
+            #[allow(clippy::cast_possible_wrap)]
+            let groups = correlation.groups_for_stage(req.stage as i32);
+            if self.inflow_correlation.is_some() {
+                DecomposedCorrelation::apply_groups_for_class(
+                    groups,
+                    EntityClass::Inflow,
+                    inflow_buf,
+                    req.corr_scratch,
+                );
+            }
+            if self.load_correlation.is_some() {
+                DecomposedCorrelation::apply_groups_for_class(
+                    groups,
+                    EntityClass::Load,
+                    load_buf,
+                    req.corr_scratch,
+                );
+            }
+            if self.ncs_correlation.is_some() {
+                DecomposedCorrelation::apply_groups_for_class(
+                    groups,
+                    EntityClass::Ncs,
+                    ncs_buf,
+                    req.corr_scratch,
+                );
+            }
         }
 
         Ok(ForwardNoise::new(&req.noise_buf[..total_dim]))
+    }
+
+    /// Rebuild every scenario-invariant table in `out` for one training
+    /// iteration's `(iteration, total_scenarios, noise_group_ids)`, reusing
+    /// its buffer capacity across iterations. A class not sampled out of
+    /// sample is cleared, and its `table_at` calls return `None`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StochasticError::DimensionExceedsCapacity`] when an
+    /// `OutOfSample` class uses `QmcSobol` with `dim > MAX_SOBOL_DIM`.
+    pub fn rebuild_noise_tables(
+        &self,
+        iteration: u32,
+        total_scenarios: u32,
+        noise_group_ids: &[u32],
+        out: &mut ForwardNoiseTables,
+    ) -> Result<(), StochasticError> {
+        rebuild_class_tables(
+            &self.inflow,
+            iteration,
+            total_scenarios,
+            noise_group_ids,
+            &mut out.inflow,
+        )?;
+        rebuild_class_tables(
+            &self.load,
+            iteration,
+            total_scenarios,
+            noise_group_ids,
+            &mut out.load,
+        )?;
+        rebuild_class_tables(
+            &self.ncs,
+            iteration,
+            total_scenarios,
+            noise_group_ids,
+            &mut out.ncs,
+        )?;
+        Ok(())
+    }
+}
+
+/// Refill one class's noise tables from its [`ClassSampler`], clearing them
+/// when the class is not sampled out of sample.
+///
+/// # Errors
+///
+/// Propagates [`ClassNoiseTables::refill`]'s error.
+fn rebuild_class_tables(
+    sampler: &ClassSampler<'_>,
+    iteration: u32,
+    total_scenarios: u32,
+    noise_group_ids: &[u32],
+    out: &mut ClassNoiseTables,
+) -> Result<(), StochasticError> {
+    if let ClassSampler::OutOfSample {
+        forward_seed,
+        dim,
+        noise_methods,
+    } = sampler
+    {
+        out.refill(
+            *forward_seed,
+            *dim,
+            iteration,
+            total_scenarios,
+            noise_group_ids,
+            noise_methods,
+        )
+    } else {
+        out.clear();
+        Ok(())
     }
 }
 
@@ -270,21 +336,17 @@ pub struct ForwardSamplerConfig<'a> {
     pub stages: &'a [Stage],
     /// Per-class entity counts for noise buffer splitting.
     pub dims: ClassDimensions,
-    /// Pre-standardized historical inflow windows library.
-    ///
-    /// Required when `class_schemes.inflow == Some(Historical)`.
+    /// Pre-standardized historical inflow windows library, required when
+    /// `class_schemes.inflow == Some(Historical)`.
     pub historical_library: Option<&'a HistoricalScenarioLibrary>,
-    /// Pre-standardized external inflow scenario library.
-    ///
-    /// Required when `class_schemes.inflow == Some(External)`.
+    /// Pre-standardized external inflow scenario library, required when
+    /// `class_schemes.inflow == Some(External)`.
     pub external_inflow_library: Option<&'a ExternalScenarioLibrary>,
-    /// Pre-standardized external load scenario library.
-    ///
-    /// Required when `class_schemes.load == Some(External)`.
+    /// Pre-standardized external load scenario library, required when
+    /// `class_schemes.load == Some(External)`.
     pub external_load_library: Option<&'a ExternalScenarioLibrary>,
-    /// Pre-standardized external NCS scenario library.
-    ///
-    /// Required when `class_schemes.ncs == Some(External)`.
+    /// Pre-standardized external NCS scenario library, required when
+    /// `class_schemes.ncs == Some(External)`.
     pub external_ncs_library: Option<&'a ExternalScenarioLibrary>,
 }
 
@@ -292,45 +354,55 @@ pub struct ForwardSamplerConfig<'a> {
 // Factory
 // ---------------------------------------------------------------------------
 
+/// Resolved scenario source for the inflow class — the only class allowed to
+/// replay historical windows.
+enum InflowSource<'a> {
+    InSample,
+    OutOfSample,
+    Historical(&'a HistoricalScenarioLibrary),
+    External(&'a ExternalScenarioLibrary),
+}
+
+/// Resolved scenario source for the load and NCS classes. Historical replay
+/// is inflow-only, so this set carries no `Historical` variant.
+enum ClassSource<'a> {
+    InSample,
+    OutOfSample,
+    External(&'a ExternalScenarioLibrary),
+}
+
 /// Inputs to [`build_class_sampler`] for one entity class.
 struct ClassSamplerParams<'a, 'b> {
-    class_name: &'b str,
-    scheme: SamplingScheme,
+    source: ClassSource<'a>,
     offset: usize,
     len: usize,
     forward_seed: Option<u64>,
     noise_methods: &'b [NoiseMethod],
     tree: Option<OpeningTreeView<'a>>,
     base_seed: u64,
-    historical_library: Option<&'a HistoricalScenarioLibrary>,
-    external_library: Option<&'a ExternalScenarioLibrary>,
 }
 
-/// Build a [`ClassSampler`] for one entity class. `class_name` is used only in
-/// error messages.
+/// Build a [`ClassSampler`] for one entity class from its resolved
+/// [`ClassSource`].
 ///
 /// # Errors
 ///
-/// Returns [`StochasticError::MissingScenarioSource`] when `OutOfSample` lacks a
-/// `forward_seed`, when `Historical`/`External` lacks its library, or when
-/// `Historical` is requested for a class other than `"inflow"`.
+/// Returns [`StochasticError::MissingScenarioSource`] when `InSample` lacks
+/// an opening tree or `OutOfSample` lacks a `forward_seed`.
 fn build_class_sampler<'a>(
     p: ClassSamplerParams<'a, '_>,
 ) -> Result<ClassSampler<'a>, StochasticError> {
     let ClassSamplerParams {
-        class_name,
-        scheme,
+        source,
         offset,
         len,
         forward_seed,
         noise_methods,
         tree,
         base_seed,
-        historical_library,
-        external_library,
     } = p;
-    match scheme {
-        SamplingScheme::InSample => {
+    match source {
+        ClassSource::InSample => {
             let tree = tree.ok_or_else(|| StochasticError::MissingScenarioSource {
                 scheme: "in_sample".to_string(),
                 reason: "opening tree not available for InSample class sampler".to_string(),
@@ -342,7 +414,7 @@ fn build_class_sampler<'a>(
                 len,
             })
         }
-        SamplingScheme::OutOfSample => {
+        ClassSource::OutOfSample => {
             let forward_seed =
                 forward_seed.ok_or_else(|| StochasticError::MissingScenarioSource {
                     scheme: "out_of_sample".to_string(),
@@ -356,16 +428,26 @@ fn build_class_sampler<'a>(
                 noise_methods: noise_methods.into(),
             })
         }
+        ClassSource::External(library) => Ok(ClassSampler::External { library }),
+    }
+}
+
+/// Resolve the inflow class's sampling scheme against the historical and
+/// external inflow libraries into an [`InflowSource`].
+///
+/// # Errors
+///
+/// Returns [`StochasticError::MissingScenarioSource`] when `Historical` or
+/// `External` is selected but its library was not loaded.
+fn resolve_inflow_source<'a>(
+    scheme: SamplingScheme,
+    historical_library: Option<&'a HistoricalScenarioLibrary>,
+    external_library: Option<&'a ExternalScenarioLibrary>,
+) -> Result<InflowSource<'a>, StochasticError> {
+    match scheme {
+        SamplingScheme::InSample => Ok(InflowSource::InSample),
+        SamplingScheme::OutOfSample => Ok(InflowSource::OutOfSample),
         SamplingScheme::Historical => {
-            if class_name != "inflow" {
-                return Err(StochasticError::MissingScenarioSource {
-                    scheme: format!("historical_{class_name}"),
-                    reason: format!(
-                        "historical replay is only supported for the inflow class; \
-                         requested for class '{class_name}'"
-                    ),
-                });
-            }
             let library =
                 historical_library.ok_or_else(|| StochasticError::MissingScenarioSource {
                     scheme: "historical".to_string(),
@@ -373,20 +455,114 @@ fn build_class_sampler<'a>(
                              was loaded; provide historical_windows in the study config"
                         .to_string(),
                 })?;
-            Ok(ClassSampler::Historical { library })
+            Ok(InflowSource::Historical(library))
         }
         SamplingScheme::External => {
             let library =
                 external_library.ok_or_else(|| StochasticError::MissingScenarioSource {
-                    scheme: format!("external_{class_name}"),
+                    scheme: format!("external_{}", EntityClass::Inflow.as_str()),
                     reason: format!(
-                        "external scenario scheme selected for class '{class_name}' but no \
-                     external library was loaded; provide the external scenario file"
+                        "external scenario scheme selected for class '{}' but no \
+                     external library was loaded; provide the external scenario file",
+                        EntityClass::Inflow.as_str()
                     ),
                 })?;
-            Ok(ClassSampler::External { library })
+            Ok(InflowSource::External(library))
         }
     }
+}
+
+/// Resolve a non-inflow class's sampling scheme against its external library
+/// into a [`ClassSource`]. `ClassSource` carries no `Historical` variant, so
+/// selecting `Historical` here always errors.
+///
+/// # Errors
+///
+/// Returns [`StochasticError::MissingScenarioSource`] when `Historical` is
+/// selected (unsupported outside inflow) or `External` names no loaded
+/// library.
+fn resolve_class_source(
+    scheme: SamplingScheme,
+    class: EntityClass,
+    external_library: Option<&ExternalScenarioLibrary>,
+) -> Result<ClassSource<'_>, StochasticError> {
+    match scheme {
+        SamplingScheme::InSample => Ok(ClassSource::InSample),
+        SamplingScheme::OutOfSample => Ok(ClassSource::OutOfSample),
+        SamplingScheme::Historical => Err(StochasticError::MissingScenarioSource {
+            scheme: format!("historical_{}", class.as_str()),
+            reason: format!(
+                "historical replay is only supported for the inflow class; \
+                 requested for class '{}'",
+                class.as_str()
+            ),
+        }),
+        SamplingScheme::External => {
+            let library =
+                external_library.ok_or_else(|| StochasticError::MissingScenarioSource {
+                    scheme: format!("external_{}", class.as_str()),
+                    reason: format!(
+                        "external scenario scheme selected for class '{}' but no \
+                     external library was loaded; provide the external scenario file",
+                        class.as_str()
+                    ),
+                })?;
+            Ok(ClassSource::External(library))
+        }
+    }
+}
+
+/// Emits at most one `tracing::warn!` naming `class` and every stage id whose
+/// `noise_method` is `Selective` or `HistoricalResiduals` — methods
+/// `fill_uncorrelated` does not implement and instead falls back to SAA.
+/// Skips a class whose resolved `scheme` never reaches `fill_uncorrelated`.
+fn warn_unsupported_forward_noise_methods(
+    class: EntityClass,
+    scheme: SamplingScheme,
+    stages: &[Stage],
+    noise_methods: &[NoiseMethod],
+) {
+    if scheme != SamplingScheme::OutOfSample {
+        return;
+    }
+    let unsupported: Vec<(i32, NoiseMethod)> = stages
+        .iter()
+        .zip(noise_methods)
+        .filter_map(|(stage, &method)| {
+            matches!(
+                method,
+                NoiseMethod::Selective | NoiseMethod::HistoricalResiduals
+            )
+            .then_some((stage.id, method))
+        })
+        .collect();
+    if unsupported.is_empty() {
+        return;
+    }
+
+    let stage_ids: Vec<i32> = unsupported.iter().map(|&(id, _)| id).collect();
+    let mut methods: Vec<&'static str> = Vec::new();
+    if unsupported
+        .iter()
+        .any(|&(_, method)| method == NoiseMethod::Selective)
+    {
+        methods.push("selective");
+    }
+    if unsupported
+        .iter()
+        .any(|&(_, method)| method == NoiseMethod::HistoricalResiduals)
+    {
+        methods.push("historical_residuals");
+    }
+    let methods = methods.join(" or ");
+    let class_str = class.as_str();
+    let count = stage_ids.len();
+
+    tracing::warn!(
+        "class '{class_str}' has {count} out-of-sample forward stage(s) selecting \
+         {methods} noise, not implemented in the forward pass; falling back to the \
+         sample-average method for stage id(s) {stage_ids:?}"
+    );
 }
 
 /// Build a composite [`ForwardSampler`] from a [`ForwardSamplerConfig`].
@@ -418,7 +594,13 @@ pub fn build_forward_sampler(
     let load_scheme = class_schemes.load.unwrap_or(SamplingScheme::InSample);
     let ncs_scheme = class_schemes.ncs.unwrap_or(SamplingScheme::InSample);
 
-    let forward_seed = ctx.forward_seed();
+    // Inflow keeps the root seed: deriving it too would change every shipped
+    // inflow-only deck.
+    let inflow_forward_seed = ctx.forward_seed();
+    let load_forward_seed =
+        inflow_forward_seed.map(|s| derive_class_forward_seed(s, EntityClass::Load));
+    let ncs_forward_seed =
+        inflow_forward_seed.map(|s| derive_class_forward_seed(s, EntityClass::Ncs));
     let base_seed = ctx.base_seed();
 
     let noise_methods: Box<[NoiseMethod]> = stages
@@ -426,78 +608,62 @@ pub fn build_forward_sampler(
         .map(|s| s.scenario_config.noise_method)
         .collect();
 
-    let entity_order = ctx.entity_order();
-    let inflow_order = &entity_order[..dims.n_hydros];
-    let load_order = &entity_order[dims.n_hydros..dims.n_hydros + dims.n_load_buses];
-    let ncs_order = &entity_order[dims.n_hydros + dims.n_load_buses..];
-
     let correlation = ctx.correlation();
 
-    let inflow = build_class_sampler(ClassSamplerParams {
-        class_name: "inflow",
-        scheme: inflow_scheme,
-        offset: 0,
-        len: dims.n_hydros,
-        forward_seed,
-        noise_methods: &noise_methods,
-        tree: Some(ctx.tree_view()),
-        base_seed,
-        historical_library,
-        external_library: external_inflow_library,
-    })?;
+    warn_unsupported_forward_noise_methods(
+        EntityClass::Inflow,
+        inflow_scheme,
+        stages,
+        &noise_methods,
+    );
+    let build_inflow = |source| {
+        build_class_sampler(ClassSamplerParams {
+            source,
+            offset: 0,
+            len: dims.n_hydros,
+            forward_seed: inflow_forward_seed,
+            noise_methods: &noise_methods,
+            tree: Some(ctx.tree_view()),
+            base_seed,
+        })
+    };
+    let inflow =
+        match resolve_inflow_source(inflow_scheme, historical_library, external_inflow_library)? {
+            InflowSource::Historical(library) => ClassSampler::Historical { library },
+            InflowSource::InSample => build_inflow(ClassSource::InSample)?,
+            InflowSource::OutOfSample => build_inflow(ClassSource::OutOfSample)?,
+            InflowSource::External(library) => build_inflow(ClassSource::External(library))?,
+        };
 
+    warn_unsupported_forward_noise_methods(EntityClass::Load, load_scheme, stages, &noise_methods);
     let load = build_class_sampler(ClassSamplerParams {
-        class_name: "load",
-        scheme: load_scheme,
+        source: resolve_class_source(load_scheme, EntityClass::Load, external_load_library)?,
         offset: dims.n_hydros,
         len: dims.n_load_buses,
-        forward_seed,
+        forward_seed: load_forward_seed,
         noise_methods: &noise_methods,
         tree: Some(ctx.tree_view()),
         base_seed,
-        historical_library: None,
-        external_library: external_load_library,
     })?;
 
+    warn_unsupported_forward_noise_methods(EntityClass::Ncs, ncs_scheme, stages, &noise_methods);
     let ncs = build_class_sampler(ClassSamplerParams {
-        class_name: "ncs",
-        scheme: ncs_scheme,
+        source: resolve_class_source(ncs_scheme, EntityClass::Ncs, external_ncs_library)?,
         offset: dims.n_hydros + dims.n_load_buses,
         len: dims.n_ncs,
-        forward_seed,
+        forward_seed: ncs_forward_seed,
         noise_methods: &noise_methods,
         tree: Some(ctx.tree_view()),
         base_seed,
-        historical_library: None,
-        external_library: external_ncs_library,
     })?;
 
     // Correlation refs are set only for OutOfSample; pre-correlated sources must
     // not be correlated again.
-    let inflow_correlation = if matches!(inflow_scheme, SamplingScheme::OutOfSample) {
-        Some(CorrelationRef {
-            decomposed: correlation,
-            entity_order: inflow_order,
-        })
-    } else {
-        None
-    };
-    let load_correlation = if matches!(load_scheme, SamplingScheme::OutOfSample) {
-        Some(CorrelationRef {
-            decomposed: correlation,
-            entity_order: load_order,
-        })
-    } else {
-        None
-    };
-    let ncs_correlation = if matches!(ncs_scheme, SamplingScheme::OutOfSample) {
-        Some(CorrelationRef {
-            decomposed: correlation,
-            entity_order: ncs_order,
-        })
-    } else {
-        None
-    };
+    let inflow_correlation =
+        matches!(inflow_scheme, SamplingScheme::OutOfSample).then_some(correlation);
+    let load_correlation =
+        matches!(load_scheme, SamplingScheme::OutOfSample).then_some(correlation);
+    let ncs_correlation = matches!(ncs_scheme, SamplingScheme::OutOfSample).then_some(correlation);
 
     Ok(ForwardSampler::new(
         inflow,
@@ -520,8 +686,10 @@ pub fn build_forward_sampler(
 /// - Indices `0..max_order`: pre-study lag seasons (oldest first)
 /// - Indices `max_order..max_order + stages.len()`: study seasons
 ///
-/// The year offset relative to the window starting year increments whenever
-/// the season sequence wraps from `n_seasons - 1` back to `0`.
+/// The year offset increments whenever the season sequence wraps from
+/// `n_seasons - 1` back to `0`, then is normalized so the first study entry is
+/// `0` — `window_year` is the first study observation's year and lag entries go
+/// negative.
 ///
 /// When `n_seasons == 1` (annual data), every entry advances exactly one year
 /// (wrap-detection is suppressed to avoid self-referential offsets).
@@ -539,7 +707,6 @@ pub(crate) fn build_observation_sequence(
         return Vec::new();
     }
 
-    // Lag seasons, oldest first: step backwards from study_seasons[0].
     let first_study_season = study_seasons[0];
     let lag_seasons: Vec<usize> = (1..=max_order)
         .rev()
@@ -569,7 +736,6 @@ pub(crate) fn build_observation_sequence(
             result.push((i as i32, season));
         }
     } else {
-        // Detect season wraps (Dec→Jan) to advance the year offset.
         let mut year_offset: i32 = 0;
         let mut prev_season = full_seasons[0];
         for (i, &season) in full_seasons.iter().enumerate() {
@@ -579,8 +745,7 @@ pub(crate) fn build_observation_sequence(
             result.push((year_offset, season));
             prev_season = season;
         }
-        // Normalize so the first study stage (index max_order) has year_offset 0
-        // — `window_year` is the first study observation's year; lags go negative.
+        // Normalize so the first study stage (index max_order) has year_offset 0.
         let study_base = result[max_order].0;
         if study_base != 0 {
             for entry in &mut result {
@@ -604,117 +769,138 @@ pub(crate) fn build_observation_sequence(
     clippy::float_cmp
 )]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::{
+        collections::BTreeMap,
+        sync::{Arc, Mutex},
+    };
 
-    use chrono::NaiveDate;
     use cobre_core::{
-        Bus, DeficitSegment, EntityId, SystemBuilder,
-        entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties},
+        Bus, DeficitSegment, EntityId, Hydro, SystemBuilder,
         scenario::{
             CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile, InflowModel,
-            SamplingScheme,
+            LoadModel, NcsModel, SamplingScheme,
         },
-        temporal::{
-            Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
-            StageStateConfig,
-        },
+        temporal::{NoiseMethod, ScenarioSourceConfig, Stage},
+        test_support::{BusSpec, HydroSpec, StageSpec, single_block},
     };
+    use tracing::{Event, Level, Metadata, Subscriber, span};
 
-    use super::{ClassSampler, ForwardNoise, ForwardSampler, SampleRequest, build_forward_sampler};
+    #[cfg(debug_assertions)]
+    use super::ClassSampleRequest;
+    use super::{
+        ClassNoiseTables, ClassSampler, ForwardNoise, ForwardNoiseTables, ForwardSampler,
+        ForwardSamplerConfig, NoiseTable, SampleRequest, build_forward_sampler,
+        rebuild_class_tables,
+    };
     use crate::{
-        StochasticContext, StochasticError,
+        NoisePointSpec, StochasticContext, StochasticError,
         context::{ClassSchemes, OpeningTreeInputs, build_stochastic_context},
         sample_forward,
+        test_support::uniform_tree,
         tree::generate::ClassDimensions,
-        tree::opening_tree::OpeningTree,
+        tree::lhs::{sample_lhs_point, sample_lhs_point_reference},
     };
 
+    /// Records all WARN-level event messages into a shared `Vec<String>`.
+    struct WarnRecorder {
+        messages: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl WarnRecorder {
+        fn new() -> (Self, Arc<Mutex<Vec<String>>>) {
+            let messages = Arc::new(Mutex::new(Vec::new()));
+            (
+                Self {
+                    messages: Arc::clone(&messages),
+                },
+                messages,
+            )
+        }
+    }
+
+    impl Subscriber for WarnRecorder {
+        fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+            *metadata.level() <= Level::WARN
+        }
+
+        fn new_span(&self, _attrs: &span::Attributes<'_>) -> span::Id {
+            span::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &span::Id, _values: &span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &span::Id, _follows: &span::Id) {}
+
+        fn event(&self, event: &Event<'_>) {
+            if *event.metadata().level() == Level::WARN {
+                struct MessageVisitor(String);
+                impl tracing::field::Visit for MessageVisitor {
+                    fn record_debug(
+                        &mut self,
+                        field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        if field.name() == "message" {
+                            self.0 = format!("{value:?}");
+                        }
+                    }
+
+                    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                        if field.name() == "message" {
+                            self.0 = value.to_string();
+                        }
+                    }
+                }
+                let mut visitor = MessageVisitor(String::new());
+                event.record(&mut visitor);
+                self.messages.lock().unwrap().push(visitor.0);
+            }
+        }
+
+        fn enter(&self, _span: &span::Id) {}
+
+        fn exit(&self, _span: &span::Id) {}
+    }
+
     fn make_bus(id: i32) -> Bus {
-        Bus {
-            id: EntityId(id),
+        cobre_core::test_support::make_bus(BusSpec {
+            id,
             name: format!("Bus{id}"),
-            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 1000.0,
             }],
-            excess_cost: 0.0,
-        }
+            ..Default::default()
+        })
     }
 
     fn make_stage(index: usize, id: i32, bf: usize) -> Stage {
-        Stage {
-            index,
+        make_stage_with_method(index, id, bf, NoiseMethod::Saa)
+    }
+
+    fn make_stage_with_method(index: usize, id: i32, bf: usize, method: NoiseMethod) -> Stage {
+        cobre_core::test_support::make_stage(StageSpec {
             id,
-            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+            index: Some(index),
             season_id: Some(0),
-            blocks: vec![Block {
-                index: 0,
-                name: "SINGLE".to_string(),
-                duration_hours: 744.0,
-            }],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: true,
-                inflow_lags: false,
-            },
-            risk_config: StageRiskConfig::Expectation,
+            blocks: single_block("SINGLE", 744.0),
             scenario_config: ScenarioSourceConfig {
                 branching_factor: bf,
-                noise_method: NoiseMethod::Saa,
+                noise_method: method,
             },
-        }
+            ..Default::default()
+        })
     }
 
     fn make_hydro(id: i32) -> Hydro {
-        let mut hydro = Hydro {
-            unit_groups: Vec::new(),
-            id: EntityId(id),
+        cobre_core::test_support::make_hydro(HydroSpec {
+            id,
             name: format!("H{id}"),
-            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            downstream_id: None,
-            travel_time_hours: None,
-            entry_stage_id: None,
-            exit_stage_id: None,
-            min_storage_hm3: 0.0,
             max_storage_hm3: 100.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity,
-            min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
-            specific_productivity_mw_per_m3s_per_m: None,
-            min_generation_mw: 0.0,
             max_generation_mw: 100.0,
-            tailrace: None,
-            hydraulic_losses: None,
-            efficiency: None,
-            evaporation_coefficients_mm: None,
-            evaporation_reference_volumes_hm3: None,
-            diversion: None,
-            filling: None,
-            penalties: HydroPenalties {
-                spillage_cost: 0.0,
-                diversion_cost: 0.0,
-                turbined_cost: 0.0,
-                storage_violation_below_cost: 0.0,
-                filling_target_violation_cost: 0.0,
-                turbined_violation_below_cost: 0.0,
-                outflow_violation_below_cost: 0.0,
-                outflow_violation_above_cost: 0.0,
-                generation_violation_below_cost: 0.0,
-                evaporation_violation_cost: 0.0,
-                water_withdrawal_violation_cost: 0.0,
-                water_withdrawal_violation_pos_cost: 0.0,
-                water_withdrawal_violation_neg_cost: 0.0,
-                evaporation_violation_pos_cost: 0.0,
-                evaporation_violation_neg_cost: 0.0,
-                inflow_nonnegativity_cost: 1000.0,
-            },
-        };
-        hydro.declare_mirror_unit_group(EntityId(0));
-        hydro
+            ..Default::default()
+        })
     }
 
     fn make_inflow_model(hydro_id: i32, stage_id: i32) -> InflowModel {
@@ -787,31 +973,24 @@ mod tests {
         (ctx, stages)
     }
 
-    /// Build a uniform opening tree for testing.
-    fn uniform_tree(n_stages: usize, openings: usize, dim: usize) -> OpeningTree {
-        let total = n_stages * openings * dim;
-        let data: Vec<f64> = (0_u32..u32::try_from(total).unwrap())
-            .map(f64::from)
-            .collect();
-        OpeningTree::from_parts(data, vec![openings; n_stages], dim)
-    }
-
     // -----------------------------------------------------------------------
     // Factory helper
     // -----------------------------------------------------------------------
 
-    /// Build a `ForwardSamplerConfig` with all three classes set to `scheme`.
+    fn dims_from_ctx(ctx: &StochasticContext) -> ClassDimensions {
+        ClassDimensions {
+            n_hydros: ctx.dim() - ctx.n_load_buses() - ctx.n_stochastic_ncs(),
+            n_load_buses: ctx.n_load_buses(),
+            n_ncs: ctx.n_stochastic_ncs(),
+        }
+    }
+
     fn all_classes_config<'a>(
         scheme: SamplingScheme,
         ctx: &'a StochasticContext,
         stages: &'a [Stage],
     ) -> super::ForwardSamplerConfig<'a> {
-        let n_hydros = ctx.dim() - ctx.n_load_buses() - ctx.n_stochastic_ncs();
-        let dims = ClassDimensions {
-            n_hydros,
-            n_load_buses: ctx.n_load_buses(),
-            n_ncs: ctx.n_stochastic_ncs(),
-        };
+        let dims = dims_from_ctx(ctx);
         super::ForwardSamplerConfig {
             class_schemes: ClassSchemes {
                 inflow: Some(scheme),
@@ -826,6 +1005,20 @@ mod tests {
             external_load_library: None,
             external_ncs_library: None,
         }
+    }
+
+    /// The `SampleRequest.tables` every `sample()` test call needs.
+    fn tables_for(
+        sampler: &ForwardSampler<'_>,
+        iteration: u32,
+        total: u32,
+        groups: &[u32],
+    ) -> ForwardNoiseTables {
+        let mut tables = ForwardNoiseTables::default();
+        sampler
+            .rebuild_noise_tables(iteration, total, groups, &mut tables)
+            .expect("test fixtures never exceed the Sobol dimension cap");
+        tables
     }
 
     // -----------------------------------------------------------------------
@@ -874,15 +1067,15 @@ mod tests {
     fn test_build_historical_with_library() {
         use super::HistoricalScenarioLibrary;
         let (ctx, stages) = build_test_ctx(None);
-        let n_hydros = ctx.dim() - ctx.n_load_buses() - ctx.n_stochastic_ncs();
-        let dims = ClassDimensions {
-            n_hydros,
-            n_load_buses: ctx.n_load_buses(),
-            n_ncs: ctx.n_stochastic_ncs(),
-        };
+        let dims = dims_from_ctx(&ctx);
         // 3 windows, 2 stages, 1 hydro, max_order=1.
-        let lib =
-            HistoricalScenarioLibrary::new(3, stages.len(), n_hydros, 1, vec![2000, 2001, 2002]);
+        let lib = HistoricalScenarioLibrary::new(
+            3,
+            stages.len(),
+            dims.n_hydros,
+            1,
+            vec![2000, 2001, 2002],
+        );
         let config = super::ForwardSamplerConfig {
             class_schemes: ClassSchemes {
                 inflow: Some(SamplingScheme::Historical),
@@ -904,15 +1097,78 @@ mod tests {
         );
     }
 
+    /// When both `historical_library` and `external_inflow_library` are
+    /// `Some` for a `Historical` inflow scheme, the fold must still pick the
+    /// historical library and ignore the external one.
+    #[test]
+    fn test_build_historical_with_library_ignores_external_library() {
+        use super::{ExternalScenarioLibrary, HistoricalScenarioLibrary};
+        let (ctx, stages) = build_test_ctx(None);
+        let dims = dims_from_ctx(&ctx);
+        // A single window makes historical window selection deterministic
+        // (hash % 1 == 0) without reaching into ClassSampler's private
+        // window-selection helper.
+        let mut historical_lib =
+            HistoricalScenarioLibrary::new(1, stages.len(), dims.n_hydros, 1, vec![2000]);
+        for stage in 0..stages.len() {
+            historical_lib.eta_slice_mut(0, stage).fill(7.0);
+        }
+        let external_lib = ExternalScenarioLibrary::new(
+            stages.len(),
+            10,
+            dims.n_hydros,
+            "inflow",
+            vec![10usize; stages.len()],
+        );
+        let config = super::ForwardSamplerConfig {
+            class_schemes: ClassSchemes {
+                inflow: Some(SamplingScheme::Historical),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+            ctx: &ctx,
+            stages: &stages,
+            dims,
+            historical_library: Some(&historical_lib),
+            external_inflow_library: Some(&external_lib),
+            external_load_library: None,
+            external_ncs_library: None,
+        };
+        let sampler = build_forward_sampler(config)
+            .expect("Historical inflow with both libraries set must still succeed");
+
+        let mut noise_buf = vec![0.0f64; ctx.dim()];
+        let mut corr_scratch = vec![0.0f64; 2 * ctx.dim()];
+        let tables = tables_for(&sampler, 0, 5, &[]);
+        let noise = sampler
+            .sample(SampleRequest {
+                iteration: 0,
+                scenario: 0,
+                stage: 0,
+                stage_idx: 0,
+                noise_buf: &mut noise_buf,
+                corr_scratch: &mut corr_scratch,
+                total_scenarios: 5,
+                noise_group_id: 0,
+                node_opening_offset: 0,
+                node_opening_len: ctx.tree_view().n_openings(0),
+                pinned_scenario: None,
+                tables: &tables,
+            })
+            .expect("expected Ok noise from Historical inflow");
+
+        assert_eq!(
+            noise.as_slice()[0],
+            7.0,
+            "inflow slot must replay the historical library's value, not the \
+             zero-filled external one"
+        );
+    }
+
     #[test]
     fn test_build_historical_missing_library() {
         let (ctx, stages) = build_test_ctx(None);
-        let n_hydros = ctx.dim() - ctx.n_load_buses() - ctx.n_stochastic_ncs();
-        let dims = ClassDimensions {
-            n_hydros,
-            n_load_buses: ctx.n_load_buses(),
-            n_ncs: ctx.n_stochastic_ncs(),
-        };
+        let dims = dims_from_ctx(&ctx);
         let config = super::ForwardSamplerConfig {
             class_schemes: ClassSchemes {
                 inflow: Some(SamplingScheme::Historical),
@@ -943,16 +1199,11 @@ mod tests {
     fn test_build_external_with_library() {
         use super::ExternalScenarioLibrary;
         let (ctx, stages) = build_test_ctx(None);
-        let n_hydros = ctx.dim() - ctx.n_load_buses() - ctx.n_stochastic_ncs();
-        let dims = ClassDimensions {
-            n_hydros,
-            n_load_buses: ctx.n_load_buses(),
-            n_ncs: ctx.n_stochastic_ncs(),
-        };
+        let dims = dims_from_ctx(&ctx);
         let lib = ExternalScenarioLibrary::new(
             stages.len(),
             10,
-            n_hydros,
+            dims.n_hydros,
             "inflow",
             vec![10usize; stages.len()],
         );
@@ -980,12 +1231,7 @@ mod tests {
     #[test]
     fn test_build_historical_load_unsupported() {
         let (ctx, stages) = build_test_ctx(None);
-        let n_hydros = ctx.dim() - ctx.n_load_buses() - ctx.n_stochastic_ncs();
-        let dims = ClassDimensions {
-            n_hydros,
-            n_load_buses: ctx.n_load_buses(),
-            n_ncs: ctx.n_stochastic_ncs(),
-        };
+        let dims = dims_from_ctx(&ctx);
         let config = super::ForwardSamplerConfig {
             class_schemes: ClassSchemes {
                 inflow: Some(SamplingScheme::InSample),
@@ -1043,7 +1289,8 @@ mod tests {
         let dim = ctx.dim();
 
         let mut noise_buf = vec![0.0f64; dim];
-        let mut perm_scratch = vec![0usize; dim];
+        let mut corr_scratch = vec![0.0f64; 2 * dim];
+        let tables = tables_for(&sampler, 0, 5, &[]);
 
         let result = sampler.sample(SampleRequest {
             iteration: 0,
@@ -1051,12 +1298,13 @@ mod tests {
             stage: 0,
             stage_idx: 0,
             noise_buf: &mut noise_buf,
-            perm_scratch: &mut perm_scratch,
+            corr_scratch: &mut corr_scratch,
             total_scenarios: 5,
             noise_group_id: 0,
             node_opening_offset: 0,
             node_opening_len: ctx.tree_view().n_openings(0),
             pinned_scenario: None,
+            tables: &tables,
         });
         let noise = result.expect("expected Ok from InSample sample()");
         assert_eq!(
@@ -1077,8 +1325,9 @@ mod tests {
 
         let mut buf_a = vec![0.0f64; dim];
         let mut buf_b = vec![0.0f64; dim];
-        let mut perm_a = vec![0usize; dim];
-        let mut perm_b = vec![0usize; dim];
+        let mut corr_a = vec![0.0f64; 2 * dim];
+        let mut corr_b = vec![0.0f64; 2 * dim];
+        let tables = tables_for(&sampler, 1, 5, &[]);
 
         let a = sampler
             .sample(SampleRequest {
@@ -1087,12 +1336,13 @@ mod tests {
                 stage: 0,
                 stage_idx: 0,
                 noise_buf: &mut buf_a,
-                perm_scratch: &mut perm_a,
+                corr_scratch: &mut corr_a,
                 total_scenarios: 5,
                 noise_group_id: 0,
                 node_opening_offset: 0,
                 node_opening_len: ctx.tree_view().n_openings(0),
                 pinned_scenario: None,
+                tables: &tables,
             })
             .unwrap();
         let b = sampler
@@ -1102,12 +1352,13 @@ mod tests {
                 stage: 0,
                 stage_idx: 0,
                 noise_buf: &mut buf_b,
-                perm_scratch: &mut perm_b,
+                corr_scratch: &mut corr_b,
                 total_scenarios: 5,
                 noise_group_id: 0,
                 node_opening_offset: 0,
                 node_opening_len: ctx.tree_view().n_openings(0),
                 pinned_scenario: None,
+                tables: &tables,
             })
             .unwrap();
 
@@ -1116,7 +1367,6 @@ mod tests {
 
     #[test]
     fn test_composite_in_sample_fills_correct_segments() {
-        // dim=5 split as 2 hydros + 2 load + 1 ncs.
         let tree = uniform_tree(1, 3, 5);
         let view = tree.view();
         let dims = ClassDimensions {
@@ -1151,7 +1401,8 @@ mod tests {
         );
 
         let mut noise_buf = vec![0.0f64; 5];
-        let mut perm_scratch = vec![0usize; 10];
+        let mut corr_scratch = vec![0.0f64; 2 * 5];
+        let tables = tables_for(&sampler, 0, 3, &[]);
 
         let result = sampler.sample(SampleRequest {
             iteration: 0,
@@ -1159,12 +1410,13 @@ mod tests {
             stage: 0,
             stage_idx: 0,
             noise_buf: &mut noise_buf,
-            perm_scratch: &mut perm_scratch,
+            corr_scratch: &mut corr_scratch,
             total_scenarios: 3,
             noise_group_id: 0,
             node_opening_offset: 0,
             node_opening_len: tree.view().n_openings(0),
             pinned_scenario: None,
+            tables: &tables,
         });
 
         let noise = result.expect("expected Ok from composite InSample sample()");
@@ -1195,7 +1447,8 @@ mod tests {
         let dim = ctx.dim();
 
         let mut noise_buf = vec![0.0f64; dim];
-        let mut perm_scratch = vec![0usize; 5];
+        let mut corr_scratch = vec![0.0f64; 2 * dim];
+        let tables = tables_for(&sampler, 0, 5, &[]);
 
         let result = sampler.sample(SampleRequest {
             iteration: 0,
@@ -1203,12 +1456,13 @@ mod tests {
             stage: 0,
             stage_idx: 0,
             noise_buf: &mut noise_buf,
-            perm_scratch: &mut perm_scratch,
+            corr_scratch: &mut corr_scratch,
             total_scenarios: 5,
             noise_group_id: 0,
             node_opening_offset: 0,
             node_opening_len: 0,
             pinned_scenario: None,
+            tables: &tables,
         });
 
         let noise = result.expect("expected Ok from OutOfSample sample()");
@@ -1233,8 +1487,9 @@ mod tests {
 
         let mut buf_a = vec![0.0f64; dim];
         let mut buf_b = vec![0.0f64; dim];
-        let mut perm_a = vec![0usize; 5];
-        let mut perm_b = vec![0usize; 5];
+        let mut corr_a = vec![0.0f64; 2 * dim];
+        let mut corr_b = vec![0.0f64; 2 * dim];
+        let tables = tables_for(&sampler, 3, 5, &[]);
 
         let a = sampler
             .sample(SampleRequest {
@@ -1243,12 +1498,13 @@ mod tests {
                 stage: 1,
                 stage_idx: 1,
                 noise_buf: &mut buf_a,
-                perm_scratch: &mut perm_a,
+                corr_scratch: &mut corr_a,
                 total_scenarios: 5,
-                noise_group_id: 0,
+                noise_group_id: 1,
                 node_opening_offset: 0,
                 node_opening_len: 0,
                 pinned_scenario: None,
+                tables: &tables,
             })
             .unwrap();
         let b = sampler
@@ -1258,12 +1514,13 @@ mod tests {
                 stage: 1,
                 stage_idx: 1,
                 noise_buf: &mut buf_b,
-                perm_scratch: &mut perm_b,
+                corr_scratch: &mut corr_b,
                 total_scenarios: 5,
-                noise_group_id: 0,
+                noise_group_id: 1,
                 node_opening_offset: 0,
                 node_opening_len: 0,
                 pinned_scenario: None,
+                tables: &tables,
             })
             .unwrap();
 
@@ -1287,8 +1544,9 @@ mod tests {
 
         let mut buf_a = vec![0.0f64; dim];
         let mut buf_b = vec![0.0f64; dim];
-        let mut perm_a = vec![0usize; 5];
-        let mut perm_b = vec![0usize; 5];
+        let mut corr_a = vec![0.0f64; 2 * dim];
+        let mut corr_b = vec![0.0f64; 2 * dim];
+        let tables_group7 = tables_for(&sampler, 2, 5, &[7]);
 
         let a = sampler
             .sample(SampleRequest {
@@ -1297,12 +1555,13 @@ mod tests {
                 stage: 0,
                 stage_idx: 0,
                 noise_buf: &mut buf_a,
-                perm_scratch: &mut perm_a,
+                corr_scratch: &mut corr_a,
                 total_scenarios: 5,
                 noise_group_id: 7,
                 node_opening_offset: 0,
                 node_opening_len: 0,
                 pinned_scenario: None,
+                tables: &tables_group7,
             })
             .unwrap();
         let b = sampler
@@ -1312,12 +1571,13 @@ mod tests {
                 stage: 1,
                 stage_idx: 0,
                 noise_buf: &mut buf_b,
-                perm_scratch: &mut perm_b,
+                corr_scratch: &mut corr_b,
                 total_scenarios: 5,
                 noise_group_id: 7,
                 node_opening_offset: 0,
                 node_opening_len: 0,
                 pinned_scenario: None,
+                tables: &tables_group7,
             })
             .unwrap();
         assert_eq!(
@@ -1327,7 +1587,8 @@ mod tests {
         );
 
         let mut buf_c = vec![0.0f64; dim];
-        let mut perm_c = vec![0usize; 5];
+        let mut corr_c = vec![0.0f64; 2 * dim];
+        let tables_group8 = tables_for(&sampler, 2, 5, &[8]);
         let c = sampler
             .sample(SampleRequest {
                 iteration: 2,
@@ -1335,12 +1596,13 @@ mod tests {
                 stage: 0,
                 stage_idx: 0,
                 noise_buf: &mut buf_c,
-                perm_scratch: &mut perm_c,
+                corr_scratch: &mut corr_c,
                 total_scenarios: 5,
                 noise_group_id: 8,
                 node_opening_offset: 0,
                 node_opening_len: 0,
                 pinned_scenario: None,
+                tables: &tables_group8,
             })
             .unwrap();
         let any_differ = a.as_slice().iter().zip(c.as_slice()).any(|(x, y)| x != y);
@@ -1348,5 +1610,647 @@ mod tests {
             any_differ,
             "different noise_group_id must produce different OutOfSample noise"
         );
+    }
+
+    /// Classes sampled out of sample must not share a noise stream: one seed
+    /// for every class makes the load and NCS slots repeat the first inflow
+    /// slots bit-for-bit. Inflow keeps the root seed, so its slot is pinned.
+    #[test]
+    fn test_out_of_sample_classes_draw_distinct_streams() {
+        let stages = vec![make_stage(0, 0, 5), make_stage(1, 1, 5)];
+        let load_model = |stage_id: i32| LoadModel {
+            bus_id: EntityId(0),
+            stage_id,
+            mean_mw: 100.0,
+            std_mw: 10.0,
+        };
+        let ncs_model = |stage_id: i32| NcsModel {
+            ncs_id: EntityId(20),
+            stage_id,
+            mean: 0.7,
+            std: 0.1,
+        };
+        let system = SystemBuilder::new()
+            .buses(vec![make_bus(0)])
+            .hydros(vec![make_hydro(1), make_hydro(2)])
+            .stages(stages.clone())
+            .inflow_models(vec![
+                make_inflow_model(1, 0),
+                make_inflow_model(1, 1),
+                make_inflow_model(2, 0),
+                make_inflow_model(2, 1),
+            ])
+            .load_models(vec![load_model(0), load_model(1)])
+            .ncs_models(vec![ncs_model(0), ncs_model(1)])
+            .correlation(identity_correlation(&[1, 2]))
+            .build()
+            .unwrap();
+        let ctx = build_stochastic_context(
+            &system,
+            42,
+            Some(99),
+            &[],
+            &[],
+            OpeningTreeInputs::default(),
+            ClassSchemes {
+                inflow: Some(SamplingScheme::OutOfSample),
+                load: Some(SamplingScheme::OutOfSample),
+                ncs: Some(SamplingScheme::OutOfSample),
+            },
+        )
+        .unwrap();
+        assert_eq!(ctx.n_load_buses(), 1);
+        assert_eq!(ctx.n_stochastic_ncs(), 1);
+        let sampler = build_forward_sampler(ForwardSamplerConfig {
+            class_schemes: ClassSchemes {
+                inflow: Some(SamplingScheme::OutOfSample),
+                load: Some(SamplingScheme::OutOfSample),
+                ncs: Some(SamplingScheme::OutOfSample),
+            },
+            ctx: &ctx,
+            stages: &stages,
+            dims: ClassDimensions {
+                n_hydros: 2,
+                n_load_buses: 1,
+                n_ncs: 1,
+            },
+            historical_library: None,
+            external_inflow_library: None,
+            external_load_library: None,
+            external_ncs_library: None,
+        })
+        .unwrap();
+
+        let mut buf = vec![0.0f64; ctx.dim()];
+        let mut corr = vec![0.0f64; 2 * ctx.dim()];
+        let tables = tables_for(&sampler, 1, 5, &[]);
+        let noise = sampler
+            .sample(SampleRequest {
+                iteration: 1,
+                scenario: 2,
+                stage: 0,
+                stage_idx: 0,
+                noise_buf: &mut buf,
+                corr_scratch: &mut corr,
+                total_scenarios: 5,
+                noise_group_id: 0,
+                node_opening_offset: 0,
+                node_opening_len: 0,
+                pinned_scenario: None,
+                tables: &tables,
+            })
+            .unwrap();
+        let s = noise.as_slice();
+        assert_ne!(
+            s[2], s[0],
+            "load slot must not repeat the first inflow slot"
+        );
+        assert_ne!(s[2], s[1]);
+        assert_ne!(s[3], s[0], "NCS slot must not repeat the first inflow slot");
+        assert_ne!(s[3], s[1]);
+        assert_ne!(s[3], s[2], "NCS slot must not repeat the load slot");
+        assert_eq!(
+            s[0].to_bits(),
+            4_608_014_355_120_151_153_u64,
+            "inflow draw must keep its root-seed value"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // rebuild_noise_tables
+    // -----------------------------------------------------------------------
+
+    /// Build a single-hydro, three-stage study whose inflow class is sampled
+    /// out of sample with the given per-stage methods and forward seed. Load
+    /// and NCS default to `InSample` — this fixture exercises only inflow.
+    fn build_inflow_oos_test_ctx(
+        methods: [NoiseMethod; 3],
+        forward_seed: u64,
+    ) -> (StochasticContext, Vec<Stage>) {
+        let hydros = vec![make_hydro(1)];
+        let stages = vec![
+            make_stage_with_method(0, 0, 5, methods[0]),
+            make_stage_with_method(1, 1, 5, methods[1]),
+            make_stage_with_method(2, 2, 5, methods[2]),
+        ];
+        let inflow_models = vec![
+            make_inflow_model(1, 0),
+            make_inflow_model(1, 1),
+            make_inflow_model(1, 2),
+        ];
+        let system = SystemBuilder::new()
+            .buses(vec![make_bus(0)])
+            .hydros(hydros)
+            .stages(stages.clone())
+            .inflow_models(inflow_models)
+            .correlation(identity_correlation(&[1]))
+            .build()
+            .unwrap();
+        let ctx = build_stochastic_context(
+            &system,
+            42,
+            Some(forward_seed),
+            &[],
+            &[],
+            OpeningTreeInputs::default(),
+            ClassSchemes {
+                inflow: Some(SamplingScheme::OutOfSample),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+        )
+        .unwrap();
+        (ctx, stages)
+    }
+
+    fn build_oos_inflow_config<'a>(
+        ctx: &'a StochasticContext,
+        stages: &'a [Stage],
+    ) -> ForwardSamplerConfig<'a> {
+        ForwardSamplerConfig {
+            class_schemes: ClassSchemes {
+                inflow: Some(SamplingScheme::OutOfSample),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+            ctx,
+            stages,
+            dims: dims_from_ctx(ctx),
+            historical_library: None,
+            external_inflow_library: None,
+            external_load_library: None,
+            external_ncs_library: None,
+        }
+    }
+
+    #[test]
+    fn test_rebuild_noise_tables_variant_per_method() {
+        let (ctx, stages) = build_inflow_oos_test_ctx(
+            [
+                NoiseMethod::QmcSobol,
+                NoiseMethod::QmcHalton,
+                NoiseMethod::Lhs,
+            ],
+            99,
+        );
+        let sampler = build_forward_sampler(build_oos_inflow_config(&ctx, &stages)).unwrap();
+        let mut tables = ForwardNoiseTables::default();
+
+        sampler
+            .rebuild_noise_tables(0, 8, &[0, 1, 2], &mut tables)
+            .expect("single-hydro dim never exceeds the Sobol dimension cap");
+
+        assert!(matches!(
+            tables.inflow().table_at(0),
+            Some(NoiseTable::Sobol(_))
+        ));
+        assert!(matches!(
+            tables.inflow().table_at(1),
+            Some(NoiseTable::Halton(_))
+        ));
+        assert!(matches!(
+            tables.inflow().table_at(2),
+            Some(NoiseTable::Lhs(_))
+        ));
+    }
+
+    #[test]
+    fn test_rebuild_noise_tables_dedups_same_group_and_method() {
+        let (ctx, stages) =
+            build_inflow_oos_test_ctx([NoiseMethod::Lhs, NoiseMethod::Lhs, NoiseMethod::Lhs], 99);
+        let sampler = build_forward_sampler(build_oos_inflow_config(&ctx, &stages)).unwrap();
+        let mut tables = ForwardNoiseTables::default();
+
+        sampler
+            .rebuild_noise_tables(0, 8, &[0, 0, 1], &mut tables)
+            .expect("Lhs never exceeds the Sobol dimension cap");
+
+        let t0 = tables.inflow().table_at(0).expect("stage 0 has a table");
+        let t1 = tables.inflow().table_at(1).expect("stage 1 has a table");
+        let t2 = tables.inflow().table_at(2).expect("stage 2 has a table");
+        assert!(
+            std::ptr::eq(t0, t1),
+            "stages sharing a (group, method) pair must resolve to the same table"
+        );
+        assert!(
+            !std::ptr::eq(t0, t2),
+            "a different noise group must resolve to a distinct table"
+        );
+    }
+
+    #[test]
+    fn test_rebuild_noise_tables_keys_on_group_and_method_pair() {
+        let (ctx, stages) = build_inflow_oos_test_ctx(
+            [NoiseMethod::Lhs, NoiseMethod::QmcSobol, NoiseMethod::Saa],
+            99,
+        );
+        let sampler = build_forward_sampler(build_oos_inflow_config(&ctx, &stages)).unwrap();
+        let mut tables = ForwardNoiseTables::default();
+
+        sampler
+            .rebuild_noise_tables(0, 8, &[0, 0, 0], &mut tables)
+            .expect("single-hydro dim never exceeds the Sobol dimension cap");
+
+        assert!(matches!(
+            tables.inflow().table_at(0),
+            Some(NoiseTable::Lhs(_))
+        ));
+        assert!(matches!(
+            tables.inflow().table_at(1),
+            Some(NoiseTable::Sobol(_))
+        ));
+        assert!(matches!(
+            tables.inflow().table_at(2),
+            Some(NoiseTable::Direct)
+        ));
+    }
+
+    #[test]
+    fn test_rebuild_noise_tables_lhs_matches_direct_point_function() {
+        let (ctx, stages) =
+            build_inflow_oos_test_ctx([NoiseMethod::Lhs, NoiseMethod::Lhs, NoiseMethod::Lhs], 99);
+        let sampler = build_forward_sampler(build_oos_inflow_config(&ctx, &stages)).unwrap();
+        let mut tables = ForwardNoiseTables::default();
+
+        sampler
+            .rebuild_noise_tables(0, 8, &[0, 0, 1], &mut tables)
+            .expect("Lhs never exceeds the Sobol dimension cap");
+
+        let Some(NoiseTable::Lhs(lhs_ctx)) = tables.inflow().table_at(2) else {
+            panic!("expected NoiseTable::Lhs for stage 2");
+        };
+
+        let forward_seed = 99; // inflow keeps the root seed unchanged
+        for scenario in 0..8u32 {
+            let spec = NoisePointSpec {
+                sampling_seed: forward_seed,
+                iteration: 0,
+                scenario,
+                stream_id: 1,
+                total_scenarios: 8,
+                dim: 1,
+            };
+            let mut precomputed_out = [0.0f64];
+            sample_lhs_point(&spec, lhs_ctx, &mut precomputed_out);
+
+            let mut perm = vec![0usize; 8];
+            let mut direct_out = [0.0f64];
+            sample_lhs_point_reference(&spec, &mut direct_out, &mut perm);
+
+            assert_eq!(
+                precomputed_out, direct_out,
+                "scenario {scenario}: precomputed LHS table must match the direct point function"
+            );
+        }
+    }
+
+    #[test]
+    fn rebuild_class_tables_rejects_an_oversized_sobol_class_and_clears_non_out_of_sample() {
+        let mut out = ClassNoiseTables::default();
+
+        let oversized = ClassSampler::OutOfSample {
+            forward_seed: 1,
+            dim: 21_202, // one above the crate's Sobol dimension cap (21_201)
+            noise_methods: vec![NoiseMethod::QmcSobol].into(),
+        };
+        match rebuild_class_tables(&oversized, 0, 1, &[0], &mut out) {
+            Err(StochasticError::DimensionExceedsCapacity {
+                dim,
+                max_dim,
+                method,
+            }) => {
+                assert_eq!(dim, 21_202, "dim field");
+                assert_eq!(max_dim, 21_201, "max_dim field");
+                assert!(
+                    method.contains("sobol"),
+                    "method must contain 'sobol', got: {method}"
+                );
+            }
+            other => panic!("expected Err(DimensionExceedsCapacity), got {other:?}"),
+        }
+        assert!(out.table_at(0).is_none());
+
+        let tree = uniform_tree(1, 2, 3);
+        let in_sample = ClassSampler::InSample {
+            tree: tree.view(),
+            base_seed: 42,
+            offset: 0,
+            len: 2,
+        };
+        let result = rebuild_class_tables(&in_sample, 0, 1, &[], &mut out);
+        assert!(
+            result.is_ok(),
+            "expected Ok for a class not sampled out of sample, got: {result:?}"
+        );
+        assert!(out.table_at(0).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // OutOfSample::fill stamp assertions
+    // -----------------------------------------------------------------------
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "tables built for")]
+    fn out_of_sample_fill_panics_when_tables_stale_for_iteration() {
+        let sampler = ClassSampler::OutOfSample {
+            forward_seed: 1,
+            dim: 2,
+            noise_methods: vec![NoiseMethod::Saa].into_boxed_slice(),
+        };
+        let mut tables = ClassNoiseTables::default();
+        tables
+            .refill(1, 2, 0, 4, &[0], &[NoiseMethod::Saa])
+            .expect("Saa never exceeds the Sobol dimension cap");
+
+        let req = ClassSampleRequest {
+            iteration: 1,
+            scenario: 0,
+            stage: 0,
+            stage_idx: 0,
+            total_scenarios: 4,
+            noise_group_id: 0,
+            node_opening_offset: 0,
+            node_opening_len: 0,
+            pinned_scenario: None,
+        };
+        let mut output = vec![0.0f64; 2];
+        let _ = sampler.fill(&req, &tables, &mut output);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "table built for group")]
+    fn out_of_sample_fill_panics_when_stage_table_built_for_a_different_group() {
+        let methods = [NoiseMethod::Saa, NoiseMethod::Saa, NoiseMethod::Saa];
+        let sampler = ClassSampler::OutOfSample {
+            forward_seed: 1,
+            dim: 2,
+            noise_methods: methods.into(),
+        };
+        let mut tables = ClassNoiseTables::default();
+        tables
+            .refill(1, 2, 0, 4, &[0, 0, 1], &methods)
+            .expect("Saa never exceeds the Sobol dimension cap");
+
+        let req = ClassSampleRequest {
+            iteration: 0,
+            scenario: 0,
+            stage: 0,
+            stage_idx: 2,
+            total_scenarios: 4,
+            noise_group_id: 0,
+            node_opening_offset: 0,
+            node_opening_len: 0,
+            pinned_scenario: None,
+        };
+        let mut output = vec![0.0f64; 2];
+        let _ = sampler.fill(&req, &tables, &mut output);
+    }
+
+    // -----------------------------------------------------------------------
+    // Unsupported forward noise method warnings
+    // -----------------------------------------------------------------------
+
+    /// Build a single-hydro, out-of-sample inflow study whose stages carry the
+    /// given `(id, method)` pairs; load and NCS default to `InSample`.
+    fn build_inflow_oos_ctx_with_stage_ids(
+        stage_specs: &[(i32, NoiseMethod)],
+    ) -> (StochasticContext, Vec<Stage>) {
+        let hydros = vec![make_hydro(1)];
+        let stages: Vec<Stage> = stage_specs
+            .iter()
+            .enumerate()
+            .map(|(idx, &(id, method))| make_stage_with_method(idx, id, 5, method))
+            .collect();
+        let inflow_models: Vec<InflowModel> = stage_specs
+            .iter()
+            .map(|&(id, _)| make_inflow_model(1, id))
+            .collect();
+        let system = SystemBuilder::new()
+            .buses(vec![make_bus(0)])
+            .hydros(hydros)
+            .stages(stages.clone())
+            .inflow_models(inflow_models)
+            .correlation(identity_correlation(&[1]))
+            .build()
+            .unwrap();
+        // Selective is unsupported by the opening tree generator regardless of
+        // the forward scheme (`generate_stage_raw_noise`), so a study with any
+        // Selective stage must supply a pre-built tree to bypass generation.
+        let user_tree = uniform_tree(stages.len(), 5, 1);
+        let ctx = build_stochastic_context(
+            &system,
+            42,
+            Some(99),
+            &[],
+            &[],
+            OpeningTreeInputs {
+                user_tree: Some(user_tree),
+                historical_library: None,
+                external_scenario_counts: None,
+                noise_group_ids: None,
+            },
+            ClassSchemes {
+                inflow: Some(SamplingScheme::OutOfSample),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+        )
+        .unwrap();
+        (ctx, stages)
+    }
+
+    #[test]
+    fn test_warn_once_names_class_and_every_unsupported_stage_id() {
+        let (ctx, stages) = build_inflow_oos_ctx_with_stage_ids(&[
+            (2, NoiseMethod::Selective),
+            (5, NoiseMethod::Selective),
+        ]);
+        let config = build_oos_inflow_config(&ctx, &stages);
+
+        let (subscriber, messages) = WarnRecorder::new();
+        tracing::subscriber::with_default(subscriber, || {
+            let sampler =
+                build_forward_sampler(config).expect("Selective falls back to SAA, not an error");
+
+            {
+                let recorded = messages.lock().unwrap();
+                assert_eq!(
+                    recorded.len(),
+                    1,
+                    "expected exactly one WARN, got: {recorded:?}"
+                );
+                let message = &recorded[0];
+                assert!(message.contains("inflow"), "message: {message}");
+                assert!(message.contains('2'), "message: {message}");
+                assert!(message.contains('5'), "message: {message}");
+            }
+
+            let dim = ctx.dim();
+            let mut noise_buf = vec![0.0f64; dim];
+            let mut corr_scratch = vec![0.0f64; 2 * dim];
+            let tables = tables_for(&sampler, 0, 5, &[]);
+            sampler
+                .sample(SampleRequest {
+                    iteration: 0,
+                    scenario: 0,
+                    stage: 2,
+                    stage_idx: 0,
+                    noise_buf: &mut noise_buf,
+                    corr_scratch: &mut corr_scratch,
+                    total_scenarios: 5,
+                    noise_group_id: 0,
+                    node_opening_offset: 0,
+                    node_opening_len: ctx.tree_view().n_openings(0),
+                    pinned_scenario: None,
+                    tables: &tables,
+                })
+                .expect("Selective fallback sample() must still succeed");
+        });
+
+        assert_eq!(
+            messages.lock().unwrap().len(),
+            1,
+            "ForwardSampler::sample must not add a WARN after construction"
+        );
+    }
+
+    #[test]
+    fn test_warn_once_covers_both_unsupported_methods_in_one_class() {
+        let (ctx, stages) = build_inflow_oos_ctx_with_stage_ids(&[
+            (0, NoiseMethod::Selective),
+            (1, NoiseMethod::HistoricalResiduals),
+        ]);
+        let config = build_oos_inflow_config(&ctx, &stages);
+
+        let (subscriber, messages) = WarnRecorder::new();
+        let result =
+            tracing::subscriber::with_default(subscriber, || build_forward_sampler(config));
+
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+        assert_eq!(
+            messages.lock().unwrap().len(),
+            1,
+            "a Selective stage and a HistoricalResiduals stage in the same class \
+             must still produce exactly one WARN"
+        );
+    }
+
+    #[test]
+    fn test_warn_skips_class_not_sampled_out_of_sample() {
+        let hydros = vec![make_hydro(1)];
+        let stages = vec![
+            make_stage_with_method(0, 0, 5, NoiseMethod::Selective),
+            make_stage_with_method(1, 1, 5, NoiseMethod::Selective),
+        ];
+        let inflow_models = vec![make_inflow_model(1, 0), make_inflow_model(1, 1)];
+        let system = SystemBuilder::new()
+            .buses(vec![make_bus(0)])
+            .hydros(hydros)
+            .stages(stages.clone())
+            .inflow_models(inflow_models)
+            .correlation(identity_correlation(&[1]))
+            .build()
+            .unwrap();
+        let user_tree = uniform_tree(stages.len(), 5, 1);
+        let ctx = build_stochastic_context(
+            &system,
+            42,
+            None,
+            &[],
+            &[],
+            OpeningTreeInputs {
+                user_tree: Some(user_tree),
+                historical_library: None,
+                external_scenario_counts: None,
+                noise_group_ids: None,
+            },
+            ClassSchemes {
+                inflow: Some(SamplingScheme::InSample),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+        )
+        .unwrap();
+        let config = all_classes_config(SamplingScheme::InSample, &ctx, &stages);
+
+        let (subscriber, messages) = WarnRecorder::new();
+        let result =
+            tracing::subscriber::with_default(subscriber, || build_forward_sampler(config));
+
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+        assert!(
+            messages.lock().unwrap().is_empty(),
+            "an InSample class must never warn about its stages' noise methods"
+        );
+    }
+
+    #[test]
+    fn test_warn_once_per_class_for_three_out_of_sample_classes() {
+        let stages = vec![
+            make_stage_with_method(0, 0, 5, NoiseMethod::Selective),
+            make_stage_with_method(1, 1, 5, NoiseMethod::Selective),
+        ];
+        let load_model = |stage_id: i32| LoadModel {
+            bus_id: EntityId(0),
+            stage_id,
+            mean_mw: 100.0,
+            std_mw: 10.0,
+        };
+        let ncs_model = |stage_id: i32| NcsModel {
+            ncs_id: EntityId(20),
+            stage_id,
+            mean: 0.7,
+            std: 0.1,
+        };
+        let system = SystemBuilder::new()
+            .buses(vec![make_bus(0)])
+            .hydros(vec![make_hydro(1)])
+            .stages(stages.clone())
+            .inflow_models(vec![make_inflow_model(1, 0), make_inflow_model(1, 1)])
+            .load_models(vec![load_model(0), load_model(1)])
+            .ncs_models(vec![ncs_model(0), ncs_model(1)])
+            .correlation(identity_correlation(&[1]))
+            .build()
+            .unwrap();
+        let user_tree = uniform_tree(stages.len(), 5, 3);
+        let ctx = build_stochastic_context(
+            &system,
+            42,
+            Some(99),
+            &[],
+            &[],
+            OpeningTreeInputs {
+                user_tree: Some(user_tree),
+                historical_library: None,
+                external_scenario_counts: None,
+                noise_group_ids: None,
+            },
+            ClassSchemes {
+                inflow: Some(SamplingScheme::OutOfSample),
+                load: Some(SamplingScheme::OutOfSample),
+                ncs: Some(SamplingScheme::OutOfSample),
+            },
+        )
+        .unwrap();
+        assert_eq!(ctx.n_load_buses(), 1);
+        assert_eq!(ctx.n_stochastic_ncs(), 1);
+        let config = all_classes_config(SamplingScheme::OutOfSample, &ctx, &stages);
+
+        let (subscriber, messages) = WarnRecorder::new();
+        let result =
+            tracing::subscriber::with_default(subscriber, || build_forward_sampler(config));
+
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+        let recorded = messages.lock().unwrap();
+        assert_eq!(
+            recorded.len(),
+            3,
+            "expected exactly three WARNs, got: {recorded:?}"
+        );
+        assert!(recorded.iter().any(|m| m.contains("inflow")));
+        assert!(recorded.iter().any(|m| m.contains("load")));
+        assert!(recorded.iter().any(|m| m.contains("ncs")));
     }
 }

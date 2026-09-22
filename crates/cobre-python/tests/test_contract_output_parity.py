@@ -35,10 +35,10 @@ import json
 import math
 import pathlib
 import shutil
-import subprocess
 
 import pyarrow.parquet as pq
-import pytest
+
+from _cobre_cli import run_cli
 
 # The D41 energy-contracts case is the only example shipping
 # system/energy_contracts.json, so the only case whose run produces a contracts/
@@ -100,37 +100,6 @@ def _make_case_with_simulation(src: pathlib.Path, dest: pathlib.Path) -> None:
     config = json.loads((src / "config.json").read_text())
     config.setdefault("simulation", {})["enabled"] = True
     (dest / "config.json").write_text(json.dumps(config))
-
-
-def _cli_binary() -> pathlib.Path:
-    """Return the compiled ``cobre`` CLI binary path, skipping if absent."""
-    for profile in ("release", "debug"):
-        candidate = _REPO_ROOT / "target" / profile / "cobre"
-        if candidate.is_file():
-            return candidate
-    pytest.skip(
-        "No compiled `cobre` binary found in target/release or target/debug. "
-        "Run `cargo build -p cobre-cli` first."
-    )
-    raise RuntimeError("unreachable: pytest.skip raises Skipped")
-
-
-def _run_cli(case_dir: pathlib.Path, output_dir: pathlib.Path) -> None:
-    """Run the cobre CLI for ``case_dir``, writing outputs to ``output_dir``."""
-    binary = _cli_binary()
-    result = subprocess.run(
-        [str(binary), "run", str(case_dir), "--output", str(output_dir)],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=120,
-    )
-    if result.returncode != 0:
-        pytest.fail(
-            f"cobre CLI failed (exit {result.returncode}):\n"
-            f"stdout: {result.stdout}\n"
-            f"stderr: {result.stderr}"
-        )
 
 
 def _read_contract_rows(parquet: pathlib.Path) -> list[dict[str, object]]:
@@ -266,7 +235,9 @@ def test_run_via_study_emits_contract_output(tmp_path: pathlib.Path) -> None:
     )
 
 
-def test_cli_python_contract_row_parity(tmp_path: pathlib.Path) -> None:
+def test_cli_python_contract_row_parity(
+    tmp_path: pathlib.Path, cli_binary: pathlib.Path
+) -> None:
     """The CLI and the Python surface emit identical contract rows.
 
     Runs the D41 case (simulation enabled) through both the compiled `cobre` CLI
@@ -287,7 +258,7 @@ def test_cli_python_contract_row_parity(tmp_path: pathlib.Path) -> None:
     _make_case_with_simulation(CONTRACT_CASE, case_dir)
 
     out_cli = tmp_path / "cli_out"
-    _run_cli(case_dir, out_cli)
+    run_cli(case_dir, out_cli, cli_binary)
 
     out_py = tmp_path / "py_out"
     cobre.run.run(str(case_dir), output_dir=str(out_py))

@@ -53,7 +53,7 @@ def test_callback_matches_convergence_parquet(tmp_path: pathlib.Path) -> None:
     cobre.run.run(
         VALID_CASE,
         output_dir=str(tmp_path),
-        skip_simulation=True,
+        config_overrides={"simulation": {"enabled": False}},
         on_iteration=on_iteration,
     )
 
@@ -119,7 +119,7 @@ def test_callback_truthy_return_stops_early(tmp_path: pathlib.Path) -> None:
     result = cobre.run.run(
         VALID_CASE,
         output_dir=str(tmp_path),
-        skip_simulation=True,
+        config_overrides={"simulation": {"enabled": False}},
         on_iteration=on_iteration,
     )
 
@@ -169,7 +169,7 @@ def test_callback_raises_propagates_with_partial_metadata(
         cobre.run.run(
             VALID_CASE,
             output_dir=str(tmp_path),
-            skip_simulation=True,
+            config_overrides={"simulation": {"enabled": False}},
             on_iteration=on_iteration,
         )
 

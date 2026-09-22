@@ -229,15 +229,14 @@ void cobre_clp_set_row_status(void* model, int32_t sequence, int32_t value);
 /* =========================================================================
  * C++ class-only knobs (implemented in clp_wrapper_cpp.cpp)
  *
- * These five entry points reach methods that exist only on the C++ ClpSimplex
- * class and are NOT in Clp_C_Interface.h: the dual-row pivot setter, the
- * factorization frequency, and the hot-start snapshot/restore trio. The opaque
- * model handle from cobre_clp_create is a Clp_Simplex* wrapper struct whose
- * ->model_ member is the real C++ ClpSimplex; the shim casts the handle to
- * that wrapper and calls the class API on ->model_ (the same model the Clp_*
- * C API reaches). They are declared here with C linkage and void/int32_t types
- * so the plain-C wrapper translation unit never pulls in the C++ class
- * headers.
+ * These two entry points reach methods that exist only on the C++ ClpSimplex
+ * class and are NOT in Clp_C_Interface.h: the dual-row pivot setter and the
+ * factorization frequency. The opaque model handle from cobre_clp_create is a
+ * Clp_Simplex* wrapper struct whose ->model_ member is the real C++ ClpSimplex;
+ * the shim casts the handle to that wrapper and calls the class API on
+ * ->model_ (the same model the Clp_* C API reaches). They are declared here
+ * with C linkage and void/int32_t types so the plain-C wrapper translation
+ * unit never pulls in the C++ class headers.
  * ========================================================================= */
 
 /** Select the dual-steepest-edge pricing rule for the dual simplex.
@@ -249,24 +248,6 @@ void cobre_clp_set_dual_row_steepest(void* model, int32_t mode);
 /** Set the simplex factorization refactor cadence.
  *  Wraps ClpSimplex::setFactorizationFrequency(value). */
 void cobre_clp_set_factorization_frequency(void* model, int32_t value);
-
-/** Snapshot the model for hot-started re-solves.
- *  Wraps ClpSimplex::markHotStart(void*&saveStuff) and returns the opaque
- *  CLP-allocated saveStuff token. The caller keeps the token opaque and must
- *  pair it with cobre_clp_unmark_hot_start on the same model. */
-void* cobre_clp_mark_hot_start(void* model);
-
-/** Re-solve the model from the hot-start snapshot.
- *  Wraps ClpSimplex::solveFromHotStart(saveStuff) and returns the CLP solve
- *  status int (0 = optimal; same space as cobre_clp_status). save_stuff must be
- *  a token from a prior cobre_clp_mark_hot_start on this same model. */
-int32_t cobre_clp_solve_from_hot_start(void* model, void* save_stuff);
-
-/** Release a hot-start snapshot, freeing the saveStuff token.
- *  Wraps ClpSimplex::unmarkHotStart(saveStuff). save_stuff must be a token from
- *  a prior cobre_clp_mark_hot_start on this same model; after this call it is
- *  freed and must not be reused. */
-void cobre_clp_unmark_hot_start(void* model, void* save_stuff);
 
 /* =========================================================================
  * Version query (no instance required)

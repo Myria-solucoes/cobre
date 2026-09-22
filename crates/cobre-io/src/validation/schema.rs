@@ -54,7 +54,10 @@ use crate::{
         load_energy_contracts, load_non_controllable_sources, load_pumping_stations, parse_buses,
         parse_hydros, parse_lines, parse_thermals,
     },
-    validation::{ErrorKind, ValidationContext, structural::FileManifest},
+    validation::{
+        ErrorKind, ValidationContext,
+        structural::{FileManifest, InputFile},
+    },
 };
 
 // ── ParsedData ────────────────────────────────────────────────────────────────
@@ -67,12 +70,6 @@ use crate::{
 pub(crate) struct ParsedData {
     /// `config.json`.
     pub(crate) config: Config,
-    /// `penalties.json`.
-    // Rationale: the per-entity parsers embed these defaults for resolution, but the
-    // Layer 5 penalty-ordering check needs the original global values; retaining the
-    // parsed field here avoids re-reading `penalties.json` when that check runs.
-    #[allow(dead_code)]
-    pub(crate) penalties: GlobalPenaltyDefaults,
     /// `stages.json`.
     pub(crate) stages: StagesData,
     /// `initial_conditions.json`.
@@ -107,10 +104,6 @@ pub(crate) struct ParsedData {
     /// `system/fpha_hyperplanes.parquet`.
     pub(crate) fpha_hyperplanes: Vec<FphaHyperplaneRow>,
     /// `constraints/generic_parameters.json`.
-    // Rationale: the field is populated by the schema-validation layer for the expression-resolution
-    // step that substitutes `@name` sigils in constraint expressions; removing it would discard
-    // the parsed data and require re-parsing from disk at that step.
-    #[allow(dead_code)]
     pub(crate) scalar_parameters: Vec<ScalarParameter>,
 
     /// `scenarios/inflow_history.parquet`.
@@ -261,7 +254,7 @@ pub(crate) fn validate_schema(
 
     // `Option` (not the aggregate): callers distinguish "no file" from an empty deck.
     let post_study_stages: Option<PostStudyStages> = optional_or_error(
-        manifest.post_study_stages_json,
+        manifest.present(InputFile::PostStudyStagesJson),
         || parse_post_study_stages(&case_root.join("post_study_stages.json")).map(Some),
         || None,
         "post_study_stages.json",
@@ -270,7 +263,7 @@ pub(crate) fn validate_schema(
 
     // Fall back to a sentinel when penalties failed to parse, so penalty-dependent
     // parsers still run and their own errors are collected in this pass.
-    let sentinel = penalties.clone().unwrap_or_else(sentinel_penalties);
+    let sentinel = penalties.unwrap_or_else(sentinel_penalties);
 
     let buses = parse_or_error(
         parse_buses(&case_root.join("system/buses.json"), &sentinel),
@@ -297,7 +290,7 @@ pub(crate) fn validate_schema(
     );
 
     let non_controllable_sources = optional_or_error(
-        manifest.system_non_controllable_sources_json,
+        manifest.present(InputFile::SystemNonControllableSourcesJson),
         || {
             load_non_controllable_sources(
                 Some(&case_root.join("system/non_controllable_sources.json")),
@@ -310,7 +303,7 @@ pub(crate) fn validate_schema(
     );
 
     let pumping_stations = optional_or_error(
-        manifest.system_pumping_stations_json,
+        manifest.present(InputFile::SystemPumpingStationsJson),
         || load_pumping_stations(Some(&case_root.join("system/pumping_stations.json"))),
         Vec::new,
         "system/pumping_stations.json",
@@ -318,7 +311,7 @@ pub(crate) fn validate_schema(
     );
 
     let energy_contracts = optional_or_error(
-        manifest.system_energy_contracts_json,
+        manifest.present(InputFile::SystemEnergyContractsJson),
         || load_energy_contracts(Some(&case_root.join("system/energy_contracts.json"))),
         Vec::new,
         "system/energy_contracts.json",
@@ -326,7 +319,7 @@ pub(crate) fn validate_schema(
     );
 
     let hydro_geometry = optional_or_error(
-        manifest.system_hydro_geometry_parquet,
+        manifest.present(InputFile::SystemHydroGeometryParquet),
         || parse_hydro_geometry(&case_root.join("system/hydro_geometry.parquet")),
         Vec::new,
         "system/hydro_geometry.parquet",
@@ -337,7 +330,7 @@ pub(crate) fn validate_schema(
         configs: production_models,
         plane_reduction,
     } = optional_or_error(
-        manifest.system_hydro_production_models_json,
+        manifest.present(InputFile::SystemHydroProductionModelsJson),
         || load_production_models(Some(&case_root.join("system/hydro_production_models.json"))),
         ProductionModelFile::default,
         "system/hydro_production_models.json",
@@ -345,7 +338,7 @@ pub(crate) fn validate_schema(
     );
 
     let hydro_energy_productivity_rows = optional_or_error(
-        manifest.system_hydro_energy_productivity_parquet,
+        manifest.present(InputFile::SystemHydroEnergyProductivityParquet),
         || {
             load_hydro_energy_productivity(Some(
                 &case_root.join("system/hydro_energy_productivity.parquet"),
@@ -357,7 +350,7 @@ pub(crate) fn validate_schema(
     );
 
     let fpha_hyperplanes = optional_or_error(
-        manifest.system_fpha_hyperplanes_parquet,
+        manifest.present(InputFile::SystemFphaHyperplanesParquet),
         || load_fpha_hyperplanes(Some(&case_root.join("system/fpha_hyperplanes.parquet"))),
         Vec::new,
         "system/fpha_hyperplanes.parquet",
@@ -365,7 +358,7 @@ pub(crate) fn validate_schema(
     );
 
     let inflow_history = optional_or_error(
-        manifest.scenarios_inflow_history_parquet,
+        manifest.present(InputFile::ScenariosInflowHistoryParquet),
         || load_inflow_history(Some(&case_root.join("scenarios/inflow_history.parquet"))),
         Vec::new,
         "scenarios/inflow_history.parquet",
@@ -373,7 +366,7 @@ pub(crate) fn validate_schema(
     );
 
     let inflow_seasonal_stats = optional_or_error(
-        manifest.scenarios_inflow_seasonal_stats_parquet,
+        manifest.present(InputFile::ScenariosInflowSeasonalStatsParquet),
         || {
             load_inflow_seasonal_stats(Some(
                 &case_root.join("scenarios/inflow_seasonal_stats.parquet"),
@@ -385,7 +378,7 @@ pub(crate) fn validate_schema(
     );
 
     let inflow_ar_coefficients = optional_or_error(
-        manifest.scenarios_inflow_ar_coefficients_parquet,
+        manifest.present(InputFile::ScenariosInflowArCoefficientsParquet),
         || {
             load_inflow_ar_coefficients(Some(
                 &case_root.join("scenarios/inflow_ar_coefficients.parquet"),
@@ -397,7 +390,7 @@ pub(crate) fn validate_schema(
     );
 
     let inflow_annual_components = optional_or_error(
-        manifest.scenarios_inflow_annual_component_parquet,
+        manifest.present(InputFile::ScenariosInflowAnnualComponentParquet),
         || {
             load_inflow_annual_component(Some(
                 &case_root.join("scenarios/inflow_annual_component.parquet"),
@@ -409,7 +402,7 @@ pub(crate) fn validate_schema(
     );
 
     let external_scenarios = optional_or_error(
-        manifest.scenarios_external_inflow_scenarios_parquet,
+        manifest.present(InputFile::ScenariosExternalInflowScenariosParquet),
         || {
             load_external_inflow_scenarios(Some(
                 &case_root.join("scenarios/external_inflow_scenarios.parquet"),
@@ -421,7 +414,7 @@ pub(crate) fn validate_schema(
     );
 
     let external_load_scenarios = optional_or_error(
-        manifest.scenarios_external_load_scenarios_parquet,
+        manifest.present(InputFile::ScenariosExternalLoadScenariosParquet),
         || {
             load_external_load_scenarios(Some(
                 &case_root.join("scenarios/external_load_scenarios.parquet"),
@@ -433,7 +426,7 @@ pub(crate) fn validate_schema(
     );
 
     let external_ncs_scenarios = optional_or_error(
-        manifest.scenarios_external_ncs_scenarios_parquet,
+        manifest.present(InputFile::ScenariosExternalNcsScenariosParquet),
         || {
             load_external_ncs_scenarios(Some(
                 &case_root.join("scenarios/external_ncs_scenarios.parquet"),
@@ -445,7 +438,7 @@ pub(crate) fn validate_schema(
     );
 
     let load_seasonal_stats = optional_or_error(
-        manifest.scenarios_load_seasonal_stats_parquet,
+        manifest.present(InputFile::ScenariosLoadSeasonalStatsParquet),
         || {
             load_load_seasonal_stats(Some(
                 &case_root.join("scenarios/load_seasonal_stats.parquet"),
@@ -457,7 +450,7 @@ pub(crate) fn validate_schema(
     );
 
     let load_factors = optional_or_error(
-        manifest.scenarios_load_factors_json,
+        manifest.present(InputFile::ScenariosLoadFactorsJson),
         || load_load_factors(Some(&case_root.join("scenarios/load_factors.json"))),
         Vec::new,
         "scenarios/load_factors.json",
@@ -466,7 +459,7 @@ pub(crate) fn validate_schema(
 
     // `Option` (not `Vec`) so callers distinguish "no file" from "empty model".
     let correlation: Option<CorrelationModel> = optional_or_error(
-        manifest.scenarios_correlation_json,
+        manifest.present(InputFile::ScenariosCorrelationJson),
         || load_correlation(Some(&case_root.join("scenarios/correlation.json"))).map(Some),
         || None,
         "scenarios/correlation.json",
@@ -474,7 +467,7 @@ pub(crate) fn validate_schema(
     );
 
     let non_controllable_factors = optional_or_error(
-        manifest.scenarios_non_controllable_factors_json,
+        manifest.present(InputFile::ScenariosNonControllableFactorsJson),
         || {
             load_non_controllable_factors(Some(
                 &case_root.join("scenarios/non_controllable_factors.json"),
@@ -486,7 +479,7 @@ pub(crate) fn validate_schema(
     );
 
     let ncs_models = optional_or_error(
-        manifest.scenarios_non_controllable_stats_parquet,
+        manifest.present(InputFile::ScenariosNonControllableStatsParquet),
         || {
             load_ncs_stats(Some(
                 &case_root.join("scenarios/non_controllable_stats.parquet"),
@@ -498,7 +491,7 @@ pub(crate) fn validate_schema(
     );
 
     let thermal_bounds = optional_or_error(
-        manifest.constraints_thermal_bounds_parquet,
+        manifest.present(InputFile::ConstraintsThermalBoundsParquet),
         || load_thermal_bounds(Some(&case_root.join("constraints/thermal_bounds.parquet"))),
         Vec::new,
         "constraints/thermal_bounds.parquet",
@@ -506,7 +499,7 @@ pub(crate) fn validate_schema(
     );
 
     let hydro_bounds = optional_or_error(
-        manifest.constraints_hydro_bounds_parquet,
+        manifest.present(InputFile::ConstraintsHydroBoundsParquet),
         || load_hydro_bounds(Some(&case_root.join("constraints/hydro_bounds.parquet"))),
         Vec::new,
         "constraints/hydro_bounds.parquet",
@@ -514,7 +507,7 @@ pub(crate) fn validate_schema(
     );
 
     let line_bounds = optional_or_error(
-        manifest.constraints_line_bounds_parquet,
+        manifest.present(InputFile::ConstraintsLineBoundsParquet),
         || load_line_bounds(Some(&case_root.join("constraints/line_bounds.parquet"))),
         Vec::new,
         "constraints/line_bounds.parquet",
@@ -522,7 +515,7 @@ pub(crate) fn validate_schema(
     );
 
     let pumping_bounds = optional_or_error(
-        manifest.constraints_pumping_bounds_parquet,
+        manifest.present(InputFile::ConstraintsPumpingBoundsParquet),
         || load_pumping_bounds(Some(&case_root.join("constraints/pumping_bounds.parquet"))),
         Vec::new,
         "constraints/pumping_bounds.parquet",
@@ -530,7 +523,7 @@ pub(crate) fn validate_schema(
     );
 
     let contract_bounds = optional_or_error(
-        manifest.constraints_contract_bounds_parquet,
+        manifest.present(InputFile::ConstraintsContractBoundsParquet),
         || load_contract_bounds(Some(&case_root.join("constraints/contract_bounds.parquet"))),
         Vec::new,
         "constraints/contract_bounds.parquet",
@@ -540,7 +533,7 @@ pub(crate) fn validate_schema(
     // Must load BEFORE generic_constraints below: it resolves the `@name` sigils
     // in constraint expressions. Reordering breaks that resolution.
     let scalar_parameters: Vec<ScalarParameter> = optional_or_error(
-        manifest.constraints_generic_parameters_json,
+        manifest.present(InputFile::ConstraintsGenericParametersJson),
         || parse_scalar_parameters_json(&case_root.join("constraints/generic_parameters.json")),
         Vec::new,
         "constraints/generic_parameters.json",
@@ -555,7 +548,7 @@ pub(crate) fn validate_schema(
         .collect();
 
     let generic_constraints = optional_or_error(
-        manifest.constraints_generic_constraints_json,
+        manifest.present(InputFile::ConstraintsGenericConstraintsJson),
         || {
             let line_pair_index = build_line_bus_pair_index(lines.as_deref().unwrap_or(&[]))?;
             load_generic_constraints(
@@ -570,7 +563,7 @@ pub(crate) fn validate_schema(
     );
 
     let generic_constraint_bounds = optional_or_error(
-        manifest.constraints_generic_constraint_bounds_parquet,
+        manifest.present(InputFile::ConstraintsGenericConstraintBoundsParquet),
         || {
             load_generic_constraint_bounds(Some(
                 &case_root.join("constraints/generic_constraint_bounds.parquet"),
@@ -582,7 +575,7 @@ pub(crate) fn validate_schema(
     );
 
     let penalty_overrides_bus = optional_or_error(
-        manifest.constraints_penalty_overrides_bus_parquet,
+        manifest.present(InputFile::ConstraintsPenaltyOverridesBusParquet),
         || {
             load_penalty_overrides_bus(Some(
                 &case_root.join("constraints/penalty_overrides_bus.parquet"),
@@ -594,7 +587,7 @@ pub(crate) fn validate_schema(
     );
 
     let penalty_overrides_line = optional_or_error(
-        manifest.constraints_penalty_overrides_line_parquet,
+        manifest.present(InputFile::ConstraintsPenaltyOverridesLineParquet),
         || {
             load_penalty_overrides_line(Some(
                 &case_root.join("constraints/penalty_overrides_line.parquet"),
@@ -606,7 +599,7 @@ pub(crate) fn validate_schema(
     );
 
     let penalty_overrides_hydro = optional_or_error(
-        manifest.constraints_penalty_overrides_hydro_parquet,
+        manifest.present(InputFile::ConstraintsPenaltyOverridesHydroParquet),
         || {
             load_penalty_overrides_hydro(Some(
                 &case_root.join("constraints/penalty_overrides_hydro.parquet"),
@@ -618,7 +611,7 @@ pub(crate) fn validate_schema(
     );
 
     let penalty_overrides_ncs = optional_or_error(
-        manifest.constraints_penalty_overrides_ncs_parquet,
+        manifest.present(InputFile::ConstraintsPenaltyOverridesNcsParquet),
         || {
             load_penalty_overrides_ncs(Some(
                 &case_root.join("constraints/penalty_overrides_ncs.parquet"),
@@ -630,7 +623,7 @@ pub(crate) fn validate_schema(
     );
 
     let ncs_bounds = optional_or_error(
-        manifest.constraints_ncs_bounds_parquet,
+        manifest.present(InputFile::ConstraintsNcsBoundsParquet),
         || load_ncs_bounds(Some(&case_root.join("constraints/ncs_bounds.parquet"))),
         Vec::new,
         "constraints/ncs_bounds.parquet",
@@ -638,7 +631,7 @@ pub(crate) fn validate_schema(
     );
 
     let hydro_unit_group_bounds = optional_or_error(
-        manifest.constraints_hydro_unit_group_bounds_parquet,
+        manifest.present(InputFile::ConstraintsHydroUnitGroupBoundsParquet),
         || {
             load_hydro_unit_group_bounds(Some(
                 &case_root.join("constraints/hydro_unit_group_bounds.parquet"),
@@ -656,7 +649,6 @@ pub(crate) fn validate_schema(
     // The guard above already ensures every required file parsed; these `?`s only
     // narrow the Options to satisfy the type checker.
     let config = config?;
-    let penalties = penalties?;
     let stages = stages?;
     let initial_conditions = initial_conditions?;
     let buses = buses?;
@@ -666,7 +658,6 @@ pub(crate) fn validate_schema(
 
     Some(ParsedData {
         config,
-        penalties,
         stages,
         initial_conditions,
         post_study_stages,
@@ -798,116 +789,10 @@ fn sentinel_penalties() -> GlobalPenaltyDefaults {
 )]
 mod tests {
     use super::*;
+    use crate::test_support::{make_minimal_case, write_file};
     use crate::validation::{ErrorKind, ValidationContext, structural::validate_structure};
     use std::fs;
     use tempfile::TempDir;
-
-    // config.json: `training.stopping_rules[].type` = "iteration_limit",
-    // field name is "limit" (not "max_iterations").
-    const VALID_CONFIG_JSON: &str = r#"{
-        "training": {
-            "selection": {"method": "sampled", "forward_passes": 10},
-            "stopping_rules": [
-                { "type": "iteration_limit", "limit": 100 }
-            ]
-        }
-    }"#;
-
-    // penalties.json: top-level keys are "bus", "line", "hydro",
-    // "non_controllable_source". Under "bus": "deficit_segments" (not
-    // "segments") and "excess_cost". Under each segment: "cost" (not
-    // "cost_per_mwh"). Under "line": "exchange_cost". Under "hydro": plain
-    // field names without unit suffixes. Under "non_controllable_source":
-    // "curtailment_cost". See src/penalties.rs for the raw serde types.
-    const VALID_PENALTIES_JSON: &str = r#"{
-        "bus": {
-            "deficit_segments": [
-                { "depth_mw": 500.0, "cost": 1000.0 },
-                { "depth_mw": null,  "cost": 5000.0 }
-            ],
-            "excess_cost": 100.0
-        },
-        "line": { "exchange_cost": 2.0 },
-        "hydro": {
-            "spillage_cost": 0.01,
-            "turbined_cost": 0.05,
-            "diversion_cost": 0.1,
-            "storage_violation_below_cost": 10000.0,
-            "filling_target_violation_cost": 50000.0,
-            "turbined_violation_below_cost": 500.0,
-            "outflow_violation_below_cost": 500.0,
-            "outflow_violation_above_cost": 500.0,
-            "generation_violation_below_cost": 1000.0,
-            "evaporation_violation_cost": 5000.0,
-            "water_withdrawal_violation_cost": 1000.0
-        },
-        "non_controllable_source": { "curtailment_cost": 0.005 }
-    }"#;
-
-    // stages.json: `target_id` in transitions must be an integer (not null).
-    // For a single-stage finite horizon we omit transitions entirely.
-    // Only mandatory per-stage fields: id, start_date, end_date, blocks,
-    // num_openings. season_id, block_mode, state_variables, risk_measure,
-    // sampling_method all have serde defaults and are optional.
-    const VALID_STAGES_JSON: &str = r#"{
-        "policy_graph": {
-            "type": "finite_horizon",
-            "annual_discount_rate": 0.06,
-            "transitions": []
-        },
-        "stages": [
-            {
-                "id": 0,
-                "start_date": "2024-01-01",
-                "end_date": "2024-02-01",
-                "blocks": [{ "id": 0, "name": "FLAT", "hours": 744.0 }],
-                "num_openings": 50
-            }
-        ]
-    }"#;
-
-    const VALID_INITIAL_CONDITIONS_JSON: &str = r#"{
-        "storage": [],
-        "filling_storage": []
-    }"#;
-
-    // buses.json: mandatory fields are "id" and "name" only.
-    // "base_kv" does not exist in the actual Bus raw type.
-    const VALID_BUSES_JSON: &str =
-        r#"{ "buses": [{ "id": 1, "name": "BUS_1", "operational_start_date": "2024-01-01" }] }"#;
-
-    const VALID_LINES_JSON: &str = r#"{ "lines": [] }"#;
-
-    const VALID_HYDROS_JSON: &str = r#"{ "hydros": [] }"#;
-
-    const VALID_THERMALS_JSON: &str = r#"{ "thermals": [] }"#;
-
-    /// Write a string to a path relative to `root`, creating all intermediate
-    /// directories.
-    fn write_file(root: &Path, relative: &str, content: &str) {
-        let full = root.join(relative);
-        if let Some(parent) = full.parent() {
-            fs::create_dir_all(parent).unwrap();
-        }
-        fs::write(&full, content).unwrap();
-    }
-
-    /// Populate a `TempDir` with all 8 required files using valid JSON content.
-    fn make_valid_case(dir: &TempDir) {
-        let root = dir.path();
-        write_file(root, "config.json", VALID_CONFIG_JSON);
-        write_file(root, "penalties.json", VALID_PENALTIES_JSON);
-        write_file(root, "stages.json", VALID_STAGES_JSON);
-        write_file(
-            root,
-            "initial_conditions.json",
-            VALID_INITIAL_CONDITIONS_JSON,
-        );
-        write_file(root, "system/buses.json", VALID_BUSES_JSON);
-        write_file(root, "system/lines.json", VALID_LINES_JSON);
-        write_file(root, "system/hydros.json", VALID_HYDROS_JSON);
-        write_file(root, "system/thermals.json", VALID_THERMALS_JSON);
-    }
 
     /// Given a case directory with all 8 required files containing valid JSON,
     /// `validate_schema` returns `Some(ParsedData)` with all required fields
@@ -915,7 +800,7 @@ mod tests {
     #[test]
     fn test_valid_case_returns_some_and_no_errors() {
         let dir = TempDir::new().unwrap();
-        make_valid_case(&dir);
+        make_minimal_case(&dir);
 
         let mut ctx = ValidationContext::new();
         let manifest = validate_structure(dir.path(), &mut ctx);
@@ -955,7 +840,7 @@ mod tests {
     #[test]
     fn test_invalid_json_returns_none_and_parse_error() {
         let dir = TempDir::new().unwrap();
-        make_valid_case(&dir);
+        make_minimal_case(&dir);
         write_file(dir.path(), "system/hydros.json", "{ invalid json !!!");
 
         let mut ctx = ValidationContext::new();
@@ -998,7 +883,7 @@ mod tests {
     #[test]
     fn test_two_invalid_files_both_errors_collected() {
         let dir = TempDir::new().unwrap();
-        make_valid_case(&dir);
+        make_minimal_case(&dir);
 
         // buses.json: duplicate bus IDs — produces a SchemaError
         write_file(
@@ -1047,14 +932,14 @@ mod tests {
     #[test]
     fn test_absent_optional_file_yields_none_no_error() {
         let dir = TempDir::new().unwrap();
-        make_valid_case(&dir);
+        make_minimal_case(&dir);
         // Do NOT write scenarios/correlation.json.
 
         let mut ctx = ValidationContext::new();
         let manifest = validate_structure(dir.path(), &mut ctx);
         assert!(!ctx.has_errors(), "structural validation should pass");
         assert!(
-            !manifest.scenarios_correlation_json,
+            !manifest.present(InputFile::ScenariosCorrelationJson),
             "manifest should show correlation.json absent"
         );
 
@@ -1131,6 +1016,21 @@ mod tests {
 
     // ── hydro_energy_productivity.parquet in Layer 2 ──────────────────────────
 
+    fn write_parquet_batch(dest: &Path, batch: &arrow::record_batch::RecordBatch) {
+        use parquet::arrow::ArrowWriter;
+
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(dest)
+            .expect("create parquet file");
+        let mut writer =
+            ArrowWriter::try_new(file, batch.schema(), None).expect("ArrowWriter::try_new");
+        writer.write(batch).expect("write batch");
+        writer.close().expect("close writer");
+    }
+
     /// Write a minimal valid `system/hydro_energy_productivity.parquet` with the
     /// given rows to a path inside `root`.
     fn write_hydro_energy_productivity_parquet(
@@ -1142,7 +1042,6 @@ mod tests {
         use arrow::array::{Float64Array, Int32Array};
         use arrow::datatypes::{DataType, Field, Schema};
         use arrow::record_batch::RecordBatch;
-        use parquet::arrow::ArrowWriter;
 
         let schema = Arc::new(Schema::new(vec![
             Field::new("hydro_id", DataType::Int32, false),
@@ -1180,16 +1079,7 @@ mod tests {
         .expect("valid batch");
 
         let dest = root.join("system/hydro_energy_productivity.parquet");
-        let file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&dest)
-            .expect("create parquet file");
-        let mut writer =
-            ArrowWriter::try_new(file, batch.schema(), None).expect("ArrowWriter::try_new");
-        writer.write(&batch).expect("write batch");
-        writer.close().expect("close writer");
+        write_parquet_batch(&dest, &batch);
     }
 
     /// Write a `system/hydro_energy_productivity.parquet` with a NULL `hydro_id`
@@ -1200,7 +1090,6 @@ mod tests {
         use arrow::array::{Float64Array, Int32Array};
         use arrow::datatypes::{DataType, Field, Schema};
         use arrow::record_batch::RecordBatch;
-        use parquet::arrow::ArrowWriter;
 
         // Use a nullable hydro_id column so we can insert a NULL value.
         let schema = Arc::new(Schema::new(vec![
@@ -1234,16 +1123,7 @@ mod tests {
         .expect("valid batch");
 
         let dest = root.join("system/hydro_energy_productivity.parquet");
-        let file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&dest)
-            .expect("create parquet file");
-        let mut writer =
-            ArrowWriter::try_new(file, batch.schema(), None).expect("ArrowWriter::try_new");
-        writer.write(&batch).expect("write batch");
-        writer.close().expect("close writer");
+        write_parquet_batch(&dest, &batch);
     }
 
     /// Given a case directory with a valid 2-row `system/hydro_energy_productivity.parquet`,
@@ -1253,7 +1133,7 @@ mod tests {
     #[test]
     fn test_validate_schema_loads_hydro_energy_productivity_when_present() {
         let dir = TempDir::new().unwrap();
-        make_valid_case(&dir);
+        make_minimal_case(&dir);
 
         // Write a valid 2-row parquet: hydro_id=0 at stage_id=0 and stage_id=1.
         write_hydro_energy_productivity_parquet(
@@ -1265,7 +1145,7 @@ mod tests {
         let manifest = validate_structure(dir.path(), &mut ctx);
         assert!(!ctx.has_errors(), "structural validation should pass");
         assert!(
-            manifest.system_hydro_energy_productivity_parquet,
+            manifest.present(InputFile::SystemHydroEnergyProductivityParquet),
             "manifest should detect the parquet"
         );
 
@@ -1296,14 +1176,14 @@ mod tests {
     #[test]
     fn test_validate_schema_hydro_energy_productivity_absent_is_empty() {
         let dir = TempDir::new().unwrap();
-        make_valid_case(&dir);
+        make_minimal_case(&dir);
         // Do NOT write system/hydro_energy_productivity.parquet.
 
         let mut ctx = ValidationContext::new();
         let manifest = validate_structure(dir.path(), &mut ctx);
         assert!(!ctx.has_errors(), "structural validation should pass");
         assert!(
-            !manifest.system_hydro_energy_productivity_parquet,
+            !manifest.present(InputFile::SystemHydroEnergyProductivityParquet),
             "manifest should show parquet absent"
         );
 
@@ -1330,14 +1210,14 @@ mod tests {
     #[test]
     fn test_validate_schema_malformed_hydro_energy_productivity_collects_error() {
         let dir = TempDir::new().unwrap();
-        make_valid_case(&dir);
+        make_minimal_case(&dir);
         write_hydro_energy_productivity_null_hydro_id(dir.path());
 
         let mut ctx = ValidationContext::new();
         let manifest = validate_structure(dir.path(), &mut ctx);
         assert!(!ctx.has_errors(), "structural validation should pass");
         assert!(
-            manifest.system_hydro_energy_productivity_parquet,
+            manifest.present(InputFile::SystemHydroEnergyProductivityParquet),
             "manifest should detect the parquet"
         );
 

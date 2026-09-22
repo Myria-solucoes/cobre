@@ -1,5 +1,3 @@
-//! `impl SolverInterface for ClpSolver`.
-
 use std::time::Instant;
 
 use super::config::{ClpAlgorithm, ClpProfile};
@@ -63,7 +61,7 @@ impl SolverInterface for ClpSolver {
     /// `Clp_loadProblem` swaps the model data but does NOT heal the
     /// `ClpSimplex`-level rim/pricing state, so stale steepest-edge reference
     /// weights persist and make the landed vertex on alternative-optima LPs
-    /// depend on the order a worker processed prior scenarios — breaking
+    /// depend on which models this handle solved before it — breaking
     /// thread/rank-count determinism. Recreating the `ClpSimplex` discards that
     /// state entirely; the cached profile is re-applied so configuration
     /// survives the swap.
@@ -75,11 +73,6 @@ impl SolverInterface for ClpSolver {
             // Allocation failed: keep the existing handle rather than abort;
             // determinism degrades but the run continues.
             return;
-        }
-        // Release any hot-start snapshot bound to the OLD handle before it is
-        // destroyed — the `saveStuff` token belongs to the old model.
-        if !self.hot_start_token.is_null() {
-            self.unmark_hot_start();
         }
         // SAFETY: `self.handle` is the valid handle from construction (or a prior
         // reset); `cobre_clp_destroy` frees it. It is immediately replaced by the
@@ -122,17 +115,6 @@ impl SolverInterface for ClpSolver {
             "num_nz {} overflows i32: LP exceeds CLP API limit",
             template.num_nz
         );
-        // Release any active hot-start snapshot before replacing the model — the
-        // saveStuff belongs to the old model's factorization and is invalid after
-        // Clp_loadProblem, so releasing before reload keeps `Drop` from unmarking
-        // a stale token after the swap. (A *solve* after a
-        // reload-following-a-hot-start stays unsafe at the CLP level — vendored
-        // CLP leaves `ClpSimplex::factorization_` dangling and `Clp_loadProblem`
-        // does not heal the rim — but no persistent-solver path reloads after
-        // marking.)
-        if !self.hot_start_token.is_null() {
-            self.unmark_hot_start();
-        }
         // Rationale: the values below were asserted to fit in i32 above.
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         let num_col = template.num_cols as i32;
@@ -203,12 +185,6 @@ impl SolverInterface for ClpSolver {
     /// not the FFI call. The native append preserves CLP's persistent simplex
     /// basis (no full rebuild).
     ///
-    /// A non-empty append **releases any captured hot-start snapshot**: the
-    /// saveStuff pins the pre-append factorization/rim and is stale once the row
-    /// dimension changes (mirrors the guard in [`Self::load_model`]). An empty
-    /// batch (`num_rows == 0`) makes no structural change and leaves an active
-    /// snapshot intact.
-    ///
     /// # Panics
     ///
     /// Panics if `rows.num_rows` or the batch nnz does not fit in `i32`.
@@ -236,11 +212,6 @@ impl SolverInterface for ClpSolver {
             return;
         }
 
-        if !self.hot_start_token.is_null() {
-            self.unmark_hot_start();
-        }
-
-        // `per_col_count[c]` is the number of batch entries in column `c`.
         let mut per_col_count = vec![0_usize; self.num_cols];
         for &col in &rows.col_indices {
             #[allow(clippy::cast_sign_loss)]
@@ -253,15 +224,11 @@ impl SolverInterface for ClpSolver {
             per_col_count[col] += 1;
         }
 
-        // Each column `c` keeps its existing entries followed by
-        // `per_col_count[c]` appended entries.
         let merged_nz = self.num_nz + new_nz;
         let mut new_col_starts = Vec::with_capacity(self.num_cols + 1);
         let mut new_row_indices = vec![0_i32; merged_nz];
         let mut new_values = vec![0.0_f64; merged_nz];
 
-        // `write_cursor[c]` tracks the next write position within column `c`'s
-        // slice of the merged buffers.
         let mut write_cursor = Vec::with_capacity(self.num_cols);
         let mut acc = 0_usize;
         for c in 0..self.num_cols {
@@ -418,8 +385,7 @@ impl SolverInterface for ClpSolver {
             self.col_lower[col] = lower[i];
             self.col_upper[col] = upper[i];
         }
-        // `Clp_chgColumn*` replace the entire bound array (not a subset), so the
-        // retained vectors are forwarded in full.
+
         // SAFETY:
         // - `self.handle` is a valid, non-null CLP pointer with a model loaded.
         // - `self.col_lower`/`self.col_upper` each have exactly `self.num_cols`
@@ -597,8 +563,8 @@ impl SolverInterface for ClpSolver {
     /// Extracts the current simplex basis into `out`, element-by-element.
     ///
     /// CLP reports basis status one element at a time (no bulk array in the
-    /// wrapper). Each native `CLP_BASIS_*` code is mapped via `from_clp_code`
-    /// into the canonical status stored in `out`.
+    /// wrapper). Each native `CLP_BASIS_*` code is mapped via
+    /// [`BasisStatus::from_clp_code`] into the canonical status stored in `out`.
     ///
     /// # Panics
     ///

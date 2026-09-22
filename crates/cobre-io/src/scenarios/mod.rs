@@ -27,7 +27,9 @@ pub use annual_component::{InflowAnnualComponentRow, parse_inflow_annual_compone
 pub use ar_coefficients::{InflowArCoefficientRow, parse_inflow_ar_coefficients};
 pub use assembly::{assemble_inflow_models, assemble_load_models};
 pub use correlation::parse_correlation;
-pub use estimation::{EstimationError, EstimationPath, estimate_from_history};
+pub use estimation::{
+    EstimationError, EstimationPath, estimate_from_history, resolve_model_stage_seasons,
+};
 pub use external::{
     ExternalLoadRow, ExternalNcsRow, ExternalScenarioRow, parse_external_inflow_scenarios,
     parse_external_load_scenarios, parse_external_ncs_scenarios,
@@ -43,11 +45,9 @@ pub use non_controllable_factors::{NcsFactorEntry, parse_non_controllable_factor
 pub use non_controllable_stats::parse_ncs_stats;
 pub use residual_derivation::{populate_derived_residual_ratios, resolve_stage_seasons};
 
-use cobre_core::scenario::{CorrelationModel, InflowModel, LoadModel, NcsModel};
+use cobre_core::scenario::{CorrelationModel, NcsModel};
 
 use crate::LoadError;
-use crate::stages::parse_stages;
-use crate::validation::structural::FileManifest;
 use std::path::Path;
 
 /// Load `scenarios/inflow_seasonal_stats.parquet`, returning an empty `Vec` when absent.
@@ -223,200 +223,6 @@ pub fn load_noise_openings(path: Option<&Path>) -> Result<Vec<NoiseOpeningRow>, 
     }
 }
 
-// ── ScenarioData ──────────────────────────────────────────────────────────────
-
-/// All assembled scenario pipeline data for one case directory.
-///
-/// Produced by [`load_scenarios`] after loading and assembling every scenario
-/// file present in the manifest. Each field maps directly to the corresponding
-/// field in [`cobre_core::System`].
-///
-/// Optional collections are empty `Vec`s when the corresponding file is absent
-/// from the manifest. [`correlation`] is [`CorrelationModel::default()`] when
-/// `scenarios/correlation.json` is absent.
-///
-/// # Examples
-///
-/// ```
-/// use cobre_io::ScenarioData;
-/// use cobre_core::scenario::CorrelationModel;
-///
-/// // Default-like state produced when all manifest flags are false.
-/// let data = ScenarioData {
-///     inflow_models: vec![],
-///     load_models: vec![],
-///     ncs_models: vec![],
-///     correlation: CorrelationModel::default(),
-///     inflow_history: vec![],
-///     external_scenarios: vec![],
-///     external_load_scenarios: vec![],
-///     external_ncs_scenarios: vec![],
-///     load_factors: vec![],
-/// };
-/// assert!(data.inflow_models.is_empty());
-/// assert!(data.correlation.profiles.is_empty());
-/// ```
-#[derive(Debug, Clone)]
-pub struct ScenarioData {
-    /// PAR(p) inflow models, sorted by `(hydro_id, stage_id)`.
-    pub inflow_models: Vec<InflowModel>,
-    /// Load seasonal statistics, sorted by `(bus_id, stage_id)`.
-    pub load_models: Vec<LoadModel>,
-    /// NCS availability noise models, sorted by `(ncs_id, stage_id)`.
-    pub ncs_models: Vec<NcsModel>,
-    /// Correlation model (profiles + schedule).
-    pub correlation: CorrelationModel,
-    /// Inflow history rows, sorted by `(hydro_id, start_date)`.
-    pub inflow_history: Vec<InflowHistoryRow>,
-    /// External inflow scenario rows, sorted by `(stage_id, scenario_id, hydro_id)`.
-    pub external_scenarios: Vec<ExternalScenarioRow>,
-    /// External load scenario rows, sorted by `(stage_id, scenario_id, bus_id)`.
-    pub external_load_scenarios: Vec<ExternalLoadRow>,
-    /// External NCS scenario rows, sorted by `(stage_id, scenario_id, ncs_id)`.
-    pub external_ncs_scenarios: Vec<ExternalNcsRow>,
-    /// Load factor entries, sorted by `(bus_id, stage_id)`.
-    pub load_factors: Vec<LoadFactorEntry>,
-}
-
-// ── load_scenarios ────────────────────────────────────────────────────────────
-
-/// Load every scenario file present in `manifest` and assemble [`ScenarioData`].
-///
-/// File paths are constructed as `case_root.join("scenarios/<filename>")`.
-///
-/// `inflow_models[].residual_std_ratio` is closure-derived, never read from a
-/// file (see [`populate_derived_residual_ratios`]). When `manifest.stages_json`
-/// is set, this function parses `case_root.join("stages.json")` for stage/season
-/// context and runs the derivation over the assembled models, mirroring the
-/// four production call sites (`pipeline.rs`, `scenarios::estimation`). When
-/// `manifest.stages_json` is unset — this function has no other source of
-/// stage/season context — derivation is skipped and every model keeps
-/// [`assemble_inflow_models`]'s placeholder `residual_std_ratio = 1.0`
-/// unresolved; a caller relying on the derived value in that case must call
-/// [`populate_derived_residual_ratios`] itself once stage data is available.
-///
-/// # Errors
-///
-/// | Condition                                                | Error variant              |
-/// |-----------------------------------------------------------|----------------------------|
-/// | Any file read or parse failure                           | Propagated from parser     |
-/// | AR coefficient rows without matching stats row           | [`LoadError::SchemaError`] |
-/// | AR coefficient rows exist for unknown (hydro, stage)     | [`LoadError::SchemaError`] |
-/// | `stages.json` present but malformed                      | Propagated from `parse_stages` |
-/// | An order-bearing model's stage has no resolvable season (`stages.json` present) | [`LoadError::ConstraintError`] |
-/// | The `residual_std_ratio` closure is singular for a hydro (`stages.json` present) | [`LoadError::ConstraintError`] |
-///
-/// # Examples
-///
-/// ```no_run
-/// use std::path::Path;
-/// use cobre_io::validation::structural::FileManifest;
-/// use cobre_io::scenarios::load_scenarios;
-///
-/// let manifest = FileManifest::default(); // all flags false
-/// let data = load_scenarios(Path::new("/case"), &manifest)
-///     .expect("empty manifest always succeeds");
-/// assert!(data.inflow_models.is_empty());
-/// assert!(data.correlation.profiles.is_empty());
-/// ```
-pub fn load_scenarios(
-    case_root: &Path,
-    manifest: &FileManifest,
-) -> Result<ScenarioData, LoadError> {
-    let scenarios_dir = case_root.join("scenarios");
-
-    let raw_stats = load_inflow_seasonal_stats(
-        manifest
-            .scenarios_inflow_seasonal_stats_parquet
-            .then(|| scenarios_dir.join("inflow_seasonal_stats.parquet"))
-            .as_deref(),
-    )?;
-    let raw_coefficients = load_inflow_ar_coefficients(
-        manifest
-            .scenarios_inflow_ar_coefficients_parquet
-            .then(|| scenarios_dir.join("inflow_ar_coefficients.parquet"))
-            .as_deref(),
-    )?;
-    let raw_annual_components = load_inflow_annual_component(
-        manifest
-            .scenarios_inflow_annual_component_parquet
-            .then(|| scenarios_dir.join("inflow_annual_component.parquet"))
-            .as_deref(),
-    )?;
-    let inflow_history = load_inflow_history(
-        manifest
-            .scenarios_inflow_history_parquet
-            .then(|| scenarios_dir.join("inflow_history.parquet"))
-            .as_deref(),
-    )?;
-    let raw_load_stats = load_load_seasonal_stats(
-        manifest
-            .scenarios_load_seasonal_stats_parquet
-            .then(|| scenarios_dir.join("load_seasonal_stats.parquet"))
-            .as_deref(),
-    )?;
-    let load_factors = load_load_factors(
-        manifest
-            .scenarios_load_factors_json
-            .then(|| scenarios_dir.join("load_factors.json"))
-            .as_deref(),
-    )?;
-    let correlation = load_correlation(
-        manifest
-            .scenarios_correlation_json
-            .then(|| scenarios_dir.join("correlation.json"))
-            .as_deref(),
-    )?;
-    let external_scenarios = load_external_inflow_scenarios(
-        manifest
-            .scenarios_external_inflow_scenarios_parquet
-            .then(|| scenarios_dir.join("external_inflow_scenarios.parquet"))
-            .as_deref(),
-    )?;
-    let external_load_scenarios = load_external_load_scenarios(
-        manifest
-            .scenarios_external_load_scenarios_parquet
-            .then(|| scenarios_dir.join("external_load_scenarios.parquet"))
-            .as_deref(),
-    )?;
-    let external_ncs_scenarios = load_external_ncs_scenarios(
-        manifest
-            .scenarios_external_ncs_scenarios_parquet
-            .then(|| scenarios_dir.join("external_ncs_scenarios.parquet"))
-            .as_deref(),
-    )?;
-    let ncs_models = load_ncs_stats(
-        manifest
-            .scenarios_non_controllable_stats_parquet
-            .then(|| scenarios_dir.join("non_controllable_stats.parquet"))
-            .as_deref(),
-    )?;
-
-    let mut inflow_models =
-        assemble_inflow_models(raw_stats, raw_coefficients, raw_annual_components)?;
-    if manifest.stages_json {
-        let stages_data = parse_stages(&case_root.join("stages.json"))?;
-        let (stage_to_season, n_seasons) = resolve_stage_seasons(
-            &stages_data.stages,
-            stages_data.policy_graph.season_map.as_ref(),
-        );
-        populate_derived_residual_ratios(&mut inflow_models, &stage_to_season, n_seasons)?;
-    }
-    let load_models = assemble_load_models(raw_load_stats);
-
-    Ok(ScenarioData {
-        inflow_models,
-        load_models,
-        ncs_models,
-        correlation,
-        inflow_history,
-        external_scenarios,
-        external_load_scenarios,
-        external_ncs_scenarios,
-        load_factors,
-    })
-}
-
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -429,8 +235,6 @@ pub fn load_scenarios(
 )]
 mod tests {
     use super::*;
-    use crate::validation::structural::FileManifest;
-    use tempfile::TempDir;
 
     #[test]
     fn test_load_inflow_seasonal_stats_none_returns_empty() {
@@ -488,148 +292,8 @@ mod tests {
     }
 
     #[test]
-    fn test_load_scenarios_all_flags_false_returns_empty() {
-        let dir = TempDir::new().unwrap();
-        let manifest = FileManifest::default();
-
-        let data =
-            load_scenarios(dir.path(), &manifest).expect("empty manifest should always succeed");
-
-        assert!(
-            data.inflow_models.is_empty(),
-            "inflow_models should be empty when no scenario files present"
-        );
-        assert!(
-            data.load_models.is_empty(),
-            "load_models should be empty when no scenario files present"
-        );
-        assert!(
-            data.correlation.profiles.is_empty(),
-            "correlation.profiles should be empty (default) when correlation.json absent"
-        );
-        assert!(
-            data.correlation.schedule.is_empty(),
-            "correlation.schedule should be empty (default) when correlation.json absent"
-        );
-        assert!(
-            data.inflow_history.is_empty(),
-            "inflow_history should be empty when file absent"
-        );
-        assert!(
-            data.external_scenarios.is_empty(),
-            "external_scenarios should be empty when file absent"
-        );
-        assert!(
-            data.external_load_scenarios.is_empty(),
-            "external_load_scenarios should be empty when file absent"
-        );
-        assert!(
-            data.external_ncs_scenarios.is_empty(),
-            "external_ncs_scenarios should be empty when file absent"
-        );
-        assert!(
-            data.load_factors.is_empty(),
-            "load_factors should be empty when file absent"
-        );
-    }
-
-    #[test]
     fn test_load_noise_openings_none_returns_empty() {
         let result = load_noise_openings(None).unwrap();
         assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_load_scenarios_no_annual_file_yields_none_field() {
-        let dir = TempDir::new().unwrap();
-        let manifest = FileManifest::default();
-
-        let data =
-            load_scenarios(dir.path(), &manifest).expect("empty manifest should always succeed");
-
-        // No inflow stats means no models: the assertion holds vacuously.
-        assert!(
-            data.inflow_models.iter().all(|m| m.annual.is_none()),
-            "every inflow model should have annual == None when annual component file is absent"
-        );
-    }
-
-    /// With `stages.json` present (`manifest.stages_json = true`), an
-    /// order-bearing model's `residual_std_ratio` must come out closure-derived
-    /// (`sqrt(1 - psi^2)` for this uniform-AR(1) fixture, per the closure's
-    /// exact order-1 decoupling), not the [`assemble_inflow_models`] placeholder
-    /// `1.0` — proving the derivation pass is actually wired into
-    /// `load_scenarios`, not merely reachable.
-    #[test]
-    fn test_load_scenarios_derives_residual_std_ratio_when_stages_present() {
-        use crate::output::stochastic::{
-            write_inflow_ar_coefficients, write_inflow_seasonal_stats,
-        };
-
-        let dir = TempDir::new().unwrap();
-        let scenarios_dir = dir.path().join("scenarios");
-        std::fs::create_dir_all(&scenarios_dir).unwrap();
-
-        std::fs::write(
-            dir.path().join("stages.json"),
-            r#"{
-                "season_definitions": {
-                    "cycle_type": "monthly",
-                    "seasons": [{ "id": 0, "month_start": 1, "label": "January" }]
-                },
-                "policy_graph": {
-                    "type": "finite_horizon",
-                    "annual_discount_rate": 0.0,
-                    "transitions": []
-                },
-                "stages": [{
-                    "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
-                    "season_id": 0,
-                    "blocks": [{ "id": 0, "name": "FLAT", "hours": 744.0 }],
-                    "num_openings": 10
-                }]
-            }"#,
-        )
-        .unwrap();
-
-        let psi = 0.5_f64;
-        write_inflow_seasonal_stats(
-            &scenarios_dir.join("inflow_seasonal_stats.parquet"),
-            &[InflowSeasonalStatsRow {
-                hydro_id: cobre_core::EntityId::from(1),
-                stage_id: 0,
-                mean_m3s: 100.0,
-                std_m3s: 20.0,
-            }],
-        )
-        .unwrap();
-        write_inflow_ar_coefficients(
-            &scenarios_dir.join("inflow_ar_coefficients.parquet"),
-            &[InflowArCoefficientRow {
-                hydro_id: cobre_core::EntityId::from(1),
-                stage_id: 0,
-                lag: 1,
-                coefficient: psi,
-            }],
-        )
-        .unwrap();
-
-        let manifest = FileManifest {
-            stages_json: true,
-            scenarios_inflow_seasonal_stats_parquet: true,
-            scenarios_inflow_ar_coefficients_parquet: true,
-            ..FileManifest::default()
-        };
-
-        let data = load_scenarios(dir.path(), &manifest).expect("load_scenarios must succeed");
-
-        assert_eq!(data.inflow_models.len(), 1);
-        let expected = (1.0 - psi * psi).sqrt();
-        let got = data.inflow_models[0].residual_std_ratio;
-        assert!(
-            (got - expected).abs() < 1e-9,
-            "residual_std_ratio must be the closure-derived value {expected}, not the \
-             assembly placeholder 1.0; got {got}"
-        );
     }
 }

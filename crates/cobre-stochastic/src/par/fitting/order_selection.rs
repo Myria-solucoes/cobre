@@ -92,6 +92,9 @@ pub fn select_order_aic(sigma2_per_order: &[f64], n_observations: usize) -> AicS
 #[derive(Debug, Clone, PartialEq)]
 pub struct PacfSelectionResult {
     /// Selected AR order; `0` when no lag exceeds the significance threshold.
+    /// The order names the outermost significant lag, never a subset, so the
+    /// fitted coefficient vector carries one entry per lag `1..=selected_order`,
+    /// where position `k` is lag `k + 1`.
     pub selected_order: usize,
     /// PACF values for lags `1..=p_max`; `pacf_values[k]` is the PACF at lag `k+1`.
     pub pacf_values: Vec<f64>,
@@ -207,7 +210,6 @@ pub fn select_order_pacf_annual(
         f64::INFINITY
     };
 
-    // Rule 1 (doc): a structural zero at lag 1 forces order 0.
     if conditional_facp.first().copied() == Some(0.0) {
         return PacfSelectionResult {
             selected_order: 0,
@@ -223,7 +225,6 @@ pub fn select_order_pacf_annual(
         .find(|&(_, p)| p.abs() > threshold)
         .map_or(0, |(k, _)| k + 1);
 
-    // Rule 2 (doc): a non-zero lag 1 floors the order at AR(1).
     let selected_order = match conditional_facp.first() {
         Some(&p1) if p1 != 0.0 => max_significant.max(1),
         _ => max_significant,

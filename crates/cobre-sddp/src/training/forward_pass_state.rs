@@ -14,8 +14,8 @@ use cobre_stochastic::context::ClassSchemes;
 #[cfg(test)]
 use cobre_stochastic::select_transition_child;
 use cobre_stochastic::{
-    ClassDimensions, ClassSampleRequest, ForwardSampler, ForwardSamplerConfig, SampleRequest,
-    build_forward_sampler,
+    ClassDimensions, ClassSampleRequest, ForwardNoiseTables, ForwardSampler, ForwardSamplerConfig,
+    SampleRequest, build_forward_sampler,
 };
 use rayon::iter::{
     IndexedParallelIterator, IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator,
@@ -35,7 +35,7 @@ use crate::{
         EnumeratedForwardResult, EnumeratedForwardScratch, EnumeratedParams, ForwardResult,
         StageKey, run_enumerated_forward, run_forward_stage,
     },
-    indexer::StateSpace,
+    lp::indexer::StateSpace,
     setup::node_graph::{EnumeratedPlan, NodePos, StageIdx, Traversal, advance_sampled_node},
     solve::partition,
     solver_phase::Phase,
@@ -165,6 +165,9 @@ pub(crate) struct ForwardWorkerParams<'a> {
     pub training_ctx: &'a TrainingContext<'a>,
     /// Forward sampler that drives per-scenario-per-stage noise generation.
     pub sampler: &'a ForwardSampler<'a>,
+    /// Per-iteration scenario-invariant tables backing `sampler`'s
+    /// `OutOfSample` draws.
+    pub noise_tables: &'a ForwardNoiseTables,
 }
 
 /// Return bundle from [`run_forward_worker`].
@@ -249,6 +252,10 @@ pub(crate) struct ForwardPassState {
     /// `Enumerated`; always present (never `Option`) and grows to size on the
     /// first enumerated `run()`, so no allocation occurs after warm-up.
     enumerated_scratch: EnumeratedForwardScratch,
+
+    /// Scenario-invariant per-class noise tables, rebuilt once per iteration
+    /// in [`Self::run`] and shared by reference across every worker's draws.
+    noise_tables: ForwardNoiseTables,
 }
 
 impl ForwardPassState {
@@ -283,6 +290,7 @@ impl ForwardPassState {
             profile: Phase::Forward.profile(),
             traversal: Traversal::default(),
             enumerated_scratch: EnumeratedForwardScratch::default(),
+            noise_tables: ForwardNoiseTables::default(),
         }
     }
 
@@ -327,7 +335,8 @@ impl ForwardPassState {
     /// Returns `Err(SddpError::Infeasible { .. })` when a stage LP has no
     /// feasible solution. Returns `Err(SddpError::Solver(_))` for all other
     /// terminal LP solver failures. Returns `Err(SddpError::Stochastic(_))` if
-    /// `build_forward_sampler` fails.
+    /// `build_forward_sampler` fails, or if `rebuild_noise_tables` rejects an
+    /// out-of-sample class wider than the Sobol dimension capacity.
     ///
     /// # Panics (debug builds only)
     ///
@@ -383,6 +392,13 @@ impl ForwardPassState {
             external_load_library: training_ctx.external_load_library,
             external_ncs_library: training_ctx.external_ncs_library,
         })?;
+        #[allow(clippy::cast_possible_truncation)]
+        sampler.rebuild_noise_tables(
+            inputs.iteration as u32,
+            inputs.total_forward_passes as u32,
+            inputs.ctx.noise_group_ids,
+            &mut self.noise_tables,
+        )?;
 
         // Taken out for the match's duration so `self` stays freely `&mut`-usable
         // inside both arms (the `Enumerated` arm's `plan` borrows this local, not
@@ -390,7 +406,15 @@ impl ForwardPassState {
         // is a stack-only `Sampled` variant.
         let traversal = std::mem::take(&mut self.traversal);
         let result = match &traversal {
-            Traversal::Enumerated(plan) => self.run_enumerated(inputs, &sampler, plan),
+            Traversal::Enumerated(plan) => {
+                // Taken out for the call's duration, mirroring `traversal` above: `self`
+                // must stay `&mut`-usable for `run_enumerated`'s receiver while this
+                // reference is also passed as an argument. Restored right after.
+                let noise_tables = std::mem::take(&mut self.noise_tables);
+                let r = self.run_enumerated(inputs, &sampler, &noise_tables, plan);
+                self.noise_tables = noise_tables;
+                r
+            }
             Traversal::Sampled { .. } => self.run_sampled(inputs, &sampler),
         };
         self.traversal = traversal;
@@ -452,9 +476,7 @@ impl ForwardPassState {
             inputs.terminal_has_boundary_cuts,
         )?;
 
-        // Re-size the per-worker per-stage accumulators: the worker count may
-        // differ from `new()` if the pool shrank. Fast path resets in place when
-        // the shape is unchanged; otherwise rebuild to `(n_workers, num_stages)`.
+        // The worker count may differ from `new()` if the pool shrank.
         let shape_matches = self.worker_stage_stats.len() == n_workers
             && self.worker_stage_stats.first().map_or(0, Vec::len) == num_stages;
         if shape_matches {
@@ -478,9 +500,8 @@ impl ForwardPassState {
         self.worker_stats_before
             .extend(inputs.workspaces.iter().map(|ws| ws.solver.statistics()));
 
-        // Apply the forward-phase solver profile to every workspace. `set_profile`
-        // is delta-tracked: it issues solver-option FFI calls only for fields that
-        // differ from each solver's current state.
+        // `set_profile` is delta-tracked: it issues solver-option FFI calls only
+        // for fields that differ from each solver's current state.
         let forward_profile = self.profile;
         for ws in inputs.workspaces.iter_mut() {
             ws.solver.set_profile(&forward_profile);
@@ -488,9 +509,6 @@ impl ForwardPassState {
                 ws.solver.current_profile() == &forward_profile,
                 "solver profile must equal the profile passed to set_profile"
             );
-        }
-
-        for ws in inputs.workspaces.iter_mut() {
             ws.worker_timing_buf = WorkerPhaseTimings::default();
         }
 
@@ -519,6 +537,7 @@ impl ForwardPassState {
             fcf: inputs.fcf,
             training_ctx,
             sampler,
+            noise_tables: &self.noise_tables,
         };
         let worker_results: Vec<Result<ForwardWorkerResult, SddpError>> = inputs
             .workspaces
@@ -566,6 +585,7 @@ impl ForwardPassState {
         &mut self,
         inputs: &mut ForwardPassInputs<'_, S>,
         sampler: &ForwardSampler<'_>,
+        noise_tables: &ForwardNoiseTables,
         plan: &EnumeratedPlan,
     ) -> Result<ForwardResult, SddpError>
     where
@@ -578,8 +598,6 @@ impl ForwardPassState {
         let forward_profile = self.profile;
         for ws in inputs.workspaces.iter_mut() {
             ws.solver.set_profile(&forward_profile);
-        }
-        for ws in inputs.workspaces.iter_mut() {
             ws.worker_timing_buf = WorkerPhaseTimings::default();
         }
 
@@ -607,6 +625,7 @@ impl ForwardPassState {
             fcf: inputs.fcf,
             training_ctx,
             sampler,
+            noise_tables,
             dcs: dcs_params,
             event_sender: inputs.event_sender,
         };
@@ -855,8 +874,8 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
     // run_forward_stage borrows ws (and so the allocation is reused).
     let mut raw_noise_buf = std::mem::take(&mut ws.scratch.raw_noise_buf);
     raw_noise_buf.resize(params.noise_dim, 0.0_f64);
-    let mut perm_scratch = std::mem::take(&mut ws.scratch.perm_scratch);
-    perm_scratch.resize(params.total_forward_passes.max(1), 0_usize);
+    let mut corr_scratch = std::mem::take(&mut ws.scratch.corr_scratch);
+    corr_scratch.resize(2 * params.noise_dim, 0.0_f64);
 
     // Per-trajectory sampled-walk node carrier, root-initialized: each
     // trajectory advances its own entry by the transition draw at the end of
@@ -974,12 +993,13 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
                 stage: t32,
                 stage_idx: t.0,
                 noise_buf: &mut raw_noise_buf,
-                perm_scratch: &mut perm_scratch,
+                corr_scratch: &mut corr_scratch,
                 total_scenarios: total_scenarios_u32,
                 noise_group_id: params.ctx.noise_group_id_at(t),
                 node_opening_offset,
                 node_opening_len,
                 pinned_scenario: None,
+                tables: params.noise_tables,
             })?;
             let raw_noise = noise.as_slice();
 
@@ -1019,7 +1039,7 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
     }
 
     ws.scratch.raw_noise_buf = raw_noise_buf;
-    ws.scratch.perm_scratch = perm_scratch;
+    ws.scratch.corr_scratch = corr_scratch;
     ws.scratch.current_node_buf = current_node_buf;
 
     let local_solves = ws.solver.statistics().solve_count - local_solve_count_before;
@@ -1065,10 +1085,10 @@ mod tests {
         context::{StageContext, TrainingContext},
         cut::{CutPool, FutureCostFunction},
         horizon_mode::HorizonMode,
-        indexer::{StateSpace, StudyDimensions},
         inflow_method::InflowNonNegativityMethod,
-        lp_builder::PatchBuffer,
-        test_support::{state_layout, study_dims},
+        lp::builder::PatchBuffer,
+        lp::indexer::{StateSpace, StudyDimensions},
+        test_support::{permissive_state_boxes, state_layout, study_dims},
         trajectory::TrajectoryRecord,
         workspace::{BackwardAccumulators, BasisStore, ScratchBuffers, SolverWorkspace},
     };
@@ -1214,7 +1234,7 @@ mod tests {
                 recon_slot_lookup: Vec::new(),
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
-                perm_scratch: Vec::new(),
+                corr_scratch: Vec::new(),
                 current_node_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
@@ -1448,7 +1468,6 @@ mod tests {
         for inner in &state.worker_stage_stats {
             assert_eq!(inner.len(), 5);
         }
-        // Per-worker stat Vecs are pre-allocated with the given capacity.
         assert_eq!(state.worker_stats_before.capacity(), 3);
         assert_eq!(state.worker_stats_after.capacity(), 3);
         assert_eq!(state.worker_deltas.capacity(), 3);
@@ -1461,7 +1480,9 @@ mod tests {
     #[test]
     fn forward_pass_state_run_produces_expected_scenario_count() {
         let mut fx = ForwardFixture::new();
+        let state_boxes = permissive_state_boxes(fx.state.n_state, fx.n_stages);
         let ctx = StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &fx.templates,
             base_rows: &fx.base_rows,
@@ -1540,7 +1561,9 @@ mod tests {
     #[test]
     fn forward_pass_state_set_profile_reaches_current_profile_after_run() {
         let mut fx = ForwardFixture::new();
+        let state_boxes = permissive_state_boxes(fx.state.n_state, fx.n_stages);
         let ctx = StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &fx.templates,
             base_rows: &fx.base_rows,
@@ -1636,7 +1659,9 @@ mod tests {
     #[test]
     fn run_forward_worker_produces_expected_trajectory_costs() {
         let fx = ForwardFixture::new();
+        let state_boxes = permissive_state_boxes(fx.state.n_state, fx.n_stages);
         let ctx = StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &fx.templates,
             base_rows: &fx.base_rows,
@@ -1703,6 +1728,15 @@ mod tests {
             external_ncs_library: None,
         })
         .expect("sampler build must not error");
+        let mut noise_tables = ForwardNoiseTables::default();
+        sampler
+            .rebuild_noise_tables(
+                1,
+                u32::try_from(fx.n_scenarios).expect("fits u32"),
+                &[],
+                &mut noise_tables,
+            )
+            .expect("test fixture never exceeds the Sobol dimension cap");
 
         let params = ForwardWorkerParams {
             forward_passes: fx.n_scenarios,
@@ -1723,6 +1757,7 @@ mod tests {
             fcf: &fx.fcf,
             training_ctx: &training_ctx,
             sampler: &sampler,
+            noise_tables: &noise_tables,
         };
 
         // Mutable per-call state: independent allocations, not borrows of fx.
@@ -1771,7 +1806,9 @@ mod tests {
     #[test]
     fn forward_pass_state_run_preserves_worker_stage_stats_shape() {
         let mut fx = ForwardFixture::new();
+        let state_boxes = permissive_state_boxes(fx.state.n_state, fx.n_stages);
         let ctx = StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &fx.templates,
             base_rows: &fx.base_rows,
@@ -1821,7 +1858,6 @@ mod tests {
 
         let mut state = ForwardPassState::new(1, fx.n_stages, fx.n_scenarios);
 
-        // First run: populates worker_stage_stats with the initial allocation.
         {
             let mut inputs = ForwardPassInputs {
                 workspaces: &mut fx.workspaces,
@@ -1848,7 +1884,6 @@ mod tests {
         let len_after_first = state.worker_stage_stats.len();
         let inner_len_after_first = state.worker_stage_stats[0].len();
 
-        // Second run: must reuse the inner allocations (no clear+rebuild).
         {
             let mut inputs = ForwardPassInputs {
                 workspaces: &mut fx.workspaces,
@@ -1909,7 +1944,9 @@ mod tests {
     #[test]
     fn forward_pass_state_run_reuses_scenario_costs_allocation() {
         let mut fx = ForwardFixture::new();
+        let state_boxes = permissive_state_boxes(fx.state.n_state, fx.n_stages);
         let ctx = StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &fx.templates,
             base_rows: &fx.base_rows,
@@ -2209,7 +2246,9 @@ mod tests {
         let fcf = FutureCostFunction::new(1, state.n_state, 1, 10, &[0_u32]);
         let horizon = HorizonMode::Finite { num_stages: 1 };
 
+        let state_boxes = permissive_state_boxes(state.n_state, 1);
         let ctx = StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -2278,6 +2317,10 @@ mod tests {
             external_ncs_library: None,
         })
         .expect("sampler build must not error");
+        let mut noise_tables = ForwardNoiseTables::default();
+        sampler
+            .rebuild_noise_tables(1, 1, &[], &mut noise_tables)
+            .expect("test fixture never exceeds the Sobol dimension cap");
 
         let params = ForwardWorkerParams {
             forward_passes: 1,
@@ -2298,6 +2341,7 @@ mod tests {
             fcf: &fcf,
             training_ctx: &training_ctx,
             sampler: &sampler,
+            noise_tables: &noise_tables,
         };
 
         let solution = LpSolution {
@@ -2389,7 +2433,7 @@ mod tests {
                 transition(0, 3, 0.25),
                 transition(0, 4, 0.25),
             ],
-            stage_discount_rate_overrides: std::collections::HashMap::new(),
+            stage_discount_rate_overrides: std::collections::BTreeMap::new(),
             season_map: None,
         };
         let node_graph = build_node_graph(&graph, 2, &resolver, &stochastic)
@@ -2495,7 +2539,7 @@ mod tests {
                 transition(0, 3, 0.25),
                 transition(0, 4, 0.25),
             ],
-            stage_discount_rate_overrides: std::collections::HashMap::new(),
+            stage_discount_rate_overrides: std::collections::BTreeMap::new(),
             season_map: None,
         };
         let node_graph = build_node_graph(&graph, 2, &resolver, &stochastic)
@@ -2515,7 +2559,9 @@ mod tests {
         );
         let horizon = HorizonMode::Finite { num_stages: 2 };
         let noise_scale = vec![0.0_f64; 2 * state.hydro_count];
+        let state_boxes = permissive_state_boxes(state.n_state, 2);
         let ctx = StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -2585,6 +2631,15 @@ mod tests {
 
         let forward_passes = 6_usize;
         let pinned_iteration = 3_u64;
+        let mut noise_tables = ForwardNoiseTables::default();
+        sampler
+            .rebuild_noise_tables(
+                u32::try_from(pinned_iteration).expect("fits u32"),
+                u32::try_from(forward_passes).expect("fits u32"),
+                &[],
+                &mut noise_tables,
+            )
+            .expect("test fixture never exceeds the Sobol dimension cap");
         let params = ForwardWorkerParams {
             forward_passes,
             total_forward_passes: forward_passes,
@@ -2604,6 +2659,7 @@ mod tests {
             fcf: &fcf,
             training_ctx: &training_ctx,
             sampler: &sampler,
+            noise_tables: &noise_tables,
         };
 
         let mut ws = single_workspace(MockSolver::always_ok(fixed_solution_1_0()), &state);

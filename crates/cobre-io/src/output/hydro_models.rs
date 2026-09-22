@@ -28,15 +28,16 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{Float64Builder, Int32Builder, RecordBatch, StringBuilder};
-use arrow::datatypes::{DataType, Field, Schema};
+#[cfg(test)]
+use arrow::datatypes::DataType;
 use serde::Serialize;
-use serde::de::DeserializeOwned;
 
 use crate::extensions::{EvaporationModelRow, FphaDeviationPointRow, FphaHyperplaneRow};
-use crate::output::atomic::{write_json_atomic, write_parquet_atomic};
+use crate::output::atomic::{ensure_parent_dir, write_batch_atomic, write_json_atomic};
 use crate::output::error::OutputError;
-use crate::output::parquet_config::ParquetWriterConfig;
-use crate::output::stochastic::ensure_parent_dir;
+use crate::output::schemas::{
+    evaporation_models_schema, fpha_deviation_points_schema, fpha_hyperplanes_schema,
+};
 
 /// Write a slice of [`FphaHyperplaneRow`] to a Parquet file at `path`,
 /// re-readable as `system/fpha_hyperplanes.parquet` by
@@ -83,28 +84,8 @@ use crate::output::stochastic::ensure_parent_dir;
 /// # }
 /// ```
 pub fn write_fpha_hyperplanes(path: &Path, rows: &[FphaHyperplaneRow]) -> Result<(), OutputError> {
-    ensure_parent_dir(path)?;
-    let config = ParquetWriterConfig::default();
     let batch = build_fpha_hyperplanes_batch(rows)?;
-    write_parquet_atomic(path, &batch, &config)
-}
-
-// ── Schema builder ────────────────────────────────────────────────────────────
-
-fn fpha_hyperplanes_schema() -> Schema {
-    Schema::new(vec![
-        Field::new("hydro_id", DataType::Int32, false),
-        Field::new("stage_id", DataType::Int32, true),
-        Field::new("plane_id", DataType::Int32, false),
-        Field::new("gamma_0", DataType::Float64, false),
-        Field::new("gamma_v", DataType::Float64, false),
-        Field::new("gamma_q", DataType::Float64, false),
-        Field::new("gamma_s", DataType::Float64, false),
-        Field::new("kappa", DataType::Float64, true),
-        Field::new("valid_v_min_hm3", DataType::Float64, true),
-        Field::new("valid_v_max_hm3", DataType::Float64, true),
-        Field::new("valid_q_max_m3s", DataType::Float64, true),
-    ])
+    write_batch_atomic(path, &batch)
 }
 
 // ── Batch builder ─────────────────────────────────────────────────────────────
@@ -202,21 +183,8 @@ pub fn write_evaporation_models(
     path: &Path,
     rows: &[EvaporationModelRow],
 ) -> Result<(), OutputError> {
-    ensure_parent_dir(path)?;
-    let config = ParquetWriterConfig::default();
     let batch = build_evaporation_models_batch(rows)?;
-    write_parquet_atomic(path, &batch, &config)
-}
-
-fn evaporation_models_schema() -> Schema {
-    Schema::new(vec![
-        Field::new("hydro_id", DataType::Int32, false),
-        Field::new("stage_id", DataType::Int32, true),
-        Field::new("intercept_m3s", DataType::Float64, false),
-        Field::new("volume_slope_m3s_per_hm3", DataType::Float64, false),
-        Field::new("reference_volume_hm3", DataType::Float64, false),
-        Field::new("source", DataType::Utf8, false),
-    ])
+    write_batch_atomic(path, &batch)
 }
 
 fn build_evaporation_models_batch(
@@ -300,23 +268,8 @@ pub fn write_fpha_deviation_points(
     path: &Path,
     rows: &[FphaDeviationPointRow],
 ) -> Result<(), OutputError> {
-    ensure_parent_dir(path)?;
-    let config = ParquetWriterConfig::default();
     let batch = build_fpha_deviation_points_batch(rows)?;
-    write_parquet_atomic(path, &batch, &config)
-}
-
-fn fpha_deviation_points_schema() -> Schema {
-    Schema::new(vec![
-        Field::new("hydro_id", DataType::Int32, false),
-        Field::new("stage_id", DataType::Int32, true),
-        Field::new("v", DataType::Float64, false),
-        Field::new("q", DataType::Float64, false),
-        Field::new("fph_exact", DataType::Float64, false),
-        Field::new("fpha_fitted", DataType::Float64, false),
-        Field::new("deviation", DataType::Float64, false),
-        Field::new("relative", DataType::Float64, false),
-    ])
+    write_batch_atomic(path, &batch)
 }
 
 fn build_fpha_deviation_points_batch(
@@ -376,27 +329,6 @@ pub fn write_hydro_model_summary(path: &Path, summary: &impl Serialize) -> Resul
     write_json_atomic(path, summary, "hydro_models")
 }
 
-/// Read a structural hydro-model summary from a JSON file.
-///
-/// Generic over `DeserializeOwned` so the summary struct can stay in the calling
-/// algorithm crate, keeping this crate algorithm-agnostic (mirrors
-/// [`write_hydro_model_summary`]).
-///
-/// # Errors
-///
-/// Returns [`OutputError::IoError`] if the file cannot be read — a missing file
-/// surfaces as an `IoError` whose `source.kind()` is
-/// [`std::io::ErrorKind::NotFound`], so callers can treat the section as absent
-/// and degrade gracefully. Returns [`OutputError::ManifestError`] if the file
-/// contains malformed JSON.
-pub fn read_hydro_model_summary<T: DeserializeOwned>(path: &Path) -> Result<T, OutputError> {
-    let content = std::fs::read_to_string(path).map_err(|e| OutputError::io(path, e))?;
-    serde_json::from_str(&content).map_err(|e| OutputError::ManifestError {
-        manifest_type: "hydro_models".to_string(),
-        message: e.to_string(),
-    })
-}
-
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -421,7 +353,6 @@ mod tests {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    /// Build a sample [`FphaHyperplaneRow`] for `hydro_id` and `plane_id`.
     fn make_row(hydro_id: i32, plane_id: i32, gamma_0: f64, kappa: f64) -> FphaHyperplaneRow {
         FphaHyperplaneRow {
             hydro_id: EntityId::from(hydro_id),
@@ -684,14 +615,12 @@ mod tests {
         let parsed = parse_fpha_hyperplanes(&path).expect("parse must succeed");
         assert_eq!(parsed.len(), 5);
 
-        // First 3 rows: hydro_id=5, plane_id 0,1,2
         assert_eq!(parsed[0].hydro_id, EntityId::from(5));
         assert_eq!(parsed[0].plane_id, 0);
         assert_eq!(parsed[1].hydro_id, EntityId::from(5));
         assert_eq!(parsed[1].plane_id, 1);
         assert_eq!(parsed[2].hydro_id, EntityId::from(5));
         assert_eq!(parsed[2].plane_id, 2);
-        // Last 2 rows: hydro_id=10, plane_id 0,1
         assert_eq!(parsed[3].hydro_id, EntityId::from(10));
         assert_eq!(parsed[3].plane_id, 0);
         assert_eq!(parsed[4].hydro_id, EntityId::from(10));
@@ -710,7 +639,6 @@ mod tests {
             .join("hydro_models")
             .join("fpha_hyperplanes.parquet");
 
-        // Parent directories do not exist yet.
         assert!(
             !path.parent().unwrap().exists(),
             "parent dir must not exist before write"
@@ -964,8 +892,9 @@ mod tests {
 
         write_hydro_model_summary(&path, &summary).expect("write should succeed");
 
+        let content = std::fs::read_to_string(&path).expect("read");
         let decoded: MockHydroModelSummary =
-            read_hydro_model_summary(&path).expect("read should succeed");
+            serde_json::from_str(&content).expect("valid JSON after round-trip");
         assert_eq!(decoded, summary);
     }
 
@@ -988,23 +917,5 @@ mod tests {
             "tmp file should be removed after rename"
         );
         assert!(path.exists(), "final file should exist");
-    }
-
-    #[test]
-    fn read_hydro_model_summary_missing_file_is_not_found() {
-        let tmp = tempdir().expect("tempdir");
-        let path = tmp.path().join("does_not_exist.json");
-
-        let result = read_hydro_model_summary::<MockHydroModelSummary>(&path);
-
-        assert!(
-            matches!(
-                &result,
-                Err(OutputError::IoError { source, .. })
-                    if source.kind() == std::io::ErrorKind::NotFound
-            ),
-            "missing file must return IoError with NotFound kind so callers \
-             can degrade gracefully, got: {result:?}"
-        );
     }
 }

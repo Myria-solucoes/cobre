@@ -90,6 +90,14 @@ def test_study_missing_case_raises(tmp_path: pathlib.Path) -> None:
         cobre.Study(MISSING_CASE, output_dir=str(tmp_path))
 
 
+def test_study_rejects_threads_zero(tmp_path: pathlib.Path) -> None:
+    """Study raises ValueError when threads=0."""
+    import cobre  # noqa: PLC0415
+
+    with pytest.raises(ValueError, match="threads"):
+        cobre.Study(VALID_CASE, output_dir=str(tmp_path), threads=0)
+
+
 def test_study_train_returns_policy(tmp_path: pathlib.Path) -> None:
     """Study.train() trains in-memory, writes _SUCCESS, and returns a Policy."""
     import cobre  # noqa: PLC0415
@@ -434,3 +442,130 @@ def test_policy_evaluate_bad_state_length_raises_valueerror(
 
     with pytest.raises(ValueError, match="expected"):
         policy.evaluate(0, [])
+
+
+def test_train_and_simulate_docstrings_name_written_paths(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Docstrings for train() and simulate() list only paths they actually write.
+
+    Unconditional paths documented in the train/simulate docstrings must both
+    exist on disk after a 1dtoy train+simulate AND appear verbatim in the
+    corresponding __doc__. The four historically drifted paths must be absent.
+    """
+    import cobre  # noqa: PLC0415
+
+    study = cobre.Study(VALID_CASE, output_dir=str(tmp_path))
+    policy = study.train()
+    study.simulate(policy)
+
+    train_paths = [
+        "policy/",  # Policy tree directory
+        "training/metadata.json",
+        "training/_SUCCESS",
+        "training/convergence.parquet",
+        "training/timing/iterations.parquet",
+        "training/solver/iterations.parquet",
+        "training/solver/retry_histogram.parquet",
+    ]
+
+    # Dictionary files are written individually but documented as a group
+    train_dict_files = [
+        "training/dictionaries/variables.csv",
+        "training/dictionaries/entities.csv",
+        "training/dictionaries/codes.json",
+        "training/dictionaries/bounds.parquet",
+    ]
+
+    train_doc = cobre.Study.train.__doc__
+    assert train_doc is not None, "train() must have a docstring"
+
+    for path in train_paths:
+        full_path = tmp_path / path
+        if path.endswith("/"):
+            assert full_path.exists() and full_path.is_dir(), (
+                f"train() must write {path} directory"
+            )
+        else:
+            assert full_path.exists() and full_path.is_file(), (
+                f"train() must write {path} file"
+            )
+        assert path in train_doc, f"train() docstring must mention {path}"
+
+    assert "training/dictionaries/" in train_doc, (
+        "train() docstring must mention training/dictionaries/"
+    )
+    for dict_file in train_dict_files:
+        full_path = tmp_path / dict_file
+        assert full_path.exists() and full_path.is_file(), (
+            f"train() must write {dict_file} file"
+        )
+        filename = dict_file.split("/")[-1]
+        assert filename in train_doc, f"train() docstring must mention {filename}"
+
+    simulate_paths = [
+        "simulation/metadata.json",
+        "simulation/_SUCCESS",
+        "simulation/paths.parquet",
+        "simulation/scenario_summary.parquet",
+        "simulation/solver/iterations.parquet",
+        "simulation/solver/retry_histogram.parquet",
+    ]
+
+    simulate_doc = cobre.Study.simulate.__doc__
+    assert simulate_doc is not None, "simulate() must have a docstring"
+
+    for path in simulate_paths:
+        full_path = tmp_path / path
+        assert full_path.exists() and full_path.is_file(), (
+            f"simulate() must write {path} file"
+        )
+        assert path in simulate_doc, f"simulate() docstring must mention {path}"
+
+    false_paths = [
+        "training/solver_stats.parquet",
+        "training/cut_selection.parquet",
+        "training/policy/",
+        "simulation/solver_stats.parquet",
+    ]
+
+    for path in false_paths:
+        assert path not in train_doc, (
+            f"train() docstring must NOT mention the false path {path}"
+        )
+        assert path not in simulate_doc, (
+            f"simulate() docstring must NOT mention the false path {path}"
+        )
+
+
+def test_study_summary_properties_match_run_result(tmp_path: pathlib.Path) -> None:
+    """Study summary properties equal the same-named keys from run.run().
+
+    The three construction-time reports (stochastic, hydro_models, provenance)
+    must produce identical dicts whether accessed via Study properties or the
+    run.run() result dict. Two output directories differ deliberately -- proving
+    the sections carry no output-path-dependent values, which makes the equality
+    assertion a parity claim rather than a coincidence.
+    """
+    import cobre  # noqa: PLC0415
+
+    run_dir = tmp_path / "run"
+    study_dir = tmp_path / "study"
+
+    result = cobre.run.run(VALID_CASE, output_dir=str(run_dir))
+    study = cobre.Study(VALID_CASE, output_dir=str(study_dir))
+
+    assert study.stochastic == result["stochastic"], (
+        "Study.stochastic must equal run.run()['stochastic']"
+    )
+    assert study.hydro_models == result["hydro_models"], (
+        "Study.hydro_models must equal run.run()['hydro_models']"
+    )
+    assert study.provenance == result["provenance"], (
+        "Study.provenance must equal run.run()['provenance']"
+    )
+
+    # Repeated access returns equal dicts (the getter builds a fresh dict per call).
+    assert study.provenance == study.provenance, (
+        "repeated access to Study.provenance must return equal dicts"
+    )

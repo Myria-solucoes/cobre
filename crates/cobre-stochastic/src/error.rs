@@ -15,15 +15,6 @@ pub enum StochasticError {
         reason: String,
     },
 
-    /// Spectral decomposition of a correlation matrix failed (e.g., Jacobi did not converge).
-    #[error("spectral decomposition failed for profile '{profile_name}': {reason}")]
-    SpectralDecompositionFailed {
-        /// Name of the correlation profile.
-        profile_name: String,
-        /// Error description.
-        reason: String,
-    },
-
     /// Correlation profile specification is invalid (e.g., entries outside [-1.0, 1.0]).
     #[error("invalid correlation profile '{profile_name}': {reason}")]
     InvalidCorrelation {
@@ -38,13 +29,6 @@ pub enum StochasticError {
     InsufficientData {
         /// Description of missing data.
         context: String,
-    },
-
-    /// Deterministic seed derivation for noise generation failed.
-    #[error("seed derivation failed: {reason}")]
-    SeedDerivationError {
-        /// Error description.
-        reason: String,
     },
 
     /// Noise method requested for a given stage is not supported.
@@ -69,15 +53,6 @@ pub enum StochasticError {
         method: String,
     },
 
-    /// Sampling scheme requested from the forward sampler factory is not supported.
-    #[error("unsupported sampling scheme '{scheme}': {reason}")]
-    UnsupportedSamplingScheme {
-        /// Name of the sampling scheme.
-        scheme: String,
-        /// Error description.
-        reason: String,
-    },
-
     /// Required scenario source is absent for the requested sampling scheme.
     #[error("missing scenario source for scheme '{scheme}': {reason}")]
     MissingScenarioSource {
@@ -97,13 +72,10 @@ mod tests {
     fn assert_all_variants_debug(err: &StochasticError) {
         match err {
             StochasticError::InvalidParParameters { .. }
-            | StochasticError::SpectralDecompositionFailed { .. }
             | StochasticError::InvalidCorrelation { .. }
             | StochasticError::InsufficientData { .. }
-            | StochasticError::SeedDerivationError { .. }
             | StochasticError::UnsupportedNoiseMethod { .. }
             | StochasticError::DimensionExceedsCapacity { .. }
-            | StochasticError::UnsupportedSamplingScheme { .. }
             | StochasticError::MissingScenarioSource { .. } => {}
         }
         let _ = format!("{err:?}");
@@ -121,18 +93,6 @@ mod tests {
         assert!(display.contains('1'));
         assert!(display.contains("12"));
         assert!(display.contains("singular"));
-    }
-
-    #[test]
-    fn test_spectral_decomposition_failed_implements_std_error() {
-        let err = StochasticError::SpectralDecompositionFailed {
-            profile_name: "southeast_inflows".into(),
-            reason: "matrix is not positive-definite".into(),
-        };
-        assert_std_error(&err);
-        let display = format!("{err}");
-        assert!(display.contains("southeast_inflows"));
-        assert!(display.contains("spectral"));
     }
 
     #[test]
@@ -159,25 +119,11 @@ mod tests {
     }
 
     #[test]
-    fn test_seed_derivation_error_implements_std_error() {
-        let err = StochasticError::SeedDerivationError {
-            reason: "hash output overflowed u64 accumulator".into(),
-        };
-        assert_std_error(&err);
-        let display = format!("{err}");
-        assert!(display.contains("overflowed"));
-    }
-
-    #[test]
     fn test_all_variants_debug() {
         let variants = [
             StochasticError::InvalidParParameters {
                 hydro_id: 0,
                 stage_id: 0,
-                reason: String::new(),
-            },
-            StochasticError::SpectralDecompositionFailed {
-                profile_name: String::new(),
                 reason: String::new(),
             },
             StochasticError::InvalidCorrelation {
@@ -186,9 +132,6 @@ mod tests {
             },
             StochasticError::InsufficientData {
                 context: String::new(),
-            },
-            StochasticError::SeedDerivationError {
-                reason: String::new(),
             },
             StochasticError::UnsupportedNoiseMethod {
                 method: String::new(),
@@ -199,10 +142,6 @@ mod tests {
                 dim: 0,
                 max_dim: 0,
                 method: String::new(),
-            },
-            StochasticError::UnsupportedSamplingScheme {
-                scheme: String::new(),
-                reason: String::new(),
             },
             StochasticError::MissingScenarioSource {
                 scheme: String::new(),
@@ -238,17 +177,6 @@ mod tests {
         assert!(display.contains("25000"));
         assert!(display.contains("21201"));
         assert!(display.contains("sobol"));
-    }
-
-    #[test]
-    fn test_unsupported_sampling_scheme_display() {
-        let err = StochasticError::UnsupportedSamplingScheme {
-            scheme: "historical".into(),
-            reason: "not yet implemented".into(),
-        };
-        let display = format!("{err}");
-        assert!(display.contains("historical"));
-        assert!(display.contains("not yet implemented"));
     }
 
     #[test]

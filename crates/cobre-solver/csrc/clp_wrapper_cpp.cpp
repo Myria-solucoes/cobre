@@ -1,12 +1,11 @@
 /* C++ shim for the CLP class-only knobs (dual-steepest-edge pricing,
- * factorization frequency, hot-start snapshot/restore).
+ * factorization frequency).
  *
- * This file is compiled as C++17 and exposes five functions with C linkage. It
+ * This file is compiled as C++17 and exposes two functions with C linkage. It
  * exists as a separate translation unit because the main wrapper
  * (clp_wrapper.c) is compiled as plain C and reaches CLP only through
- * <Clp_C_Interface.h>, which does NOT expose markHotStart/solveFromHotStart/
- * unmarkHotStart, setFactorizationFrequency, or the dual-row pivot setter.
- * Those live solely on the C++ ClpSimplex class.
+ * <Clp_C_Interface.h>, which does NOT expose setFactorizationFrequency or the
+ * dual-row pivot setter. Those live solely on the C++ ClpSimplex class.
  *
  * Handle layout (critical): the opaque handle threaded through the FFI is the
  * pointer cobre_clp_create() returns from Clp_newModel(). That is NOT a
@@ -26,11 +25,6 @@
  * makes ->model_ accessible. CLP_EXTERN_C only affects that typedef and gives
  * the C API declarations C linkage; this shim calls no Clp_* C function, only
  * ClpSimplex class methods, so it has no other effect here.
- *
- * The hot-start saveStuff token is allocated and owned by CLP. The Rust side
- * keeps it opaque (never dereferences it) and pairs every mark with an unmark
- * on the same model instance, so the token's lifetime is bounded by the
- * persistent solver instance that produced it.
  */
 
 #include "clp_wrapper.h"
@@ -66,39 +60,6 @@ void cobre_clp_set_factorization_frequency(void* model, int32_t value) {
     // real ClpSimplex is `wrapper->model_`. See the file header invariant.
     ClpSimplex* simplex = static_cast<Clp_Simplex*>(model)->model_;
     simplex->setFactorizationFrequency(value);
-}
-
-void* cobre_clp_mark_hot_start(void* model) {
-    // SAFETY: `model` is a `Clp_Simplex*` wrapper from cobre_clp_create(); the
-    // real ClpSimplex is `wrapper->model_`. See the file header invariant.
-    ClpSimplex* simplex = static_cast<Clp_Simplex*>(model)->model_;
-    // CLP allocates the saveStuff token and writes it through the reference
-    // parameter; we return it opaquely for the Rust side to thread back into
-    // solveFromHotStart / unmarkHotStart.
-    void* save_stuff = nullptr;
-    simplex->markHotStart(save_stuff);
-    return save_stuff;
-}
-
-int32_t cobre_clp_solve_from_hot_start(void* model, void* save_stuff) {
-    // SAFETY: `model` is a `Clp_Simplex*` wrapper from cobre_clp_create(); the
-    // real ClpSimplex is `wrapper->model_`. See the file header invariant.
-    // `save_stuff` is the opaque token returned by a prior
-    // cobre_clp_mark_hot_start on this same model; it is forwarded to CLP
-    // unchanged and never dereferenced here.
-    ClpSimplex* simplex = static_cast<Clp_Simplex*>(model)->model_;
-    simplex->solveFromHotStart(save_stuff);
-    return static_cast<int32_t>(simplex->status());
-}
-
-void cobre_clp_unmark_hot_start(void* model, void* save_stuff) {
-    // SAFETY: `model` is a `Clp_Simplex*` wrapper from cobre_clp_create(); the
-    // real ClpSimplex is `wrapper->model_`. See the file header invariant.
-    // `save_stuff` is the opaque token returned by a prior
-    // cobre_clp_mark_hot_start on this same model; unmarkHotStart frees it. It
-    // is forwarded unchanged and never dereferenced here.
-    ClpSimplex* simplex = static_cast<Clp_Simplex*>(model)->model_;
-    simplex->unmarkHotStart(save_stuff);
 }
 
 } /* extern "C" */

@@ -57,19 +57,19 @@ const C0_EPS_REL: f64 = 1e-4;
 /// Valid on `[outflow_min, outflow_max]` (m³/s). `coeffs[i]` is the coefficient of `Q^i`,
 /// so `coeffs = [coefficient_0, coefficient_1, coefficient_2, coefficient_3, coefficient_4]`.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct QuarticSegment {
+struct QuarticSegment {
     /// Segment lower validity bound (m³/s).
-    pub outflow_min: f64,
+    outflow_min: f64,
     /// Segment upper validity bound (m³/s), `>= outflow_min`.
-    pub outflow_max: f64,
+    outflow_max: f64,
     /// Polynomial coefficients, `coeffs[i]` the coefficient of `Q^i`.
-    pub coeffs: [f64; 5],
+    coeffs: [f64; 5],
 }
 
 impl QuarticSegment {
     /// Evaluate the quartic at `q` via Horner's method.
     #[inline]
-    pub(crate) fn eval(&self, q: f64) -> f64 {
+    fn eval(&self, q: f64) -> f64 {
         let [a0, a1, a2, a3, a4] = self.coeffs;
         (((a4 * q + a3) * q + a2) * q + a1) * q + a0
     }
@@ -83,7 +83,7 @@ impl QuarticSegment {
 /// pure, and allocation-free: identical inputs yield bit-identical outputs
 /// regardless of call order.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct TailraceSegments {
+struct TailraceSegments {
     /// Contiguous segments ordered by ascending `outflow_min` (>= 1 element).
     segments: Vec<QuarticSegment>,
 }
@@ -104,10 +104,7 @@ impl TailraceSegments {
     /// | `rows` empty | [`FphaFittingError::InsufficientPoints`] |
     /// | A gap or overlap between consecutive segments | [`FphaFittingError::TailraceGap`] |
     /// | A C0 break at an interior boundary | [`FphaFittingError::TailraceDiscontinuity`] |
-    pub(crate) fn from_rows(
-        rows: &[TailraceCurveRow],
-        hydro_name: &str,
-    ) -> Result<Self, FphaFittingError> {
+    fn from_rows(rows: &[TailraceCurveRow], hydro_name: &str) -> Result<Self, FphaFittingError> {
         if rows.is_empty() {
             return Err(FphaFittingError::InsufficientPoints {
                 hydro_name: hydro_name.to_owned(),
@@ -167,7 +164,7 @@ impl TailraceSegments {
     /// segment is found and its quartic evaluated at the clamped value. The
     /// method is infallible, pure, and allocation-free: validation already ran
     /// in [`TailraceSegments::from_rows`], and the segments live in `self`.
-    pub(crate) fn evaluate(&self, outflow_m3s: f64) -> f64 {
+    fn evaluate(&self, outflow_m3s: f64) -> f64 {
         // INVARIANT: `segments` is non-empty (enforced by `from_rows`).
         let n = self.segments.len();
         let q_lo = self.segments[0].outflow_min;
@@ -186,12 +183,12 @@ impl TailraceSegments {
 
 /// One downstream-level-keyed family of a plant's tailrace curve.
 #[derive(Debug, Clone)]
-pub(crate) struct TailraceFamily {
+struct TailraceFamily {
     /// Downstream reference level keying the family (m); `None` for a
     /// single-family plant.
-    pub downstream_reference_level_m: Option<f64>,
+    downstream_reference_level_m: Option<f64>,
     /// The family's validated piecewise-quartic curve.
-    pub segments: TailraceSegments,
+    segments: TailraceSegments,
 }
 
 /// All tailrace families for ONE plant, ordered for downstream-level bracketing.

@@ -52,13 +52,12 @@
 //! range and duplicate-row checks.
 
 use cobre_core::EntityId;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use std::fs::File;
 use std::path::Path;
 
 use crate::LoadError;
 use crate::parquet_helpers::{
     extract_optional_float64, extract_optional_int32, extract_required_int32,
+    open_record_batch_reader,
 };
 
 use super::bounds::{optional_f64, optional_i32, validate_optional_finite};
@@ -99,13 +98,13 @@ pub struct HydroUnitGroupBoundsRow {
     pub hydro_unit_group_id: EntityId,
     /// Stage ID.
     pub stage_id: i32,
-    /// Minimum turbined flow override (m³/s).
+    /// Minimum turbined flow (m³/s).
     pub min_turbined_m3s: Option<f64>,
-    /// Maximum turbined flow override (m³/s).
+    /// Maximum turbined flow (m³/s).
     pub max_turbined_m3s: Option<f64>,
-    /// Minimum generation override (MW).
+    /// Minimum generation (MW).
     pub min_generation_mw: Option<f64>,
-    /// Maximum generation override (MW).
+    /// Maximum generation (MW).
     pub max_generation_mw: Option<f64>,
     /// `None` applies at the stage level; `Some(b)` applies to block `b` only.
     pub block_id: Option<i32>,
@@ -144,16 +143,9 @@ pub struct HydroUnitGroupBoundsRow {
 pub fn parse_hydro_unit_group_bounds(
     path: &Path,
 ) -> Result<Vec<HydroUnitGroupBoundsRow>, LoadError> {
-    let file = File::open(path).map_err(|e| LoadError::io(path, e))?;
+    let reader = open_record_batch_reader(path)?;
 
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
-
-    let reader = builder
-        .build()
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
-
-    let mut rows: Vec<HydroUnitGroupBoundsRow> = Vec::new();
+    let mut rows = Vec::new();
 
     for batch_result in reader {
         let batch = batch_result.map_err(|e| LoadError::parse(path, e.to_string()))?;
@@ -230,21 +222,11 @@ pub fn parse_hydro_unit_group_bounds(
 )]
 mod tests {
     use super::*;
+    use crate::test_support::write_parquet;
     use arrow::array::{Float64Array, Int32Array};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
-    use parquet::arrow::ArrowWriter;
     use std::sync::Arc;
-    use tempfile::NamedTempFile;
-
-    fn write_parquet(batch: &RecordBatch) -> NamedTempFile {
-        let tmp = NamedTempFile::new().expect("tempfile");
-        let mut writer = ArrowWriter::try_new(tmp.reopen().expect("reopen"), batch.schema(), None)
-            .expect("ArrowWriter");
-        writer.write(batch).expect("write batch");
-        writer.close().expect("close writer");
-        tmp
-    }
 
     /// AC: scrambled declaration order — hydro=1 declares group 5 before group 2
     /// at the same stage, and a `block_id = None` row precedes its

@@ -19,7 +19,7 @@ use crate::types::{RowBatch, StageTemplate};
 /// state (once the largest seen template/batch has been processed).
 #[derive(Debug, Default)]
 pub struct FreezeScratch {
-    cut_nz_per_col: Vec<u32>,
+    csc_nz_per_col: Vec<u32>,
     col_list_start: Vec<u32>,
     col_list_row: Vec<i32>,
     col_list_val: Vec<f64>,
@@ -134,11 +134,11 @@ pub fn freeze_rows_into_template(
     let num_cols = base.num_cols;
     let num_rows = base.num_rows + rows.num_rows;
 
-    scratch.cut_nz_per_col.clear();
-    scratch.cut_nz_per_col.resize(num_cols, 0u32);
+    scratch.csc_nz_per_col.clear();
+    scratch.csc_nz_per_col.resize(num_cols, 0u32);
     #[allow(clippy::cast_sign_loss)]
     for &col in &rows.col_indices {
-        scratch.cut_nz_per_col[col as usize] += 1;
+        scratch.csc_nz_per_col[col as usize] += 1;
     }
 
     out.col_starts.clear();
@@ -185,7 +185,7 @@ pub fn freeze_rows_into_template(
     scratch.col_list_start.clear();
     scratch.col_list_start.reserve(num_cols + 1);
     let mut running = 0u32;
-    for &count in &scratch.cut_nz_per_col {
+    for &count in &scratch.csc_nz_per_col {
         scratch.col_list_start.push(running);
         running += count;
     }
@@ -723,25 +723,20 @@ mod tests {
     /// Verifies that `freeze_rows_into_template` panics with the expected message
     /// when `base.num_nz + rows_nnz` exceeds `i32::MAX`.
     ///
-    /// Skipped in debug builds because `debug_assert!` on `base.row_indices.len()`
-    /// fires before the overflow guard when `num_nz` is fabricated. The
-    /// `i32::try_from` path exists in both builds; run `cargo test --release` to
-    /// exercise it directly.
+    /// Release-only: debug asserts on fabricated sizes fire first in debug builds.
+    /// Run `cargo test --release` to exercise the `i32::try_from` guard.
     #[test]
     #[cfg(not(debug_assertions))]
     #[should_panic(expected = "total nnz exceeds i32::MAX")]
     fn test_freeze_panics_on_nnz_overflow() {
-        // base: zero columns, zero actual non-zeros, but num_nz = i32::MAX.
-        // In release mode, debug_asserts are disabled so the i32::try_from guard
-        // is reached before any length check. rows contributes 1 extra non-zero
-        // (rows_nnz = 1), making total_nnz = i32::MAX + 1 which overflows i32.
-        let large_num_nz = usize::try_from(i32::MAX).unwrap(); // 2_147_483_647
+        // base.num_nz = i32::MAX; rows adds 1 more to trigger the overflow.
+        let large_num_nz = usize::try_from(i32::MAX).unwrap();
         let base = StageTemplate {
             num_cols: 0,
             num_rows: 0,
             num_nz: large_num_nz,
-            col_starts: vec![0_i32], // len = num_cols + 1 = 1
-            row_indices: vec![],     // empty — debug_asserts disabled in release
+            col_starts: vec![0_i32],
+            row_indices: vec![],
             values: vec![],
             col_lower: vec![],
             col_upper: vec![],
@@ -756,11 +751,6 @@ mod tests {
             col_scale: Vec::new(),
             row_scale: Vec::new(),
         };
-        // rows contributes 1 non-zero, tipping base.num_nz + 1 > i32::MAX.
-        // col_indices = [0] would be out-of-range for num_cols == 0, but the
-        // corresponding debug_assert is also disabled in release mode; the
-        // i32::try_from check fires first because total_nnz is computed before
-        // any further use of col_indices.
         let rows = RowBatch {
             num_rows: 1,
             row_starts: vec![0_i32, 1],
@@ -817,7 +807,7 @@ mod tests {
         freeze_rows_into_template(&base, &rows, &mut out1, &mut scratch);
 
         // Capacities after the first freeze (must not shrink on reuse).
-        let cap_cut_nz = scratch.cut_nz_per_col.capacity();
+        let cap_cut_nz = scratch.csc_nz_per_col.capacity();
         let cap_col_start = scratch.col_list_start.capacity();
         let cap_col_row = scratch.col_list_row.capacity();
         let cap_col_val = scratch.col_list_val.capacity();
@@ -846,7 +836,7 @@ mod tests {
         assert_eq!(out1.row_scale, out_fresh.row_scale);
 
         // No downward realloc on the second (reused) freeze.
-        assert!(scratch.cut_nz_per_col.capacity() >= cap_cut_nz);
+        assert!(scratch.csc_nz_per_col.capacity() >= cap_cut_nz);
         assert!(scratch.col_list_start.capacity() >= cap_col_start);
         assert!(scratch.col_list_row.capacity() >= cap_col_row);
         assert!(scratch.col_list_val.capacity() >= cap_col_val);

@@ -20,11 +20,14 @@ pub use checkpoint::{read_policy_checkpoint, write_policy_checkpoint};
 pub use codec::{deserialize_stage_basis, deserialize_stage_cuts, deserialize_stage_states};
 pub use codec::{serialize_stage_basis, serialize_stage_cuts, serialize_stage_states};
 pub use records::{
-    CheckpointManifest, ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, FORMAT_VERSION,
-    GraphManifest, ManifestEdge, ManifestNode, OwnedPolicyBasisRecord, OwnedPolicyCutRecord,
-    PolicyBasisRecord, PolicyCheckpoint, PolicyCutRecord, ProducerBlock,
-    STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL, STAGE_CUTS_NODE_ID_SENTINEL, STAGE_STATES_NODE_ID_SENTINEL,
+    CheckpointManifest, ENTITY_SLOT_DATE_SENTINEL, EntitySlot, FORMAT_VERSION, GraphManifest,
+    HydroSeasonOrders, ManifestEdge, ManifestNode, OwnedPolicyBasisRecord, OwnedPolicyCutRecord,
+    PolicyBasisRecord, PolicyCheckpoint, PolicyCutRecord, ProducerBlock, SEASON_CYCLE_CODE_ABSENT,
+    SEASON_CYCLE_CODE_CUSTOM, SEASON_CYCLE_CODE_MONTHLY, SEASON_CYCLE_CODE_WEEKLY,
+    STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL, STAGE_CUTS_NODE_ID_SENTINEL,
+    STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, STAGE_STATES_NODE_ID_SENTINEL, SeasonManifest,
     StageCutsPayload, StageCutsReadResult, StageStatesPayload, StageStatesReadResult, StateFamily,
+    decode_slot_date, encode_slot_date,
 };
 
 #[cfg(test)]
@@ -79,6 +82,7 @@ mod tests {
             cost_scale_factor: 1_000_000.0,
             node_id: -1,
             graph_stage_id: -1,
+            priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
         })
     }
 
@@ -279,6 +283,7 @@ mod tests {
                 training_block_mode_per_stage: vec![],
                 cost_scale_factor: None,
             },
+            season_manifest: SeasonManifest::default(),
         }
     }
 
@@ -302,10 +307,10 @@ mod tests {
             cost_scale_factor: 1_000_000.0,
             node_id: -1,
             graph_stage_id: -1,
+            priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
         }
     }
 
-    /// Build a [`PolicyBasisRecord`] for the given stage.
     fn make_basis_record(stage_id: u32) -> PolicyBasisRecord<'static> {
         PolicyBasisRecord {
             stage_id,
@@ -478,7 +483,8 @@ mod tests {
         );
     }
 
-    /// Returns `true` when running as root (UID 0). Used to skip permission tests.
+    // Root's read-only permission enforcement is unreliable, so callers that
+    // rely on read-only-directory failures skip the test in that case.
     #[cfg(unix)]
     fn is_root() -> bool {
         std::fs::read_to_string("/proc/self/status")
@@ -499,8 +505,6 @@ mod tests {
 
     #[test]
     fn write_policy_checkpoint_error_on_readonly_dir() {
-        // Skip this test on platforms where read-only enforcement is unreliable
-        // (e.g., when running as root).
         if is_root() {
             return;
         }
@@ -784,27 +788,9 @@ mod tests {
 
     fn sample_manifest() -> Vec<EntitySlot> {
         vec![
-            EntitySlot {
-                entity_type: 0,
-                entity_id: 12,
-                subindex: 0,
-                was_active: true,
-                delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-            },
-            EntitySlot {
-                entity_type: 1,
-                entity_id: -1,
-                subindex: 3,
-                was_active: false,
-                delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-            },
-            EntitySlot {
-                entity_type: 2,
-                entity_id: 7,
-                subindex: 1,
-                was_active: true,
-                delivery_date: 20240501,
-            },
+            EntitySlot::storage(12, true),
+            EntitySlot::inflow_lag(-1, 3, false),
+            EntitySlot::anticipated(7, 1, true).with_interval(20_240_501, 20_240_601),
         ]
     }
 
@@ -815,7 +801,10 @@ mod tests {
             assert_eq!(a.entity_id, e.entity_id, "slot {i} entity_id");
             assert_eq!(a.subindex, e.subindex, "slot {i} subindex");
             assert_eq!(a.was_active, e.was_active, "slot {i} was_active");
-            assert_eq!(a.delivery_date, e.delivery_date, "slot {i} delivery_date");
+            assert_eq!(
+                a.interval_start, e.interval_start,
+                "slot {i} interval_start"
+            );
         }
     }
 
@@ -959,6 +948,23 @@ mod tests {
 
     // ── read_policy_checkpoint round-trip tests ───────────────────────────────
 
+    fn assert_no_tmp_files_under(dir: &std::path::Path) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                assert_no_tmp_files_under(&path);
+            } else {
+                assert_ne!(
+                    path.extension().and_then(std::ffi::OsStr::to_str),
+                    Some("tmp"),
+                    "no .tmp file must remain under {}: found {}",
+                    dir.display(),
+                    path.display()
+                );
+            }
+        }
+    }
+
     #[test]
     fn read_policy_checkpoint_full_round_trip() {
         let tmp = tempfile::tempdir().unwrap();
@@ -985,6 +991,8 @@ mod tests {
             &[],
         )
         .expect("write must succeed");
+
+        assert_no_tmp_files_under(tmp.path());
 
         let checkpoint = read_policy_checkpoint(tmp.path()).expect("read must succeed");
 
@@ -1042,6 +1050,237 @@ mod tests {
         assert!(
             checkpoint.stage_bases.is_empty(),
             "no basis files must produce empty stage_bases"
+        );
+    }
+
+    #[test]
+    fn rewrite_over_existing_checkpoint_reads_back_the_new_artifact() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let a0 = [1.0_f64, 2.0, 3.0];
+        let piece_a = PolicyCutRecord {
+            intercept: 11.0,
+            ..make_cut_record(101, 0, 1, &a0)
+        };
+        let cuts_a = [piece_a];
+        let stage_cuts_a = [make_stage_cuts_payload(0, &cuts_a, &[0], 3)];
+        let basis_a = [make_basis_record(0)];
+        let metadata_a = make_metadata(1, 3);
+
+        write_policy_checkpoint(tmp.path(), &stage_cuts_a, &basis_a, &metadata_a, &[])
+            .expect("write of checkpoint A must succeed");
+
+        let b0 = [40.0_f64, 50.0, 60.0];
+        let piece_b = PolicyCutRecord {
+            intercept: 99.0,
+            ..make_cut_record(202, 0, 5, &b0)
+        };
+        let cuts_b = [piece_b];
+        let stage_cuts_b = [make_stage_cuts_payload(0, &cuts_b, &[0], 3)];
+        let basis_b = [make_basis_record(0)];
+        let metadata_b = make_metadata(1, 3);
+
+        write_policy_checkpoint(tmp.path(), &stage_cuts_b, &basis_b, &metadata_b, &[])
+            .expect("rewrite with checkpoint B must succeed");
+
+        assert_no_tmp_files_under(tmp.path());
+
+        let checkpoint = read_policy_checkpoint(tmp.path())
+            .expect("read of the rewritten checkpoint must succeed");
+
+        assert_eq!(
+            checkpoint.stage_cuts.len(),
+            1,
+            "rewrite must not accumulate stale pools from A"
+        );
+        assert_eq!(
+            checkpoint.stage_cuts[0].stage_id, 0,
+            "must read back B's stage id"
+        );
+        assert_eq!(checkpoint.stage_cuts[0].cuts.len(), 1);
+
+        let cut = &checkpoint.stage_cuts[0].cuts[0];
+        assert_eq!(cut.cut_id, 202, "must read back B's cut id, not A's");
+        assert_ne!(cut.cut_id, 101, "A's cut id must not survive the rewrite");
+        assert_eq!(
+            cut.coefficients,
+            &[40.0f64, 50.0, 60.0],
+            "must read back B's coefficients, not A's"
+        );
+        assert_eq!(cut.intercept, 99.0, "must read back B's intercept, not A's");
+        assert_ne!(
+            cut.intercept, 11.0,
+            "A's intercept must not survive the rewrite"
+        );
+
+        assert_eq!(checkpoint.stage_bases.len(), 1);
+        assert_eq!(checkpoint.stage_bases[0].stage_id, 0);
+    }
+
+    /// Run A leaves two pools, two bases and exported states; run B, into the
+    /// same directory, has one pool, one basis and no states. The reader lists
+    /// the payload directories, so anything A left behind would be read back as
+    /// B's — and B's terminal pool would then be A's stale pool 1.
+    #[test]
+    fn rewrite_with_fewer_pools_and_no_states_leaves_no_stale_payloads() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let a0 = [1.0_f64, 2.0, 3.0];
+        let cuts_a = [make_cut_record(101, 0, 1, &a0)];
+        let stage_cuts_a = [
+            make_stage_cuts_payload(0, &cuts_a, &[0], 3),
+            make_stage_cuts_payload(1, &cuts_a, &[0], 3),
+        ];
+        let basis_a = [make_basis_record(0), make_basis_record(1)];
+        let states_data = [1.0_f64, 2.0, 3.0];
+        let states_manifest = sample_manifest();
+        let states_a = [StageStatesPayload {
+            stage_id: 0,
+            node_id: 0,
+            state_dimension: 3,
+            count: 1,
+            data: &states_data,
+            entity_manifest: &states_manifest,
+        }];
+        write_policy_checkpoint(
+            tmp.path(),
+            &stage_cuts_a,
+            &basis_a,
+            &make_metadata(2, 3),
+            &states_a,
+        )
+        .expect("write of checkpoint A must succeed");
+        assert!(tmp.path().join("states").is_dir());
+
+        let b0 = [40.0_f64, 50.0, 60.0];
+        let cuts_b = [make_cut_record(202, 0, 5, &b0)];
+        let stage_cuts_b = [make_stage_cuts_payload(0, &cuts_b, &[0], 3)];
+        let basis_b = [make_basis_record(0)];
+        write_policy_checkpoint(
+            tmp.path(),
+            &stage_cuts_b,
+            &basis_b,
+            &make_metadata(1, 3),
+            &[],
+        )
+        .expect("rewrite with checkpoint B must succeed");
+
+        assert_no_tmp_files_under(tmp.path());
+        assert!(
+            !tmp.path().join("cuts").join("001.bin").exists(),
+            "A's second pool must not survive the rewrite"
+        );
+        assert!(
+            !tmp.path().join("basis").join("001.bin").exists(),
+            "A's second basis must not survive the rewrite"
+        );
+        assert!(
+            !tmp.path().join("states").exists(),
+            "A's states directory must not survive a rewrite that exports no states"
+        );
+
+        let checkpoint = read_policy_checkpoint(tmp.path())
+            .expect("read of the rewritten checkpoint must succeed");
+        assert_eq!(checkpoint.stage_cuts.len(), 1);
+        assert_eq!(checkpoint.stage_cuts[0].cuts[0].cut_id, 202);
+        assert_eq!(checkpoint.stage_bases.len(), 1);
+        assert!(checkpoint.stage_states.is_empty());
+    }
+
+    #[test]
+    fn rewrite_with_fewer_states_payloads_leaves_no_stale_states() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a0 = [1.0_f64, 2.0, 3.0];
+        let cuts = [make_cut_record(101, 0, 1, &a0)];
+        let stage_cuts = [make_stage_cuts_payload(0, &cuts, &[0], 3)];
+        let states_data = [1.0_f64, 2.0, 3.0];
+        let states_manifest = sample_manifest();
+        let states_for = |stage_id: u32| StageStatesPayload {
+            stage_id,
+            node_id: i32::try_from(stage_id).unwrap(),
+            state_dimension: 3,
+            count: 1,
+            data: &states_data,
+            entity_manifest: &states_manifest,
+        };
+
+        let states_a = [states_for(0), states_for(1)];
+        write_policy_checkpoint(
+            tmp.path(),
+            &stage_cuts,
+            &[],
+            &make_metadata(1, 3),
+            &states_a,
+        )
+        .expect("write of checkpoint A must succeed");
+
+        let states_b = [states_for(0)];
+        write_policy_checkpoint(
+            tmp.path(),
+            &stage_cuts,
+            &[],
+            &make_metadata(1, 3),
+            &states_b,
+        )
+        .expect("rewrite with checkpoint B must succeed");
+
+        assert!(
+            !tmp.path().join("states").join("001.bin").exists(),
+            "A's second states payload must not survive the rewrite"
+        );
+        let checkpoint = read_policy_checkpoint(tmp.path()).expect("read must succeed");
+        assert_eq!(checkpoint.stage_states.len(), 1);
+        assert_eq!(checkpoint.stage_states[0].stage_id, 0);
+    }
+
+    #[test]
+    fn interrupted_rewrite_never_pairs_an_old_manifest_with_new_payloads() {
+        if is_root() {
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+
+        let a0 = [1.0_f64, 2.0, 3.0];
+        let cuts_a = [make_cut_record(1, 0, 1, &a0)];
+        let stage_cuts_a = [make_stage_cuts_payload(0, &cuts_a, &[0], 3)];
+        let metadata_a = make_metadata(1, 3);
+
+        write_policy_checkpoint(tmp.path(), &stage_cuts_a, &[], &metadata_a, &[])
+            .expect("write of checkpoint A must succeed");
+
+        // Make cuts/ unwritable so the rewrite fails right after the manifest
+        // removal, at the stale-payload sweep, before any payload write.
+        let cuts_dir = tmp.path().join("cuts");
+        let mut perms = std::fs::metadata(&cuts_dir).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o555);
+        std::fs::set_permissions(&cuts_dir, perms).unwrap();
+
+        let b0 = [40.0_f64, 50.0, 60.0];
+        let cuts_b = [make_cut_record(2, 0, 5, &b0)];
+        let stage_cuts_b = [make_stage_cuts_payload(0, &cuts_b, &[0], 3)];
+        let metadata_b = make_metadata(1, 3);
+
+        let result = write_policy_checkpoint(tmp.path(), &stage_cuts_b, &[], &metadata_b, &[]);
+
+        // Restore permissions so the tempdir can be cleaned up.
+        let mut perms2 = std::fs::metadata(&cuts_dir).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms2, 0o755);
+        std::fs::set_permissions(&cuts_dir, perms2).unwrap();
+
+        assert!(
+            matches!(result, Err(OutputError::IoError { .. })),
+            "the interrupted rewrite must surface an IoError, got: {result:?}"
+        );
+        assert!(
+            !tmp.path().join("manifest.bin").exists(),
+            "manifest.bin must stay absent after an interrupted rewrite"
+        );
+
+        let read_result = read_policy_checkpoint(tmp.path());
+        assert!(
+            matches!(read_result, Err(OutputError::IoError { .. })),
+            "read_policy_checkpoint must reject the directory as not-a-checkpoint, got: {read_result:?}"
         );
     }
 
@@ -1162,6 +1401,7 @@ mod tests {
                 cost_scale_factor: 1_000_000.0,
                 node_id: -1,
                 graph_stage_id: -1,
+                priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
             },
             StageCutsPayload {
                 stage_id: 1,
@@ -1175,6 +1415,7 @@ mod tests {
                 cost_scale_factor: 1_000_000.0,
                 node_id: -1,
                 graph_stage_id: -1,
+                priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
             },
             StageCutsPayload {
                 stage_id: 2,
@@ -1188,6 +1429,7 @@ mod tests {
                 cost_scale_factor: 1_000_000.0,
                 node_id: -1,
                 graph_stage_id: -1,
+                priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
             },
         ];
 
@@ -1220,8 +1462,6 @@ mod tests {
         write_policy_checkpoint(tmp.path(), &stage_cuts, &[], &make_metadata(1, 1), &[])
             .expect("write must succeed");
 
-        // Overwrite manifest.bin with a stale format_version and corrupt the
-        // payload, proving the version gate fires before any payload parse.
         let mut stale = make_metadata(1, 1);
         stale.format_version = FORMAT_VERSION + 1;
         std::fs::write(
@@ -1237,6 +1477,39 @@ mod tests {
         assert!(
             msg.contains("format_version"),
             "must reject on the version marker, not the corrupt payload: {msg}"
+        );
+    }
+
+    /// The older-version mirror of the test above: a manifest predating
+    /// [`FORMAT_VERSION`] is rejected on the same version marker BEFORE any
+    /// payload is parsed, naming both versions and instructing a re-export.
+    #[test]
+    fn read_policy_checkpoint_rejects_older_manifest_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c0 = [1.0_f64];
+        let cuts_s0 = [make_cut_record(1, 0, 1, &c0)];
+        let stage_cuts = [make_stage_cuts_payload(0, &cuts_s0, &[0], 1)];
+        write_policy_checkpoint(tmp.path(), &stage_cuts, &[], &make_metadata(1, 1), &[])
+            .expect("write must succeed");
+
+        let mut older = make_metadata(1, 1);
+        older.format_version = FORMAT_VERSION - 1;
+        std::fs::write(
+            tmp.path().join("manifest.bin"),
+            super::codec::serialize_checkpoint_manifest(&older),
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join("cuts/000.bin"), b"garbage").unwrap();
+
+        let err =
+            read_policy_checkpoint(tmp.path()).expect_err("older manifest version must reject");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("format_version")
+                && msg.contains(&(FORMAT_VERSION - 1).to_string())
+                && msg.contains(&FORMAT_VERSION.to_string())
+                && msg.contains("re-export"),
+            "must name both versions and instruct a re-export, not surface the corrupt payload: {msg}"
         );
     }
 

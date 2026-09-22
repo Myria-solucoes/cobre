@@ -8,72 +8,129 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use chrono::NaiveDate;
-
+use super::super::atomic::write_bytes_atomic;
 use super::super::error::OutputError;
 use super::codec::{
+    build_checkpoint_manifest, build_stage_basis, build_stage_cuts, build_stage_states,
     deserialize_checkpoint_manifest, deserialize_stage_basis, deserialize_stage_cuts,
-    deserialize_stage_states, read_sorted_bin_files, serialize_checkpoint_manifest,
-    serialize_stage_basis, serialize_stage_cuts, serialize_stage_states,
+    deserialize_stage_states, read_sorted_bin_files,
 };
 use super::records::{
-    CheckpointManifest, ENTITY_SLOT_DELIVERY_DATE_SENTINEL, OwnedPolicyBasisRecord,
+    CheckpointManifest, ENTITY_SLOT_DATE_SENTINEL, EntitySlot, OwnedPolicyBasisRecord,
     PolicyBasisRecord, PolicyCheckpoint, StageCutsPayload, StageCutsReadResult, StageStatesPayload,
-    StageStatesReadResult, StateFamily,
+    StageStatesReadResult, StateFamily, decode_slot_date,
 };
 
-/// Whether `delivery_date` is [`ENTITY_SLOT_DELIVERY_DATE_SENTINEL`] or decodes
-/// as a valid `YYYYMMDD` date.
-fn is_well_formed_delivery_date(delivery_date: i32) -> bool {
-    if delivery_date == ENTITY_SLOT_DELIVERY_DATE_SENTINEL {
-        return true;
-    }
-    let year = delivery_date / 10_000;
-    let month = (delivery_date / 100) % 100;
-    let day = delivery_date % 100;
-    let (Ok(month), Ok(day)) = (u32::try_from(month), u32::try_from(day)) else {
-        return false;
-    };
-    NaiveDate::from_ymd_opt(year, month, day).is_some()
+fn is_well_formed_slot_date(value: i32) -> bool {
+    value == ENTITY_SLOT_DATE_SENTINEL || decode_slot_date(value).is_some()
 }
 
-/// Verify one pool's [`StateFamily::HydroTransitBucket`] slots (grouped by
-/// `entity_id`) carry non-sentinel `delivery_date`s that are monotone
-/// non-decreasing in `subindex` (the maturity-lag depth).
-///
-/// Only this family is checked: its `subindex` is a genuine delivery-ordered
-/// maturity depth, whereas the other calendar-shaped family's modular
-/// delivery-target-residue `subindex` wraps across the horizon, so enforcing
-/// monotonicity there would reject correctly-produced, non-monotone dates.
-///
-/// # Errors
-///
-/// Returns [`OutputError::SerializationError`] naming the pool, the offending
-/// subindex, and its `delivery_date`.
-fn check_transit_bucket_monotonicity(pool: &StageCutsReadResult) -> Result<(), OutputError> {
-    let mut by_entity: BTreeMap<i32, Vec<(u32, i32)>> = BTreeMap::new();
-    for slot in &pool.entity_manifest {
-        if slot.family() == Some(StateFamily::HydroTransitBucket)
-            && slot.delivery_date != ENTITY_SLOT_DELIVERY_DATE_SENTINEL
-        {
-            by_entity
-                .entry(slot.entity_id)
-                .or_default()
-                .push((slot.subindex, slot.delivery_date));
+fn slot_date_error(pool_id: u32, slot: &EntitySlot, detail: &str) -> OutputError {
+    OutputError::serialization(
+        "policy_checkpoint_dates",
+        format!(
+            "pool {pool_id} entity {} subindex {} {detail}",
+            slot.entity_id, slot.subindex
+        ),
+    )
+}
+
+fn check_well_formed_slot_dates(pool_id: u32, slot: &EntitySlot) -> Result<(), OutputError> {
+    for (field_name, value) in [
+        ("reference_date", slot.reference_date),
+        ("interval_start", slot.interval_start),
+        ("interval_end", slot.interval_end),
+    ] {
+        if !is_well_formed_slot_date(value) {
+            return Err(slot_date_error(
+                pool_id,
+                slot,
+                &format!("carries malformed {field_name} {value}"),
+            ));
         }
     }
-    for dates in by_entity.values_mut() {
-        dates.sort_by_key(|&(subindex, _)| subindex);
-        for pair in dates.windows(2) {
-            let (prev_subindex, prev_date) = pair[0];
-            let (subindex, date) = pair[1];
-            if date < prev_date {
-                let pool_id = pool.stage_id;
-                return Err(OutputError::serialization(
-                    "policy_checkpoint_dates",
-                    format!(
-                        "pool {pool_id} subindex {subindex} carries delivery_date {date}, \
-                         earlier than subindex {prev_subindex}'s {prev_date}"
+    Ok(())
+}
+
+fn check_interval_pairing(pool_id: u32, slot: &EntitySlot) -> Result<(), OutputError> {
+    let start_live = slot.interval_start != ENTITY_SLOT_DATE_SENTINEL;
+    let end_live = slot.interval_end != ENTITY_SLOT_DATE_SENTINEL;
+    match (start_live, end_live) {
+        (true, false) => Err(slot_date_error(
+            pool_id,
+            slot,
+            "carries a live interval_start with no interval_end",
+        )),
+        (false, true) => Err(slot_date_error(
+            pool_id,
+            slot,
+            "carries a live interval_end with no interval_start",
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn check_interval_ordering(pool_id: u32, slot: &EntitySlot) -> Result<(), OutputError> {
+    let start = slot.interval_start;
+    let end = slot.interval_end;
+    if start != ENTITY_SLOT_DATE_SENTINEL && end != ENTITY_SLOT_DATE_SENTINEL && start >= end {
+        return Err(slot_date_error(
+            pool_id,
+            slot,
+            &format!("carries interval_start {start} not before interval_end {end}"),
+        ));
+    }
+    Ok(())
+}
+
+fn check_family_applicability(pool_id: u32, slot: &EntitySlot) -> Result<(), OutputError> {
+    let interval_live = slot.interval_start != ENTITY_SLOT_DATE_SENTINEL
+        || slot.interval_end != ENTITY_SLOT_DATE_SENTINEL;
+    let reference_live = slot.reference_date != ENTITY_SLOT_DATE_SENTINEL;
+    match slot.family() {
+        Some(StateFamily::HydroStorage) => {
+            if reference_live {
+                return Err(slot_date_error(
+                    pool_id,
+                    slot,
+                    &format!(
+                        "is a storage slot, which carries no per-slot date, but carries a live reference_date {}",
+                        slot.reference_date
+                    ),
+                ));
+            }
+            if interval_live {
+                return Err(slot_date_error(
+                    pool_id,
+                    slot,
+                    "is a storage slot, which carries no per-slot date, but carries a live interval",
+                ));
+            }
+        }
+        Some(StateFamily::HydroInflowLag) => {
+            if interval_live {
+                return Err(slot_date_error(
+                    pool_id,
+                    slot,
+                    "is an inflow-lag slot, which carries no interval, but carries a live interval",
+                ));
+            }
+        }
+        other => {
+            if reference_live {
+                let noun = match other {
+                    Some(StateFamily::HydroTransitBucket) => "a transit-bucket slot",
+                    Some(StateFamily::AnticipatedThermalState) => {
+                        "an anticipated-thermal-state slot"
+                    }
+                    _ => "a slot with no recognized family",
+                };
+                return Err(slot_date_error(
+                    pool_id,
+                    slot,
+                    &format!(
+                        "is {noun}, which carries no reference_date (only inflow-lag slots do), but carries a live reference_date {}",
+                        slot.reference_date
                     ),
                 ));
             }
@@ -82,38 +139,73 @@ fn check_transit_bucket_monotonicity(pool: &StageCutsReadResult) -> Result<(), O
     Ok(())
 }
 
-/// Validate that `checkpoint` is internally date-consistent: every
-/// [`EntitySlot`](super::records::EntitySlot)'s non-sentinel `delivery_date` is
-/// a well-formed `YYYYMMDD` date, and every pool's `HydroTransitBucket` slots
-/// are monotone non-decreasing in `subindex`
-/// (see [`check_transit_bucket_monotonicity`]).
+/// Non-sentinel `interval_start`s must be monotone non-decreasing in `subindex`
+/// for [`StateFamily::HydroTransitBucket`] slots. Only this family is checked:
+/// the other calendar-shaped family's modular delivery-target-residue `subindex`
+/// wraps across the horizon, so monotonicity there would reject valid dates.
 ///
 /// # Errors
 ///
-/// Returns [`OutputError::SerializationError`] naming the offending pool,
-/// subindex, and `delivery_date`.
-fn validate_checkpoint_dates(checkpoint: &PolicyCheckpoint) -> Result<(), OutputError> {
-    for pool in &checkpoint.stage_cuts {
-        for slot in &pool.entity_manifest {
-            if !is_well_formed_delivery_date(slot.delivery_date) {
+/// Returns [`OutputError::SerializationError`] naming the pool, the offending
+/// subindex, and its `interval_start`.
+fn check_transit_bucket_monotonicity(pool: &StageCutsReadResult) -> Result<(), OutputError> {
+    let mut by_entity: BTreeMap<i32, Vec<(u32, i32)>> = BTreeMap::new();
+    for slot in &pool.entity_manifest {
+        if slot.family() == Some(StateFamily::HydroTransitBucket)
+            && slot.interval_start != ENTITY_SLOT_DATE_SENTINEL
+        {
+            by_entity
+                .entry(slot.entity_id)
+                .or_default()
+                .push((slot.subindex, slot.interval_start));
+        }
+    }
+    for starts in by_entity.values_mut() {
+        starts.sort_by_key(|&(subindex, _)| subindex);
+        for pair in starts.windows(2) {
+            let (prev_subindex, prev_start) = pair[0];
+            let (subindex, start) = pair[1];
+            if start < prev_start {
+                let pool_id = pool.stage_id;
                 return Err(OutputError::serialization(
                     "policy_checkpoint_dates",
                     format!(
-                        "pool {} subindex {} carries malformed delivery_date {}",
-                        pool.stage_id, slot.subindex, slot.delivery_date
+                        "pool {pool_id} subindex {subindex} carries interval_start {start}, \
+                         earlier than subindex {prev_subindex}'s {prev_start}"
                     ),
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+/// Validate that `checkpoint` is internally date-consistent, returning the
+/// first violation found.
+///
+/// # Errors
+///
+/// Returns [`OutputError::SerializationError`] naming the offending pool and
+/// slot.
+fn validate_checkpoint_dates(checkpoint: &PolicyCheckpoint) -> Result<(), OutputError> {
+    for pool in &checkpoint.stage_cuts {
+        let pool_id = pool.stage_id;
+        // Canonical order so the first reported error is declaration-order invariant.
+        let mut slots: Vec<&EntitySlot> = pool.entity_manifest.iter().collect();
+        slots.sort_by_key(|slot| (slot.entity_type, slot.entity_id, slot.subindex));
+        for slot in slots {
+            check_well_formed_slot_dates(pool_id, slot)?;
+            check_interval_pairing(pool_id, slot)?;
+            check_interval_ordering(pool_id, slot)?;
+            check_family_applicability(pool_id, slot)?;
         }
         check_transit_bucket_monotonicity(pool)?;
     }
     Ok(())
 }
 
-/// One `.bin` payload file name, keyed by the payload's own id (the pool id for
-/// `cuts/`, the stage id for `basis/`/`states/`). Zero-padded for a stable
-/// on-disk sort; the reader derives identity from inside each buffer, never from
-/// this name.
+/// Zero-padded `.bin` name for stable on-disk sort. Identity comes from the
+/// buffer content, never this filename.
 fn bin_file_name(id: u32) -> String {
     format!("{id:03}.bin")
 }
@@ -133,12 +225,20 @@ fn bin_file_name(id: u32) -> String {
 ///     000.bin        (only when stage_bases is non-empty)
 ///     001.bin
 ///     ...
+///   states/          (only when stage_states is non-empty)
+///     000.bin
+///     ...
 /// ```
 ///
 /// `manifest.bin` is written **last**, only after every `.bin` write succeeds:
 /// its absence is how the caller detects an incomplete artifact. Partially
 /// written files are not cleaned up. An empty `stage_bases` writes no basis files
 /// (the `basis/` directory is still created).
+///
+/// Rewriting a directory that already holds a checkpoint removes its
+/// `manifest.bin` and every previous payload file before any payload write:
+/// an old manifest left in place would pair with new payloads, and a stale
+/// payload would survive a rewrite with fewer pools or with states export off.
 ///
 /// # Errors
 ///
@@ -149,7 +249,8 @@ fn bin_file_name(id: u32) -> String {
 /// ```no_run
 /// use cobre_io::{
 ///     write_policy_checkpoint, FORMAT_VERSION, GraphManifest, PolicyBasisRecord,
-///     CheckpointManifest, PolicyCutRecord, ProducerBlock, StageCutsPayload,
+///     CheckpointManifest, PolicyCutRecord, ProducerBlock, SeasonManifest,
+///     STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, StageCutsPayload,
 /// };
 /// use std::path::Path;
 ///
@@ -176,6 +277,7 @@ fn bin_file_name(id: u32) -> String {
 ///     cost_scale_factor: 1_000_000.0,
 ///     node_id: 0,
 ///     graph_stage_id: 0,
+///     priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
 /// }];
 /// let metadata = CheckpointManifest {
 ///     format_version: FORMAT_VERSION,
@@ -197,6 +299,7 @@ fn bin_file_name(id: u32) -> String {
 ///         training_block_mode_per_stage: vec![],
 ///         cost_scale_factor: None,
 ///     },
+///     season_manifest: SeasonManifest::default(),
 /// };
 /// write_policy_checkpoint(Path::new("/tmp/policy"), &stage_cuts, &[], &metadata, &[])?;
 /// # Ok(())
@@ -209,41 +312,67 @@ pub fn write_policy_checkpoint(
     metadata: &CheckpointManifest,
     stage_states: &[StageStatesPayload<'_>],
 ) -> Result<(), OutputError> {
+    let manifest_path = path.join("manifest.bin");
+
     let cuts_dir = path.join("cuts");
     std::fs::create_dir_all(&cuts_dir).map_err(|e| OutputError::io(&cuts_dir, e))?;
 
     let basis_dir = path.join("basis");
     std::fs::create_dir_all(&basis_dir).map_err(|e| OutputError::io(&basis_dir, e))?;
 
+    match std::fs::remove_file(&manifest_path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(OutputError::io(&manifest_path, e)),
+    }
+    remove_bin_files(&cuts_dir)?;
+    remove_bin_files(&basis_dir)?;
+
+    let states_dir = path.join("states");
+    if stage_states.is_empty() {
+        match std::fs::remove_dir_all(&states_dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(OutputError::io(&states_dir, e)),
+        }
+    } else {
+        std::fs::create_dir_all(&states_dir).map_err(|e| OutputError::io(&states_dir, e))?;
+        remove_bin_files(&states_dir)?;
+    }
+
     for payload in stage_cuts {
         let file_path = cuts_dir.join(bin_file_name(payload.stage_id));
-        let buf = serialize_stage_cuts(payload);
-        std::fs::write(&file_path, &buf).map_err(|e| OutputError::io(&file_path, e))?;
+        let builder = build_stage_cuts(payload);
+        write_bytes_atomic(&file_path, builder.finished_data())?;
     }
 
     for record in stage_bases {
         let file_path = basis_dir.join(bin_file_name(record.stage_id));
-        let buf = serialize_stage_basis(record);
-        std::fs::write(&file_path, &buf).map_err(|e| OutputError::io(&file_path, e))?;
+        let builder = build_stage_basis(record);
+        write_bytes_atomic(&file_path, builder.finished_data())?;
     }
 
-    if !stage_states.is_empty() {
-        let states_dir = path.join("states");
-        std::fs::create_dir_all(&states_dir).map_err(|e| OutputError::io(&states_dir, e))?;
+    for payload in stage_states {
+        let file_path = states_dir.join(bin_file_name(payload.stage_id));
+        let builder = build_stage_states(payload);
+        write_bytes_atomic(&file_path, builder.finished_data())?;
+    }
 
-        for payload in stage_states {
-            let file_path = states_dir.join(bin_file_name(payload.stage_id));
-            let buf = serialize_stage_states(payload);
-            std::fs::write(&file_path, &buf).map_err(|e| OutputError::io(&file_path, e))?;
+    let manifest_builder = build_checkpoint_manifest(metadata);
+    write_bytes_atomic(&manifest_path, manifest_builder.finished_data())?;
+
+    Ok(())
+}
+
+/// Removes stale `.bin` files so [`read_policy_checkpoint`] does not mistake
+/// them for live pools.
+fn remove_bin_files(dir: &Path) -> Result<(), OutputError> {
+    for entry in std::fs::read_dir(dir).map_err(|e| OutputError::io(dir, e))? {
+        let file_path = entry.map_err(|e| OutputError::io(dir, e))?.path();
+        if file_path.extension().is_some_and(|ext| ext == "bin") {
+            std::fs::remove_file(&file_path).map_err(|e| OutputError::io(&file_path, e))?;
         }
     }
-
-    // Write manifest.bin LAST — its presence is the commit signal.
-    let manifest_buf = serialize_checkpoint_manifest(metadata);
-    let manifest_path = path.join("manifest.bin");
-    std::fs::write(&manifest_path, &manifest_buf)
-        .map_err(|e| OutputError::io(&manifest_path, e))?;
-
     Ok(())
 }
 
@@ -280,8 +409,6 @@ pub fn write_policy_checkpoint(
 /// # }
 /// ```
 pub fn read_policy_checkpoint(path: &Path) -> Result<PolicyCheckpoint, OutputError> {
-    // Read manifest.bin FIRST: its CBVF-identifier and format_version gates
-    // reject an unreadable artifact before any payload is parsed.
     let manifest_path = path.join("manifest.bin");
     let manifest_bytes =
         std::fs::read(&manifest_path).map_err(|e| OutputError::io(&manifest_path, e))?;

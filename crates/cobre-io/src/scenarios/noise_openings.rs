@@ -16,15 +16,14 @@
 use std::path::PathBuf;
 
 use cobre_stochastic::OpeningTree;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::File;
 use std::path::Path;
 
 use crate::LoadError;
 use crate::StageIdResolver;
 use crate::parquet_helpers::{
     extract_required_float64, extract_required_int32, extract_required_uint32,
+    open_record_batch_reader,
 };
 
 /// A single row from `scenarios/noise_openings.parquet`.
@@ -80,14 +79,7 @@ pub struct NoiseOpeningRow {
 /// println!("loaded {} noise opening rows", rows.len());
 /// ```
 pub fn parse_noise_openings(path: &Path) -> Result<Vec<NoiseOpeningRow>, LoadError> {
-    let file = File::open(path).map_err(|e| LoadError::io(path, e))?;
-
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
-
-    let reader = builder
-        .build()
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
+    let reader = open_record_batch_reader(path)?;
 
     let mut rows: Vec<NoiseOpeningRow> = Vec::new();
 
@@ -329,12 +321,11 @@ pub fn assemble_opening_tree(
 )]
 mod tests {
     use super::*;
+    use crate::test_support::write_parquet;
     use arrow::array::{Float64Array, Int32Array, UInt32Array};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
-    use parquet::arrow::ArrowWriter;
     use std::sync::Arc;
-    use tempfile::NamedTempFile;
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -345,15 +336,6 @@ mod tests {
             Field::new("entity_index", DataType::UInt32, false),
             Field::new("value", DataType::Float64, false),
         ]))
-    }
-
-    fn write_parquet(batch: &RecordBatch) -> NamedTempFile {
-        let tmp = NamedTempFile::new().expect("tempfile");
-        let mut writer = ArrowWriter::try_new(tmp.reopen().expect("reopen"), batch.schema(), None)
-            .expect("ArrowWriter");
-        writer.write(batch).expect("write batch");
-        writer.close().expect("close writer");
-        tmp
     }
 
     fn make_batch(

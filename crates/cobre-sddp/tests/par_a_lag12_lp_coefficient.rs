@@ -38,11 +38,11 @@
 use chrono::NaiveDate;
 use cobre_core::{
     BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, DeficitSegment,
-    EntityId, HydroBlockBounds, HydroStageBounds, HydroStagePenalties, LineBlockBounds,
+    EntityId, HydroBlockBounds, HydroPenalties, HydroStageBounds, LineBlockBounds,
     LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
     PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder, ThermalBlockBounds,
     ThermalStageBounds,
-    entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties},
+    entities::hydro::{Hydro, HydroGenerationModel},
     scenario::{AnnualComponent, InflowModel, LoadModel},
     temporal::{
         Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
@@ -51,7 +51,7 @@ use cobre_core::{
 };
 use cobre_sddp::{
     InflowNonNegativityMethod, ResolvedParameters, hydro_models::PrepareHydroModelsResult,
-    lp_builder::build_stage_templates_resolving_layout,
+    lp::builder::build_stage_templates_resolving_layout,
 };
 use cobre_stochastic::{PrecomputedPar, normal::precompute::PrecomputedNormal};
 
@@ -86,10 +86,11 @@ const PHI_2: f64 = 0.2;
 // Private fixture builder — PAR(2)-A
 // ---------------------------------------------------------------------------
 
-/// Build a 2-hydro, 24-stage, 12-season system with `annual: Some(_)` and
-/// the corresponding [`PrecomputedPar`].
+/// Build a 2-hydro, 24-stage, 12-season system and the corresponding
+/// [`PrecomputedPar`]. `annual: Some(_)` reproduces the PAR(2)-A fixture;
+/// `annual: None` reproduces the classical PAR(2) fixture.
 ///
-/// Fixture choices that make the arithmetic readable:
+/// Fixture choices that make the PAR(2)-A arithmetic readable:
 /// - Uniform σ_m = 200, σ^A = 250 across all stages → σ_m / σ_{m-1} = 1.0
 ///   so φ̂_j = φ_j · 1.0 = φ_j for the AR unit conversion.
 /// - ψ̂ = 0.1 * 200 / 250 = 0.08  (PSI * SIGMA_M / SIGMA_A)
@@ -98,7 +99,9 @@ const PHI_2: f64 = 0.2;
 ///
 /// Pre-study models (stage ids -1 and -2) are required so the
 /// `PrecomputedPar` builder can resolve lag-stage statistics for stage 0.
-fn build_par_a_fixture() -> (cobre_core::System, PrecomputedPar) {
+fn build_par_a_fixture_core(
+    annual: Option<&AnnualComponent>,
+) -> (cobre_core::System, PrecomputedPar) {
     let hydro_ids = [EntityId(1), EntityId(2)];
 
     let zero_penalties = HydroPenalties {
@@ -209,16 +212,10 @@ fn build_par_a_fixture() -> (cobre_core::System, PrecomputedPar) {
         })
         .collect();
 
-    let annual_component = AnnualComponent {
-        coefficient: PSI,
-        mean_m3s: 1000.0,
-        std_m3s: SIGMA_A,
-    };
-
     let mut all_inflow_models: Vec<InflowModel> = Vec::new();
 
-    for pre_id in [-2_i32, -1_i32] {
-        for &h_id in &hydro_ids {
+    for &h_id in &hydro_ids {
+        for pre_id in [-2_i32, -1_i32] {
             all_inflow_models.push(InflowModel {
                 hydro_id: h_id,
                 stage_id: pre_id,
@@ -226,13 +223,11 @@ fn build_par_a_fixture() -> (cobre_core::System, PrecomputedPar) {
                 std_m3s: SIGMA_M,
                 ar_coefficients: vec![],
                 residual_std_ratio: 1.0,
-                annual: Some(annual_component.clone()),
+                annual: annual.cloned(),
             });
         }
-    }
 
-    for i in 0..N_STUDY {
-        for &h_id in &hydro_ids {
+        for i in 0..N_STUDY {
             all_inflow_models.push(InflowModel {
                 hydro_id: h_id,
                 stage_id: i as i32,
@@ -240,13 +235,13 @@ fn build_par_a_fixture() -> (cobre_core::System, PrecomputedPar) {
                 std_m3s: SIGMA_M,
                 ar_coefficients: vec![PHI_1, PHI_2],
                 residual_std_ratio: 0.7,
-                annual: Some(annual_component.clone()),
+                annual: annual.cloned(),
             });
         }
     }
 
     let par_lp = PrecomputedPar::build(&all_inflow_models, &study_stages, &hydro_ids, None)
-        .expect("PrecomputedPar::build must succeed for a valid PAR(2)-A fixture");
+        .expect("PrecomputedPar::build must succeed for a valid PAR(2) fixture");
 
     let hydro_bounds_default = HydroStageBounds {
         min_storage_hm3: 0.0,
@@ -293,7 +288,7 @@ fn build_par_a_fixture() -> (cobre_core::System, PrecomputedPar) {
         },
     );
 
-    let hydro_penalties_default = HydroStagePenalties {
+    let hydro_penalties_default = HydroPenalties {
         spillage_cost: 0.01,
         diversion_cost: 0.0,
         turbined_cost: 0.0,
@@ -338,248 +333,25 @@ fn build_par_a_fixture() -> (cobre_core::System, PrecomputedPar) {
         .bounds(bounds)
         .penalties(penalties)
         .build()
-        .expect("SystemBuilder::build must succeed for a valid PAR(2)-A fixture");
+        .expect("SystemBuilder::build must succeed for a valid PAR(2) fixture");
 
     (system, par_lp)
 }
 
-/// Build the same system shape as [`build_par_a_fixture`] but with
-/// `annual: None` on every model. The classical PAR(2) path is used and
-/// `max_par_order` stays at 2.
+/// PAR(2)-A fixture: [`build_par_a_fixture_core`] with the annual component present.
+fn build_par_a_fixture() -> (cobre_core::System, PrecomputedPar) {
+    let annual = AnnualComponent {
+        coefficient: PSI,
+        mean_m3s: 1000.0,
+        std_m3s: SIGMA_A,
+    };
+    build_par_a_fixture_core(Some(&annual))
+}
+
+/// Classical PAR(2) fixture: [`build_par_a_fixture_core`] with no annual
+/// component; `max_par_order` stays at 2.
 fn build_classical_fixture() -> (cobre_core::System, PrecomputedPar) {
-    let hydro_ids = [EntityId(1), EntityId(2)];
-
-    let zero_penalties = HydroPenalties {
-        spillage_cost: 0.01,
-        diversion_cost: 0.0,
-        turbined_cost: 0.0,
-        storage_violation_below_cost: 0.0,
-        filling_target_violation_cost: 0.0,
-        turbined_violation_below_cost: 0.0,
-        outflow_violation_below_cost: 0.0,
-        outflow_violation_above_cost: 0.0,
-        generation_violation_below_cost: 0.0,
-        evaporation_violation_cost: 0.0,
-        water_withdrawal_violation_cost: 0.0,
-        water_withdrawal_violation_pos_cost: 0.0,
-        water_withdrawal_violation_neg_cost: 0.0,
-        evaporation_violation_pos_cost: 0.0,
-        evaporation_violation_neg_cost: 0.0,
-        inflow_nonnegativity_cost: 1000.0,
-    };
-
-    let hydros: Vec<Hydro> = hydro_ids
-        .iter()
-        .enumerate()
-        .map(|(i, &id)| {
-            make_hydro(
-                id,
-                HydroSpec {
-                    name: format!("H{}", i + 1),
-                    operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-                    bus_id: EntityId(0),
-                    downstream_id: None,
-                    entry_stage_id: None,
-                    exit_stage_id: None,
-                    min_storage_hm3: 0.0,
-                    max_storage_hm3: 500.0,
-                    min_outflow_m3s: 0.0,
-                    max_outflow_m3s: None,
-                    generation_model: HydroGenerationModel::ConstantProductivity,
-                    min_turbined_m3s: 0.0,
-                    max_turbined_m3s: 200.0,
-                    specific_productivity_mw_per_m3s_per_m: None,
-                    min_generation_mw: 0.0,
-                    max_generation_mw: 200.0,
-                    tailrace: None,
-                    hydraulic_losses: None,
-                    efficiency: None,
-                    evaporation_coefficients_mm: None,
-                    evaporation_reference_volumes_hm3: None,
-                    diversion: None,
-                    filling: None,
-                    penalties: zero_penalties,
-                    ..Default::default()
-                },
-            )
-        })
-        .collect();
-
-    let bus = make_bus(
-        EntityId(0),
-        BusSpec {
-            name: "B0".to_string(),
-            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            deficit_segments: vec![DeficitSegment {
-                depth_mw: None,
-                cost_per_mwh: 1000.0,
-            }],
-            excess_cost: 0.0,
-            ..Default::default()
-        },
-    );
-
-    let study_stages: Vec<Stage> = (0..N_STUDY)
-        .map(|i| {
-            make_stage(
-                i,
-                StageSpec {
-                    start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-                    end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
-                    season_id: Some(i % N_SEASONS),
-                    blocks: vec![Block {
-                        index: 0,
-                        name: "S".to_string(),
-                        duration_hours: 744.0,
-                    }],
-                    block_mode: BlockMode::Parallel,
-                    state_config: StageStateConfig {
-                        storage: true,
-                        inflow_lags: true,
-                    },
-                    risk_config: StageRiskConfig::Expectation,
-                    scenario_config: ScenarioSourceConfig {
-                        branching_factor: 1,
-                        noise_method: NoiseMethod::Saa,
-                    },
-                    ..Default::default()
-                },
-            )
-        })
-        .collect();
-
-    let load_models: Vec<LoadModel> = (0..N_STUDY)
-        .map(|i| LoadModel {
-            bus_id: EntityId(0),
-            stage_id: i as i32,
-            mean_mw: 100.0,
-            std_mw: 0.0,
-        })
-        .collect();
-
-    let mut all_inflow_models: Vec<InflowModel> = Vec::new();
-    for pre_id in [-2_i32, -1_i32] {
-        for &h_id in &hydro_ids {
-            all_inflow_models.push(InflowModel {
-                hydro_id: h_id,
-                stage_id: pre_id,
-                mean_m3s: 1000.0,
-                std_m3s: SIGMA_M,
-                ar_coefficients: vec![],
-                residual_std_ratio: 1.0,
-                annual: None,
-            });
-        }
-    }
-    for i in 0..N_STUDY {
-        for &h_id in &hydro_ids {
-            all_inflow_models.push(InflowModel {
-                hydro_id: h_id,
-                stage_id: i as i32,
-                mean_m3s: 1000.0,
-                std_m3s: SIGMA_M,
-                ar_coefficients: vec![PHI_1, PHI_2],
-                residual_std_ratio: 0.7,
-                annual: None,
-            });
-        }
-    }
-
-    let par_lp = PrecomputedPar::build(&all_inflow_models, &study_stages, &hydro_ids, None)
-        .expect("PrecomputedPar::build must succeed for a classical PAR(2) fixture");
-
-    let hydro_bounds_default = HydroStageBounds {
-        min_storage_hm3: 0.0,
-        max_storage_hm3: 500.0,
-        filling_min_rate_m3s: 0.0,
-        water_withdrawal_m3s: 0.0,
-    };
-    let hydro_bounds_default_block = HydroBlockBounds {
-        max_turbined_m3s: 200.0,
-        max_generation_mw: 200.0,
-        ..Default::default()
-    };
-    let bounds = ResolvedBounds::new(
-        &BoundsCountsSpec {
-            n_hydros: N_H,
-            n_thermals: 0,
-            n_lines: 0,
-            n_pumping: 0,
-            n_contracts: 0,
-            n_stages: N_STUDY,
-            k_max: 0,
-        },
-        &BoundsDefaults {
-            hydro: hydro_bounds_default,
-            hydro_block: hydro_bounds_default_block,
-            thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
-            thermal_block: ThermalBlockBounds {
-                min_generation_mw: 0.0,
-                max_generation_mw: 0.0,
-            },
-            line_block: LineBlockBounds {
-                direct_mw: 0.0,
-                reverse_mw: 0.0,
-            },
-            pumping_block: PumpingBlockBounds {
-                min_flow_m3s: 0.0,
-                max_flow_m3s: 0.0,
-            },
-            contract_block: ContractBlockBounds {
-                min_mw: 0.0,
-                max_mw: 0.0,
-                price_per_mwh: 0.0,
-            },
-        },
-    );
-    let hydro_penalties_default = HydroStagePenalties {
-        spillage_cost: 0.01,
-        diversion_cost: 0.0,
-        turbined_cost: 0.0,
-        storage_violation_below_cost: 0.0,
-        filling_target_violation_cost: 0.0,
-        turbined_violation_below_cost: 0.0,
-        outflow_violation_below_cost: 0.0,
-        outflow_violation_above_cost: 0.0,
-        generation_violation_below_cost: 0.0,
-        evaporation_violation_cost: 0.0,
-        water_withdrawal_violation_cost: 0.0,
-        water_withdrawal_violation_pos_cost: 0.0,
-        water_withdrawal_violation_neg_cost: 0.0,
-        evaporation_violation_pos_cost: 0.0,
-        evaporation_violation_neg_cost: 0.0,
-        inflow_nonnegativity_cost: 1000.0,
-    };
-    let penalties = ResolvedPenalties::new(
-        &PenaltiesCountsSpec {
-            n_hydros: N_H,
-            n_buses: 1,
-            n_lines: 0,
-            n_ncs: 0,
-            n_stages: N_STUDY,
-        },
-        &PenaltiesDefaults {
-            hydro: hydro_penalties_default,
-            bus: BusStagePenalties { excess_cost: 0.0 },
-            line: LineStagePenalties { exchange_cost: 0.0 },
-            ncs: NcsStagePenalties {
-                curtailment_cost: 0.0,
-            },
-        },
-    );
-
-    let system = SystemBuilder::new()
-        .buses(vec![bus])
-        .hydros(hydros)
-        .stages(study_stages)
-        .inflow_models(all_inflow_models)
-        .load_models(load_models)
-        .bounds(bounds)
-        .penalties(penalties)
-        .build()
-        .expect("SystemBuilder::build must succeed for a classical PAR(2) fixture");
-
-    (system, par_lp)
+    build_par_a_fixture_core(None)
 }
 
 // ---------------------------------------------------------------------------

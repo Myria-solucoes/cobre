@@ -74,14 +74,18 @@
 //! - Duplicate `(entity_id, stage_id)` pairs — deferred.
 //! - Semantic cross-validation (e.g., penalty ordering constraints) — deferred.
 
-use arrow::array::Array;
+use arrow::array::{Array, Float64Array};
 use cobre_core::EntityId;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use std::fs::File;
 use std::path::Path;
 
 use crate::LoadError;
-use crate::parquet_helpers::{extract_optional_float64, extract_required_int32};
+use crate::parquet_helpers::{
+    extract_optional_float64, extract_required_int32, open_record_batch_reader,
+};
+
+fn optional_value(col: Option<&Float64Array>, row: usize) -> Option<f64> {
+    col.filter(|c| !c.is_null(row)).map(|c| c.value(row))
+}
 
 // ── Row types ─────────────────────────────────────────────────────────────────
 
@@ -316,14 +320,7 @@ fn validate_optional_positive(
 /// println!("loaded {} bus penalty override rows", rows.len());
 /// ```
 pub fn parse_penalty_overrides_bus(path: &Path) -> Result<Vec<BusPenaltyOverrideRow>, LoadError> {
-    let file = File::open(path).map_err(|e| LoadError::io(path, e))?;
-
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
-
-    let reader = builder
-        .build()
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
+    let reader = open_record_batch_reader(path)?;
 
     let mut rows: Vec<BusPenaltyOverrideRow> = Vec::new();
 
@@ -345,9 +342,7 @@ pub fn parse_penalty_overrides_bus(path: &Path) -> Result<Vec<BusPenaltyOverride
             let bus_id = EntityId::from(bus_id_col.value(i));
             let stage_id = stage_id_col.value(i);
 
-            let excess_cost = excess_cost_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
+            let excess_cost = optional_value(excess_cost_col, i);
 
             validate_optional_positive(
                 excess_cost,
@@ -402,14 +397,7 @@ pub fn parse_penalty_overrides_bus(path: &Path) -> Result<Vec<BusPenaltyOverride
 /// println!("loaded {} line penalty override rows", rows.len());
 /// ```
 pub fn parse_penalty_overrides_line(path: &Path) -> Result<Vec<LinePenaltyOverrideRow>, LoadError> {
-    let file = File::open(path).map_err(|e| LoadError::io(path, e))?;
-
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
-
-    let reader = builder
-        .build()
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
+    let reader = open_record_batch_reader(path)?;
 
     let mut rows: Vec<LinePenaltyOverrideRow> = Vec::new();
 
@@ -431,9 +419,7 @@ pub fn parse_penalty_overrides_line(path: &Path) -> Result<Vec<LinePenaltyOverri
             let line_id = EntityId::from(line_id_col.value(i));
             let stage_id = stage_id_col.value(i);
 
-            let exchange_cost = exchange_cost_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
+            let exchange_cost = optional_value(exchange_cost_col, i);
 
             validate_optional_positive(
                 exchange_cost,
@@ -494,14 +480,7 @@ pub fn parse_penalty_overrides_line(path: &Path) -> Result<Vec<LinePenaltyOverri
 pub fn parse_penalty_overrides_hydro(
     path: &Path,
 ) -> Result<Vec<HydroPenaltyOverrideRow>, LoadError> {
-    let file = File::open(path).map_err(|e| LoadError::io(path, e))?;
-
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
-
-    let reader = builder
-        .build()
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
+    let reader = open_record_batch_reader(path)?;
 
     let mut rows: Vec<HydroPenaltyOverrideRow> = Vec::new();
 
@@ -551,54 +530,30 @@ pub fn parse_penalty_overrides_hydro(
             let hydro_id = EntityId::from(hydro_id_col.value(i));
             let stage_id = stage_id_col.value(i);
 
-            let spillage_cost = spillage_cost_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let turbined_cost = turbined_cost_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let diversion_cost = diversion_cost_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let storage_violation_below_cost = storage_violation_below_cost_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let filling_target_violation_cost = filling_target_violation_cost_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let turbined_violation_below_cost = turbined_violation_below_cost_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let outflow_violation_below_cost = outflow_violation_below_cost_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let outflow_violation_above_cost = outflow_violation_above_cost_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let generation_violation_below_cost = generation_violation_below_cost_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let evaporation_violation_cost = evaporation_violation_cost_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let water_withdrawal_violation_cost = water_withdrawal_violation_cost_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let water_withdrawal_violation_pos_cost = water_withdrawal_violation_pos_cost_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let water_withdrawal_violation_neg_cost = water_withdrawal_violation_neg_cost_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let evaporation_violation_pos_cost = evaporation_violation_pos_cost_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let evaporation_violation_neg_cost = evaporation_violation_neg_cost_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let inflow_nonnegativity_cost = inflow_nonnegativity_cost_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
+            let spillage_cost = optional_value(spillage_cost_col, i);
+            let turbined_cost = optional_value(turbined_cost_col, i);
+            let diversion_cost = optional_value(diversion_cost_col, i);
+            let storage_violation_below_cost = optional_value(storage_violation_below_cost_col, i);
+            let filling_target_violation_cost =
+                optional_value(filling_target_violation_cost_col, i);
+            let turbined_violation_below_cost =
+                optional_value(turbined_violation_below_cost_col, i);
+            let outflow_violation_below_cost = optional_value(outflow_violation_below_cost_col, i);
+            let outflow_violation_above_cost = optional_value(outflow_violation_above_cost_col, i);
+            let generation_violation_below_cost =
+                optional_value(generation_violation_below_cost_col, i);
+            let evaporation_violation_cost = optional_value(evaporation_violation_cost_col, i);
+            let water_withdrawal_violation_cost =
+                optional_value(water_withdrawal_violation_cost_col, i);
+            let water_withdrawal_violation_pos_cost =
+                optional_value(water_withdrawal_violation_pos_cost_col, i);
+            let water_withdrawal_violation_neg_cost =
+                optional_value(water_withdrawal_violation_neg_cost_col, i);
+            let evaporation_violation_pos_cost =
+                optional_value(evaporation_violation_pos_cost_col, i);
+            let evaporation_violation_neg_cost =
+                optional_value(evaporation_violation_neg_cost_col, i);
+            let inflow_nonnegativity_cost = optional_value(inflow_nonnegativity_cost_col, i);
 
             validate_optional_positive(
                 spillage_cost,
@@ -773,14 +728,7 @@ pub fn parse_penalty_overrides_hydro(
 /// println!("loaded {} NCS penalty override rows", rows.len());
 /// ```
 pub fn parse_penalty_overrides_ncs(path: &Path) -> Result<Vec<NcsPenaltyOverrideRow>, LoadError> {
-    let file = File::open(path).map_err(|e| LoadError::io(path, e))?;
-
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
-
-    let reader = builder
-        .build()
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
+    let reader = open_record_batch_reader(path)?;
 
     let mut rows: Vec<NcsPenaltyOverrideRow> = Vec::new();
 
@@ -802,9 +750,7 @@ pub fn parse_penalty_overrides_ncs(path: &Path) -> Result<Vec<NcsPenaltyOverride
             let source_id = EntityId::from(source_id_col.value(i));
             let stage_id = stage_id_col.value(i);
 
-            let curtailment_cost = curtailment_cost_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
+            let curtailment_cost = optional_value(curtailment_cost_col, i);
 
             validate_optional_positive(
                 curtailment_cost,
@@ -844,23 +790,11 @@ pub fn parse_penalty_overrides_ncs(path: &Path) -> Result<Vec<NcsPenaltyOverride
 )]
 mod tests {
     use super::*;
+    use crate::test_support::write_parquet;
     use arrow::array::{Float64Array, Int32Array};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
-    use parquet::arrow::ArrowWriter;
     use std::sync::Arc;
-    use tempfile::NamedTempFile;
-
-    // ── Shared test helpers ───────────────────────────────────────────────────
-
-    fn write_parquet(batch: &RecordBatch) -> NamedTempFile {
-        let tmp = NamedTempFile::new().expect("tempfile");
-        let mut writer = ArrowWriter::try_new(tmp.reopen().expect("reopen"), batch.schema(), None)
-            .expect("ArrowWriter");
-        writer.write(batch).expect("write batch");
-        writer.close().expect("close writer");
-        tmp
-    }
 
     // ── BusPenaltyOverrideRow tests ───────────────────────────────────────────
 

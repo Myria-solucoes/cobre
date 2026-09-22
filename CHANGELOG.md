@@ -45,6 +45,507 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Pure CVaR and expectation retain their mathematical definitions. See the
   `cobre-sddp` risk aggregation contract and its reproducible example.
 
+## [0.16.0] - 2026-09-22
+
+### Added
+
+- **Two new simulation output columns publish the useful-range mean-evaluator
+  hydro productivity, alongside the existing reference-point pair.**
+  `integrated_equivalent_productivity_mw_per_m3s` and
+  `integrated_accumulated_productivity_mw_per_m3s` (unit `MW/(m3/s)`) are
+  written after the existing `equivalent_productivity_mw_per_m3s` /
+  `accumulated_productivity_mw_per_m3s` pair, by both the CLI and the Python
+  bindings, so the cascade recurrence is checkable on disk under either
+  evaluator.
+
+- **Two new `stored_energy_initial_mw` and `stored_energy_final_mw` columns
+  report stored energy as a power instead of an energy quantity.** Each is the
+  corresponding `stored_energy_{initial,final}_mwh` value divided by the
+  stage's total block hours; `_mwh` itself is stage-length independent, so the
+  two forms diverge by exactly the stage's own duration — reconciling either
+  against a month-based source convention is left to the consumer.
+
+- **Three new computed scalar-parameter tags expose the useful-range mean
+  evaluator.** `integrated_equivalent_productivity` and
+  `integrated_accumulated_productivity` are the useful-range-mean counterparts
+  of the existing `equivalent_productivity` / `accumulated_productivity` tags
+  (own-plant and whole-cascade respectively), and `max_stored_energy` is the
+  matching security-curve reference — the useful-range-mean cascade
+  productivity times the plant's physical storage range, in the raw
+  productivity-times-volume unit rather than MWh.
+
+- **`hydro_useful_volume_initial(id)` and `hydro_useful_volume_final(id)` are
+  now authorable generic-constraint variable references.** Each resolves to
+  the same LP column as the corresponding `hydro_storage_{initial,final}`
+  reference, with the constraint's resolved bound shifted by the plant's
+  physical dead volume, so an authored constraint reads as an
+  above-dead-storage quantity while the underlying storage column is
+  unchanged.
+
+- **A non-blocking validation warning flags a security-curve constraint that
+  pairs `max_stored_energy(h)` with the mismatched reference-point
+  `accumulated_productivity(h)` tag for the same hydro.** The matching
+  (cancelling) coefficient is `integrated_accumulated_productivity`; the
+  warning never rejects the constraint, since a study author may have a
+  reason to combine them the checker cannot see.
+
+- **Every stored state value is canonicalized onto its admissible bounds at
+  read-back, so an out-of-tolerance solver drift can no longer abort a run.** On
+  the training and simulation solve path each outgoing state — reservoir storage,
+  in-transit water buckets, and anticipated-commitment holds — is projected onto
+  its resolved bounds before the value is pinned, solved against, or priced into a
+  future-cost cut. A commitment the simplex places a hair outside its cap is
+  absorbed rather than raising a spurious infeasibility that would end the run. A
+  genuine over-commitment — a committed value outside the delivery stage's resolved
+  generation bounds — is now rejected at case-load time with a clear diagnostic,
+  instead of aborting mid-solve.
+
+- **`Study.stochastic`, `Study.hydro_models` and `Study.provenance` accessors
+  read the three structural summaries a study captures at construction.** A
+  caller can now read the stochastic summary, the hydro-model summary and the
+  model-provenance report from the object without reloading the case or
+  running a phase. The same three reports were already returned as keys of
+  `cobre.run.run`'s result dict; they are now reachable from the `Study`
+  object too.
+
+- **`cobre.model.EnergyContract`, `cobre.model.PumpingStation` and
+  `cobre.model.NonControllableSource` now expose every declared attribute.**
+  Each previously carried only `id` and `name`. `EnergyContract` gains
+  `operational_start_date`, `bus_id`, `contract_type`, `entry_stage_id`,
+  `exit_stage_id`, `price_per_mwh`, `min_mw` and `max_mw`; `PumpingStation`
+  gains `operational_start_date`, `bus_id`, `source_hydro_id`,
+  `destination_hydro_id`, `entry_stage_id`, `exit_stage_id`,
+  `consumption_mw_per_m3s`, `min_flow_m3s` and `max_flow_m3s`;
+  `NonControllableSource` gains `operational_start_date`, `bus_id`,
+  `entry_stage_id`, `exit_stage_id`, `max_generation_mw`, `allow_curtailment`
+  and `curtailment_cost`.
+
+- **`cobre.errors.InternalError` completes the exception hierarchy the module's
+  documentation described.** Software and environment faults raise
+  `cobre.errors.InternalError`, subclassing `RuntimeError` and
+  `cobre.errors.CobreError`.
+
+- **`cobre.write_policy_checkpoint` accepts an optional
+  `metadata["season_manifest"]` dict with `cycle_code`, `n_seasons` and
+  `hydro_orders` keys, and `cobre.results.load_policy` always emits it, so a
+  checkpoint authored from Python can carry the study's season descriptor.**
+  Omitting the key writes a checkpoint byte-identical to before. A
+  Python-authored boundary policy no longer trips the season compatibility
+  check of a seasonal study, and a loaded checkpoint round-trips unchanged.
+
+### Changed
+
+- **`stored_energy_initial_mwh` and `stored_energy_final_mwh` now read the
+  useful-range mean evaluator's `integrated_accumulated_productivity` grid
+  and the plant's physical dead volume, in place of what they read before.**
+  This is a declared, intentional value change, not a silent rebaseline: a
+  study with at least one plant whose physical storage range is genuinely
+  non-collapsed and whose VHA geometry resolves — where the mean and
+  reference-point evaluators diverge — now reports a different stored-energy
+  value than earlier releases. A study where every hydro's physical range is
+  collapsed, or where no hydro has resolvable geometry, sees the two
+  evaluators coincide and the columns stay byte-neutral.
+
+- **The `specific_productivity_mw_per_m3s_per_m` override column in
+  `hydro_energy_productivity.parquet` now reaches the head-derived
+  productivity of both the reference-point and the useful-range mean
+  evaluator, through the same resolver the `specific_productivity` computed
+  tag already used.** A study that leaves every row of the column `NULL` is
+  byte-neutral: the resolved value equals the entity-level
+  `specific_productivity_mw_per_m3s_per_m` default on every `(hydro, stage)`,
+  exactly as before.
+
+- **A study stage declaring no block, or a block whose duration is not
+  finite and strictly positive, is now rejected at validation.** This guards
+  the new `stored_energy_*_mw` power columns against a zero or non-finite
+  divisor; a stage that already declares only well-formed blocks is
+  unaffected.
+
+- **`generic_parameters.schema.json` is regenerated for the three new
+  `computed` tags — `integrated_equivalent_productivity`,
+  `integrated_accumulated_productivity`, and `max_stored_energy`.** No other
+  schema changed.
+
+- **`cobre validate` now runs the generic-constraint parameter check for every
+  deck, not only boundary-configured ones, so a scalar-parameter resolution gap
+  is caught at validate time instead of only at run time.** A generic constraint
+  referencing a scalar parameter that does not resolve for a stage's season
+  previously passed `cobre validate` on a deck without a configured boundary
+  policy and only failed once `cobre run` built the study; validation now reports
+  it up front (kind `GenericConstraintValidationError`), restoring the guarantee
+  that a case which validates cleanly will not fail this phase at run time. The
+  CLI and the Python `cobre.io.validate` binding reject identically.
+
+- **A negative FPHA discretization count in `hydro_production_models.json` is now
+  rejected at load with a diagnostic naming the field and hydro.** The count
+  fields — `volume_discretization_points`, `turbine_discretization_points`,
+  `spillage_discretization_points` and `max_planes_per_hydro` — are validated when
+  present: a negative value fails validation instead of being carried into
+  hyperplane fitting, where it was previously accepted. An absent count keeps its
+  default and a non-negative value is unaffected.
+
+- **A study configuring enumerated forward traversal together with dynamic cut
+  selection is now rejected at setup with a clear diagnostic.** The two are
+  incompatible: enumerated traversal seeds the cut pool on its own node-native
+  stride, while dynamic cut selection relies on the sampled-selection
+  eviction-key discipline. The combination is refused as a validation error
+  during study setup rather than silently exercising an untested cut-eviction
+  path. Every other forward-traversal and cut-selection combination is unchanged.
+
+- **BREAKING — `policy.boundary.source_stage` is removed and rejected by
+  `config.json`'s deny-unknown-fields contract; the source pool is now
+  chosen by calendar date instead of a stage index.** A `policy.boundary`
+  block that still sets `source_stage` fails validation; delete the
+  key. The boundary loader selects the source checkpoint's pool whose
+  priced state date equals the study's last stage `end_date`, replacing
+  the removed override and its calendar-overlap auto-resolution. Independently,
+  a source checkpoint written before `format_version` 2 is rejected on
+  load — warm-start, resume, simulation-only, and boundary injection
+  alike — with no migration path; re-export the source policy with a
+  current Cobre. `cobre validate --json`'s
+  `report.anticipated_coverage.source_month_count` field is renamed
+  `source_interval_count`. That same object drops its `source_span` and
+  `target_span` keys; the report's `dropped_source_slots` and
+  `straddling_slots` arrays carry each affected slot's own dating instead.
+
+- **BREAKING — `cobre_sddp::resolve_boundary_source_stage` is removed, and
+  `load_boundary_cuts` now takes a single request object instead of a long
+  positional argument list.** No deck, CLI output, or Python package output
+  is affected; only code that calls `cobre_sddp::load_boundary_cuts` or
+  `cobre_sddp::resolve_boundary_source_stage` directly needs to adapt. A
+  caller now builds a `BoundaryLoadRequest` with `BoundaryLoadRequest::new`
+  and its `with_*` builders and passes it by reference; the function
+  returns either a validation error or the validated boundary cuts
+  together with their reconciliation report, with no warning callback — a
+  caller that previously observed superset warnings through the callback
+  now reads them from the returned report instead.
+  `BoundaryReconciliationReport::tally_clause` is removed with it; the same
+  wording is `summary_line()` minus its `boundary reconciliation: ` prefix,
+  and `tally_totals()` still returns the four counts for a caller that wants
+  to render them itself. `cobre_io::ENTITY_SLOT_DELIVERY_DATE_SENTINEL` is
+  renamed `ENTITY_SLOT_DATE_SENTINEL`: the same value now sentinels every
+  `EntitySlot` date field, not only the retired delivery date.
+
+- **`policy.boundary.strict` (default `false`) turns a source pool that
+  prices an entity or commitment the study does not model into a hard
+  reject, naming every dropping family and its count.** Left `false`, such
+  a load still succeeds; boundary loading emits no warning lines at all —
+  every drop is instead recorded in the returned reconciliation report.
+  `cobre validate --json`'s output gains `boundary_date` (the date the
+  boundary pool was selected against) and the report's
+  `dropped_source_slots` and `straddling_slots`, each an array of the
+  affected slots' own identity and dating.
+
+- **BREAKING — a bound-override row whose `stage_id` is not a declared study
+  stage is now rejected at validation, for every bound family.** Such rows
+  were previously dropped without a warning or an error. A deck that relied on
+  that — for example one carrying stale override rows for a stage no longer in
+  the study — now fails validation; remove the rows or correct their
+  `stage_id`.
+
+- **Generic-constraint bound-override rows now follow the same rules as the
+  other six bound families.** An out-of-range `block_id` in
+  `constraints/generic_constraint_bounds.parquet` is reported as a
+  `BusinessRuleViolation` instead of an `InvalidValue`, and two rows that set
+  disjoint columns (`bound_lower` in one, `bound_upper` in the other) for the
+  same constraint, stage and block are no longer rejected as duplicates. Every
+  other bound family already behaved this way; decks without such rows are
+  unaffected.
+
+- **A required column missing from `hydro_geometry.parquet`,
+  `hydro_energy_productivity.parquet` or `tailrace_curves.parquet` is now
+  reported as `missing required column "<name>"`**, the wording every other
+  tabular input already uses. The error class, file path and column name are
+  unchanged.
+
+- **Rust crate API: `cobre-core`, `cobre-io` and `cobre-stochastic` drop
+  unused or duplicated public items and tighten two constructor checks.** The
+  `cobre` CLI, its output files, the Python package and every loadable deck
+  are unaffected; only code that depends on these crates directly needs to
+  adapt:
+  - `cobre-core`: `ValidationError::DisconnectedBus` and
+    `ValidationError::InvalidPenalty` are removed. The `count`, `variance`,
+    `std_dev`, `sample_variance` and `ci_95_half_width` accessors of
+    `WelfordAccumulator` are removed; the sample-statistics accessors stay.
+    `NetworkTopology`, `BusGenerators`, `BusLineConnection`, `BusLoads` and
+    `System::network()` are removed — derive adjacency from the entity
+    accessors; `System::cascade()` is unchanged. The per-(hydro, stage)
+    penalty type that duplicated `HydroPenalties` is removed from
+    `cobre_core::resolved`; `ResolvedPenalties::hydro_penalties` and
+    `hydro_penalties_mut` now read and write `cobre_core::HydroPenalties`
+    directly, with the same field names and values. `SystemBuilder::build`
+    rejects a scenario model table (`inflow_models`, `load_models`,
+    `ncs_models`) whose `(entity_id, stage_id)` keys are not in canonical
+    order, `System::with_scenario_models` returns
+    `Result<Self, ValidationError>` to apply the same check, and
+    `EstimationError` gains a `Validation` variant; `cobre-io` already emits
+    the tables sorted, so no deck is affected.
+    `HorizonGraph::stage_discount_rate_overrides` is a `BTreeMap<i32, f64>`
+    instead of a `HashMap`, so a `System` payload serializes to the same
+    bytes regardless of the order the overrides were inserted.
+  - `cobre-io`: the free `serialize_system`, `deserialize_system`,
+    `serialize_parameters` and `deserialize_parameters` postcard helpers;
+    `load_scalar_parameters_json` and `build_season_stage_map`;
+    `load_scenarios` and its result type; `default_severity` on the
+    validation error kind; the study-configuration argument of
+    `write_dictionaries`; the public `default_bounds` and
+    `default_upper_bound_kind` helpers; the two thread-pool setup fields of
+    `IterationRecord`; `SimulationOutput::partitions_written`;
+    `LoadError::CrossReferenceError`; and the `resolution::load_factors` and
+    `resolution::ncs_factors` module paths (`resolve_load_factors` and
+    `resolve_ncs_factors` stay at `cobre_io::resolution`) are removed.
+    `ParquetWriterConfig` is removed and no longer a parameter of the
+    simulation and row-selection writers: Parquet encoding (Zstd level 3,
+    row groups of 100000 rows, dictionary encoding) is a fixed internal
+    setting; output bytes are unchanged.
+  - `cobre-stochastic`: `ParValidationReport` and `ParWarning` are removed
+    (`validate_par_parameters` returns only the fatal result); the three
+    PAR-fitting entry points that took no season map are removed (call the
+    season-map variants); `SweepDirection` and the direction argument of
+    `set_solve_order` are removed (openings are always ordered by descending
+    key, as every run already did); and
+    `StochasticError::SpectralDecompositionFailed`,
+    `StochasticError::SeedDerivationError` and
+    `StochasticError::UnsupportedSamplingScheme` are removed. The per-method
+    point-generation spec structs (`tree::LhsPointSpec` and the Halton
+    counterpart) are unified into one `NoisePointSpec`, re-exported at the
+    crate root, whose `stage_id` field is renamed `stream_id`: forward-pass
+    producers pass the noise-group id there, opening-tree producers the stage
+    id.
+
+- **The out-of-sample forward draw no longer rebuilds per-draw sampling state for
+  the Sobol, Halton and Latin-hypercube noise methods, and no longer allocates
+  for a correlation group of any width.** Each of those methods
+  previously reconstructed its scenario-invariant tables on every draw; each now
+  reads tables built once per training iteration and reused across draws. The
+  correlation applier's separate full-vector code path is removed in favor of a
+  single applier that handles every group width from caller-owned scratch.
+  Results are unchanged.
+
+- **BREAKING — `cobre.run.run(threads=0)` now raises `ValueError`.** Previously,
+  `threads=0` was accepted and treated as unspecified; it is now rejected at
+  argument validation. Pass `threads=1` or omit the keyword to let the runtime
+  choose.
+
+- **BREAKING — case-load and policy-load failures now raise
+  `cobre.errors.CaseIoError` or `cobre.errors.ValidationError`, where they
+  previously raised `cobre.errors.SolverError`.** Filesystem read failures
+  raise `cobre.errors.CaseIoError`; schema, parse, constraint and
+  configuration validation failures raise `cobre.errors.ValidationError`. Both
+  subclass `cobre.errors.CobreError`, so a caller catching
+  `cobre.errors.CobreError` covers all three. A caller that previously caught
+  `cobre.errors.SolverError` to handle case-load failures should now catch
+  `cobre.errors.CaseIoError` and `cobre.errors.ValidationError` instead, or
+  catch the base `cobre.errors.CobreError` to handle every error class the
+  package raises.
+
+- **BREAKING — `cobre validate --json`'s error object `kind` for a load-phase
+  failure now uses `cobre_io::LoadError`'s own vocabulary (`IoError`,
+  `ParseError`, `SchemaError`, `ConstraintError`, `PolicyIncompatible`)
+  instead of the CLI-only `CaseValidationError`, matching `cobre.io.validate`'s
+  `kind` for the identical failure.** A caller filtering on
+  `"CaseValidationError"` — for example, a duplicate bus id — must filter on
+  `"ConstraintError"` instead; there is no compatibility alias. Independently,
+  a `config.json` parse failure and an invalid `training.scenario_source` now
+  also emit the `--json` error object; both previously left stdout empty on
+  failure.
+
+- **`cobre validate --json` now emits an error object for a boundary
+  reconciliation reject, with `kind == "BoundaryReconciliationError"`.**
+  Previously a boundary reject under `--json` left stdout empty; the boundary
+  phase now shares the same phase-metadata mapping `cobre.io.validate` already
+  used for this kind, so both front ends report an identical `kind` and
+  message shape.
+
+### Removed
+
+- **BREAKING — the `cobre report` subcommand is removed, and so is
+  `cobre summary`.** `cobre --help` now lists only `init`, `run`,
+  `validate`, `schema` and `version`. No deck, output file, schema or
+  checkpoint format changed. Read `training/metadata.json` and
+  `simulation/metadata.json` directly, or use the Python `load_*` loaders.
+
+- **BREAKING — `cobre.results.report()` is removed, and so is
+  `cobre.results.summary()`; `cobre.results` is now the compiled module rather
+  than a pure-Python wrapper.** No deck, output file, schema or checkpoint
+  format changed; every `load_*` function and the `Stochastic` class are
+  unchanged. Read the same `training/metadata.json` and
+  `simulation/metadata.json` files, or use the unchanged `load_*` loaders.
+
+- **BREAKING — `cobre-io`'s `ConvergenceSummary` and the readers that produced
+  it are removed.** No deck, output file, schema or checkpoint format changed,
+  and the corresponding writers are unchanged; a caller reads the written
+  artefact directly with `serde_json` instead:
+  - `ConvergenceSummary`
+  - `read_convergence_summary`
+  - `read_initial_gap_percent`
+  - `read_hydro_model_summary`
+  - `read_provenance_report`
+
+- **BREAKING — the `skip_simulation` keyword argument to `cobre.run.run` is
+  removed.** A call passing `skip_simulation` now raises `TypeError`. No deck,
+  output file, schema or checkpoint format changed. Remove the keyword; to run
+  only the training phase, pass
+  `config_overrides={"simulation": {"enabled": False}}` to `cobre.run.run`, or
+  construct a `Study` and call `train()` without `simulate()`.
+
+- **BREAKING — seven unused or superseded Rust-API surfaces are removed from
+  `cobre-sddp` and `cobre-solver`.** No deck, output file, schema or
+  checkpoint format changed:
+  - `CutManagementConfig::warm_start_cuts` is removed; the field had no
+    reader and always held `0`. Per-pool warm-start capacity is unaffected.
+  - The `Col` and `Row` indexer newtypes are removed; the `InCol`, `OutCol`
+    and `StateDim` role types are unchanged.
+  - `FphaRowRange` is removed; `EvaporationIndices` is unchanged.
+  - The crate-root `cobre_sddp::orchestration` re-export is removed; the
+    same items are now reached at `cobre_sddp::policy::orchestration` —
+    only the path changed.
+  - The superseded cut-sync methods `sync_cuts`, `pack_local_records` and
+    `sync_packed_records` are removed; the live cut-exchange path
+    `sync_level_records` is unchanged.
+  - The CLP hot-start acquire/release FFI surface — the C shim's `mark`,
+    `solve` and `unmark` functions and their `ClpSolver` wrappers — is
+    removed. It guarded a basis-invalidation path that never fired; no
+    solver behaviour changes.
+  - `StudySetup::set_budget` is removed; it had no caller. The active-cut
+    budget is set through `config.json`'s cut-management section as before.
+
+### Fixed
+
+- **`cobre validate` and `cobre.io.validate` now reject a boundary-configured
+  study whose scalar-parameter table has a genuine gap, instead of silently
+  passing.** Both entry points build the study against the loaded
+  `constraints/generic_parameters.json` table; previously they built it
+  against an empty placeholder, so a study missing a seasonal value, a
+  per-stage-block coverage cell, or a hydro's specific productivity would
+  pass validation and only fail once `cobre run` reached the solver. A
+  generic constraint referencing a scalar-parameter id the table never
+  resolved is now also rejected at construction, rather than silently
+  resolving to `0.0`. A previously-accepted empty-table boundary-configured
+  deck with a genuine gap now fails validation.
+- **`cobre.write_policy_checkpoint` raises `ValueError` when a cut carries
+  `inflow_lag_coefficients` but no positive `inflow_lag_depth` is passed.**
+  Previously the coefficients were silently dropped and the checkpoint
+  written without the lag slots they targeted; the error names the stage and
+  cut and asks for `inflow_lag_depth=N` so the slots are reserved.
+
+- **A boundary policy load whose study horizon covers only part of the
+  source's declared season cycle no longer rejects on an artifact of the
+  unmodeled seasons.** The season/PAR-order compatibility gate previously
+  compared every season in the declared cycle, including seasons the loading
+  study's own stages never reach, so a partial-year study or a horizon
+  reduction against a longer source could reject at a season it held no
+  fitted opinion for at all. The comparison now runs only at the seasons the
+  loading study's stages reference, including the synthesized pre-study
+  seasons its inflow-lag coefficients reach back into. A genuine
+  autoregressive-order difference at a season the study does model still
+  rejects, and the checkpoint file format is unchanged. Reading a checkpoint
+  now also rejects a season descriptor whose hydro entries are not in
+  ascending id order or whose per-hydro order list does not span the declared
+  season count, before any consumer sees it.
+
+- **A multi-rank `cobre run` now applies the terminal boundary policy on every
+  rank.** The cuts loaded from `policy.boundary` were injected only on rank 0
+  and never broadcast, so every other rank trained and simulated its share of
+  the terminal stage against an empty terminal pool with the post-horizon
+  value-to-go dropped. Under enumerated traversal, where forward paths and
+  backward outcomes are partitioned across ranks, this corrupted the upper
+  bound, the backward cut aggregation and every non-root rank's simulation
+  costs, by an amount that grew with the share of work on non-root ranks.
+  Rank 0 still reads and reconciles the boundary cuts once; the reconciled
+  records are now broadcast, so every rank injects the identical terminal
+  pool. Single-rank runs and runs without a boundary policy are unchanged;
+  multi-rank results with a boundary policy change, and are now bit-identical
+  across rank counts.
+
+- **Entity classes sampled out of sample no longer share a noise stream.**
+  Every class sampler was seeded from the same forward seed with no class tag,
+  so a deck that set two or more of `inflow`, `load` and `ncs` to
+  `out_of_sample` drew bit-identical noise for the k-th entity of each class —
+  a perfect cross-class correlation no correlation profile declared, under
+  every noise method. The load and non-controllable-source classes now derive
+  their seed from the root forward seed and their class tag; the inflow class
+  keeps the root seed, so a deck with only the inflow class out of sample
+  reproduces bit-for-bit. Results for decks with two or more out-of-sample
+  classes change.
+
+- **Per-stage non-controllable-source curtailment penalty overrides now apply to
+  the LP objective.** The stage LP column build priced every non-controllable
+  source's curtailment cost from its single declaration-time constant,
+  regardless of a `penalty_overrides_ncs.parquet` override declared for that
+  source and stage. The objective coefficient now reads the resolved
+  per-(source, stage) penalty table instead, so a declared override changes the
+  cost the solver sees; a deck with no override file is unaffected, since the
+  resolved table's default is the same declaration-time constant.
+
+- **An invalid `simulation.scenario_source` is now rejected when the case is
+  loaded and by `cobre validate`, matching `cobre run`.** Config loading
+  previously validated only `training.scenario_source`, so a deck whose
+  simulation scenario source violated an admission rule (for example, a
+  `historical` load scheme, which is only valid for the inflow class) passed
+  `cobre validate` and Python's `cobre.io.validate` with no error, then failed
+  at study setup when `cobre run` resolved the simulation source. Both checks
+  now validate the same rules for both sections.
+
+- **Thermal bound-override rows naming the last declared study stage are no
+  longer rejected in decks whose stage ids do not start at 0.** The thermal
+  stage check compared the row's `stage_id` against the position range
+  `[0, n_stages)` while resolution keys rows by declared id, so a gapped or
+  1-based id set had its last declared stage rejected as out of range. One
+  rule now admits all six bound families by declared-id membership, with the
+  same diagnostic text for each.
+
+- **Rewriting a policy checkpoint directory now removes the previous
+  checkpoint's payload files first.** The checkpoint reader lists the `cuts/`,
+  `basis/` and `states/` directories rather than an inventory, so a rerun into
+  the same output directory with fewer cut pools, or with `exports.states`
+  turned off, left the earlier run's files to be read back alongside the new
+  ones — in a release build silently, with the stale last pool taken as the
+  terminal pool. The writer now clears those files after removing the old
+  manifest and before writing the new payloads.
+
+- **Policy checkpoint payloads and dictionary CSV files are now written
+  atomically, and rewriting an existing policy checkpoint directory can no
+  longer leave a partially written checkpoint behind.** Every checkpoint
+  payload, its manifest, and each dictionary CSV are now written to a
+  temporary sibling file and renamed into place, so a crash or I/O failure
+  mid-write leaves the previous file (or none) rather than a truncated one.
+  Rewriting a directory that already holds a checkpoint now removes its old
+  manifest before any new payload is written, so a crash partway through a
+  rewrite can no longer leave that old manifest pointing at a mix of old and
+  new payloads: a reader sees either the complete previous checkpoint or none
+  at all.
+
+- **`cobre.io.validate` now runs the boundary-reconciliation phase that
+  `cobre validate` already ran.** A boundary configuration the CLI rejects is
+  no longer accepted by the Python validator. `cobre.io.validate` now builds
+  the study setup and reconciles the boundary checkpoint against the terminal
+  entity manifest when `config.policy.boundary` is configured, matching
+  `cobre validate` and `cobre run`.
+
+- **`simulation/metadata.json` written by `cobre run` now carries
+  `solver_version`, the key the training file and both Python paths already
+  wrote.** The CLI simulation path previously omitted the key;
+  `simulation/metadata.json` and `training/metadata.json` are now symmetric.
+
+- **The `cobre-python` package metadata now describes what is built — the
+  `abi3-py312` target, a `rust-version` matching the workspace, the wheel
+  platform list and the README's module census — and the bindings crate's own
+  Rust test suite runs in continuous integration, where it had never
+  executed.** The package declaration and the continuous-integration matrix
+  previously described a build that did not match what the release workflow
+  wrote or what the wheel contained.
+
+- **`training/metadata.json` written by `cobre.run.run` and `Study.train` now carries the
+  `setup` section (per-phase setup timings) that `cobre run` already wrote.** The Python
+  path times case load, stochastic fit and production-model fit the same way the CLI
+  does; `broadcast_seconds` is zero for the single-process path. The two entry points now
+  write the same set of top-level keys.
+
+- **The package manifests' homepage and documentation URLs point at the unified
+  documentation site.** The workspace `Cargo.toml`, the `cobre-python` crate manifest and
+  its `pyproject.toml` named a retired site.
+
 ## [0.15.0] - 2026-08-24
 
 ### Added
@@ -3462,7 +3963,10 @@ disappears from `cobre.results.load_policy` per-cut dicts.
 
 <!-- next-url -->
 
-[Unreleased]: https://github.com/cobre-rs/cobre/compare/v0.14.2...HEAD
+[Unreleased]: https://github.com/cobre-rs/cobre/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/cobre-rs/cobre/compare/v0.15.0...v0.16.0
+[0.15.0]: https://github.com/cobre-rs/cobre/compare/v0.14.3...v0.15.0
+[0.14.3]: https://github.com/cobre-rs/cobre/compare/v0.14.2...v0.14.3
 [0.14.2]: https://github.com/cobre-rs/cobre/compare/v0.14.1...v0.14.2
 [0.14.1]: https://github.com/cobre-rs/cobre/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/cobre-rs/cobre/compare/v0.13.0...v0.14.0

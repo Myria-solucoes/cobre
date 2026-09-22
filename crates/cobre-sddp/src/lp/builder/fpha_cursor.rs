@@ -4,9 +4,7 @@ use crate::indexer::{BlockIdx, FphaCellLocal, FphaLocal, HydroCell, HydroSys};
 use super::layout::{StageLayout, TemplateBuildCtx};
 
 /// One `(plant, cell, block, plane)` visit emitted by [`for_each_fpha_plane`],
-/// bundled into a `Copy` struct rather than passed as separate closure
-/// arguments — the cell dimension pushes the argument count past the
-/// per-function budget.
+/// bundled into a `Copy` struct rather than passed as separate closure arguments.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct FphaVisit {
     /// The plant this cell belongs to; owns the plant-level storage/spillage columns.
@@ -36,7 +34,7 @@ pub(super) struct FphaVisit {
 /// row-ascending only because cells are visited in ascending order with
 /// `blk`/plane innermost. Nesting `blk` outside `cell` would revisit an earlier
 /// cell's row range after a later cell's, tripping `assemble_csc`'s
-/// row-sortedness assertion. Matches `FphaRowRange::start`.
+/// row-sortedness assertion. Matches `StageLayout::row_fpha_start`.
 ///
 /// The closure is a monomorphised `FnMut` borrowing its target buffer (no
 /// `Box<dyn>`, no intermediate `Vec`), so the build allocates nothing and the
@@ -78,9 +76,6 @@ pub(super) fn for_each_fpha_plane<F>(
             let cell_local = FphaCellLocal::new(cell_base + offset);
             for blk in (0..n_blks).map(BlockIdx::new) {
                 for (p_idx, plane) in planes.iter().enumerate() {
-                    // Block OUTER (stride n_planes), plane INNER — the opposite nesting
-                    // of the flat shape; the distinct `fpha_plane` method prevents a
-                    // silent transpose of the two.
                     let row = grid.fpha_plane(fpha_block_start, blk, p_idx, n_planes);
                     visit(
                         FphaVisit {

@@ -131,7 +131,10 @@ fn hydro_id_of(c: ComputedParameter) -> EntityId {
         | ComputedParameter::ReferenceTurbine { hydro_id }
         | ComputedParameter::MinStorage { hydro_id }
         | ComputedParameter::MaxStorage { hydro_id }
-        | ComputedParameter::SpecificProductivity { hydro_id } => hydro_id,
+        | ComputedParameter::SpecificProductivity { hydro_id }
+        | ComputedParameter::IntegratedEquivalentProductivity { hydro_id }
+        | ComputedParameter::IntegratedAccumulatedProductivity { hydro_id }
+        | ComputedParameter::MaxStoredEnergy { hydro_id } => hydro_id,
     }
 }
 
@@ -416,8 +419,8 @@ mod tests {
     }
 
     #[test]
-    fn test_exhaustive_hydro_id_extraction_for_all_seven_variants() {
-        // All seven ComputedParameter variants point at hydro id=1, which exists.
+    fn test_exhaustive_hydro_id_extraction_for_every_variant() {
+        // Every ComputedParameter variant points at hydro id=1, which exists.
         let system = system_with_hydros(&[1]);
         let params = vec![
             computed_param(
@@ -469,6 +472,27 @@ mod tests {
                     hydro_id: EntityId(1),
                 },
             ),
+            computed_param(
+                8,
+                "rho_eq_int",
+                ComputedParameter::IntegratedEquivalentProductivity {
+                    hydro_id: EntityId(1),
+                },
+            ),
+            computed_param(
+                9,
+                "rho_acum_int",
+                ComputedParameter::IntegratedAccumulatedProductivity {
+                    hydro_id: EntityId(1),
+                },
+            ),
+            computed_param(
+                10,
+                "e_max",
+                ComputedParameter::MaxStoredEnergy {
+                    hydro_id: EntityId(1),
+                },
+            ),
         ];
         let mut ctx = ValidationContext::new();
 
@@ -476,7 +500,7 @@ mod tests {
 
         assert!(
             !ctx.has_errors(),
-            "all seven ComputedParameter variants with valid hydro id should produce no errors; \
+            "every ComputedParameter variant with a valid hydro id should produce no errors; \
              got: {:?}",
             ctx.errors().iter().map(|e| &e.message).collect::<Vec<_>>()
         );

@@ -15,7 +15,7 @@ use crate::{EntityId, Hydro};
 /// from hydro `downstream_id` fields during System construction and immutable
 /// thereafter. Traversing in topological order guarantees every upstream
 /// inflow is computed before the downstream plant that receives it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CascadeTopology {
     /// Terminal nodes (no downstream) are absent from the map.
@@ -135,62 +135,8 @@ impl CascadeTopology {
 #[cfg(test)]
 mod tests {
     use super::CascadeTopology;
-    use crate::{
-        EntityId, Hydro,
-        entities::{HydroGenerationModel, HydroPenalties},
-    };
-    use chrono::NaiveDate;
-
-    fn make_hydro(id: i32, downstream_id: Option<i32>) -> Hydro {
-        let zero_penalties = HydroPenalties {
-            spillage_cost: 0.0,
-            diversion_cost: 0.0,
-            turbined_cost: 0.0,
-            storage_violation_below_cost: 0.0,
-            filling_target_violation_cost: 0.0,
-            turbined_violation_below_cost: 0.0,
-            outflow_violation_below_cost: 0.0,
-            outflow_violation_above_cost: 0.0,
-            generation_violation_below_cost: 0.0,
-            evaporation_violation_cost: 0.0,
-            water_withdrawal_violation_cost: 0.0,
-            water_withdrawal_violation_pos_cost: 0.0,
-            water_withdrawal_violation_neg_cost: 0.0,
-            evaporation_violation_pos_cost: 0.0,
-            evaporation_violation_neg_cost: 0.0,
-            inflow_nonnegativity_cost: 1000.0,
-        };
-        let mut hydro = Hydro {
-            unit_groups: Vec::new(),
-            id: EntityId(id),
-            name: String::new(),
-            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            downstream_id: downstream_id.map(EntityId),
-            travel_time_hours: None,
-            entry_stage_id: None,
-            exit_stage_id: None,
-            min_storage_hm3: 0.0,
-            max_storage_hm3: 1.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity,
-            min_turbined_m3s: 0.0,
-            max_turbined_m3s: 1.0,
-            specific_productivity_mw_per_m3s_per_m: None,
-            min_generation_mw: 0.0,
-            max_generation_mw: 1.0,
-            tailrace: None,
-            hydraulic_losses: None,
-            efficiency: None,
-            evaporation_coefficients_mm: None,
-            evaporation_reference_volumes_hm3: None,
-            diversion: None,
-            filling: None,
-            penalties: zero_penalties,
-        };
-        hydro.declare_mirror_unit_group(EntityId(0));
-        hydro
-    }
+    use crate::EntityId;
+    use crate::test_support::{HydroSpec, make_hydro};
 
     #[test]
     fn test_empty_cascade() {
@@ -202,7 +148,10 @@ mod tests {
 
     #[test]
     fn test_single_hydro_terminal() {
-        let hydros = vec![make_hydro(1, None)];
+        let hydros = vec![make_hydro(HydroSpec {
+            id: 1,
+            ..Default::default()
+        })];
         let topo = CascadeTopology::build(&hydros);
         assert_eq!(topo.len(), 1);
         assert!(!topo.is_empty());
@@ -216,9 +165,20 @@ mod tests {
     #[test]
     fn test_linear_chain() {
         let hydros = vec![
-            make_hydro(0, Some(1)),
-            make_hydro(1, Some(2)),
-            make_hydro(2, None),
+            make_hydro(HydroSpec {
+                id: 0,
+                downstream_id: Some(1),
+                ..Default::default()
+            }),
+            make_hydro(HydroSpec {
+                id: 1,
+                downstream_id: Some(2),
+                ..Default::default()
+            }),
+            make_hydro(HydroSpec {
+                id: 2,
+                ..Default::default()
+            }),
         ];
         let topo = CascadeTopology::build(&hydros);
         assert_eq!(topo.len(), 3);
@@ -242,9 +202,20 @@ mod tests {
     #[test]
     fn test_fork_merge() {
         let hydros = vec![
-            make_hydro(0, Some(2)),
-            make_hydro(1, Some(2)),
-            make_hydro(2, None),
+            make_hydro(HydroSpec {
+                id: 0,
+                downstream_id: Some(2),
+                ..Default::default()
+            }),
+            make_hydro(HydroSpec {
+                id: 1,
+                downstream_id: Some(2),
+                ..Default::default()
+            }),
+            make_hydro(HydroSpec {
+                id: 2,
+                ..Default::default()
+            }),
         ];
         let topo = CascadeTopology::build(&hydros);
         assert_eq!(topo.len(), 3);
@@ -271,10 +242,24 @@ mod tests {
     #[test]
     fn test_parallel_chains() {
         let hydros = vec![
-            make_hydro(0, Some(1)),
-            make_hydro(1, None),
-            make_hydro(2, Some(3)),
-            make_hydro(3, None),
+            make_hydro(HydroSpec {
+                id: 0,
+                downstream_id: Some(1),
+                ..Default::default()
+            }),
+            make_hydro(HydroSpec {
+                id: 1,
+                ..Default::default()
+            }),
+            make_hydro(HydroSpec {
+                id: 2,
+                downstream_id: Some(3),
+                ..Default::default()
+            }),
+            make_hydro(HydroSpec {
+                id: 3,
+                ..Default::default()
+            }),
         ];
         let topo = CascadeTopology::build(&hydros);
         assert_eq!(topo.len(), 4);
@@ -293,9 +278,18 @@ mod tests {
     #[test]
     fn test_all_terminal() {
         let hydros = vec![
-            make_hydro(1, None),
-            make_hydro(2, None),
-            make_hydro(3, None),
+            make_hydro(HydroSpec {
+                id: 1,
+                ..Default::default()
+            }),
+            make_hydro(HydroSpec {
+                id: 2,
+                ..Default::default()
+            }),
+            make_hydro(HydroSpec {
+                id: 3,
+                ..Default::default()
+            }),
         ];
         let topo = CascadeTopology::build(&hydros);
         assert_eq!(topo.len(), 3);
@@ -314,9 +308,20 @@ mod tests {
     #[test]
     fn test_deterministic_ordering() {
         let hydros = vec![
-            make_hydro(5, Some(10)),
-            make_hydro(3, Some(10)),
-            make_hydro(10, None),
+            make_hydro(HydroSpec {
+                id: 5,
+                downstream_id: Some(10),
+                ..Default::default()
+            }),
+            make_hydro(HydroSpec {
+                id: 3,
+                downstream_id: Some(10),
+                ..Default::default()
+            }),
+            make_hydro(HydroSpec {
+                id: 10,
+                ..Default::default()
+            }),
         ];
         let topo_a = CascadeTopology::build(&hydros);
         let topo_b = CascadeTopology::build(&hydros);
@@ -328,9 +333,20 @@ mod tests {
     #[test]
     fn test_is_headwater() {
         let hydros = vec![
-            make_hydro(0, Some(2)),
-            make_hydro(1, Some(2)),
-            make_hydro(2, None),
+            make_hydro(HydroSpec {
+                id: 0,
+                downstream_id: Some(2),
+                ..Default::default()
+            }),
+            make_hydro(HydroSpec {
+                id: 1,
+                downstream_id: Some(2),
+                ..Default::default()
+            }),
+            make_hydro(HydroSpec {
+                id: 2,
+                ..Default::default()
+            }),
         ];
         let topo = CascadeTopology::build(&hydros);
         assert!(topo.is_headwater(EntityId(0)));
@@ -341,9 +357,20 @@ mod tests {
     #[test]
     fn test_is_terminal() {
         let hydros = vec![
-            make_hydro(0, Some(2)),
-            make_hydro(1, Some(2)),
-            make_hydro(2, None),
+            make_hydro(HydroSpec {
+                id: 0,
+                downstream_id: Some(2),
+                ..Default::default()
+            }),
+            make_hydro(HydroSpec {
+                id: 1,
+                downstream_id: Some(2),
+                ..Default::default()
+            }),
+            make_hydro(HydroSpec {
+                id: 2,
+                ..Default::default()
+            }),
         ];
         let topo = CascadeTopology::build(&hydros);
         assert!(!topo.is_terminal(EntityId(0)));
@@ -354,9 +381,20 @@ mod tests {
     #[test]
     fn test_len() {
         let hydros = vec![
-            make_hydro(0, Some(1)),
-            make_hydro(1, Some(2)),
-            make_hydro(2, None),
+            make_hydro(HydroSpec {
+                id: 0,
+                downstream_id: Some(1),
+                ..Default::default()
+            }),
+            make_hydro(HydroSpec {
+                id: 1,
+                downstream_id: Some(2),
+                ..Default::default()
+            }),
+            make_hydro(HydroSpec {
+                id: 2,
+                ..Default::default()
+            }),
         ];
         let topo = CascadeTopology::build(&hydros);
         assert_eq!(topo.len(), 3);
@@ -366,9 +404,20 @@ mod tests {
     #[test]
     fn test_topology_serde_roundtrip_cascade() {
         let hydros = vec![
-            make_hydro(0, Some(1)),
-            make_hydro(1, Some(2)),
-            make_hydro(2, None),
+            make_hydro(HydroSpec {
+                id: 0,
+                downstream_id: Some(1),
+                ..Default::default()
+            }),
+            make_hydro(HydroSpec {
+                id: 1,
+                downstream_id: Some(2),
+                ..Default::default()
+            }),
+            make_hydro(HydroSpec {
+                id: 2,
+                ..Default::default()
+            }),
         ];
         let topo = CascadeTopology::build(&hydros);
         let json = serde_json::to_string(&topo).unwrap();

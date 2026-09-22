@@ -1,33 +1,11 @@
 //! The `cobre.errors` exception hierarchy and the single error-mapping site.
 //!
-//! Cobre's Rust layer fails with a handful of typed error enums
-//! ([`cobre_io::LoadError`], [`cobre_io::OutputError`], [`cobre_sddp::SddpError`])
-//! and a few string-prefixed messages produced by the run/study front ends.
-//! This module funnels every one of those failures through a single
-//! [`convert_error`] function that maps them to a structured Python exception
-//! hierarchy rooted at `cobre.errors.CobreError`.
-//!
-//! ## Hierarchy
-//!
-//! Every leaf class subclasses BOTH [`CobreError`] and the matching builtin, so
-//! existing `except OSError` / `except ValueError` / `except RuntimeError` code
-//! keeps catching while new code can catch the typed class or the common
-//! `CobreError` base:
-//!
-//! ```text
-//! CobreError(Exception)
-//! ├── ValidationError(CobreError, ValueError)
-//! ├── PolicyIncompatibleError(CobreError, ValueError)
-//! ├── CaseIoError(CobreError, OSError)
-//! ├── OutputError(CobreError, OSError)
-//! ├── SolverError(CobreError, RuntimeError)        ← stage/iteration/scenario
-//! └── SimulationError(CobreError, RuntimeError)
-//! ```
-//!
-//! The qualified name of every class is `cobre.errors.<Name>` so tracebacks read
+//! Every leaf class subclasses BOTH `CobreError` and the matching builtin
+//! (`OSError`, `ValueError`, `RuntimeError`), so existing `except OSError` /
+//! `except ValueError` / `except RuntimeError` code keeps catching while new code
+//! can catch the typed class or the common `CobreError` base. The qualified name
+//! of every class is `cobre.errors.<Name>` so tracebacks read
 //! `cobre.errors.SolverError`.
-//!
-//! ## Single mapping site
 //!
 //! [`convert_error`] is the ONLY place Rust errors become Python exceptions for
 //! the raising paths. It accepts a concrete [`ErrorSource`] enum (never a
@@ -168,6 +146,13 @@ static SIMULATION_ERROR: LeafClass = LeafClass::new(
     "Raised on a simulation-phase failure (subclasses RuntimeError).",
 );
 
+/// `InternalError(CobreError, RuntimeError)` — software or environment faults.
+static INTERNAL_ERROR: LeafClass = LeafClass::new(
+    "InternalError",
+    BuiltinBase::Runtime,
+    "Raised on an internal software or environment fault (subclasses RuntimeError).",
+);
+
 /// The owned/borrowed source of an error to be mapped to a Python exception.
 ///
 /// A concrete enum (NOT a `Box<dyn Trait>`, per the hard rules) so every call
@@ -192,12 +177,10 @@ pub(crate) enum ErrorSource<'a> {
     Message(String),
 }
 
-/// Build a [`CaseIoError`] `PyErr` from a message.
 fn case_io_error(py: Python<'_>, message: &str) -> PyErr {
     new_leaf_err(py, &CASE_IO_ERROR, message)
 }
 
-/// Build a [`ValidationError`] `PyErr` from a message.
 fn validation_error(py: Python<'_>, message: &str) -> PyErr {
     new_leaf_err(py, &VALIDATION_ERROR, message)
 }
@@ -237,7 +220,6 @@ fn convert_error_with(py: Python<'_>, source: ErrorSource<'_>) -> PyErr {
             LoadError::IoError { .. } => case_io_error(py, &err.to_string()),
             LoadError::ParseError { .. }
             | LoadError::SchemaError { .. }
-            | LoadError::CrossReferenceError { .. }
             | LoadError::ConstraintError { .. } => validation_error(py, &err.to_string()),
             LoadError::PolicyIncompatible { .. } => {
                 new_leaf_err(py, &POLICY_INCOMPATIBLE_ERROR, &err.to_string())
@@ -270,19 +252,70 @@ fn convert_error_with(py: Python<'_>, source: ErrorSource<'_>) -> PyErr {
     }
 }
 
+/// Prefix minted for output-serialization/write failures (classified as `CaseIoError`).
+pub(crate) const OUTPUT_WRITE_ERROR_PREFIX: &str = "output write error";
+
+/// Prefix minted for policy-checkpoint write failures (classified as `CaseIoError`).
+pub(crate) const POLICY_CHECKPOINT_ERROR_PREFIX: &str = "policy checkpoint error";
+
+/// Prefix minted for config-override merge failures (classified as `ValidationError`).
+pub(crate) const CONFIG_OVERRIDE_ERROR_PREFIX: &str = "config override error";
+
+/// Prefix minted for config JSON parse failures (classified as `ValidationError`).
+pub(crate) const CONFIG_PARSE_ERROR_PREFIX: &str = "config parse error";
+
+/// Prefix minted for config file read failures (classified as `ValidationError`).
+pub(crate) const CONFIG_READ_ERROR_PREFIX: &str = "config read error";
+
+/// Prefix minted for warm-start/resume policy validation failures (classified
+/// as `PolicyIncompatibleError`).
+pub(crate) const POLICY_VALIDATION_ERROR_PREFIX: &str = "policy validation error";
+
+/// Prefix minted for simulation-phase failures (classified as `SimulationError`).
+pub(crate) const SIMULATION_ERROR_PREFIX: &str = "simulation error";
+
+/// Prefix minted for internal software/environment faults (classified as `InternalError`).
+pub(crate) const INTERNAL_ERROR_PREFIX: &str = "internal error";
+
+/// Prefix minted for training-phase failures. Unrecognized by the classifier
+/// below (it falls through to `SolverError`, same as today); named here so the
+/// run-path minter shares one owning constant with the other prefixes. The
+/// remaining run-path phase prefixes below are classifier-unrecognized for the
+/// same reason and are named on the same rationale.
+pub(crate) const TRAINING_ERROR_PREFIX: &str = "training error";
+
+/// Prefix minted for simulation-writer initialisation failures.
+pub(crate) const SIMULATION_WRITER_INIT_ERROR_PREFIX: &str =
+    "simulation writer initialisation error";
+
+/// Prefix minted for scenario-source construction failures.
+pub(crate) const SCENARIO_SOURCE_ERROR_PREFIX: &str = "scenario source error";
+
+/// Prefix minted for stochastic-preprocessing failures.
+pub(crate) const STOCHASTIC_PREPROCESSING_ERROR_PREFIX: &str = "stochastic preprocessing error";
+
+/// Prefix minted for hydro-model-preprocessing failures.
+pub(crate) const HYDRO_MODEL_PREPROCESSING_ERROR_PREFIX: &str = "hydro model preprocessing error";
+
+/// Prefix minted for boundary-cut load failures.
+pub(crate) const BOUNDARY_CUT_ERROR_PREFIX: &str = "boundary cut error";
+
 /// Map a string-prefixed run/study message to its typed class.
 fn message_prefix_to_pyerr(py: Python<'_>, msg: &str) -> PyErr {
-    if msg.starts_with("output write error") || msg.starts_with("policy checkpoint error") {
+    if msg.starts_with(OUTPUT_WRITE_ERROR_PREFIX) || msg.starts_with(POLICY_CHECKPOINT_ERROR_PREFIX)
+    {
         case_io_error(py, msg)
-    } else if msg.starts_with("config override error")
-        || msg.starts_with("config parse error")
-        || msg.starts_with("config read error")
+    } else if msg.starts_with(CONFIG_OVERRIDE_ERROR_PREFIX)
+        || msg.starts_with(CONFIG_PARSE_ERROR_PREFIX)
+        || msg.starts_with(CONFIG_READ_ERROR_PREFIX)
     {
         validation_error(py, msg)
-    } else if msg.starts_with("policy validation error") {
+    } else if msg.starts_with(POLICY_VALIDATION_ERROR_PREFIX) {
         new_leaf_err(py, &POLICY_INCOMPATIBLE_ERROR, msg)
-    } else if msg.starts_with("simulation error") {
+    } else if msg.starts_with(SIMULATION_ERROR_PREFIX) {
         new_leaf_err(py, &SIMULATION_ERROR, msg)
+    } else if msg.starts_with(INTERNAL_ERROR_PREFIX) {
+        new_leaf_err(py, &INTERNAL_ERROR, msg)
     } else {
         // Unrecognized prefix (e.g. "training error" / "training failed after")
         // falls through to SolverError.
@@ -363,6 +396,7 @@ pub(crate) fn register_errors(m: &Bound<'_, PyModule>) -> PyResult<()> {
         &OUTPUT_ERROR,
         &SOLVER_ERROR,
         &SIMULATION_ERROR,
+        &INTERNAL_ERROR,
     ] {
         let class = leaf.get(py)?;
         m.add(leaf.name, class.clone_ref(py))?;
@@ -371,9 +405,10 @@ pub(crate) fn register_errors(m: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::{ErrorSource, LeafClass, SIMULATION_ERROR, SOLVER_ERROR, convert_error_with};
+    use super::{
+        ErrorSource, INTERNAL_ERROR, LeafClass, SIMULATION_ERROR, SOLVER_ERROR, convert_error_with,
+    };
     use cobre_sddp::SddpError;
     use pyo3::prelude::*;
 
@@ -467,6 +502,19 @@ mod tests {
             assert!(value.getattr("scenario").unwrap().is_none());
             let solver_rendered: String = value.str().unwrap().extract().unwrap();
             assert_eq!(solver_rendered, solver_msg);
+        });
+    }
+
+    /// An "internal error: " prefixed message maps to `InternalError`.
+    #[test]
+    fn convert_error_internal_error_prefix() {
+        Python::initialize();
+        Python::attach(|py| {
+            let msg = "internal error: drain thread panicked".to_string();
+            let err = convert_error_with(py, ErrorSource::Message(msg.clone()));
+            assert_leaf(py, &err, &INTERNAL_ERROR);
+            let rendered: String = err.value(py).str().unwrap().extract().unwrap();
+            assert_eq!(rendered, msg);
         });
     }
 }

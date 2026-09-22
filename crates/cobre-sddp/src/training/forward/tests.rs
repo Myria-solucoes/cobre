@@ -33,12 +33,12 @@ use crate::{
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
     horizon_mode::HorizonMode,
-    indexer::StateSpace,
     inflow_method::InflowNonNegativityMethod,
-    lp_builder::PatchBuffer,
+    lp::builder::PatchBuffer,
+    lp::indexer::StateSpace,
     risk_measure::RiskMeasure,
     setup::{NodeId, NodePos},
-    test_support,
+    test_support::{self, permissive_state_boxes},
     trajectory::TrajectoryRecord,
     workspace::{BackwardAccumulators, BasisStore, ScratchBuffers, SolverWorkspace},
 };
@@ -47,13 +47,7 @@ use crate::{
 
 /// Mock solver that returns a configurable fixed `LpSolution` on every `solve()`.
 ///
-/// Optionally returns `SolverError::Infeasible` at a specific
-/// `(scenario, stage)` pair (counted across calls in the scenario-outer,
-/// stage-inner traversal order). `infeasible_at` counts global solve
-/// calls starting from 0.
-///
-/// `warm_start_calls` is incremented each time `solve(Some(&basis))`
-/// is called, enabling warm-start invocation tests.
+/// Optionally returns `SolverError::Infeasible` at the n-th solve call (0-indexed).
 struct MockSolver {
     solution: LpSolution,
     /// If `Some(n)`, the n-th solve call (0-indexed, counting both cold-start
@@ -69,7 +63,6 @@ struct MockSolver {
 }
 
 impl MockSolver {
-    /// Create a solver that always returns `solution`.
     fn always_ok(solution: LpSolution) -> Self {
         let buf_primal = solution.primal.clone();
         let buf_dual = solution.dual.clone();
@@ -85,7 +78,6 @@ impl MockSolver {
         }
     }
 
-    /// Create a solver that returns infeasible on the `n`-th solve call.
     fn infeasible_on(solution: LpSolution, n: usize) -> Self {
         let buf_primal = solution.primal.clone();
         let buf_dual = solution.dual.clone();
@@ -101,7 +93,6 @@ impl MockSolver {
         }
     }
 
-    /// Shared solve logic used by both cold-start and warm-start paths.
     fn do_solve(&mut self) -> Result<cobre_solver::SolutionView<'_>, SolverError> {
         let call = self.call_count;
         self.call_count += 1;
@@ -171,9 +162,7 @@ impl SolverInterface for MockSolver {
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
-/// Minimal valid stage template for N=1 hydro, L=0 PAR order: columns
-/// `[storage_out(0), z_inflow(1), storage_in(2), theta(3)]`, one storage-fixing
-/// row whose only nonzero is the `storage_in` coefficient. Minimises theta.
+/// Minimal N=1, L=0 template: `[storage_out, z_inflow, storage_in, theta]`, one row.
 fn minimal_template_1_0() -> StageTemplate {
     StageTemplate {
         num_cols: 4,
@@ -584,7 +573,7 @@ fn single_workspace(solver: MockSolver, state: &StateSpace) -> SolverWorkspace<M
             recon_slot_lookup: Vec::new(),
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
-            perm_scratch: Vec::new(),
+            corr_scratch: Vec::new(),
             current_node_buf: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
@@ -652,7 +641,6 @@ fn ac_two_scenarios_three_stages_fixed_solution() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation],
         },
         events: EventConfig {
@@ -679,7 +667,9 @@ fn ac_two_scenarios_three_stages_fixed_solution() {
     let mut basis_store =
         BasisStore::new(config.loop_config.forward_passes as usize, templates.len());
 
+    let state_boxes = permissive_state_boxes(state.n_state, templates.len());
     let ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -787,7 +777,6 @@ fn ac_infeasible_at_stage_1_scenario_0_returns_infeasible_error() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation],
         },
         events: EventConfig {
@@ -814,7 +803,9 @@ fn ac_infeasible_at_stage_1_scenario_0_returns_infeasible_error() {
     let mut basis_store =
         BasisStore::new(config.loop_config.forward_passes as usize, templates.len());
 
+    let state_boxes = permissive_state_boxes(state.n_state, templates.len());
     let ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -926,7 +917,6 @@ fn cost_statistics_accumulated_correctly() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation],
         },
         events: EventConfig {
@@ -953,7 +943,9 @@ fn cost_statistics_accumulated_correctly() {
     let mut basis_store =
         BasisStore::new(config.loop_config.forward_passes as usize, templates.len());
 
+    let state_boxes = permissive_state_boxes(state.n_state, templates.len());
     let ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -1540,7 +1532,6 @@ fn run_one_iteration(
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation],
         },
         events: EventConfig {
@@ -1564,7 +1555,9 @@ fn run_one_iteration(
     let stochastic = make_stochastic_context_1_hydro_3_stages();
     let stages = make_stages_3();
 
+    let state_boxes = permissive_state_boxes(state.n_state, templates.len());
     let ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -1724,7 +1717,9 @@ fn test_forward_pass_parallel_cost_agreement() {
     let initial_state = vec![0.0_f64; state.n_state];
     let n_scenarios = 10;
 
+    let state_boxes = permissive_state_boxes(state.n_state, templates.len());
     let ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -1888,7 +1883,9 @@ fn test_forward_pass_work_distribution() {
     let mut records = empty_records(n_scenarios * num_stages);
     let mut basis_store = BasisStore::new(n_scenarios, num_stages);
 
+    let state_boxes = permissive_state_boxes(state.n_state, templates.len());
     let ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -2183,7 +2180,9 @@ fn run_single_stage_forward(
     let mut basis_store = BasisStore::new(1, 1);
     let noise_scale = vec![noise_scale_val];
 
+    let state_boxes = permissive_state_boxes(state.n_state, templates.len());
     let ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -2281,7 +2280,7 @@ fn truncation_clamps_negative_inflow_noise() {
     // Use zeta = 1.0 for simplicity (noise_scale = sigma).
     let mean_m3s = -1000.0_f64;
     let sigma = 1.0_f64;
-    let zeta = 1.0_f64; // simplified for test: treat zeta=1
+    let zeta = 1.0_f64;
     let base_rhs = zeta * mean_m3s;
     let noise_scale_val = zeta * sigma;
 
@@ -2368,7 +2367,6 @@ fn none_method_unchanged_with_truncation_code_present() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation],
         },
         events: EventConfig {
@@ -2394,7 +2392,9 @@ fn none_method_unchanged_with_truncation_code_present() {
     let mut basis_store =
         BasisStore::new(config.loop_config.forward_passes as usize, templates.len());
 
+    let state_boxes = permissive_state_boxes(state.n_state, templates.len());
     let ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -2460,7 +2460,6 @@ fn none_method_unchanged_with_truncation_code_present() {
     )
     .unwrap();
 
-    // Regression guard: same assertions as `ac_two_scenarios_three_stages_fixed_solution`.
     assert_eq!(result.scenario_costs.len(), 2);
     for (i, record) in records.iter().enumerate() {
         assert_eq!(
@@ -2634,8 +2633,6 @@ fn test_forward_pass_parallel_infeasibility() {
     let n_scenarios = 10usize;
     let n_workers = 4usize;
 
-    // Worker 1 handles scenarios [3, 6). Its first solve call (call index 0
-    // within that worker) corresponds to scenario 3, stage 0.
     let mut workspaces: Vec<SolverWorkspace<MockSolver>> = (0..n_workers)
         .map(|w| {
             let solver = if w == 1 {
@@ -2651,7 +2648,9 @@ fn test_forward_pass_parallel_infeasibility() {
     let mut records = empty_records(n_scenarios * num_stages);
     let mut basis_store = BasisStore::new(n_scenarios, num_stages);
 
+    let state_boxes = permissive_state_boxes(state.n_state, templates.len());
     let ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -2716,8 +2715,6 @@ fn test_forward_pass_parallel_infeasibility() {
         &mut records,
     );
 
-    // Worker 1's partition: partition(10, 4, 1) → start_m=3.
-    // The first solve in that worker is scenario 3, stage 0.
     match result {
         Err(SddpError::Infeasible {
             stage,
@@ -2800,7 +2797,7 @@ fn forward_pass_load_noise_positive_realization() {
             recon_slot_lookup: Vec::new(),
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
-            perm_scratch: Vec::new(),
+            corr_scratch: Vec::new(),
             current_node_buf: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
@@ -2819,7 +2816,9 @@ fn forward_pass_load_noise_positive_realization() {
     let load_bus_indices = vec![0usize];
     let block_counts_per_stage = vec![1usize];
 
+    let state_boxes = permissive_state_boxes(state.n_state, templates.len());
     let ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -2963,7 +2962,7 @@ fn forward_pass_load_noise_clamped_to_zero() {
             recon_slot_lookup: Vec::new(),
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
-            perm_scratch: Vec::new(),
+            corr_scratch: Vec::new(),
             current_node_buf: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
@@ -2982,7 +2981,9 @@ fn forward_pass_load_noise_clamped_to_zero() {
     let load_bus_indices = vec![0usize];
     let block_counts_per_stage = vec![1usize];
 
+    let state_boxes = permissive_state_boxes(state.n_state, templates.len());
     let ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -3085,19 +3086,21 @@ fn forward_pass_no_load_buses_unchanged() {
     ];
     let base_rows = vec![2usize, 2, 2];
     let initial_state = vec![0.0_f64; state.n_state];
-    let mut records = empty_records(3); // 1 scenario * 3 stages
+    let mut records = empty_records(3);
     let fcf = FutureCostFunction::new(3, state.n_state, 1, 10, &[0; 3]);
     let horizon = HorizonMode::Finite { num_stages: 3 };
     let mut basis_store = BasisStore::new(1, 3);
 
+    let state_boxes = permissive_state_boxes(state.n_state, templates.len());
     let ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
-        noise_scale: &[], // noise_scale empty when n_hydros=0
-        n_hydros: 0,      // skip inflow noise loop (minimal_template_1_0 has 1 row)
+        noise_scale: &[],
+        n_hydros: 0, // skip inflow noise loop (minimal_template_1_0 has 1 row)
         cost_scale_factor: 1_000_000.0,
-        n_load_buses: 0, // no load patches
+        n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
         block_counts_per_stage: &[1, 1, 1],
@@ -3165,7 +3168,6 @@ fn forward_pass_no_load_buses_unchanged() {
         "forward_patch_count must be N=1 when n_load_buses=0, got {}",
         ws.patch_buf.forward_patch_count()
     );
-    // load_rhs_buf must remain empty (never pushed to).
     assert!(
         ws.scratch.load_rhs_buf.is_empty(),
         "load_rhs_buf must be empty when n_load_buses=0"
@@ -3187,7 +3189,6 @@ fn empty_delta_batch() -> RowBatch {
 
 #[test]
 fn test_build_delta_empty_pool() {
-    // Empty pool → num_rows == 0, row_starts == [0], col_indices empty.
     let fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
     let state = test_support::state_layout(1, 0);
     let mut batch = empty_delta_batch();
@@ -3359,29 +3360,13 @@ fn test_build_delta_matches_full_batch_when_pool_has_only_current_iter() {
 
 #[test]
 fn test_build_delta_sparse_path() {
-    // State layout with non-empty nonzero_state_indices (sparse path).
-    // Verify that the emitted col_indices for the cut contain exactly
-    // nonzero_state_indices.len() + 1 entries (mask entries plus theta).
-    //
-    // State layout (n_hydro, n_lag): n_state = n_hydro * (1 + n_lag)
-    // With n_hydro=2, n_lag=0: n_state=2, no lags, sparse mask is empty.
-    // We need a lag to get a nonzero_state_indices mask.
-    // With n_hydro=1, n_lag=1: n_state=2, nonzero_state_indices=[0,1] (len=2)
-    // for a cut that touches both state components.
-    //
-    // Actually we verify against the existing build_cut_row_batch_into for
-    // correctness, which already tests the sparse path thoroughly.
-    // Here we just verify col_indices.len() == mask.len() + 1 per row.
-
-    // n_hydro=1, n_lag=1: n_state=2 (vol + lag).
-    // nonzero_state_indices should be non-empty (check via indexer).
+    // n_hydro=1, n_lag=1 gives a non-empty nonzero_state_indices mask (n_state=2);
+    // full sparse-path correctness is covered by build_cut_row_batch_into's own
+    // tests — this only checks col_indices.len() == mask.len() + 1 per row.
     let state = test_support::state_layout(1, 1);
-    // nonzero_state_indices is the mask for non-trivially-zero state dims.
     let mask_len = state.nonzero_state_indices.len();
 
-    // Only proceed if this indexer actually uses the sparse path.
     if mask_len == 0 {
-        // Sparse path not active for this indexer; skip the assertion.
         return;
     }
 
@@ -3542,7 +3527,7 @@ mod dcs_forward {
 
     use crate::DEFAULT_COST_SCALE_FACTOR;
     use crate::inflow_method::InflowNonNegativityMethod;
-    use crate::lp_builder::PatchBuffer;
+    use crate::lp::builder::{PatchBuffer, StateBox};
     use crate::setup::{NodeId, NodePos, StageIdx};
     use crate::test_support;
     use crate::trajectory::TrajectoryRecord;
@@ -3670,7 +3655,6 @@ mod dcs_forward {
             initial_pool_capacity: 16,
             n_state: 1,
             max_local_fwd: 1,
-            total_forward_passes: 1,
             noise_dim: 1,
             n_anticipated: 0,
             k_max: 0,
@@ -3742,9 +3726,17 @@ mod dcs_forward {
         // dominating-frozen-cut test distinguish theta=4 (correct) from
         // theta=10 (a wrong frozen load).
         let discount_factors = [0.0_f64, 0.0];
+        let state_boxes = vec![
+            StateBox {
+                lower: vec![f64::NEG_INFINITY; state.n_state],
+                upper: vec![f64::INFINITY; state.n_state],
+            };
+            2
+        ];
         let ctx = StageContext {
             geometry_per_stage: &[],
             templates: &templates,
+            state_boxes: &state_boxes,
             base_rows: &base_rows,
             noise_scale: &[],
             n_hydros: 0,
@@ -3985,7 +3977,7 @@ mod transit_bucket_copy_gap {
     use crate::cut::FutureCostFunction;
     use crate::horizon_mode::HorizonMode;
     use crate::inflow_method::InflowNonNegativityMethod;
-    use crate::lp_builder::{PatchBuffer, StageGeometry};
+    use crate::lp::builder::{PatchBuffer, StageGeometry, StateBox};
     use crate::setup::{NodeId, NodePos, StageIdx};
     use crate::test_support;
     use crate::trajectory::TrajectoryRecord;
@@ -4063,7 +4055,6 @@ mod transit_bucket_copy_gap {
             initial_pool_capacity: 16,
             n_state: 4,
             max_local_fwd: 1,
-            total_forward_passes: 1,
             noise_dim: 1,
             n_anticipated: 1,
             k_max: 1,
@@ -4096,10 +4087,15 @@ mod transit_bucket_copy_gap {
             .extend_from_slice(&[10.0, 20.0, 30.0, 40.0]);
 
         let geometry_per_stage = vec![StageGeometry::default()];
+        let state_boxes = vec![StateBox {
+            lower: vec![f64::NEG_INFINITY; state.n_state],
+            upper: vec![f64::INFINITY; state.n_state],
+        }];
 
         let ctx = StageContext {
             geometry_per_stage: &geometry_per_stage,
             templates: &templates,
+            state_boxes: &state_boxes,
             base_rows: &base_rows,
             noise_scale: &[],
             n_hydros: 0,

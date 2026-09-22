@@ -11,9 +11,15 @@
 //! out/in state-index ranges: a [`DeliveryRing`] borrows them for one
 //! construction and never re-derives or persists an independent copy. The
 //! block-mode-coupled per-lag deposit fill stays at each ring's own call
-//! site; this module owns only the shared skeleton.
+//! site; this module owns the shared skeleton plus, for the anticipated ring
+//! alone, [`for_each_ring_residue`] — the single owner of its
+//! delivery-axis → ring-slot map.
 
+use std::borrow::Cow;
 use std::ops::Range;
+
+use crate::indexer::{AnticipatedLocal, StateSpace, anticipated_resolution_for};
+use crate::lead_time::PointResolution;
 
 use super::columns::ColumnBufs;
 
@@ -28,7 +34,7 @@ pub struct DeliveryRing {
     out_block: Range<usize>,
     /// Incoming (pinned) column block, size `n_lanes * depth`.
     in_block: Range<usize>,
-    /// Parallel delivery lanes (plants) sharing this ring.
+    /// Delivery lanes (plants).
     n_lanes: usize,
     /// Slots per lane.
     depth: usize,
@@ -297,6 +303,80 @@ impl DeliveryRing {
     }
 }
 
+/// One anticipated ring-window visit: a plant's modular ring slot and its own
+/// physical delivery target for one ring-axis position. Bundled `Copy` struct
+/// rather than separate closure arguments, mirroring
+/// [`super::fpha_cursor::FphaVisit`].
+#[derive(Debug, Clone, Copy)]
+pub(super) struct RingResidue {
+    /// Modular ring slot `ring_index(target) mod k_max` this visit lands on.
+    pub(super) slot: usize,
+    /// Anticipated-local plant (ring lane) index.
+    pub(super) plant: usize,
+    /// The plant's own physical delivery target at this ring-axis position
+    /// ([`PointResolution::physical_target`] of the window index).
+    pub(super) target: usize,
+}
+
+/// Walk the stage's strictly-future anticipated ring window
+/// `{stage_idx + 1 ..= stage_idx + k_max}`, invoking `visit` once per
+/// `(ring residue, plant)` in depth-major/plant-minor order.
+///
+/// Single owner of the anticipated delivery-axis → ring-slot map the three
+/// anticipated fills share: each visit resolves the ring-axis slot and the
+/// plant's OWN physical delivery target through its per-plant excision, so
+/// `slot = ring_index(target) mod k_max` has one home instead of three inlined
+/// residue loops. Keying the slot on the raw delivery axis (`m mod k_max`) is
+/// the forbidden alternative — injective only on a contiguous run, which a
+/// plant's excised fixed post-horizon window breaks; see
+/// [`PointResolution::ring_index`]/[`PointResolution::physical_target`] (the
+/// ring-axis contract) and [`DeliveryRing`]'s out/in columns, pinned via
+/// `state_to_lp_incoming_column` (the column-bound-pinning contract).
+///
+/// The depth-major/plant-minor order is load-bearing: the carry-row family
+/// compacts its row positions in exactly this order. A plant whose physical
+/// target lands beyond the extended delivery calendar
+/// (`target >= delivery_stage_count`) is skipped, never visited. The closure
+/// is a monomorphised `FnMut` reusing the caller's buffers — no `Box<dyn>` and
+/// no per-residue allocation; the per-stage resolution set is built once and
+/// reused across the whole window.
+pub(super) fn for_each_ring_residue<F>(
+    state: &StateSpace,
+    n_stages: usize,
+    stage_idx: usize,
+    mut visit: F,
+) where
+    F: FnMut(RingResidue, &PointResolution),
+{
+    let n_anticipated = state.n_anticipated;
+    let k_max = state.k_max;
+    if n_anticipated == 0 || k_max == 0 {
+        return;
+    }
+    let n_delivery = state.delivery_stage_count(n_stages);
+    let points: Vec<Cow<'_, PointResolution>> = (0..n_anticipated)
+        .map(|plant| anticipated_resolution_for(state, AnticipatedLocal::new(plant), n_stages))
+        .collect();
+    for depth in 0..k_max {
+        let r = stage_idx + depth + 1;
+        let slot = r % k_max;
+        for (plant, point) in points.iter().enumerate() {
+            let target = point.physical_target(r);
+            if target >= n_delivery {
+                continue;
+            }
+            visit(
+                RingResidue {
+                    slot,
+                    plant,
+                    target,
+                },
+                point,
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ColumnBufs, DeliveryRing};
@@ -314,14 +394,10 @@ mod tests {
         let mut col_entries_a: Vec<Vec<(usize, f64)>> = vec![Vec::new(); 210];
         let n_a = ring_a.emit_shift_rows(&row_pos_a, 900, &mut col_entries_a);
         assert_eq!(n_a, 3);
-        // slot 0: out[100] +1, in[201] -1 (deeper neighbor at slot 1 exists).
         assert_eq!(col_entries_a[100], vec![(900, 1.0)]);
         assert_eq!(col_entries_a[201], vec![(900, -1.0)]);
-        // slot 1: out[101] +1, in[202] -1 (deeper neighbor at slot 2 exists).
         assert_eq!(col_entries_a[101], vec![(901, 1.0)]);
         assert_eq!(col_entries_a[202], vec![(901, -1.0)]);
-        // slot 2 (the lane's last slot): out[102] +1, NO shift term — slot 3
-        // does not exist for this lane's own depth of 3.
         assert_eq!(col_entries_a[102], vec![(902, 1.0)]);
         assert!(col_entries_a[203].is_empty());
 
@@ -330,7 +406,6 @@ mod tests {
         let mut col_entries_b: Vec<Vec<(usize, f64)>> = vec![Vec::new(); 260];
         let n_b = ring_b.emit_shift_rows(&row_pos_b, 950, &mut col_entries_b);
         assert_eq!(n_b, 1);
-        // A single-slot lane never has a deeper neighbor.
         assert_eq!(col_entries_b[150], vec![(950, 1.0)]);
         assert!(col_entries_b[250].is_empty());
     }
@@ -357,14 +432,10 @@ mod tests {
         let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); 410];
         let n = ring.emit_shift_rows(&row_pos, 500, &mut col_entries);
         assert_eq!(n, 2);
-        // slot 0, lane 0: out[300] +1, in[402] -1 (slot 1, lane 0).
         assert_eq!(col_entries[300], vec![(500, 1.0)]);
         assert_eq!(col_entries[402], vec![(500, -1.0)]);
-        // slot 1, lane 0: out[302] +1, in[404] -1 (slot 2, lane 0), even
-        // though slot 2/lane 0 itself has no row in this table.
         assert_eq!(col_entries[302], vec![(501, 1.0)]);
         assert_eq!(col_entries[404], vec![(501, -1.0)]);
-        // Lane 1 contributes no rows at all.
         for &col in &[301, 303, 305] {
             assert!(
                 col_entries[col].is_empty(),
@@ -383,10 +454,8 @@ mod tests {
         let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); 210];
         let n = ring.emit_carry_rows(&row_pos, 0, &mut col_entries);
         assert_eq!(n, 2);
-        // lane 0: out[100] +1, in[200] -1, same slot, row 0.
         assert_eq!(col_entries[100], vec![(0, 1.0)]);
         assert_eq!(col_entries[200], vec![(0, -1.0)]);
-        // lane 1: out[101] +1, in[201] -1, same slot, row 1.
         assert_eq!(col_entries[101], vec![(1, 1.0)]);
         assert_eq!(col_entries[201], vec![(1, -1.0)]);
     }
@@ -400,13 +469,10 @@ mod tests {
         let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); 410];
         let n = ring.emit_carry_rows(&row_pos, 500, &mut col_entries);
         assert_eq!(n, 2);
-        // slot 0: out[300] +1, in[400] -1, same slot, row 500.
         assert_eq!(col_entries[300], vec![(500, 1.0)]);
         assert_eq!(col_entries[400], vec![(500, -1.0)]);
-        // slot 1 is masked: no entries anywhere for it.
         assert!(col_entries[301].is_empty());
         assert!(col_entries[401].is_empty());
-        // slot 2: out[302] +1, in[402] -1, same slot, row 501.
         assert_eq!(col_entries[302], vec![(501, 1.0)]);
         assert_eq!(col_entries[402], vec![(501, -1.0)]);
     }
@@ -430,20 +496,15 @@ mod tests {
         assert_eq!(n_shift, 2);
         assert_eq!(n_carry, 2);
 
-        // Both agree on the out_col side.
         assert_eq!(shift_entries[600], vec![(0, 1.0)]);
         assert_eq!(carry_entries[600], vec![(0, 1.0)]);
         assert_eq!(shift_entries[601], vec![(1, 1.0)]);
         assert_eq!(carry_entries[601], vec![(1, 1.0)]);
 
-        // Slot 0's -1.0 term: shift writes it on in_col(1) (next slot);
-        // carry writes it on in_col(0) (same slot).
         assert!(shift_entries[700].is_empty());
         assert_eq!(shift_entries[701], vec![(0, -1.0)]);
         assert_eq!(carry_entries[700], vec![(0, -1.0)]);
 
-        // Slot 1's -1.0 term: shift drops it (no deeper neighbor); carry
-        // still writes it, on in_col(1) (same slot).
         assert_eq!(carry_entries[701], vec![(1, -1.0)]);
     }
 
@@ -474,35 +535,21 @@ mod tests {
             };
             ring.freeze_masked_columns(&row_pos, 50, reachable_bound, &mut bufs);
 
-            assert_eq!(
-                col_lower[50], reachable_bound.0,
-                "{label}: reachable col 50 lower"
-            );
-            assert_eq!(
-                col_upper[50], reachable_bound.1,
-                "{label}: reachable col 50 upper"
-            );
-            assert_eq!(col_lower[51], 0.0, "{label}: masked col 51 lower");
-            assert_eq!(col_upper[51], 0.0, "{label}: masked col 51 upper");
-            assert_eq!(
-                col_lower[52], reachable_bound.0,
-                "{label}: reachable col 52 lower"
-            );
-            assert_eq!(
-                col_upper[52], reachable_bound.1,
-                "{label}: reachable col 52 upper"
-            );
+            assert_eq!(col_lower[50], reachable_bound.0, "{label}: col 50 lower");
+            assert_eq!(col_upper[50], reachable_bound.1, "{label}: col 50 upper");
+            assert_eq!(col_lower[51], 0.0, "{label}: col 51 lower");
+            assert_eq!(col_upper[51], 0.0, "{label}: col 51 upper");
+            assert_eq!(col_lower[52], reachable_bound.0, "{label}: col 52 lower");
+            assert_eq!(col_upper[52], reachable_bound.1, "{label}: col 52 upper");
         }
     }
 
     #[test]
     fn out_col_in_col_addressing_is_slot_major_lane_minor() {
         let ring = DeliveryRing::new(1000..1006, 2000..2006, 3, 2);
-        // slot 0: lanes 0, 1, 2 occupy the first n_lanes columns.
         assert_eq!(ring.out_col(0, 0), 1000);
         assert_eq!(ring.out_col(0, 1), 1001);
         assert_eq!(ring.out_col(0, 2), 1002);
-        // slot 1: advances by a full n_lanes stride.
         assert_eq!(ring.out_col(1, 0), 1003);
         assert_eq!(ring.out_col(1, 1), 1004);
         assert_eq!(ring.out_col(1, 2), 1005);
@@ -559,9 +606,7 @@ mod tests {
     #[test]
     fn slot_target_maps_lag_to_the_flat_row_pos_index() {
         let ring = DeliveryRing::new(0..9, 0..9, 3, 3);
-        // lane 1, lag 1 -> slot 0 -> flat index 0 * 3 + 1.
         assert_eq!(ring.slot_target(1, 1), 1);
-        // lane 2, lag 3 -> slot 2 -> flat index 2 * 3 + 2.
         assert_eq!(ring.slot_target(2, 3), 8);
     }
 }

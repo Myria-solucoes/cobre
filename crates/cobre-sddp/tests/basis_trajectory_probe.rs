@@ -152,9 +152,7 @@ fn classify_stage_rows(
 
     let mut fam = vec![RowFamily::CutRow; total_rows];
     let mark = |fam: &mut [RowFamily], range: Range<usize>, family: RowFamily| {
-        for r in range {
-            fam[r] = family;
-        }
+        fam[range].fill(family);
     };
 
     let z_inflow_range = geom.z_inflow_row_start..geom.z_inflow_row_start + n_hydros;
@@ -307,6 +305,7 @@ fn classify_stage_rows_reconciles_on_a_hand_built_geometry() {
     );
 
     let ctx = StageContext {
+        state_boxes: &[],
         geometry_per_stage: std::slice::from_ref(&geom),
         templates: &[],
         base_rows: &[0],
@@ -421,8 +420,14 @@ fn fresh_setup(
         cobre_sddp::hydro_models::prepare_hydro_models(&prepared.system, case_dir, false)
             .expect("prepare_hydro_models must succeed for cobre_rodada");
 
-    StudySetup::new(&prepared.system, &config, prepared.stochastic, hydro_models)
-        .expect("StudySetup::new must build for cobre_rodada")
+    StudySetup::new(
+        &prepared.system,
+        &config,
+        prepared.stochastic,
+        hydro_models,
+        Vec::new(),
+    )
+    .expect("StudySetup::new must build for cobre_rodada")
 }
 
 struct CheckpointRun {
@@ -804,8 +809,7 @@ fn lag_fold_check_stage(
                 StageIdx(stage),
                 x_hat,
                 raw_noise,
-            )
-            .expect("StageSolvePrep::run must not error on cobre_rodada");
+            );
 
             let stored_basis = (omega_position == 0).then_some(forward_basis);
             let view = solve_stage_for_probe(
@@ -1108,8 +1112,7 @@ fn run_lag_fold_ab_stage(
                     StageIdx(stage),
                     x_hat,
                     raw_noise,
-                )
-                .expect("StageSolvePrep::run must not error on cobre_rodada");
+                );
 
                 let stored_basis = (omega_position == 0).then_some(forward_basis);
                 let view = solve_stage_for_probe(

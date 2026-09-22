@@ -109,7 +109,7 @@ mod d38_dead_volume_filling_simulation {
     /// `H4`'s stage-0 seed (hm³), mirroring `initial_conditions.json`.
     const H4_SEED_HM3: f64 = 100.0;
 
-    /// m³/s → hm³ per hour. Mirrors `crate::lp_builder::M3S_TO_HM3` (a private const
+    /// m³/s → hm³ per hour. Mirrors `crate::lp::builder::M3S_TO_HM3` (a private const
     /// not exported to integration tests). `ζ = total_stage_hours · M3S_TO_HM3`.
     const M3S_TO_HM3: f64 = 3_600.0 / 1_000_000.0;
     /// Every stage in `stages.json` totals 720 h, so `ζ` is uniform.
@@ -216,8 +216,8 @@ mod d38_dead_volume_filling_simulation {
         let hydro_models = prepare_hydro_models(&system, &case_dir, false)
             .expect("prepare_hydro_models must succeed");
 
-        let mut setup =
-            StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup::new");
+        let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
+            .expect("StudySetup::new");
 
         let comm = StubComm;
         let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
@@ -656,7 +656,7 @@ mod d40_filling_cascade_simulation {
     /// `H_ctrl`'s stage-0 seed (hm³), mirroring `initial_conditions.json`.
     const H_CTRL_SEED_HM3: f64 = 100.0;
 
-    /// m³/s → hm³ per hour. Mirrors `crate::lp_builder::M3S_TO_HM3` (a private const
+    /// m³/s → hm³ per hour. Mirrors `crate::lp::builder::M3S_TO_HM3` (a private const
     /// not exported to integration tests). `ζ = total_stage_hours · M3S_TO_HM3`.
     const M3S_TO_HM3: f64 = 3_600.0 / 1_000_000.0;
     /// Every stage in `stages.json` totals 720 h, so `ζ` is uniform.
@@ -793,8 +793,8 @@ mod d40_filling_cascade_simulation {
         let hydro_models = prepare_hydro_models(&system, &case_dir, false)
             .expect("prepare_hydro_models must succeed");
 
-        let mut setup =
-            StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup::new");
+        let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
+            .expect("StudySetup::new");
 
         let comm = StubComm;
         let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
@@ -1108,7 +1108,7 @@ mod prefilling_spillage_frozen {
     /// `scenarios/inflow_seasonal_stats.parquet`, hydro 2.
     const H3_INCR_M3S: f64 = 20.0;
 
-    /// m³/s → hm³ per hour. Mirrors `crate::lp_builder::M3S_TO_HM3` (private). Stages
+    /// m³/s → hm³ per hour. Mirrors `crate::lp::builder::M3S_TO_HM3` (private). Stages
     /// 0 and 1 are single FLAT blocks totalling 720 h, so `ζ = 720 · M3S_TO_HM3`.
     const M3S_TO_HM3: f64 = 3_600.0 / 1_000_000.0;
     const STAGE_HOURS: f64 = 720.0;
@@ -1190,8 +1190,8 @@ mod prefilling_spillage_frozen {
         let hydro_models = prepare_hydro_models(&system, &case_dir, false)
             .expect("prepare_hydro_models must succeed");
 
-        let mut setup =
-            StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup::new");
+        let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
+            .expect("StudySetup::new");
 
         let comm = StubComm;
         let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
@@ -1305,7 +1305,7 @@ mod filling_cut_validity {
 
     use cobre_core::entities::{
         bus::DeficitSegment,
-        hydro::{FillingConfig, HydroGenerationModel, HydroPenalties},
+        hydro::{FillingConfig, HydroGenerationModel},
     };
     use cobre_core::scenario::{InflowModel, LoadModel};
     use cobre_core::temporal::{
@@ -1314,7 +1314,7 @@ mod filling_cut_validity {
     };
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, EntityId,
-        HydroBlockBounds, HydroStageBounds, HydroStagePenalties, HydroStorage, InitialConditions,
+        HydroBlockBounds, HydroPenalties, HydroStageBounds, HydroStorage, InitialConditions,
         LineBlockBounds, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
         PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder,
         ThermalBlockBounds, ThermalStageBounds, TrainingEvent,
@@ -1505,9 +1505,10 @@ mod filling_cut_validity {
             })
             .collect();
 
-        let inflow_models: Vec<InflowModel> = (0..N_STAGES)
-            .flat_map(|i| {
-                [HF1_ID, HF2_ID, HOP_ID, HCTL_ID].map(|hid| InflowModel {
+        let inflow_models: Vec<InflowModel> = [HF1_ID, HF2_ID, HOP_ID, HCTL_ID]
+            .into_iter()
+            .flat_map(|hid| {
+                (0..N_STAGES).map(move |i| InflowModel {
                     hydro_id: EntityId(hid),
                     stage_id: i as i32,
                     mean_m3s: 80.0,
@@ -1545,8 +1546,8 @@ mod filling_cut_validity {
             }
         }
 
-        fn default_hydro_penalties() -> HydroStagePenalties {
-            HydroStagePenalties {
+        fn default_hydro_penalties() -> HydroPenalties {
+            HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,
@@ -2031,8 +2032,8 @@ mod d35_pumping_commissioning_simulation {
         let hydro_models = prepare_hydro_models(&system, &case_dir, false)
             .expect("prepare_hydro_models must succeed");
 
-        let mut setup =
-            StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup::new");
+        let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
+            .expect("StudySetup::new");
 
         let comm = StubComm;
         let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
@@ -2197,8 +2198,8 @@ mod d36_thermal_line_commissioning_simulation {
         let hydro_models = prepare_hydro_models(&system, &case_dir, false)
             .expect("prepare_hydro_models must succeed");
 
-        let mut setup =
-            StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup::new");
+        let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
+            .expect("StudySetup::new");
 
         let comm = StubComm;
         let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
@@ -2397,7 +2398,7 @@ mod d42_nonfilling_hydro_commissioning {
     const H_NEW_SEED_HM3: f64 = 50.0;
     const H_TAIL_SEED_HM3: f64 = 30.0;
 
-    /// m³/s → hm³ per hour. Mirrors `crate::lp_builder::M3S_TO_HM3` (private). `ζ =
+    /// m³/s → hm³ per hour. Mirrors `crate::lp::builder::M3S_TO_HM3` (private). `ζ =
     /// total_stage_hours · M3S_TO_HM3`; every stage totals 720 h.
     const M3S_TO_HM3: f64 = 3_600.0 / 1_000_000.0;
     const STAGE_HOURS: f64 = 720.0;
@@ -2509,8 +2510,8 @@ mod d42_nonfilling_hydro_commissioning {
         let hydro_models = prepare_hydro_models(&system, &case_dir, false)
             .expect("prepare_hydro_models must succeed");
 
-        let mut setup =
-            StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup::new");
+        let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
+            .expect("StudySetup::new");
 
         let comm = StubComm;
         let mut solver = ActiveSolver::new().expect("ActiveSolver::new");

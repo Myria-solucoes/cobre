@@ -10,7 +10,6 @@ use console::Term;
 use cobre_core::System;
 use cobre_io::Config;
 use cobre_io::OutputContext;
-use cobre_io::ParquetWriterConfig;
 use cobre_io::SimulationOutput;
 use cobre_io::SolverStatsRow;
 use cobre_io::TrainingOutput;
@@ -25,7 +24,6 @@ use cobre_io::write_simulation_results;
 use cobre_io::write_simulation_solver_stats;
 use cobre_io::write_solver_stats;
 use cobre_io::write_training_results;
-use cobre_sddp::PrepareHydroModelsResult;
 use cobre_sddp::SolverStatsDelta;
 use cobre_sddp::StudySetup;
 use cobre_sddp::TrainingResult;
@@ -33,8 +31,8 @@ use cobre_sddp::build_evaporation_model_rows;
 use cobre_sddp::build_fixed_delivery_rows;
 use cobre_sddp::build_generic_constraint_echo_rows;
 use cobre_sddp::delta_to_stats_row;
-use cobre_sddp::orchestration::CheckpointParams;
-use cobre_sddp::orchestration::write_checkpoint;
+use cobre_sddp::policy::orchestration::CheckpointParams;
+use cobre_sddp::policy::orchestration::write_checkpoint;
 use cobre_sddp::solver_stats_log_to_rows;
 
 use crate::error::CliError;
@@ -49,7 +47,6 @@ pub(super) struct WriteTrainingArgs<'a> {
     pub(super) setup: &'a StudySetup,
     pub(super) training_result: &'a TrainingResult,
     pub(super) output_ctx: &'a OutputContext,
-    pub(super) hydro_models: &'a PrepareHydroModelsResult,
     pub(super) quiet: bool,
     pub(super) stderr: &'a Term,
 }
@@ -87,18 +84,18 @@ pub(super) fn write_training_outputs(args: &WriteTrainingArgs<'_>) -> Result<(),
     )
     .map_err(CliError::from)?;
 
-    if !args.hydro_models.fpha_export_rows.is_empty() {
+    if !args.setup.hydro_models.fpha_export_rows.is_empty() {
         let fpha_path = args
             .output_dir
             .join("hydro_models")
             .join("fpha_hyperplanes.parquet");
-        write_fpha_hyperplanes(&fpha_path, &args.hydro_models.fpha_export_rows)
+        write_fpha_hyperplanes(&fpha_path, &args.setup.hydro_models.fpha_export_rows)
             .map_err(CliError::from)?;
     }
 
     // No evaporation-modeled hydro writes no file (FPHA "if-any" behavior);
     // mirror on the Python side: `write_evaporation_models_if_any`.
-    let evaporation_rows = build_evaporation_model_rows(args.hydro_models, args.system);
+    let evaporation_rows = build_evaporation_model_rows(&args.setup.hydro_models, args.system);
     if !evaporation_rows.is_empty() {
         let evaporation_path = args
             .output_dir
@@ -109,16 +106,14 @@ pub(super) fn write_training_outputs(args: &WriteTrainingArgs<'_>) -> Result<(),
 
     // Off by default, so a default run writes no file and stays byte-identical;
     // mirror on the Python side: `write_fpha_deviation_points_if_any`.
-    if args.config.exports.fpha_deviation_points {
-        let deviation_point_rows = args.hydro_models.fpha_deviation_point_rows.as_slice();
-        if !deviation_point_rows.is_empty() {
-            let deviation_points_path = args
-                .output_dir
-                .join("hydro_models")
-                .join("fpha_deviation_points.parquet");
-            write_fpha_deviation_points(&deviation_points_path, deviation_point_rows)
-                .map_err(CliError::from)?;
-        }
+    let deviation_point_rows = args.setup.hydro_models.fpha_deviation_point_rows.as_slice();
+    if args.config.exports.fpha_deviation_points && !deviation_point_rows.is_empty() {
+        let deviation_points_path = args
+            .output_dir
+            .join("hydro_models")
+            .join("fpha_deviation_points.parquet");
+        write_fpha_deviation_points(&deviation_points_path, deviation_point_rows)
+            .map_err(CliError::from)?;
     }
 
     // No generic constraint writes no file, so a default run stays byte-identical;
@@ -143,13 +138,8 @@ pub(super) fn write_training_outputs(args: &WriteTrainingArgs<'_>) -> Result<(),
     }
 
     if !args.training_output.cut_selection_records.is_empty() {
-        let parquet_config = ParquetWriterConfig::default();
-        write_row_selection_records(
-            args.output_dir,
-            &args.training_output.cut_selection_records,
-            &parquet_config,
-        )
-        .map_err(CliError::from)?;
+        write_row_selection_records(args.output_dir, &args.training_output.cut_selection_records)
+            .map_err(CliError::from)?;
     }
 
     if !args.quiet {
@@ -186,8 +176,7 @@ pub(super) fn write_simulation_outputs(args: &WriteSimulationArgs<'_>) -> Result
     write_simulation_results(args.output_dir, args.sim_output, args.output_ctx)
         .map_err(CliError::from)?;
 
-    // Simulation fills scenario_id (not iteration) and has no stage/opening/rank/
-    // worker dimension; those axes are all None.
+    // Simulation fills scenario_id (not iteration).
     if !args.sim_solver_stats.is_empty() {
         let rows: Vec<SolverStatsRow> = args
             .sim_solver_stats

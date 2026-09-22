@@ -26,7 +26,7 @@ use std::sync::mpsc;
 use chrono::NaiveDate;
 use cobre_core::{
     BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, DeficitSegment,
-    EntityId, HydroBlockBounds, HydroStageBounds, HydroStagePenalties, LineBlockBounds,
+    EntityId, HydroBlockBounds, HydroPenalties, HydroStageBounds, LineBlockBounds,
     LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
     PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder, ThermalBlockBounds,
     ThermalStageBounds,
@@ -49,7 +49,7 @@ use cobre_sddp::{
     hydro_models::PrepareHydroModelsResult,
     indexer::{CutStateProjection, StateSpace, StudyDimensions},
     inflow_method::InflowNonNegativityMethod,
-    lp_builder::{PatchBuffer, StageGeometry, build_stage_templates_resolving_layout},
+    lp::builder::{PatchBuffer, StageGeometry, StateBox, build_stage_templates_resolving_layout},
     risk_measure::RiskMeasure,
     setup::node_graph::Traversal,
     simulate,
@@ -67,10 +67,8 @@ mod common;
 use common::StubComm;
 use common::builders::{BusSpec, HydroSpec, StageSpec, make_bus, make_hydro, make_stage};
 
-/// Build the role-(a) [`StateSpace`] via the public [`StateSpace::new`] (full
-/// `max_par_order` lag stride per hydro). This external test crate cannot see the
-/// parent's `#[cfg(test)]`/`test-support` surface, so it constructs from explicit
-/// dimensions rather than a test helper.
+/// External test crate cannot see parent's `test-support` surface; constructs
+/// from explicit dimensions.
 fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateSpace {
     StateSpace::new(
         hydro_count,
@@ -84,10 +82,7 @@ fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateSpace {
     )
 }
 
-/// Build `StudyDimensions` from explicit entity counts. This external test crate
-/// cannot see the parent's `#[cfg(test)]`/`test-support` surface, so it sets the
-/// fields directly; `n_pumping`/`has_ncs`/anticipated are empty for these
-/// single-bus, no-pumping, no-NCS fixtures.
+/// External test crate cannot see `test-support`; sets fields directly.
 fn study_dims_for(
     n_thermals: usize,
     n_lines: usize,
@@ -116,9 +111,6 @@ fn study_dims_for(
 const N_STAGES: usize = 3;
 const N_HYDROS: usize = 2;
 
-/// Build the 2-hydro, 1-bus, 3-stage negative-inflow fixture. `ResolvedBounds`
-/// and `ResolvedPenalties` are built manually from the hydro entity values so
-/// `build_stage_templates_resolving_layout` can read them without `cobre-io` case loading.
 fn build_system() -> cobre_core::System {
     use cobre_core::entities::hydro::{HydroGenerationModel, HydroPenalties};
     use cobre_core::scenario::InflowModel;
@@ -220,19 +212,18 @@ fn build_system() -> cobre_core::System {
         })
         .collect();
 
-    let inflow_models: Vec<InflowModel> = (0..N_STAGES)
-        .flat_map(|stage_idx| {
-            [EntityId(1), EntityId(2)]
-                .iter()
-                .map(move |&hydro_id| InflowModel {
-                    hydro_id,
-                    stage_id: stage_idx as i32,
-                    mean_m3s: 0.0,
-                    std_m3s: 30.0,
-                    ar_coefficients: vec![],
-                    residual_std_ratio: 1.0,
-                    annual: None,
-                })
+    let inflow_models: Vec<InflowModel> = [EntityId(1), EntityId(2)]
+        .iter()
+        .flat_map(|&hydro_id| {
+            (0..N_STAGES).map(move |stage_idx| InflowModel {
+                hydro_id,
+                stage_id: stage_idx as i32,
+                mean_m3s: 0.0,
+                std_m3s: 30.0,
+                ar_coefficients: vec![],
+                residual_std_ratio: 1.0,
+                annual: None,
+            })
         })
         .collect();
 
@@ -307,7 +298,7 @@ fn build_system() -> cobre_core::System {
         },
     );
 
-    let hydro_penalties_default = HydroStagePenalties {
+    let hydro_penalties_default = HydroPenalties {
         spillage_cost: 0.0,
         diversion_cost: 0.0,
         turbined_cost: 0.0,
@@ -355,7 +346,6 @@ fn build_system() -> cobre_core::System {
         .unwrap()
 }
 
-/// Build a [`StochasticContext`] for the 2-hydro, 3-stage negative-inflow fixture.
 fn build_stochastic() -> StochasticContext {
     let system = build_system();
     build_stochastic_context(
@@ -479,8 +469,25 @@ fn build_fixture_with_method(inflow_method: InflowNonNegativityMethod) -> Fixtur
 // Shared test helpers
 // ===========================================================================
 
-fn base_stage_context<'a>(fx: &'a Fixture, block_counts: &'a [usize]) -> StageContext<'a> {
+/// A fully-permissive `(-inf, inf)` box per stage, for fixtures driving
+/// `train`/`simulate` through the seam without exercising the clamp.
+fn permissive_state_boxes(n_state: usize, n_stages: usize) -> Vec<StateBox> {
+    vec![
+        StateBox {
+            lower: vec![f64::NEG_INFINITY; n_state],
+            upper: vec![f64::INFINITY; n_state],
+        };
+        n_stages
+    ]
+}
+
+fn base_stage_context<'a>(
+    fx: &'a Fixture,
+    block_counts: &'a [usize],
+    state_boxes: &'a [StateBox],
+) -> StageContext<'a> {
     StageContext {
+        state_boxes,
         geometry_per_stage: &[],
         templates: &fx.stage_templates.templates,
         base_rows: &fx.stage_templates.base_rows,
@@ -524,7 +531,8 @@ fn train_fixture(
         .collect();
     let max_blocks = block_counts.iter().copied().max().unwrap_or(1);
 
-    let stage_ctx = base_stage_context(fx, &block_counts);
+    let state_boxes = permissive_state_boxes(fx.state.n_state, n_stages);
+    let stage_ctx = base_stage_context(fx, &block_counts, &state_boxes);
     train(
         &mut solver,
         TrainingConfig {
@@ -546,7 +554,6 @@ fn train_fixture(
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                warm_start_cuts: 0,
                 risk_measures: fx.risk_measures.clone(),
             },
             events: EventConfig {
@@ -636,9 +643,10 @@ fn simulate_fixture(
         N_STAGES,
     );
 
+    let state_boxes_sim = permissive_state_boxes(fx.state.n_state, N_STAGES);
     simulate(
         &mut sim_workspaces,
-        &base_stage_context(fx, &block_counts_sim),
+        &base_stage_context(fx, &block_counts_sim, &state_boxes_sim),
         fcf,
         &TrainingContext {
             node_graph: &cobre_sddp::test_support::chain_node_graph(&fx.stochastic),
@@ -822,7 +830,7 @@ fn truncation_with_penalty_training_completes() {
 /// `100 * block_hours`, H2's `5000 * block_hours` (justifies the magic asserts).
 #[test]
 fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
-    let hydro_penalties_default = HydroStagePenalties {
+    let hydro_penalties_default = HydroPenalties {
         spillage_cost: 0.0,
         diversion_cost: 0.0,
         turbined_cost: 0.0,
@@ -932,11 +940,8 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
     );
 }
 
-/// Local mirror of the gated `test_support::all_enabled_cut_state_layouts`
-/// via the public `CutStateProjection::new`, so this external test crate (which cannot
-/// see the parent crate's `#[cfg(test)]` surface) builds the default all-enabled
-/// per-pool projection. Every pool projects the full global state, keeping the
-/// extracted subgradient bit-identical to the global-loop result.
+/// External test crate cannot see parent's `#[cfg(test)]` surface; mirrors
+/// `test_support::all_enabled_cut_state_layouts` via public API.
 fn all_enabled_cut_state_layouts(global: &StateSpace, n_stages: usize) -> Vec<CutStateProjection> {
     let full = StageStateConfig {
         storage: true,

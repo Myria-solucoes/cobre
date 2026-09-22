@@ -209,6 +209,12 @@ n_buckets = Σ_j L_j
 column_order = [(j, 1), (j, 2), …, (j, L_j)] for each plant j in canonical order
 ```
 
+`extended` is the study calendar followed by any declared post-study calendar
+(`delivery_stage_durations`), padded with copies of its trailing duration only
+past what that base calendar already covers (`extend_for_resolution`,
+`bucket_topology.rs`). With no declared post-study calendar the base is the
+study-only vector and the formula above is unchanged.
+
 Key properties (each pinned by a named test in `bucket_topology.rs`):
 
 - **Confluence aggregates** — all arcs into one downstream collapse to a _single_
@@ -231,7 +237,8 @@ Sizing gives the _global_ depth; a per-stage mask (`per_stage_mask`) says which
 lags are live at each stage: the union of this stage's own-release depth with the
 **decaying IC residual** `ic_depth − stage`. With no boundary policy the mask is
 **horizon-capped** at `n_stages − 1 − stage` (deep terminal slots masked `[0,0]` —
-the "terminal credit deferred" imprecision); with a boundary policy present
+the "terminal credit deferred" imprecision, confined to this no-boundary path);
+with a boundary policy present
 (`config.policy.boundary.is_some()`, threaded as `boundary_present`) the mask is
 the **raw uncapped** depth at every stage so those terminal slots stay live and
 reach the boundary-priced cut projection. **Sizing is identical either way** —
@@ -487,15 +494,18 @@ boundary FCF then prices its carried state directly through the generic `β·sta
 projection. (Reachable slots use `(-inf, inf)`, not water's `[0, inf)`, because a
 committed MW value carries either sign.)
 
-**Drift reconciliation** (`crates/cobre-sddp/src/lp/builder/commitment_reconcile.rs`):
-a latched `commit_out` is a _basic_ variable produced by the simplex factorization,
-so it is accurate only to the backend's `primal_feasibility_tolerance` (`1e-9`),
-never 1 ULP; a commitment at its cap arrives a hair outside it and the no-slack
-fishing equality would turn that hair into a false `Infeasible`. `StageSolvePrep`
-reconciles every pinned commitment against the delivery column's enforced bound
-within a `drift_margin`; drift beyond that is a real error, never absorbed. The
-reconciliation is mandatory and non-parametric — all four solve sites get it and
-none can opt out.
+**Drift reconciliation** (`crates/cobre-sddp/src/solve/stage_solve.rs`,
+`assemble_outgoing_state`): a latched `commit_out` is a _basic_ variable produced by
+the simplex factorization, so it is accurate only to the backend's
+`primal_feasibility_tolerance` (`1e-9`), never 1 ULP; a commitment at its cap arrives
+a hair outside it and the no-slack fishing equality would turn that hair into a false
+`Infeasible`. The outgoing-state read-back seam projects every outgoing state onto its
+admissible box before the value is pinned, solved against, or dotted into a cut, so the
+sub-tolerance drift is absorbed silently — no runtime verdict, no telemetry. The clamp
+runs at all four solve sites uniformly (forward, backward, lower bound, simulation). A
+_genuine_ over-commitment — a declared value outside the delivery stage's resolved
+generation box — is rejected before the study runs, at cobre-io load time
+(`check_committed_value_bounds`), never on the solve path.
 
 ### 3.5 `col_scale` and boundary pricing
 
@@ -526,16 +536,16 @@ Both rings share the `DeliveryRing` skeleton, one contiguous state region, the
 out-by-identity / in-pinned column resolution, the two-sided masking discipline,
 and the dual sign convention. They differ in exactly four call-site-local ways:
 
-| Aspect                   | Water travel time                                 | Anticipated thermal                                                             |
-| ------------------------ | ------------------------------------------------- | ------------------------------------------------------------------------------- |
-| Ring instances           | one per downstream plant (`n_lanes = 1`)          | one dense ring (`n_lanes = n_anticipated`)                                      |
-| Transition               | **shift** (`emit_shift_rows`, `slot → slot+1`)    | **hold** (`emit_carry_rows`, same slot)                                         |
-| Slot key                 | lag (distance in flight), one plant per ring      | delivery-target residue on the **ring axis** (`ring_index(m) mod k_max`)        |
-| Deposit                  | `k_d`-weighted release share at the call site     | single decision latch (`emit_deposit`)                                          |
-| Depth sizing             | overlap measure (`stage_reach`, IC overlap)       | `max(occupancy_max, n_none_in_study)` per plant                                 |
-| Reachable column bound   | `[0, inf)` (a volume)                             | `(-inf, inf)` (a signed MW value)                                               |
-| Masked terminal slot     | drops a **genuine** deposited share (imprecision) | provably **zero** (no commitment targets a masked slot)                         |
-| Terminal live-state gate | needs `config.policy.boundary` (not inert)        | post-study slot **existence** on declared `post_study_stages.json` + lead reach |
+| Aspect                   | Water travel time                                                                 | Anticipated thermal                                                             |
+| ------------------------ | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| Ring instances           | one per downstream plant (`n_lanes = 1`)                                          | one dense ring (`n_lanes = n_anticipated`)                                      |
+| Transition               | **shift** (`emit_shift_rows`, `slot → slot+1`)                                    | **hold** (`emit_carry_rows`, same slot)                                         |
+| Slot key                 | lag (distance in flight), one plant per ring                                      | delivery-target residue on the **ring axis** (`ring_index(m) mod k_max`)        |
+| Deposit                  | `k_d`-weighted release share at the call site                                     | single decision latch (`emit_deposit`)                                          |
+| Depth sizing             | overlap measure (`stage_reach`, IC overlap)                                       | `max(occupancy_max, n_none_in_study)` per plant                                 |
+| Reachable column bound   | `[0, inf)` (a volume)                                                             | `(-inf, inf)` (a signed MW value)                                               |
+| Masked terminal slot     | drops a **genuine** deposited share — only on the horizon-capped no-boundary path | provably **zero** (no commitment targets a masked slot)                         |
+| Terminal live-state gate | needs `config.policy.boundary` (not inert)                                        | post-study slot **existence** on declared `post_study_stages.json` + lead reach |
 
 These last two rows carry the deepest asymmetry, and it **survives** the
 ring-native re-derivation rather than collapsing into one rule. On the masked slot:

@@ -4,21 +4,13 @@
 //! dimensions. Dimension 1 uses the van der Corput sequence;
 //! dimensions 2+ read `SOBOL_DIRECTIONS` (array index 0 is dimension 2).
 //!
-//! ## Direction number convention
-//!
-//! `SobolDirEntry::initial_dirs` stores raw `m_i` values as listed in the Joe-Kuo
-//! file; the generator applies the left-shift `v[j] = m_j << (32 - j)` — do not
+//! `SobolDirEntry::initial_dirs` holds raw, unshifted `m_i` values as listed in
+//! the Joe-Kuo file; `build_direction_matrix` applies the left-shift — do not
 //! pre-shift the stored values.
 //!
-//! ## Entry points
-//!
-//! - [`generate_qmc_sobol`]: batch generation via Gray-code recurrence (O(1) per
-//!   point).
-//! - [`scrambled_sobol_point`]: single-scenario point-wise generation via direct
-//!   binary decomposition, for the out-of-sample forward pass.
-//!
-//! Both apply Matousek linear scrambling `x' = a*x + b (mod 2^32)` with
-//! seed-derived parameters, then map to N(0,1) via `norm_quantile`.
+//! [`generate_qmc_sobol`] walks the sequence by Gray-code recurrence (O(1) per
+//! point); [`scrambled_sobol_point`] reaches one scenario by direct binary
+//! decomposition. Both scramble via `scramble_to_normal`.
 
 mod sobol_directions;
 
@@ -31,6 +23,7 @@ use crate::noise::{
     rng::rng_from_seed,
     seed::{derive_opening_seed, derive_stage_seed},
 };
+use crate::tree::NoisePointSpec;
 
 /// Maximum supported Sobol dimension: dimension 1 (van der Corput) plus the
 /// Joe-Kuo entries in `SOBOL_DIRECTIONS`.
@@ -38,6 +31,15 @@ pub(crate) const MAX_SOBOL_DIM: usize = SOBOL_MAX_DIM;
 
 /// `1.0 / 2^32`, scaling a uniform u32 to a float in `[0, 1)`.
 const INV_2_32: f64 = 1.0 / 4_294_967_296.0;
+
+/// Applies Matousek linear scrambling to a raw Sobol coordinate, then maps the
+/// result to N(0,1) via `norm_quantile`.
+#[inline]
+fn scramble_to_normal(x: u32, a: u32, b: u32) -> f64 {
+    let xp = a.wrapping_mul(x).wrapping_add(b);
+    let u = (f64::from(xp) * INV_2_32).clamp(f64::MIN_POSITIVE, 1.0 - f64::EPSILON);
+    norm_quantile(u)
+}
 
 /// Build the full 32-bit direction vectors for each of the `dim` dimensions.
 ///
@@ -60,7 +62,6 @@ fn build_direction_matrix(dim: usize) -> Vec<[u32; 32]> {
         let mut v = [0u32; 32];
 
         if d == 0 {
-            // Dimension 1: van der Corput.
             for (j, slot) in v.iter_mut().enumerate() {
                 *slot = 1u32 << (31 - j);
             }
@@ -75,8 +76,7 @@ fn build_direction_matrix(dim: usize) -> Vec<[u32; 32]> {
                 *slot = entry.initial_dirs[j] << (31 - j);
             }
 
-            // Joe-Kuo recurrence in 0-indexed j (the source states it 1-indexed):
-            //   v[j] = v[j-s] ^ (v[j-s] >> s) ^ sum_{k=1}^{s-1} ((a >> (s-1-k)) & 1) * v[j-k]
+            // Joe-Kuo recurrence re-indexed: the source states it with 1-indexed j.
             for j in s..32 {
                 let mut x = v[j - s] ^ (v[j - s] >> s);
                 for k in 1..s {
@@ -142,28 +142,24 @@ pub fn generate_qmc_sobol(
 
     for d in 0..dim {
         let (a, b) = scramble[d];
-        let xp = a.wrapping_mul(sobol_state[d]).wrapping_add(b);
-        let u = (f64::from(xp) * INV_2_32).clamp(f64::MIN_POSITIVE, 1.0 - f64::EPSILON);
-        output[d] = norm_quantile(u);
+        output[d] = scramble_to_normal(sobol_state[d], a, b);
     }
 
-    // Gray-code recurrence: for point i, XOR direction c = i.trailing_zeros()
-    // (the rightmost set bit) into each dimension's state.
+    // Gray-code recurrence: XOR the direction at index `i.trailing_zeros()` into
+    // each dimension's state.
     for i in 1..n_openings {
         #[allow(clippy::cast_possible_truncation)]
         let c = i.trailing_zeros() as usize;
         for d in 0..dim {
             sobol_state[d] ^= directions[d][c];
             let (a, b) = scramble[d];
-            let xp = a.wrapping_mul(sobol_state[d]).wrapping_add(b);
-            let u = (f64::from(xp) * INV_2_32).clamp(f64::MIN_POSITIVE, 1.0 - f64::EPSILON);
-            output[i * dim + d] = norm_quantile(u);
+            output[i * dim + d] = scramble_to_normal(sobol_state[d], a, b);
         }
     }
 }
 
 /// Direction matrix and scramble parameters built once per
-/// (`sampling_seed`, `iteration`, `stage_id`, `dim`) tuple and reused across all
+/// (`sampling_seed`, `iteration`, `stream_id`, `dim`) tuple and reused across all
 /// scenarios at that stage.
 #[derive(Debug, Clone)]
 pub struct SobolPrecomputed {
@@ -172,14 +168,15 @@ pub struct SobolPrecomputed {
 }
 
 impl SobolPrecomputed {
-    /// Precompute for a given (seed, iteration, stage, dim) combination.
+    /// Builds the direction matrix and scramble parameters described on
+    /// [`SobolPrecomputed`].
     ///
     /// # Panics
     ///
     /// Panics if `dim > MAX_SOBOL_DIM`.
     #[must_use]
-    pub fn new(sampling_seed: u64, iteration: u32, stage_id: u32, dim: usize) -> Self {
-        let seed = derive_opening_seed(sampling_seed, iteration, stage_id);
+    pub fn new(sampling_seed: u64, iteration: u32, stream_id: u32, dim: usize) -> Self {
+        let seed = derive_opening_seed(sampling_seed, iteration, stream_id);
         let directions = build_direction_matrix(dim);
         let scramble = derive_scramble_params(seed, dim);
         Self {
@@ -189,19 +186,13 @@ impl SobolPrecomputed {
     }
 }
 
-/// Generate one scenario's noise vector using a precomputed Sobol context.
-///
-/// Same as [`scrambled_sobol_point`] but avoids recomputing the direction
-/// matrix and scramble parameters per call.
+/// Generate one scenario's noise vector from a precomputed direction matrix
+/// and scramble parameters.
 ///
 /// # Panics
 ///
 /// Panics if `output.len() < spec.dim` or `spec.dim > MAX_SOBOL_DIM`.
-pub fn scrambled_sobol_point_precomputed(
-    spec: &SobolPointSpec,
-    ctx: &SobolPrecomputed,
-    output: &mut [f64],
-) {
+pub fn scrambled_sobol_point(spec: &NoisePointSpec, ctx: &SobolPrecomputed, output: &mut [f64]) {
     assert!(
         output.len() >= spec.dim,
         "output too short: need {}, got {}",
@@ -222,39 +213,18 @@ pub fn scrambled_sobol_point_precomputed(
         }
 
         let (a, b) = ctx.scramble[d];
-        let xp = a.wrapping_mul(xd).wrapping_add(b);
-        let u = (f64::from(xp) * INV_2_32).clamp(f64::MIN_POSITIVE, 1.0 - f64::EPSILON);
-        *out = norm_quantile(u);
+        *out = scramble_to_normal(xd, a, b);
     }
 }
 
-/// Configuration for single-scenario Sobol point generation.
-///
-/// Bundles the parameters needed by [`scrambled_sobol_point`] to generate
-/// one scenario's noise vector without inter-worker coordination.
-#[derive(Debug, Clone, Copy)]
-pub struct SobolPointSpec {
-    /// Forward-pass base seed.
-    pub sampling_seed: u64,
-    /// Training iteration index.
-    pub iteration: u32,
-    /// Global scenario index in `0..total_scenarios`.
-    pub scenario: u32,
-    /// Stage domain identifier.
-    pub stage_id: u32,
-    /// Total forward scenarios per iteration.
-    pub total_scenarios: u32,
-    /// Noise vector dimension.
-    pub dim: usize,
-}
-
-/// Generate one scenario's noise vector using scrambled Sobol QMC with direct
-/// binary decomposition, independent of all other scenarios.
+/// Derives the direction matrix and scramble parameters per call; this is the
+/// reference `scrambled_sobol_point` is tested against.
 ///
 /// # Panics
 ///
 /// Panics if `output.len() < spec.dim` or `spec.dim > MAX_SOBOL_DIM`.
-pub fn scrambled_sobol_point(spec: &SobolPointSpec, output: &mut [f64]) {
+#[cfg(test)]
+pub(crate) fn scrambled_sobol_point_reference(spec: &NoisePointSpec, output: &mut [f64]) {
     assert!(
         output.len() >= spec.dim,
         "output too short: need {}, got {}",
@@ -273,12 +243,11 @@ pub fn scrambled_sobol_point(spec: &SobolPointSpec, output: &mut [f64]) {
         return;
     }
 
-    let seed = derive_opening_seed(spec.sampling_seed, spec.iteration, spec.stage_id);
+    let seed = derive_opening_seed(spec.sampling_seed, spec.iteration, spec.stream_id);
     let directions = build_direction_matrix(spec.dim);
     let scramble = derive_scramble_params(seed, spec.dim);
 
     for d in 0..spec.dim {
-        // Direct binary decomposition: XOR v[j] for each bit j set in scenario.
         let mut xd = 0u32;
         let mut scenario = spec.scenario;
         let mut j = 0usize;
@@ -307,8 +276,8 @@ pub fn scrambled_sobol_point(spec: &SobolPointSpec, output: &mut [f64]) {
 )]
 mod tests {
     use super::{
-        INV_2_32, MAX_SOBOL_DIM, SobolPointSpec, build_direction_matrix, generate_qmc_sobol,
-        scrambled_sobol_point,
+        INV_2_32, MAX_SOBOL_DIM, NoisePointSpec, SobolPrecomputed, build_direction_matrix,
+        generate_qmc_sobol, scrambled_sobol_point, scrambled_sobol_point_reference,
     };
 
     /// Generate unscrambled Gray-code Sobol points in `[0,1)` for regression testing.
@@ -333,7 +302,6 @@ mod tests {
         result
     }
 
-    /// Same `(base_seed, stage_id, n_openings, dim)` must produce bitwise identical output.
     #[test]
     fn test_sobol_batch_determinism() {
         let n_openings = 64;
@@ -345,7 +313,6 @@ mod tests {
         assert_eq!(out1, out2, "generate_qmc_sobol is not deterministic");
     }
 
-    /// Different `base_seed` values must produce different output.
     #[test]
     fn test_sobol_batch_different_seeds_differ() {
         let n_openings = 64;
@@ -357,7 +324,6 @@ mod tests {
         assert_ne!(out1, out2, "different seeds produced identical output");
     }
 
-    /// All output values must be finite for N=64, dim=5.
     #[test]
     fn test_sobol_batch_all_finite() {
         let n_openings = 64;
@@ -369,7 +335,6 @@ mod tests {
         }
     }
 
-    /// Output must fill exactly `n_openings * dim` elements.
     #[test]
     fn test_sobol_batch_correct_length() {
         let n_openings = 32;
@@ -379,42 +344,40 @@ mod tests {
         assert_eq!(output.len(), n_openings * dim);
     }
 
-    /// Same `SobolPointSpec` must produce bitwise identical output.
     #[test]
     fn test_sobol_point_determinism() {
         let dim = 2;
-        let spec = SobolPointSpec {
+        let spec = NoisePointSpec {
             sampling_seed: 42,
             iteration: 0,
             scenario: 0,
-            stage_id: 0,
+            stream_id: 0,
             total_scenarios: 64,
             dim,
         };
         let mut out1 = vec![0.0_f64; dim];
         let mut out2 = vec![0.0_f64; dim];
-        scrambled_sobol_point(&spec, &mut out1);
-        scrambled_sobol_point(&spec, &mut out2);
+        scrambled_sobol_point_reference(&spec, &mut out1);
+        scrambled_sobol_point_reference(&spec, &mut out2);
         assert_eq!(out1, out2, "scrambled_sobol_point is not deterministic");
     }
 
-    /// Different `sampling_seed` must produce different output.
     #[test]
     fn test_sobol_point_different_seeds_differ() {
         let dim = 3;
-        let base_spec = SobolPointSpec {
+        let base_spec = NoisePointSpec {
             sampling_seed: 42,
             iteration: 0,
             scenario: 5,
-            stage_id: 0,
+            stream_id: 0,
             total_scenarios: 64,
             dim,
         };
         let mut out1 = vec![0.0_f64; dim];
         let mut out2 = vec![0.0_f64; dim];
-        scrambled_sobol_point(&base_spec, &mut out1);
-        scrambled_sobol_point(
-            &SobolPointSpec {
+        scrambled_sobol_point_reference(&base_spec, &mut out1);
+        scrambled_sobol_point_reference(
+            &NoisePointSpec {
                 sampling_seed: 43,
                 ..base_spec
             },
@@ -426,22 +389,21 @@ mod tests {
         );
     }
 
-    /// All values finite across all scenarios 0..N.
     #[test]
     fn test_sobol_point_all_finite() {
         let n = 64_usize;
         let dim = 4;
         for scenario in 0..n {
-            let spec = SobolPointSpec {
+            let spec = NoisePointSpec {
                 sampling_seed: 42,
                 iteration: 0,
                 scenario: scenario as u32,
-                stage_id: 1,
+                stream_id: 1,
                 total_scenarios: n as u32,
                 dim,
             };
             let mut output = vec![0.0_f64; dim];
-            scrambled_sobol_point(&spec, &mut output);
+            scrambled_sobol_point_reference(&spec, &mut output);
             for (d, &v) in output.iter().enumerate() {
                 assert!(
                     v.is_finite(),
@@ -451,7 +413,34 @@ mod tests {
         }
     }
 
-    /// Dimension 1 directions must equal `1 << (31 - j)` for j in 0..32.
+    #[test]
+    fn sobol_point_matches_reference() {
+        for (dim, total_scenarios) in [(1_usize, 4_u32), (2, 16), (5, 8)] {
+            let ctx = SobolPrecomputed::new(42, 1, 3, dim);
+            let mut precomputed_out = vec![0.0_f64; dim];
+            let mut direct_out = vec![0.0_f64; dim];
+
+            for scenario in 0..total_scenarios {
+                let spec = NoisePointSpec {
+                    sampling_seed: 42,
+                    iteration: 1,
+                    scenario,
+                    stream_id: 3,
+                    total_scenarios,
+                    dim,
+                };
+
+                scrambled_sobol_point(&spec, &ctx, &mut precomputed_out);
+                scrambled_sobol_point_reference(&spec, &mut direct_out);
+
+                assert_eq!(
+                    precomputed_out, direct_out,
+                    "mismatch at dim={dim}, total_scenarios={total_scenarios}, scenario={scenario}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_build_direction_matrix_dim1() {
         let dirs = build_direction_matrix(1);
@@ -465,10 +454,7 @@ mod tests {
         }
     }
 
-    /// All batch output values must be in the finite range expected for N(0,1).
-    ///
-    /// The BSM approximation clamps at ±8.22; all values must be within that
-    /// range and finite.
+    /// The BSM approximation clamps at ±8.22.
     #[test]
     fn test_sobol_batch_values_in_range() {
         let n_openings = 64;
@@ -484,19 +470,13 @@ mod tests {
         }
     }
 
-    /// `MAX_SOBOL_DIM` must equal 21,201.
     #[test]
     fn test_max_sobol_dim_constant() {
         assert_eq!(MAX_SOBOL_DIM, 21_201);
     }
 
-    /// Verify unscrambled dimension 1 (van der Corput base-2) first 8 points
-    /// against the known Gray-code Sobol values.
-    ///
-    /// The Gray-code Sobol sequence for dimension 1 produces the same set of
-    /// values as the van der Corput base-2 sequence but in a different traversal
-    /// order dictated by the Gray-code recurrence. The first 8 expected values
-    /// are computed from `v[j] = 1 << (31 - j)` with Gray-code XOR updates.
+    /// Dimension 1 yields the van der Corput base-2 values in Gray-code traversal
+    /// order, not in van der Corput order.
     #[test]
     fn test_unscrambled_dim1_first_8_points() {
         let pts = generate_unscrambled_sobol(8, 1);
@@ -520,13 +500,7 @@ mod tests {
         }
     }
 
-    /// Verify unscrambled dimension 2 first 8 points against the known
-    /// Joe-Kuo direction-table values.
-    ///
-    /// Dimension 2 uses `SOBOL_DIRECTIONS[0]` with degree=1, poly=0, and
-    /// `initial_dirs=[1,...]`. The direction vector recurrence with degree 1
-    /// is `v[j] = v[j-1] XOR (v[j-1] >> 1)`, giving a sequence of known
-    /// values when combined with the Gray-code update.
+    /// Dimension 2 reads `SOBOL_DIRECTIONS[0]` (degree 1, poly 0).
     #[test]
     fn test_unscrambled_dim2_first_8_points() {
         let pts = generate_unscrambled_sobol(8, 2);

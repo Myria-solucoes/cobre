@@ -16,10 +16,3 @@ mod tests;
 
 pub use config::{ClpAlgorithm, ClpProfile};
 pub use solver::{ClpSolver, clp_version};
-
-// Rationale: the sole consumer of this re-export is the `#[cfg(test)]` `tests`
-// module (`interface` reads the const directly via `super::retry`), so a
-// non-test build sees no consumer; the allow suppresses the spurious
-// `unused_imports` while keeping the lint live under `--cfg test`.
-#[cfg_attr(not(test), allow(unused_imports))]
-pub(crate) use retry::LADDER_RUNGS;

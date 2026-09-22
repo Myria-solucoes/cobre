@@ -158,7 +158,7 @@ pub(crate) struct BroadcastConfig {
 
 impl BroadcastConfig {
     pub(crate) fn from_config(config: &Config) -> Result<Self, CliError> {
-        let params = StudyParams::from_config(config).map_err(CliError::from)?;
+        let params = StudyParams::from_config(config, Vec::new()).map_err(CliError::from)?;
         // Sentinel path: the scenario-source helpers use it only for historical-years
         // look-up and error messages, neither exercised here.
         let sentinel_path = std::path::Path::new("config.json");
@@ -255,22 +255,15 @@ pub(crate) struct BroadcastOpeningTree {
 }
 
 /// Postcard-serializable wrapper for [`NodeGraph`] broadcast — plain
-/// struct-of-`Vec`s (no tagged enum on the wire), mirroring
-/// [`BroadcastOpeningTree`]'s shape. `NodeOpenings::source` becomes the
-/// `is_external` flag; successor lists flatten to a CSR triple
+/// struct-of-`Vec`s (no tagged enum on the wire). `NodeOpenings::source`
+/// becomes the `is_external` flag; successor lists flatten to a CSR triple
 /// (`successor_offsets`/`successor_child`/`successor_probability`).
 ///
-/// Not currently wired into the live MPI broadcast: [`NodeGraph`] is a pure,
-/// deterministic function of already-broadcast inputs (`System::policy_graph`
-/// — carried whole by the existing `System` broadcast — and the standardized
-/// scenario libraries, themselves rebuilt identically on every rank inside
-/// `StudySetup::from_broadcast_params`), so every rank constructs a
-/// bitwise-identical graph without a wire hop — the same guarantee
-/// `cut_state_layouts`/`stage_templates`/`scenario_libraries` already rely on.
-/// This type exists so a future caller can transport the graph explicitly
-/// (e.g. to cross-check the deterministic-construction guarantee, the way
-/// [`BroadcastOpeningTree`] transports a user-supplied tree) without
-/// inventing a second wire shape.
+/// Not currently wired: [`NodeGraph`] is deterministically reconstructed
+/// on every rank from already-broadcast inputs, so explicit transport is
+/// unnecessary. This type reserves the wire shape for future use (e.g. to
+/// cross-check the deterministic-construction guarantee) without inventing
+/// a second format later.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct BroadcastNodeGraph {
     pub(crate) node_ids: Vec<i32>,
@@ -511,6 +504,31 @@ mod tests {
         let original: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0];
         let result = broadcast_value(Some(original.clone()), &comm).unwrap();
         assert_eq!(result, original);
+    }
+
+    /// The reconciled boundary cuts ride `broadcast_value` to non-root ranks
+    /// (`apply_training_policy`), so `OwnedPolicyCutRecord` must survive the
+    /// postcard wire hop — losing its `Serialize` derive would silently strand
+    /// every non-root rank with an empty terminal pool.
+    #[test]
+    fn broadcast_value_round_trips_owned_policy_cut_records() {
+        let comm = cobre_comm::LocalBackend;
+        let original = vec![cobre_io::OwnedPolicyCutRecord {
+            cut_id: 7,
+            slot_index: 3,
+            iteration: 2,
+            forward_pass_index: 0,
+            intercept: 1.5,
+            coefficients: vec![0.25, -0.5, 1.0],
+            is_active: true,
+        }];
+        let result = broadcast_value(Some(original.clone()), &comm).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].cut_id, original[0].cut_id);
+        assert_eq!(result[0].slot_index, original[0].slot_index);
+        assert_eq!(result[0].intercept, original[0].intercept);
+        assert_eq!(result[0].coefficients, original[0].coefficients);
+        assert_eq!(result[0].is_active, original[0].is_active);
     }
 
     #[test]

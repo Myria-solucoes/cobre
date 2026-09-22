@@ -437,9 +437,9 @@ pub(crate) struct RawHydroPenaltyOverrides {
 /// Reads the JSON file, deserializes it through intermediate serde types,
 /// performs post-deserialization validation, then converts to `Vec<Hydro>` using
 /// the three-tier penalty resolution cascade (global → entity). The result is
-/// sorted by `id` ascending, so parser output is deterministic regardless of file
-/// row order (declaration-order invariance); the builder applies the same id as
-/// its `(operational_start_date, id)` canonical tiebreak.
+/// sorted by `id` ascending, so parser output is deterministic regardless of
+/// file row order (declaration-order invariance); canonical order is
+/// [`SystemBuilder::build`](cobre_core::SystemBuilder::build)'s to establish.
 ///
 /// # Errors
 ///
@@ -759,7 +759,7 @@ fn convert_hydros(
                 max_turbined_m3s,
                 min_generation_mw,
                 max_generation_mw,
-            ) = convert_generation(raw_hydro.generation);
+            ) = convert_generation(&raw_hydro.generation);
 
             let tailrace = raw_hydro.tailrace.map(convert_tailrace);
 
@@ -854,49 +854,20 @@ fn convert_hydros(
 }
 
 /// Returns `(model, min_turbined_m3s, max_turbined_m3s, min_generation_mw, max_generation_mw)`.
-// Clippy flags this as needless_pass_by_value, but the function consumes its
-// argument by destructuring (moving fields out). Taking &RawGeneration would
-// require cloning the copied f64 fields, which is no improvement.
-#[allow(clippy::needless_pass_by_value)]
-fn convert_generation(raw: RawGeneration) -> (HydroGenerationModel, f64, f64, f64, f64) {
-    match raw {
-        RawGeneration::ConstantProductivity {
-            min_turbined_m3s,
-            max_turbined_m3s,
-            min_generation_mw,
-            max_generation_mw,
-        } => (
-            HydroGenerationModel::ConstantProductivity,
-            min_turbined_m3s,
-            max_turbined_m3s,
-            min_generation_mw,
-            max_generation_mw,
-        ),
-        RawGeneration::LinearizedHead {
-            min_turbined_m3s,
-            max_turbined_m3s,
-            min_generation_mw,
-            max_generation_mw,
-        } => (
-            HydroGenerationModel::LinearizedHead,
-            min_turbined_m3s,
-            max_turbined_m3s,
-            min_generation_mw,
-            max_generation_mw,
-        ),
-        RawGeneration::Fpha {
-            min_turbined_m3s,
-            max_turbined_m3s,
-            min_generation_mw,
-            max_generation_mw,
-        } => (
-            HydroGenerationModel::Fpha,
-            min_turbined_m3s,
-            max_turbined_m3s,
-            min_generation_mw,
-            max_generation_mw,
-        ),
-    }
+fn convert_generation(raw: &RawGeneration) -> (HydroGenerationModel, f64, f64, f64, f64) {
+    let model = match raw {
+        RawGeneration::ConstantProductivity { .. } => HydroGenerationModel::ConstantProductivity,
+        RawGeneration::LinearizedHead { .. } => HydroGenerationModel::LinearizedHead,
+        RawGeneration::Fpha { .. } => HydroGenerationModel::Fpha,
+    };
+    let (min_turbined_m3s, max_turbined_m3s, min_generation_mw, max_generation_mw) = raw.bounds();
+    (
+        model,
+        min_turbined_m3s,
+        max_turbined_m3s,
+        min_generation_mw,
+        max_generation_mw,
+    )
 }
 
 fn convert_tailrace(raw: RawTailrace) -> TailraceModel {
@@ -987,53 +958,7 @@ fn extract_field_from_serde_msg(msg: &str) -> String {
 )]
 mod tests {
     use super::*;
-    use cobre_core::entities::{DeficitSegment, HydroPenalties};
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-
-    /// Write a string to a temp file and return the file handle (keeps it alive).
-    fn write_json(content: &str) -> NamedTempFile {
-        let mut f = NamedTempFile::new().unwrap();
-        f.write_all(content.as_bytes()).unwrap();
-        f
-    }
-
-    /// Build a canonical `GlobalPenaltyDefaults` for test use.
-    fn make_global() -> GlobalPenaltyDefaults {
-        GlobalPenaltyDefaults {
-            bus_deficit_segments: vec![
-                DeficitSegment {
-                    depth_mw: Some(500.0),
-                    cost_per_mwh: 1000.0,
-                },
-                DeficitSegment {
-                    depth_mw: None,
-                    cost_per_mwh: 5000.0,
-                },
-            ],
-            bus_excess_cost: 100.0,
-            line_exchange_cost: 2.0,
-            hydro: HydroPenalties {
-                spillage_cost: 0.01,
-                turbined_cost: 0.05,
-                diversion_cost: 0.1,
-                storage_violation_below_cost: 10_000.0,
-                filling_target_violation_cost: 50_000.0,
-                turbined_violation_below_cost: 500.0,
-                outflow_violation_below_cost: 500.0,
-                outflow_violation_above_cost: 500.0,
-                generation_violation_below_cost: 1_000.0,
-                evaporation_violation_cost: 5_000.0,
-                water_withdrawal_violation_cost: 1_000.0,
-                water_withdrawal_violation_pos_cost: 1_000.0,
-                water_withdrawal_violation_neg_cost: 1_000.0,
-                evaporation_violation_pos_cost: 5_000.0,
-                evaporation_violation_neg_cost: 5_000.0,
-                inflow_nonnegativity_cost: 1000.0,
-            },
-            ncs_curtailment_cost: 0.005,
-        }
-    }
+    use crate::test_support::{make_global, write_json};
 
     /// Minimal hydro entry (`constant_productivity`, no optional fields).
     const MINIMAL_HYDRO_JSON: &str = r#"{

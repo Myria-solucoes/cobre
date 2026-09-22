@@ -10,9 +10,10 @@ use std::collections::{BTreeMap, HashMap};
 use chrono::NaiveDate;
 
 use super::{
-    EntityCounts, HydroReverseLookup, SolutionView, StageExtractionSpec, accumulate_category_costs,
-    assign_scenarios, extract_anticipated_lanes, extract_contracts, extract_generic_violations,
-    extract_pumping_stations, extract_stage_result, extract_stub_collections,
+    EntityCounts, HydroReverseLookup, SimulationHydroResult, SolutionView, StageExtractionSpec,
+    accumulate_category_costs, assign_scenarios, extract_anticipated_lanes, extract_contracts,
+    extract_generic_violations, extract_pumping_stations, extract_stage_result,
+    extract_stub_collections,
 };
 use cobre_core::{
     Block, BlockMode, CascadeTopology, ConstraintExpression, GenericConstraint, NoiseMethod,
@@ -24,13 +25,13 @@ use cobre_stochastic::par::precompute::PrecomputedPar;
 
 use crate::energy_conversion::EnergyConversionSet;
 use crate::hydro_models::{EvaporationModelSet, ProductionModelSet};
-use crate::indexer::{
+use crate::lead_time::{AnticipatedResolution, PointResolution};
+use crate::lp::builder::{
+    GenericConstraintRowEntry, ResolvedTables, StageGeometry, StageLayout, TemplateBuildCtx,
+};
+use crate::lp::indexer::{
     FillingTargetLocal, FloorLocal, FphaLocal, HydroCellIndex, HydroSys, StateSpace,
     StudyDimensions,
-};
-use crate::lead_time::{AnticipatedResolution, PointResolution};
-use crate::lp_builder::{
-    GenericConstraintRowEntry, ResolvedTables, StageGeometry, StageLayout, TemplateBuildCtx,
 };
 use crate::resolved_parameters::ResolvedParameters;
 use crate::setup::PostStudyResolved;
@@ -4494,8 +4495,10 @@ fn make_primal_1_1(storage: f64, storage_in: f64, theta: f64) -> Vec<f64> {
 
 #[test]
 fn stored_energy_initial_uses_v_min_offset() {
-    // storage_initial = 110, V_min = 100, ρ_acum = 4.0 →
-    // stored_energy_initial = (110 - 100) * 4 * 1e6 / 3600 ≈ 11_111.111…
+    // storage_initial = 110, V_min = 100, ρ_acum_integrated = 4.0 (a plain
+    // EnergyConversionSet::new with no with_integrated defaults the integrated
+    // grid to a clone of the reference-point one, so this is the coinciding
+    // case) → stored_energy_initial = (110 - 100) * 4 * 1e6 / 3600 ≈ 11_111.111…
     let indexer = test_support::geom(1, 1);
     let study_dims = test_support::study_dims();
     let state = test_support::state_layout(1, 1);
@@ -4558,7 +4561,8 @@ fn stored_energy_initial_uses_v_min_offset() {
         "accumulated_productivity should be 4.0, got {}",
         h.accumulated_productivity_mw_per_m3s
     );
-    // storage_initial_hm3 = 110.0 (from primal storage_in), V_min = 100.0.
+    // storage_initial_hm3 = 110.0 (from primal storage_in), V_min = 100.0, against
+    // ρ_acum_integrated (coincides with ρ_acum here — see the comment above).
     let expected = (110.0_f64 - 100.0) * 4.0 * 1.0e6 / 3600.0;
     assert!(
         (h.stored_energy_initial_mwh - expected).abs() < 1e-6,
@@ -4629,6 +4633,314 @@ fn incremental_inflow_energy_uses_rho_acum() {
     );
 }
 
+/// With `with_integrated` giving `integrated_accumulated_productivity` a value
+/// distinct from `accumulated_productivity`, stored energy rides the integrated
+/// grid while `incremental_inflow_energy_mw` and the reported accumulated column
+/// stay on the reference-point grid — proven on both the no-turbine and the
+/// per-block extraction path.
+#[test]
+fn stored_energy_rides_integrated_grid_distinct_from_reference_point() {
+    let rho_acum = 4.0_f64;
+    let rho_acum_integrated = 7.5_f64;
+    let v_min = 100.0_f64;
+    let incremental_inflow = 50.0_f64;
+    let ec = one_hydro_energy_set(0.9, rho_acum)
+        .with_integrated(vec![vec![0.9]], vec![vec![rho_acum_integrated]]);
+
+    let indexer = test_support::geom(1, 1);
+    let study_dims = test_support::study_dims();
+    let state = test_support::state_layout(1, 1);
+    let primal = make_primal_1_1(120.0, 110.0, 0.0);
+    let dual = vec![0.0; 2];
+
+    let result = extract_stage_result(
+        &SolutionView {
+            primal: &primal,
+            dual: &dual,
+            objective: 0.0,
+            objective_coeffs: &[],
+            row_lower: &[],
+        },
+        &StageExtractionSpec {
+            study_dims: &study_dims,
+            geometry: &indexer,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
+            state: &state,
+            n_blks: indexer.n_blks,
+            entity_counts: &make_entity_counts_1_hydro(),
+            inflow_m3s_per_hydro: &[incremental_inflow],
+            block_hours: &[],
+            generic_constraint_entries: &[],
+            ncs_col_start: 0,
+            n_ncs: 0,
+            ncs_entity_ids: &[],
+            ncs_col_upper: &[],
+            pumping_col_start: 0,
+            n_pumping: 0,
+            pumping_consumption_mw_per_m3s: &[],
+            contract_prices: &[],
+            contract_is_import: &[],
+            diversion_upstream: &HashMap::new(),
+            hydro_productivities: &[1.0],
+            col_scale: &[],
+            row_scale: &[],
+            cumulative_discount_factor: 1.0,
+            cost_scale_factor: 1_000_000.0,
+            energy_conversion: &ec,
+            hydro_min_storage_hm3: &[v_min],
+            stage_index: 0,
+            n_stages: 1,
+            anticipated_windows: &[],
+            study_stage_ids: &[],
+        },
+        0,
+    );
+
+    assert_eq!(result.hydros.len(), 1);
+    let row = &result.hydros[0];
+    assert_eq!(
+        row.accumulated_productivity_mw_per_m3s.to_bits(),
+        rho_acum.to_bits(),
+        "no-turbine path: reported accumulated column must stay on the reference-point grid"
+    );
+    let expected_inflow_energy = rho_acum * incremental_inflow;
+    assert_eq!(
+        row.incremental_inflow_energy_mw.to_bits(),
+        expected_inflow_energy.to_bits(),
+        "no-turbine path: inflow energy must stay on the reference-point grid"
+    );
+    let expected_initial =
+        (110.0_f64 - v_min) * rho_acum_integrated * super::ENERGY_FACTOR_MWH_PER_HM3_PER_MW_PER_M3S;
+    let expected_final =
+        (120.0_f64 - v_min) * rho_acum_integrated * super::ENERGY_FACTOR_MWH_PER_HM3_PER_MW_PER_M3S;
+    assert_eq!(
+        row.stored_energy_initial_mwh.to_bits(),
+        expected_initial.to_bits(),
+        "no-turbine path: stored energy must ride the integrated grid"
+    );
+    assert_eq!(
+        row.stored_energy_final_mwh.to_bits(),
+        expected_final.to_bits(),
+        "no-turbine path: stored energy must ride the integrated grid"
+    );
+
+    let k = 1_usize;
+    let geom = single_hydro_block_geometry(BlockMode::Parallel, k);
+    let pb_state = test_support::state_layout(1, 0);
+    let n_cols = geom.spillage.end + k * 3;
+    let mut pb_primal = vec![0.0_f64; n_cols];
+    pb_primal[0] = 120.0; // Sᴷ (outgoing)
+    pb_primal[2] = 110.0; // S⁰ (incoming)
+    let pb_dual = vec![0.0_f64; 4];
+
+    let pb_spec = StageExtractionSpec {
+        study_dims: &study_dims,
+        geometry: &geom,
+        hydro_cell_index: &test_support::identity_hydro_cell_index(256),
+        state: &pb_state,
+        n_blks: k,
+        entity_counts: &entity_counts_1_hydro(),
+        inflow_m3s_per_hydro: &[incremental_inflow],
+        block_hours: &[100.0],
+        generic_constraint_entries: &[],
+        ncs_col_start: 0,
+        n_ncs: 0,
+        ncs_entity_ids: &[],
+        ncs_col_upper: &[],
+        pumping_col_start: 0,
+        n_pumping: 0,
+        pumping_consumption_mw_per_m3s: &[],
+        contract_prices: &[],
+        contract_is_import: &[],
+        diversion_upstream: &HashMap::new(),
+        hydro_productivities: &[0.0],
+        col_scale: &[],
+        row_scale: &[],
+        cumulative_discount_factor: 1.0,
+        cost_scale_factor: 1_000_000.0,
+        energy_conversion: &ec,
+        hydro_min_storage_hm3: &[v_min],
+        stage_index: 0,
+        n_stages: 1,
+        anticipated_windows: &[],
+        study_stage_ids: &[],
+    };
+    let pb_view = SolutionView {
+        primal: &pb_primal,
+        dual: &pb_dual,
+        objective: 0.0,
+        objective_coeffs: &vec![0.0_f64; n_cols],
+        row_lower: &[],
+    };
+
+    let pb_result = extract_stage_result(&pb_view, &pb_spec, 0);
+    assert_eq!(pb_result.hydros.len(), k);
+    let pb_row = &pb_result.hydros[0];
+    assert_eq!(
+        pb_row.accumulated_productivity_mw_per_m3s.to_bits(),
+        rho_acum.to_bits(),
+        "per-block path: reported accumulated column must stay on the reference-point grid"
+    );
+    assert_eq!(
+        pb_row.incremental_inflow_energy_mw.to_bits(),
+        expected_inflow_energy.to_bits(),
+        "per-block path: inflow energy must stay on the reference-point grid"
+    );
+    assert_eq!(
+        pb_row.stored_energy_initial_mwh.to_bits(),
+        expected_initial.to_bits(),
+        "per-block path: stored energy must ride the integrated grid"
+    );
+    assert_eq!(
+        pb_row.stored_energy_final_mwh.to_bits(),
+        expected_final.to_bits(),
+        "per-block path: stored energy must ride the integrated grid"
+    );
+}
+
+/// `stored_energy_{initial,final}_mw` divide the corresponding `_mwh` value by
+/// the STAGE's total hours (`Σ block_hours`), never a per-block hours — proven
+/// on the no-turbine path and, under Parallel block mode (storage held constant
+/// across blocks), identical on every per-block row of the stage.
+#[test]
+fn stored_energy_mw_divides_by_stage_total_hours() {
+    let rho_acum_integrated = 2.0_f64;
+    let v_min = 5.0_f64;
+    let storage_initial = 20.0_f64;
+    let storage_final = 50.0_f64;
+    let ec = one_hydro_energy_set(0.0, rho_acum_integrated);
+    let block_hours = [100.0_f64, 200.0, 300.0];
+    let stage_total_hours: f64 = block_hours.iter().sum();
+
+    let indexer = test_support::geom(1, 1);
+    let study_dims = test_support::study_dims();
+    let state = test_support::state_layout(1, 1);
+    let primal = make_primal_1_1(storage_final, storage_initial, 0.0);
+    let dual = vec![0.0; 2];
+
+    let result = extract_stage_result(
+        &SolutionView {
+            primal: &primal,
+            dual: &dual,
+            objective: 0.0,
+            objective_coeffs: &[],
+            row_lower: &[],
+        },
+        &StageExtractionSpec {
+            study_dims: &study_dims,
+            geometry: &indexer,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
+            state: &state,
+            n_blks: indexer.n_blks,
+            entity_counts: &make_entity_counts_1_hydro(),
+            inflow_m3s_per_hydro: &[0.0],
+            block_hours: &block_hours,
+            generic_constraint_entries: &[],
+            ncs_col_start: 0,
+            n_ncs: 0,
+            ncs_entity_ids: &[],
+            ncs_col_upper: &[],
+            pumping_col_start: 0,
+            n_pumping: 0,
+            pumping_consumption_mw_per_m3s: &[],
+            contract_prices: &[],
+            contract_is_import: &[],
+            diversion_upstream: &HashMap::new(),
+            hydro_productivities: &[1.0],
+            col_scale: &[],
+            row_scale: &[],
+            cumulative_discount_factor: 1.0,
+            cost_scale_factor: 1_000_000.0,
+            energy_conversion: &ec,
+            hydro_min_storage_hm3: &[v_min],
+            stage_index: 0,
+            n_stages: 1,
+            anticipated_windows: &[],
+            study_stage_ids: &[],
+        },
+        0,
+    );
+
+    assert_eq!(result.hydros.len(), 1);
+    let row = &result.hydros[0];
+    let expected_initial_mw = row.stored_energy_initial_mwh / stage_total_hours;
+    let expected_final_mw = row.stored_energy_final_mwh / stage_total_hours;
+    assert_eq!(
+        row.stored_energy_initial_mw.to_bits(),
+        expected_initial_mw.to_bits(),
+        "no-turbine path: stored_energy_initial_mw must equal _mwh / stage total hours"
+    );
+    assert_eq!(
+        row.stored_energy_final_mw.to_bits(),
+        expected_final_mw.to_bits(),
+        "no-turbine path: stored_energy_final_mw must equal _mwh / stage total hours"
+    );
+
+    let k = 3_usize;
+    let geom = single_hydro_block_geometry(BlockMode::Parallel, k);
+    let pb_state = test_support::state_layout(1, 0);
+    let n_cols = geom.spillage.end + k * 3;
+    let mut pb_primal = vec![0.0_f64; n_cols];
+    pb_primal[0] = storage_final; // Sᴷ (outgoing)
+    pb_primal[2] = storage_initial; // S⁰ (incoming)
+    let pb_dual = vec![0.0_f64; 4];
+
+    let pb_spec = StageExtractionSpec {
+        study_dims: &study_dims,
+        geometry: &geom,
+        hydro_cell_index: &test_support::identity_hydro_cell_index(256),
+        state: &pb_state,
+        n_blks: k,
+        entity_counts: &entity_counts_1_hydro(),
+        inflow_m3s_per_hydro: &[0.0],
+        block_hours: &block_hours,
+        generic_constraint_entries: &[],
+        ncs_col_start: 0,
+        n_ncs: 0,
+        ncs_entity_ids: &[],
+        ncs_col_upper: &[],
+        pumping_col_start: 0,
+        n_pumping: 0,
+        pumping_consumption_mw_per_m3s: &[],
+        contract_prices: &[],
+        contract_is_import: &[],
+        diversion_upstream: &HashMap::new(),
+        hydro_productivities: &[0.0],
+        col_scale: &[],
+        row_scale: &[],
+        cumulative_discount_factor: 1.0,
+        cost_scale_factor: 1_000_000.0,
+        energy_conversion: &ec,
+        hydro_min_storage_hm3: &[v_min],
+        stage_index: 0,
+        n_stages: 1,
+        anticipated_windows: &[],
+        study_stage_ids: &[],
+    };
+    let pb_view = SolutionView {
+        primal: &pb_primal,
+        dual: &pb_dual,
+        objective: 0.0,
+        objective_coeffs: &vec![0.0_f64; n_cols],
+        row_lower: &[],
+    };
+
+    let pb_result = extract_stage_result(&pb_view, &pb_spec, 0);
+    assert_eq!(pb_result.hydros.len(), k);
+    for pb_row in &pb_result.hydros {
+        assert_eq!(
+            pb_row.stored_energy_initial_mw.to_bits(),
+            expected_initial_mw.to_bits(),
+            "per-block path: stored_energy_initial_mw must divide by stage, not per-block, hours"
+        );
+        assert_eq!(
+            pb_row.stored_energy_final_mw.to_bits(),
+            expected_final_mw.to_bits(),
+            "per-block path: stored_energy_final_mw must divide by stage, not per-block, hours"
+        );
+    }
+}
+
 #[test]
 fn stage_path_propagates_productivity_values() {
     // The per-stage path (block_hours empty) must read ρ_eq and ρ_acum
@@ -4692,6 +5004,145 @@ fn stage_path_propagates_productivity_values() {
         (rho_acum - 3.5).abs() < 1e-12,
         "stage rho_acum = {rho_acum}"
     );
+}
+
+#[test]
+fn integrated_productivity_columns_read_the_mean_evaluator_on_both_branches() {
+    // Reference point ρ_eq = 0.9, ρ_acum = 4.0; the mean-evaluator grids are
+    // installed distinct (1.5, 6.0) so a column reading the reference-point pair
+    // instead of the integrated accessor would fail this test.
+    let study_dims = test_support::study_dims();
+    let state = test_support::state_layout(1, 1);
+    let ec = one_hydro_energy_set(0.9, 4.0).with_integrated(vec![vec![1.5]], vec![vec![6.0]]);
+    let dual = vec![0.0; 2];
+
+    let assert_columns = |h: &SimulationHydroResult| {
+        assert!(
+            (h.equivalent_productivity_mw_per_m3s - 0.9).abs() < 1e-12,
+            "reference ρ_eq must stay unchanged, got {}",
+            h.equivalent_productivity_mw_per_m3s
+        );
+        assert!(
+            (h.accumulated_productivity_mw_per_m3s - 4.0).abs() < 1e-12,
+            "reference ρ_acum must stay unchanged, got {}",
+            h.accumulated_productivity_mw_per_m3s
+        );
+        assert!(
+            (h.integrated_equivalent_productivity_mw_per_m3s - 1.5).abs() < 1e-12,
+            "integrated ρ_eq must equal the own-scope accessor, got {}",
+            h.integrated_equivalent_productivity_mw_per_m3s
+        );
+        assert!(
+            (h.integrated_accumulated_productivity_mw_per_m3s - 6.0).abs() < 1e-12,
+            "integrated ρ_acum must equal the cascade-scope accessor, got {}",
+            h.integrated_accumulated_productivity_mw_per_m3s
+        );
+    };
+
+    // No-turbine branch: an empty `turbine` range routes `extract_hydros`
+    // through `extract_hydro_no_turbine`.
+    let primal = make_primal_1_1(120.0, 110.0, 0.0);
+    let no_turbine = extract_stage_result(
+        &SolutionView {
+            primal: &primal,
+            dual: &dual,
+            objective: 0.0,
+            objective_coeffs: &[],
+            row_lower: &[],
+        },
+        &StageExtractionSpec {
+            study_dims: &study_dims,
+            geometry: &test_support::geom(1, 1),
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
+            state: &state,
+            n_blks: 0,
+            entity_counts: &make_entity_counts_1_hydro(),
+            inflow_m3s_per_hydro: &[10.0],
+            block_hours: &[],
+            generic_constraint_entries: &[],
+            ncs_col_start: 0,
+            n_ncs: 0,
+            ncs_entity_ids: &[],
+            ncs_col_upper: &[],
+            pumping_col_start: 0,
+            n_pumping: 0,
+            pumping_consumption_mw_per_m3s: &[],
+            contract_prices: &[],
+            contract_is_import: &[],
+            diversion_upstream: &HashMap::new(),
+            hydro_productivities: &[1.0],
+            col_scale: &[],
+            row_scale: &[],
+            cumulative_discount_factor: 1.0,
+            cost_scale_factor: 1_000_000.0,
+            energy_conversion: &ec,
+            hydro_min_storage_hm3: &[100.0],
+            stage_index: 0,
+            n_stages: 1,
+            anticipated_windows: &[],
+            study_stage_ids: &[],
+        },
+        0,
+    );
+    assert_eq!(no_turbine.hydros.len(), 1);
+    assert_columns(&no_turbine.hydros[0]);
+
+    // Per-block branch: a non-empty `turbine` range with `n_blks = 1` routes
+    // `extract_hydros` through `extract_hydro_per_block`. Turbine col at index 5,
+    // spillage col at index 6, appended after the base N=1,L=1 primal.
+    let mut primal_pb = make_primal_1_1(120.0, 110.0, 0.0);
+    primal_pb.extend_from_slice(&[5.0, 0.0]);
+    let objective_coeffs = vec![0.0; primal_pb.len()];
+    let geom_pb = StageGeometry {
+        turbine: 5..6,
+        spillage: 6..7,
+        n_blks: 1,
+        ..test_support::geom(1, 1)
+    };
+    let per_block = extract_stage_result(
+        &SolutionView {
+            primal: &primal_pb,
+            dual: &dual,
+            objective: 0.0,
+            objective_coeffs: &objective_coeffs,
+            row_lower: &[],
+        },
+        &StageExtractionSpec {
+            study_dims: &study_dims,
+            geometry: &geom_pb,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
+            state: &state,
+            n_blks: 1,
+            entity_counts: &make_entity_counts_1_hydro(),
+            inflow_m3s_per_hydro: &[10.0],
+            block_hours: &[720.0],
+            generic_constraint_entries: &[],
+            ncs_col_start: 0,
+            n_ncs: 0,
+            ncs_entity_ids: &[],
+            ncs_col_upper: &[],
+            pumping_col_start: 0,
+            n_pumping: 0,
+            pumping_consumption_mw_per_m3s: &[],
+            contract_prices: &[],
+            contract_is_import: &[],
+            diversion_upstream: &HashMap::new(),
+            hydro_productivities: &[1.0],
+            col_scale: &[],
+            row_scale: &[],
+            cumulative_discount_factor: 1.0,
+            cost_scale_factor: 1_000_000.0,
+            energy_conversion: &ec,
+            hydro_min_storage_hm3: &[100.0],
+            stage_index: 0,
+            n_stages: 1,
+            anticipated_windows: &[],
+            study_stage_ids: &[],
+        },
+        0,
+    );
+    assert_eq!(per_block.hydros.len(), 1);
+    assert_columns(&per_block.hydros[0]);
 }
 
 // -------------------------------------------------------------------------
@@ -5329,7 +5780,7 @@ fn entity_counts_1_hydro() -> EntityCounts {
 /// spillage `[t0 + K, t0 + 2K)`, then `K` evaporation triples. In parallel mode the
 /// interior family is empty and turbine begins at 4.
 fn single_hydro_block_geometry(block_mode: BlockMode, k: usize) -> StageGeometry {
-    use crate::indexer::{EvaporationIndices, StorageBoundaryGrid};
+    use crate::lp::indexer::{EvaporationIndices, StorageBoundaryGrid};
     let n_interior = match block_mode {
         BlockMode::Chronological => k - 1,
         BlockMode::Parallel => 0,
@@ -5523,7 +5974,10 @@ fn extract_parallel_per_block_storage_byte_identical() {
 }
 
 /// Chronological per-block stored energy derives from each block's own boundary:
-/// `(S − V_min) · ρ_acum · ENERGY_FACTOR`, with `V_min` / `ρ_acum` block-invariant.
+/// `(S − V_min) · ρ_acum_integrated · ENERGY_FACTOR`, with `V_min` /
+/// `ρ_acum_integrated` block-invariant. A plain `EnergyConversionSet::new` with no
+/// `with_integrated` defaults the integrated grid to a clone of the
+/// reference-point one, so `ρ_acum_integrated` coincides with `ρ_acum` here.
 #[test]
 fn extract_chronological_per_block_stored_energy() {
     use crate::energy_conversion::EnergyConversion;
@@ -5532,7 +5986,7 @@ fn extract_chronological_per_block_stored_energy() {
     let study_dims = test_support::study_dims();
     let state = test_support::state_layout(1, 0);
 
-    let rho_acum = 2.0_f64;
+    let rho_acum_integrated = 2.0_f64;
     let v_min = 5.0_f64;
     let ec = EnergyConversionSet::new(
         vec![vec![EnergyConversion {
@@ -5540,7 +5994,7 @@ fn extract_chronological_per_block_stored_energy() {
             reference_volume_hm3: 0.0,
             reference_outflow_m3s: 0.0,
         }]],
-        vec![vec![rho_acum]],
+        vec![vec![rho_acum_integrated]],
         1,
         1,
     );
@@ -5596,7 +6050,7 @@ fn extract_chronological_per_block_stored_energy() {
     let result = extract_stage_result(&view, &spec, 0);
     let boundaries = [10.0, 20.0, 30.0, 40.0];
     let expected = |s: f64| -> f64 {
-        (s - v_min) * rho_acum * super::ENERGY_FACTOR_MWH_PER_HM3_PER_MW_PER_M3S
+        (s - v_min) * rho_acum_integrated * super::ENERGY_FACTOR_MWH_PER_HM3_PER_MW_PER_M3S
     };
     for b in 0..k {
         let row = &result.hydros[b];

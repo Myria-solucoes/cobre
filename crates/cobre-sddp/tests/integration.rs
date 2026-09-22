@@ -48,6 +48,7 @@ use cobre_sddp::{
     horizon_mode::HorizonMode,
     indexer::{CutStateProjection, StateSpace, StudyDimensions},
     inflow_method::InflowNonNegativityMethod,
+    lp::builder::StateBox,
     risk_measure::RiskMeasure,
     train,
 };
@@ -537,6 +538,16 @@ impl Fixture {
     }
 }
 
+fn permissive_state_boxes(n_state: usize, n_stages: usize) -> Vec<StateBox> {
+    vec![
+        StateBox {
+            lower: vec![f64::NEG_INFINITY; n_state],
+            upper: vec![f64::INFINITY; n_state],
+        };
+        n_stages
+    ]
+}
+
 /// Run a single training pass with a given stochastic context.
 fn run_one_deterministic_pass(
     fx: &Fixture,
@@ -545,6 +556,7 @@ fn run_one_deterministic_pass(
 ) -> cobre_sddp::TrainingOutcome {
     let mut fcf = make_fcf(fx.n_stages);
     let mut solver = MockSolver::with_fixed(50.0);
+    let state_boxes = permissive_state_boxes(fx.state.n_state, fx.n_stages);
     let stage_ctx = StageContext {
         geometry_per_stage: &[],
         templates: &fx.templates,
@@ -555,6 +567,7 @@ fn run_one_deterministic_pass(
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
+        state_boxes: &state_boxes,
         block_counts_per_stage: &[1usize, 1],
         ncs_col_starts: &[],
         n_ncs: 0,
@@ -588,7 +601,6 @@ fn run_one_deterministic_pass(
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                warm_start_cuts: 0,
                 risk_measures: fx.risk_measures.clone(),
             },
             events: EventConfig {
@@ -652,7 +664,6 @@ fn train_converges_with_mock_solver() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: fx.risk_measures.clone(),
         },
         events: EventConfig {
@@ -663,6 +674,7 @@ fn train_converges_with_mock_solver() {
         },
     };
 
+    let state_boxes = permissive_state_boxes(fx.state.n_state, fx.n_stages);
     let stage_ctx = StageContext {
         geometry_per_stage: &[],
         templates: &fx.templates,
@@ -673,6 +685,7 @@ fn train_converges_with_mock_solver() {
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
+        state_boxes: &state_boxes,
         block_counts_per_stage: &[1usize, 1],
         ncs_col_starts: &[],
         n_ncs: 0,
@@ -774,7 +787,6 @@ fn train_lb_monotonically_nondecreasing() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: fx.risk_measures.clone(),
         },
         events: EventConfig {
@@ -785,6 +797,7 @@ fn train_lb_monotonically_nondecreasing() {
         },
     };
 
+    let state_boxes = permissive_state_boxes(fx.state.n_state, fx.n_stages);
     let stage_ctx = StageContext {
         geometry_per_stage: &[],
         templates: &fx.templates,
@@ -795,6 +808,7 @@ fn train_lb_monotonically_nondecreasing() {
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
+        state_boxes: &state_boxes,
         block_counts_per_stage: &[1usize, 1],
         ncs_col_starts: &[],
         n_ncs: 0,
@@ -885,7 +899,6 @@ fn train_emits_correct_event_sequence() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: fx.risk_measures.clone(),
         },
         events: EventConfig {
@@ -896,6 +909,7 @@ fn train_emits_correct_event_sequence() {
         },
     };
 
+    let state_boxes = permissive_state_boxes(fx.state.n_state, fx.n_stages);
     let stage_ctx = StageContext {
         geometry_per_stage: &[],
         templates: &fx.templates,
@@ -906,6 +920,7 @@ fn train_emits_correct_event_sequence() {
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
+        state_boxes: &state_boxes,
         block_counts_per_stage: &[1usize, 1],
         ncs_col_starts: &[],
         n_ncs: 0,
@@ -988,6 +1003,7 @@ fn train_stops_at_iteration_limit() {
     let mut solver = MockSolver::with_fixed(100.0);
     let comm = StubComm;
 
+    let state_boxes = permissive_state_boxes(fx.state.n_state, fx.n_stages);
     let stage_ctx = StageContext {
         geometry_per_stage: &[],
         templates: &fx.templates,
@@ -998,6 +1014,7 @@ fn train_stops_at_iteration_limit() {
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
+        state_boxes: &state_boxes,
         block_counts_per_stage: &[1usize, 1],
         ncs_col_starts: &[],
         n_ncs: 0,
@@ -1031,7 +1048,6 @@ fn train_stops_at_iteration_limit() {
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                warm_start_cuts: 0,
                 risk_measures: fx.risk_measures.clone(),
             },
             events: EventConfig {
@@ -1092,6 +1108,7 @@ fn train_stops_on_graceful_shutdown() {
         mode: StoppingMode::Any,
     };
 
+    let state_boxes = permissive_state_boxes(fx.state.n_state, fx.n_stages);
     let stage_ctx = StageContext {
         geometry_per_stage: &[],
         templates: &fx.templates,
@@ -1102,6 +1119,7 @@ fn train_stops_on_graceful_shutdown() {
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
+        state_boxes: &state_boxes,
         block_counts_per_stage: &[1usize, 1],
         ncs_col_starts: &[],
         n_ncs: 0,
@@ -1135,7 +1153,6 @@ fn train_stops_on_graceful_shutdown() {
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                warm_start_cuts: 0,
                 risk_measures: fx.risk_measures.clone(),
             },
             events: EventConfig {
@@ -1186,6 +1203,7 @@ fn train_propagates_infeasible_error() {
     let mut solver = MockSolver::infeasible_on_first();
     let comm = StubComm;
 
+    let state_boxes = permissive_state_boxes(fx.state.n_state, fx.n_stages);
     let stage_ctx = StageContext {
         geometry_per_stage: &[],
         templates: &fx.templates,
@@ -1196,6 +1214,7 @@ fn train_propagates_infeasible_error() {
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
+        state_boxes: &state_boxes,
         block_counts_per_stage: &[1usize, 1],
         ncs_col_starts: &[],
         n_ncs: 0,
@@ -1229,7 +1248,6 @@ fn train_propagates_infeasible_error() {
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                warm_start_cuts: 0,
                 risk_measures: fx.risk_measures.clone(),
             },
             events: EventConfig {
@@ -1315,7 +1333,6 @@ fn d17_level1_cut_selection_convergence() {
             }),
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: fx.risk_measures.clone(),
         },
         events: EventConfig {
@@ -1326,6 +1343,7 @@ fn d17_level1_cut_selection_convergence() {
         },
     };
 
+    let state_boxes = permissive_state_boxes(fx.state.n_state, fx.n_stages);
     let stage_ctx = StageContext {
         geometry_per_stage: &[],
         templates: &fx.templates,
@@ -1336,6 +1354,7 @@ fn d17_level1_cut_selection_convergence() {
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
+        state_boxes: &state_boxes,
         block_counts_per_stage: &[1usize, 1],
         ncs_col_starts: &[],
         n_ncs: 0,
@@ -1459,6 +1478,7 @@ fn d17_level1_cut_selection_reconstruction() {
     let mut solver = MockSolver::with_fixed(100.0);
     let comm = StubComm;
 
+    let state_boxes = permissive_state_boxes(fx.state.n_state, fx.n_stages);
     let stage_ctx = StageContext {
         geometry_per_stage: &[],
         templates: &fx.templates,
@@ -1469,6 +1489,7 @@ fn d17_level1_cut_selection_reconstruction() {
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
+        state_boxes: &state_boxes,
         block_counts_per_stage: &[1usize, 1],
         ncs_col_starts: &[],
         n_ncs: 0,
@@ -1506,7 +1527,6 @@ fn d17_level1_cut_selection_reconstruction() {
                 }),
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                warm_start_cuts: 0,
                 risk_measures: fx.risk_measures.clone(),
             },
             events: EventConfig {
@@ -1593,7 +1613,6 @@ fn d18_lml1_cut_selection_convergence() {
             }),
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: fx.risk_measures.clone(),
         },
         events: EventConfig {
@@ -1604,6 +1623,7 @@ fn d18_lml1_cut_selection_convergence() {
         },
     };
 
+    let state_boxes = permissive_state_boxes(fx.state.n_state, fx.n_stages);
     let stage_ctx = StageContext {
         geometry_per_stage: &[],
         templates: &fx.templates,
@@ -1614,6 +1634,7 @@ fn d18_lml1_cut_selection_convergence() {
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
+        state_boxes: &state_boxes,
         block_counts_per_stage: &[1usize, 1],
         ncs_col_starts: &[],
         n_ncs: 0,
@@ -1725,45 +1746,6 @@ fn test_forward_basis_reconstruct_bit_identical_d01() {
     use cobre_sddp::{StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic};
     use cobre_solver::ActiveSolver;
 
-    struct LocalStubComm;
-
-    impl Communicator for LocalStubComm {
-        fn allgatherv<T: CommData>(
-            &self,
-            send: &[T],
-            recv: &mut [T],
-            _counts: &[usize],
-            _displs: &[usize],
-        ) -> Result<(), CommError> {
-            recv[..send.len()].clone_from_slice(send);
-            Ok(())
-        }
-        fn allreduce<T: CommData>(
-            &self,
-            send: &[T],
-            recv: &mut [T],
-            _op: ReduceOp,
-        ) -> Result<(), CommError> {
-            recv.clone_from_slice(send);
-            Ok(())
-        }
-        fn broadcast<T: CommData>(&self, _buf: &mut [T], _root: usize) -> Result<(), CommError> {
-            Ok(())
-        }
-        fn barrier(&self) -> Result<(), CommError> {
-            Ok(())
-        }
-        fn rank(&self) -> usize {
-            0
-        }
-        fn size(&self) -> usize {
-            1
-        }
-        fn abort(&self, error_code: i32) -> ! {
-            std::process::exit(error_code)
-        }
-    }
-
     let case_dir = Path::new("../../examples/deterministic/d01-thermal-dispatch");
     let config_path = case_dir.join("config.json");
     let config = cobre_io::parse_config(&config_path).expect("config must parse");
@@ -1784,10 +1766,10 @@ fn test_forward_basis_reconstruct_bit_identical_d01() {
     let hydro_models =
         prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
 
-    let mut setup =
-        StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup must build");
+    let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
+        .expect("StudySetup must build");
 
-    let comm = LocalStubComm;
+    let comm = StubComm;
     let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
 
     let outcome = setup
@@ -1821,6 +1803,7 @@ fn frozen_backward_pass_smoke_test() {
     // The frozen path adds cut rows on iteration 2+; ExpandingMockSolver grows its
     // dual slice to match, where MockSolver's fixed 2-element dual would panic.
     let mut solver = ExpandingMockSolver::with_objectives(vec![50.0]);
+    let state_boxes = permissive_state_boxes(fx.state.n_state, fx.n_stages);
     let stage_ctx = StageContext {
         geometry_per_stage: &[],
         templates: &fx.templates,
@@ -1831,6 +1814,7 @@ fn frozen_backward_pass_smoke_test() {
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
+        state_boxes: &state_boxes,
         block_counts_per_stage: &[1_usize, 1, 1],
         ncs_col_starts: &[],
         n_ncs: 0,
@@ -1865,7 +1849,6 @@ fn frozen_backward_pass_smoke_test() {
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                warm_start_cuts: 0,
                 risk_measures: fx.risk_measures.clone(),
             },
             events: EventConfig {

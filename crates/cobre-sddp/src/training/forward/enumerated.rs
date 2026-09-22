@@ -20,7 +20,7 @@ use std::time::Instant;
 
 use cobre_core::{TrainingEvent, WorkerTimingPhase};
 use cobre_solver::{SolutionView, SolverInterface, StageTemplate};
-use cobre_stochastic::{ClassSampleRequest, ForwardSampler, SampleRequest};
+use cobre_stochastic::{ClassSampleRequest, ForwardNoiseTables, ForwardSampler, SampleRequest};
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 
 use crate::{
@@ -30,10 +30,13 @@ use crate::{
     dcs::{DcsParams, DcsSolveContext, build_initial_resident_set, lazy_solve_preloaded},
     error::SddpError,
     indexer::CutStateProjection,
-    noise::{AccumSnapshot, DownstreamAccumState, LagAccumState, accumulate_and_shift_lag_state},
+    noise::{AccumSnapshot, DownstreamAccumState, LagAccumState},
     setup::node_graph::{EnumeratedPlan, NodeGraph, NodeId, NodePos, StageIdx, TypedVec},
     solver_stats::SolverStatsDelta,
-    stage_solve::{StageInputs, fill_unscaled, run_stage_solve, run_stage_solve_terminal_static},
+    stage_solve::{
+        StageInputs, assemble_outgoing_state, fill_unscaled, run_stage_solve,
+        run_stage_solve_terminal_static,
+    },
     training::{
         backward::extract_state_duals_only,
         stage_solve_prep::{
@@ -194,6 +197,7 @@ pub(crate) struct EnumeratedParams<'a> {
     pub fcf: &'a FutureCostFunction,
     pub training_ctx: &'a TrainingContext<'a>,
     pub sampler: &'a ForwardSampler<'a>,
+    pub noise_tables: &'a ForwardNoiseTables,
     pub dcs: Option<DcsParams>,
     pub event_sender: Option<&'a Sender<TrainingEvent>>,
 }
@@ -278,6 +282,7 @@ fn solve_forward_node<S: SolverInterface + Send>(
     let state = training_ctx.state;
     let horizon = training_ctx.horizon;
     let pool = &params.fcf.pools[pool_id];
+    let is_terminal = horizon.is_terminal(t.next().0);
     // Fuse the leaf's forward slice only with its CUT-GENERATING PARENT's
     // cut-state projection, never the leaf's own pool — the parent-pool
     // fusion-projection contract (sddp.md). Disabled under DCS: the forward's
@@ -315,8 +320,8 @@ fn solve_forward_node<S: SolverInterface + Send>(
         training_ctx,
         t,
         &prep_params,
-    )?;
-    if horizon.is_terminal(t.next().0) && !params.terminal_has_boundary_cuts {
+    );
+    if is_terminal && !params.terminal_has_boundary_cuts {
         ws.solver.set_col_bounds(&[state.theta], &[0.0], &[0.0]);
     }
 
@@ -365,7 +370,7 @@ fn solve_forward_node<S: SolverInterface + Send>(
             iteration: Some(params.iteration),
             node_id,
         };
-        let view = if horizon.is_terminal(t.next().0) {
+        let view = if is_terminal {
             run_stage_solve_terminal_static(ws, &inputs)?
         } else {
             run_stage_solve(ws, &inputs)?
@@ -380,7 +385,7 @@ fn solve_forward_node<S: SolverInterface + Send>(
     // Terminal boundary θ prices the post-horizon value-to-go: KEEP it in the cost
     // (subtracting it, the interior form, drops it from the UB only — understating
     // it below the LB). sddp.md "Terminal boundary FCF in the reported total cost".
-    let stage_cost = if horizon.is_terminal(t.next().0) && params.terminal_has_boundary_cuts {
+    let stage_cost = if is_terminal && params.terminal_has_boundary_cuts {
         view_objective * ctx.cost_scale_factor
     } else {
         (view_objective - d_t * unscaled_primal[state.theta]) * ctx.cost_scale_factor
@@ -393,9 +398,6 @@ fn solve_forward_node<S: SolverInterface + Send>(
         .lag_matrix_buf
         .extend_from_slice(&ws.current_state[lag_start..lag_start + lag_len]);
 
-    ws.current_state.clear();
-    ws.current_state
-        .extend_from_slice(&unscaled_primal[..state.n_state]);
     let stage_lag = ctx.stage_lag(t);
     let downstream_par_order = ws
         .scratch
@@ -403,12 +405,13 @@ fn solve_forward_node<S: SolverInterface + Send>(
         .len()
         .checked_div(ws.scratch.lag_accumulator.len())
         .unwrap_or(0);
-    accumulate_and_shift_lag_state(
+    assemble_outgoing_state(
         &mut ws.current_state,
-        &ws.scratch.lag_matrix_buf,
         &unscaled_primal,
+        &ws.scratch.lag_matrix_buf,
         state,
-        &stage_lag,
+        ctx.state_box(t),
+        stage_lag,
         &mut LagAccumState {
             accumulator: &mut ws.scratch.lag_accumulator,
             weight_accum: &mut ws.scratch.lag_weight_accum,
@@ -730,8 +733,8 @@ fn enumerated_stage_worker<S: SolverInterface + Send>(
 
     let mut raw_noise_buf = std::mem::take(&mut ws.scratch.raw_noise_buf);
     raw_noise_buf.resize(params.noise_dim, 0.0_f64);
-    let mut perm_scratch = std::mem::take(&mut ws.scratch.perm_scratch);
-    perm_scratch.resize(params.total_forward_passes.max(1), 0_usize);
+    let mut corr_scratch = std::mem::take(&mut ws.scratch.corr_scratch);
+    corr_scratch.resize(2 * params.noise_dim, 0.0_f64);
 
     #[allow(clippy::cast_possible_truncation)]
     let total_scenarios_u32 = params.total_forward_passes as u32;
@@ -785,12 +788,13 @@ fn enumerated_stage_worker<S: SolverInterface + Send>(
             stage: t32,
             stage_idx: t.0,
             noise_buf: &mut raw_noise_buf,
-            perm_scratch: &mut perm_scratch,
+            corr_scratch: &mut corr_scratch,
             total_scenarios: total_scenarios_u32,
             noise_group_id: params.ctx.noise_group_id_at(t),
             node_opening_offset,
             node_opening_len,
             pinned_scenario,
+            tables: params.noise_tables,
         })?;
 
         // Reuse the capture slot at `count`, growing only until the widest stage's
@@ -833,7 +837,7 @@ fn enumerated_stage_worker<S: SolverInterface + Send>(
     }
 
     ws.scratch.raw_noise_buf = raw_noise_buf;
-    ws.scratch.perm_scratch = perm_scratch;
+    ws.scratch.corr_scratch = corr_scratch;
     Ok(count)
 }
 
@@ -1014,6 +1018,15 @@ mod tests {
             usize::try_from(test_support::node_scenario_count(node_graph).expect("scenario count"))
                 .expect("fits usize");
         let dcs = training_ctx.dcs.filter(|p| p.is_active(iteration));
+        let mut noise_tables = ForwardNoiseTables::default();
+        sampler
+            .rebuild_noise_tables(
+                u32::try_from(iteration).expect("fits u32"),
+                u32::try_from(total_forward_passes).expect("fits u32"),
+                stage_ctx.noise_group_ids,
+                &mut noise_tables,
+            )
+            .expect("test fixture never exceeds the Sobol dimension cap");
 
         let params = EnumeratedParams {
             num_stages: setup.num_stages(),
@@ -1031,6 +1044,7 @@ mod tests {
             fcf: &setup.fcf,
             training_ctx: &training_ctx,
             sampler: &sampler,
+            noise_tables: &noise_tables,
             dcs,
             event_sender,
         };

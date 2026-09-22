@@ -8,11 +8,10 @@
 //!
 //! Parquet parsers follow the canonical pattern:
 //!
-//! 1. Open the file with `std::fs::File::open`.
-//! 2. Build a `ParquetRecordBatchReaderBuilder` and consume all record batches.
-//! 3. Extract typed columns by name; return `SchemaError` for missing or wrong-type columns.
-//! 4. Validate per-row constraints; return `SchemaError` on violation.
-//! 5. Sort the output by the documented sort key and return.
+//! 1. Obtain the batch reader from `open_record_batch_reader` and consume all record batches.
+//! 2. Extract typed columns by name; return `SchemaError` for missing or wrong-type columns.
+//! 3. Validate per-row constraints; return `SchemaError` on violation.
+//! 4. Sort the output by the documented sort key and return.
 //!
 //! JSON parsers follow the four-step pipeline:
 //!
@@ -54,7 +53,7 @@ pub use production_models::{
     ProductionModelFile, ReferenceVolume, SeasonConfig, SelectionMode, StageRange,
     parse_production_models,
 };
-pub use scalar_parameters::{load_scalar_parameters_json, parse_scalar_parameters_json};
+pub use scalar_parameters::parse_scalar_parameters_json;
 pub use tailrace_curves::{TailraceCurveRow, parse_tailrace_curves};
 
 use crate::LoadError;

@@ -4,11 +4,16 @@
 //! stage: interior storage boundaries (`HydroStorageInitial` / `HydroStorageFinal`)
 //! on parallel stages, and out-of-range block selectors on any per-block reference.
 
-use cobre_core::{VariableRef, temporal::BlockMode};
+use std::collections::{HashMap, HashSet};
+
+use cobre_core::{
+    AffineBound, CoefficientRef, ComputedParameter, EntityId, GenericConstraint, ParameterKind,
+    VariableRef, temporal::BlockMode,
+};
 
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 
-/// Layer 5a — rejects per-block variable references that address a column a stage
+/// Rule 20. Layer 5a — rejects per-block variable references that address a column a stage
 /// cannot expose, honoring per-`(constraint, stage)` activation.
 ///
 /// `HydroStorageInitial{Some(b)}` references boundary `b` (start of block `b`);
@@ -64,6 +69,84 @@ fn constraint_active_on_stage(data: &ParsedData, constraint_id: i32, stage_id: i
         .any(|r| r.constraint_id == constraint_id && r.stage_id == stage_id)
 }
 
+/// Rule 51. Layer 5a — warns when a constraint pairs the `max_stored_energy(h)`
+/// computed parameter with the mismatched `accumulated_productivity(h)` coefficient
+/// for the same hydro `h`: the two ride different evaluators and would not cancel.
+/// The matching (cancelling) coefficient for `max_stored_energy` is
+/// `integrated_accumulated_productivity`. Warning only — never rejected.
+pub(super) fn check_productivity_tag_pairing(data: &ParsedData, ctx: &mut ValidationContext) {
+    let computed: HashMap<EntityId, ComputedParameter> = data
+        .scalar_parameters
+        .iter()
+        .filter_map(|p| match p.kind {
+            ParameterKind::Computed { computed_spec } => Some((p.id, computed_spec)),
+            _ => None,
+        })
+        .collect();
+
+    for constraint in &data.generic_constraints {
+        let mut max_stored_energy: HashSet<EntityId> = HashSet::new();
+        let mut accumulated_productivity: HashSet<EntityId> = HashSet::new();
+
+        for id in constraint_parameter_ids(constraint) {
+            match computed.get(&id) {
+                Some(ComputedParameter::MaxStoredEnergy { hydro_id }) => {
+                    max_stored_energy.insert(*hydro_id);
+                }
+                Some(ComputedParameter::AccumulatedProductivity { hydro_id }) => {
+                    accumulated_productivity.insert(*hydro_id);
+                }
+                _ => {}
+            }
+        }
+
+        let mut mismatched: Vec<EntityId> = max_stored_energy
+            .intersection(&accumulated_productivity)
+            .copied()
+            .collect();
+        mismatched.sort_unstable();
+
+        for hydro_id in mismatched {
+            ctx.add_warning(
+                ErrorKind::SemanticAmbiguity,
+                "constraints/generic_constraints.json",
+                Some(&constraint.name),
+                format!(
+                    "Constraint \"{}\": pairs max_stored_energy({hid}) with \
+                     accumulated_productivity({hid}) for hydro {hid}; the two ride \
+                     different evaluators and would not cancel. The coefficient \
+                     matching max_stored_energy is integrated_accumulated_productivity, \
+                     not accumulated_productivity.",
+                    constraint.name,
+                    hid = hydro_id.0,
+                ),
+            );
+        }
+    }
+}
+
+/// Every scalar-parameter id a constraint's expression coefficients or affine
+/// bounds reference.
+fn constraint_parameter_ids(constraint: &GenericConstraint) -> impl Iterator<Item = EntityId> + '_ {
+    let term_ids = constraint
+        .expression
+        .terms
+        .iter()
+        .filter_map(|term| match term.coefficient {
+            CoefficientRef::Parameter(id) => Some(id),
+            CoefficientRef::Literal(_) => None,
+        });
+    let lower_ids = constraint
+        .bound_lower_affine
+        .iter()
+        .flat_map(AffineBound::params);
+    let upper_ids = constraint
+        .bound_upper_affine
+        .iter()
+        .flat_map(AffineBound::params);
+    term_ids.chain(lower_ids).chain(upper_ids)
+}
+
 /// Which per-block storage boundary a term references, and the block selector.
 ///
 /// `Initial` references boundary `block_id`; `Final` references `block_id + 1`.
@@ -73,45 +156,41 @@ enum StorageRef {
     Final(Option<usize>),
 }
 
+fn add_constraint_error(
+    ctx: &mut ValidationContext,
+    constraint: &GenericConstraint,
+    message: String,
+) {
+    ctx.add_error(
+        ErrorKind::BusinessRuleViolation,
+        "constraints/generic_constraints.json",
+        Some(format!("constraint[id={}]", constraint.id.0)),
+        message,
+    );
+}
+
 /// Dispatch a term to its per-block validity check. Storage boundaries get the
 /// full interior + out-of-range check; evaporation gets out-of-range only (its `K`
 /// per-block columns exist in both modes); every other variant is unrestricted.
 fn validate_block_ref(
-    constraint: &cobre_core::GenericConstraint,
+    constraint: &GenericConstraint,
     variable: &VariableRef,
     k: usize,
     stage_id: i32,
     block_mode: BlockMode,
     ctx: &mut ValidationContext,
 ) {
+    if let Some((accessor, storage)) = storage_boundary_ref(variable) {
+        validate_storage_ref(constraint, accessor, storage, k, stage_id, block_mode, ctx);
+        return;
+    }
     match variable {
-        VariableRef::HydroStorageInitial { block_id, .. } => {
-            validate_storage_ref(
-                constraint,
-                StorageRef::Initial(*block_id),
-                k,
-                stage_id,
-                block_mode,
-                ctx,
-            );
-        }
-        VariableRef::HydroStorageFinal { block_id, .. } => {
-            validate_storage_ref(
-                constraint,
-                StorageRef::Final(*block_id),
-                k,
-                stage_id,
-                block_mode,
-                ctx,
-            );
-        }
         VariableRef::HydroEvaporation {
             block_id: Some(b), ..
         } if *b >= k => {
-            ctx.add_error(
-                ErrorKind::BusinessRuleViolation,
-                "constraints/generic_constraints.json",
-                Some(format!("constraint[id={}]", constraint.id.0)),
+            add_constraint_error(
+                ctx,
+                constraint,
                 format!(
                     "Constraint \"{}\": per-block evaporation reference \
                      `hydro_evaporation({b})` at stage {stage_id} references block {b} \
@@ -123,10 +202,9 @@ fn validate_block_ref(
         VariableRef::HydroEvaporation { block_id: None, .. }
             if block_mode == BlockMode::Chronological && k > 1 =>
         {
-            ctx.add_error(
-                ErrorKind::BusinessRuleViolation,
-                "constraints/generic_constraints.json",
-                Some(format!("constraint[id={}]", constraint.id.0)),
+            add_constraint_error(
+                ctx,
+                constraint,
                 format!(
                     "Constraint \"{}\": stage-level `hydro_evaporation` at chronological \
                      stage {stage_id} is ambiguous — evaporation is per-block there \
@@ -139,26 +217,44 @@ fn validate_block_ref(
     }
 }
 
+/// The accessor name and boundary of a storage-boundary term, `None` for every
+/// other variant.
+fn storage_boundary_ref(variable: &VariableRef) -> Option<(&'static str, StorageRef)> {
+    match variable {
+        VariableRef::HydroStorageInitial { block_id, .. } => {
+            Some(("hydro_storage_initial", StorageRef::Initial(*block_id)))
+        }
+        VariableRef::HydroStorageFinal { block_id, .. } => {
+            Some(("hydro_storage_final", StorageRef::Final(*block_id)))
+        }
+        VariableRef::HydroUsefulVolumeInitial { block_id, .. } => Some((
+            "hydro_useful_volume_initial",
+            StorageRef::Initial(*block_id),
+        )),
+        VariableRef::HydroUsefulVolumeFinal { block_id, .. } => {
+            Some(("hydro_useful_volume_final", StorageRef::Final(*block_id)))
+        }
+        _ => None,
+    }
+}
+
 fn validate_storage_ref(
-    constraint: &cobre_core::GenericConstraint,
+    constraint: &GenericConstraint,
+    accessor: &str,
     storage: StorageRef,
     k: usize,
     stage_id: i32,
     block_mode: BlockMode,
     ctx: &mut ValidationContext,
 ) {
-    let (accessor, block_id) = match storage {
-        StorageRef::Initial(b) => ("hydro_storage_initial", b),
-        StorageRef::Final(b) => ("hydro_storage_final", b),
-    };
+    let (StorageRef::Initial(block_id) | StorageRef::Final(block_id)) = storage;
 
     if let Some(b) = block_id
         && b >= k
     {
-        ctx.add_error(
-            ErrorKind::BusinessRuleViolation,
-            "constraints/generic_constraints.json",
-            Some(format!("constraint[id={}]", constraint.id.0)),
+        add_constraint_error(
+            ctx,
+            constraint,
             format!(
                 "Constraint \"{}\": per-block storage reference `{accessor}({b})` at \
                  stage {stage_id} references block {b} which does not exist at \
@@ -185,10 +281,9 @@ fn validate_storage_ref(
                     Some(b) => format!("{accessor}({b})"),
                     None => format!("{accessor}(all blocks)"),
                 };
-                ctx.add_error(
-                    ErrorKind::BusinessRuleViolation,
-                    "constraints/generic_constraints.json",
-                    Some(format!("constraint[id={}]", constraint.id.0)),
+                add_constraint_error(
+                    ctx,
+                    constraint,
                     format!(
                         "Constraint \"{}\": per-block storage reference `{block_label}` at \
                          stage {stage_id} resolves to an interior boundary, which requires \
@@ -211,14 +306,16 @@ fn boundary_is_interior(k: usize, num_blocks: usize) -> bool {
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use cobre_core::{
-        ConstraintExpression, EntityId, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
+        AffineBound, CoefficientRef, ComputedParameter, ConstraintExpression, EntityId,
+        GenericConstraint, LinearTerm, ParameterKind, ScalarParameter, SlackConfig, VariableRef,
         temporal::{Block, BlockMode},
     };
 
-    use super::super::test_support::*;
     use super::super::validate_semantic_hydro_thermal;
+    use super::check_productivity_tag_pairing;
     use crate::ValidationEntry;
     use crate::constraints::GenericConstraintBoundsRow;
+    use crate::test_support::*;
     use crate::validation::schema::ParsedData;
     use crate::validation::{ErrorKind, ValidationContext};
 
@@ -303,6 +400,121 @@ mod tests {
         VariableRef::HydroStorageFinal {
             hydro_id: EntityId::from(1),
             block_id,
+        }
+    }
+
+    fn useful_initial(block_id: Option<usize>) -> VariableRef {
+        VariableRef::HydroUsefulVolumeInitial {
+            hydro_id: EntityId::from(1),
+            block_id,
+        }
+    }
+
+    fn useful_final(block_id: Option<usize>) -> VariableRef {
+        VariableRef::HydroUsefulVolumeFinal {
+            hydro_id: EntityId::from(1),
+            block_id,
+        }
+    }
+
+    /// The single error a reference raises, with `accessor` rewritten to the
+    /// storage sibling's name so the two messages can be compared verbatim.
+    fn sole_error_as_storage(
+        block_mode: BlockMode,
+        variable: VariableRef,
+        accessor: &str,
+        storage_accessor: &str,
+    ) -> String {
+        let errors = interior_errors(&make_data_storage_ref(block_mode, 3, variable));
+        assert_eq!(errors.len(), 1, "expected one error, got: {errors:?}");
+        let msg = &errors[0].message;
+        assert!(
+            msg.contains(accessor),
+            "message should name `{accessor}`, got: {msg}"
+        );
+        msg.replace(accessor, storage_accessor)
+    }
+
+    #[test]
+    fn useful_volume_out_of_range_block_matches_storage_sibling() {
+        for block_mode in [BlockMode::Parallel, BlockMode::Chronological] {
+            for (useful, storage, accessor, storage_accessor) in [
+                (
+                    useful_initial(Some(5)),
+                    initial(Some(5)),
+                    "hydro_useful_volume_initial",
+                    "hydro_storage_initial",
+                ),
+                (
+                    useful_final(Some(5)),
+                    final_(Some(5)),
+                    "hydro_useful_volume_final",
+                    "hydro_storage_final",
+                ),
+            ] {
+                assert_eq!(
+                    sole_error_as_storage(block_mode, useful, accessor, storage_accessor),
+                    sole_error_as_storage(block_mode, storage, storage_accessor, storage_accessor),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn useful_volume_parallel_interior_boundary_matches_storage_sibling() {
+        // Initial{1} and Final{0} both reference boundary k=1, interior for K=3.
+        for (useful, storage, accessor, storage_accessor) in [
+            (
+                useful_initial(Some(1)),
+                initial(Some(1)),
+                "hydro_useful_volume_initial",
+                "hydro_storage_initial",
+            ),
+            (
+                useful_final(Some(0)),
+                final_(Some(0)),
+                "hydro_useful_volume_final",
+                "hydro_storage_final",
+            ),
+        ] {
+            assert_eq!(
+                sole_error_as_storage(BlockMode::Parallel, useful, accessor, storage_accessor),
+                sole_error_as_storage(
+                    BlockMode::Parallel,
+                    storage,
+                    storage_accessor,
+                    storage_accessor
+                ),
+            );
+        }
+    }
+
+    #[test]
+    fn non_storage_per_block_reference_is_unrestricted() {
+        // An interior block on a parallel stage would be rejected for a storage boundary.
+        for block_mode in [BlockMode::Parallel, BlockMode::Chronological] {
+            let turbined = VariableRef::HydroTurbined {
+                hydro_id: EntityId::from(1),
+                block_id: Some(1),
+                bus_id: None,
+            };
+            let data = make_data_storage_ref(block_mode, 3, turbined);
+            assert!(interior_errors(&data).is_empty());
+        }
+    }
+
+    #[test]
+    fn useful_volume_valid_references_accepted() {
+        for (block_mode, variable) in [
+            (BlockMode::Parallel, useful_initial(Some(0))),
+            (BlockMode::Parallel, useful_final(Some(2))),
+            (BlockMode::Parallel, useful_initial(None)),
+            (BlockMode::Parallel, useful_final(None)),
+            (BlockMode::Chronological, useful_initial(Some(1))),
+            (BlockMode::Chronological, useful_final(Some(1))),
+        ] {
+            let data = make_data_storage_ref(block_mode, 3, variable);
+            assert!(interior_errors(&data).is_empty());
         }
     }
 
@@ -516,5 +728,257 @@ mod tests {
             msg.contains("hydro_evaporation(5)") && msg.contains("block 5 which does not exist"),
             "message should be the evaporation out-of-range message, got: {msg}"
         );
+    }
+
+    // ── check_productivity_tag_pairing ──────────────────────────────────────
+
+    fn computed_scalar_param(id: i32, name: &str, spec: ComputedParameter) -> ScalarParameter {
+        ScalarParameter {
+            id: EntityId::from(id),
+            name: name.to_string(),
+            kind: ParameterKind::Computed {
+                computed_spec: spec,
+            },
+        }
+    }
+
+    fn param_term(coefficient_id: EntityId) -> LinearTerm {
+        LinearTerm {
+            coefficient: CoefficientRef::Parameter(coefficient_id),
+            scale: 1.0,
+            variable: VariableRef::HydroTurbined {
+                hydro_id: EntityId::from(1),
+                block_id: None,
+                bus_id: None,
+            },
+        }
+    }
+
+    fn constraint_with_lhs_and_upper_bound(
+        lhs_param: EntityId,
+        upper_bound_param: EntityId,
+    ) -> GenericConstraint {
+        GenericConstraint {
+            id: EntityId::from(1),
+            name: "energy_constraint".to_string(),
+            description: None,
+            expression: ConstraintExpression {
+                terms: vec![param_term(lhs_param)],
+            },
+            slack: SlackConfig {
+                enabled: false,
+                penalty: None,
+            },
+            bound_lower_affine: None,
+            bound_upper_affine: Some(AffineBound::single(upper_bound_param)),
+        }
+    }
+
+    fn constraint_with_two_lhs_terms(param_a: EntityId, param_b: EntityId) -> GenericConstraint {
+        GenericConstraint {
+            id: EntityId::from(1),
+            name: "energy_constraint".to_string(),
+            description: None,
+            expression: ConstraintExpression {
+                terms: vec![param_term(param_a), param_term(param_b)],
+            },
+            slack: SlackConfig {
+                enabled: false,
+                penalty: None,
+            },
+            bound_lower_affine: None,
+            bound_upper_affine: None,
+        }
+    }
+
+    fn constraint_with_literal_term() -> GenericConstraint {
+        GenericConstraint {
+            id: EntityId::from(1),
+            name: "no_computed_params".to_string(),
+            description: None,
+            expression: ConstraintExpression {
+                terms: vec![LinearTerm::literal(
+                    1.0,
+                    VariableRef::HydroTurbined {
+                        hydro_id: EntityId::from(1),
+                        block_id: None,
+                        bus_id: None,
+                    },
+                )],
+            },
+            slack: SlackConfig {
+                enabled: false,
+                penalty: None,
+            },
+            bound_lower_affine: None,
+            bound_upper_affine: None,
+        }
+    }
+
+    /// Build `ParsedData` with a single hydro/stage, the given scalar parameters,
+    /// and a single generic constraint.
+    fn make_data_with_constraint(
+        scalar_parameters: Vec<ScalarParameter>,
+        constraint: GenericConstraint,
+    ) -> ParsedData {
+        let mut data = make_data(
+            vec![make_hydro(1, None)],
+            vec![],
+            vec![],
+            make_stages(vec![0]),
+            vec![],
+            vec![],
+        );
+        data.scalar_parameters = scalar_parameters;
+        data.generic_constraints = vec![constraint];
+        data
+    }
+
+    #[test]
+    fn mismatched_pairing_same_hydro_warns_once() {
+        let data = make_data_with_constraint(
+            vec![
+                computed_scalar_param(
+                    1,
+                    "rho_acum",
+                    ComputedParameter::AccumulatedProductivity {
+                        hydro_id: EntityId::from(7),
+                    },
+                ),
+                computed_scalar_param(
+                    2,
+                    "e_max",
+                    ComputedParameter::MaxStoredEnergy {
+                        hydro_id: EntityId::from(7),
+                    },
+                ),
+            ],
+            constraint_with_lhs_and_upper_bound(EntityId::from(1), EntityId::from(2)),
+        );
+        let mut ctx = ValidationContext::new();
+        check_productivity_tag_pairing(&data, &mut ctx);
+
+        let messages: Vec<String> = ctx
+            .warnings()
+            .iter()
+            .map(|e| {
+                assert_eq!(e.kind, ErrorKind::SemanticAmbiguity);
+                e.message.clone()
+            })
+            .collect();
+        assert_eq!(messages.len(), 1, "expected one warning, got: {messages:?}");
+        assert!(
+            messages[0].contains('7'),
+            "message should name hydro 7, got: {}",
+            messages[0]
+        );
+        assert!(
+            messages[0].contains("integrated_accumulated_productivity"),
+            "message should name the matching coefficient, got: {}",
+            messages[0]
+        );
+
+        assert!(
+            ctx.into_result().is_ok(),
+            "a warning must not fail into_result"
+        );
+    }
+
+    #[test]
+    fn mismatched_pairing_both_as_lhs_coefficients_warns_once() {
+        let data = make_data_with_constraint(
+            vec![
+                computed_scalar_param(
+                    1,
+                    "rho_acum",
+                    ComputedParameter::AccumulatedProductivity {
+                        hydro_id: EntityId::from(7),
+                    },
+                ),
+                computed_scalar_param(
+                    2,
+                    "e_max",
+                    ComputedParameter::MaxStoredEnergy {
+                        hydro_id: EntityId::from(7),
+                    },
+                ),
+            ],
+            constraint_with_two_lhs_terms(EntityId::from(1), EntityId::from(2)),
+        );
+        let mut ctx = ValidationContext::new();
+        check_productivity_tag_pairing(&data, &mut ctx);
+
+        let warnings = ctx.warnings();
+        assert_eq!(warnings.len(), 1, "expected one warning, got: {warnings:?}");
+        assert_eq!(warnings[0].kind, ErrorKind::SemanticAmbiguity);
+    }
+
+    #[test]
+    fn matching_integrated_coefficient_no_warning() {
+        let data = make_data_with_constraint(
+            vec![
+                computed_scalar_param(
+                    1,
+                    "rho_acum_int",
+                    ComputedParameter::IntegratedAccumulatedProductivity {
+                        hydro_id: EntityId::from(7),
+                    },
+                ),
+                computed_scalar_param(
+                    2,
+                    "e_max",
+                    ComputedParameter::MaxStoredEnergy {
+                        hydro_id: EntityId::from(7),
+                    },
+                ),
+            ],
+            constraint_with_lhs_and_upper_bound(EntityId::from(1), EntityId::from(2)),
+        );
+        let mut ctx = ValidationContext::new();
+        check_productivity_tag_pairing(&data, &mut ctx);
+
+        assert!(
+            ctx.warnings().is_empty(),
+            "the matching integrated_accumulated_productivity coefficient must not warn"
+        );
+    }
+
+    #[test]
+    fn different_hydro_pairing_no_warning() {
+        let data = make_data_with_constraint(
+            vec![
+                computed_scalar_param(
+                    1,
+                    "rho_acum_h9",
+                    ComputedParameter::AccumulatedProductivity {
+                        hydro_id: EntityId::from(9),
+                    },
+                ),
+                computed_scalar_param(
+                    2,
+                    "e_max_h7",
+                    ComputedParameter::MaxStoredEnergy {
+                        hydro_id: EntityId::from(7),
+                    },
+                ),
+            ],
+            constraint_with_lhs_and_upper_bound(EntityId::from(1), EntityId::from(2)),
+        );
+        let mut ctx = ValidationContext::new();
+        check_productivity_tag_pairing(&data, &mut ctx);
+
+        assert!(
+            ctx.warnings().is_empty(),
+            "a different-hydro pairing must not warn"
+        );
+    }
+
+    #[test]
+    fn no_computed_scalar_parameters_no_warning_no_panic() {
+        let data = make_data_with_constraint(vec![], constraint_with_literal_term());
+        let mut ctx = ValidationContext::new();
+        check_productivity_tag_pairing(&data, &mut ctx);
+
+        assert!(ctx.warnings().is_empty());
     }
 }

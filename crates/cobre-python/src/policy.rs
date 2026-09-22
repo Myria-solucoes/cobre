@@ -3,8 +3,12 @@
 //! `cobre_io`.
 //!
 //! Input dict shapes mirror what [`crate::results::load_policy`] emits, so a
-//! loaded checkpoint round-trips: load -> edit -> write.
+//! loaded checkpoint round-trips: load -> edit -> write. `season_manifest` and
+//! `graph_manifest` round-trip; `active_cut_indices` is written but not returned
+//! by `load_policy`, so a load → write cycle resets it (cut activity round-trips
+//! through each cut's `is_active`).
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -12,10 +16,11 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use cobre_io::{
-    CheckpointManifest, ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, FORMAT_VERSION,
-    GraphManifest, ManifestEdge, ManifestNode, PolicyBasisRecord, PolicyCutRecord, ProducerBlock,
-    STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL, STAGE_CUTS_NODE_ID_SENTINEL, STAGE_STATES_NODE_ID_SENTINEL,
-    StageCutsPayload, StageStatesPayload,
+    CheckpointManifest, ENTITY_SLOT_DATE_SENTINEL, EntitySlot, FORMAT_VERSION, GraphManifest,
+    HydroSeasonOrders, ManifestEdge, ManifestNode, PolicyBasisRecord, PolicyCutRecord,
+    ProducerBlock, STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL, STAGE_CUTS_NODE_ID_SENTINEL,
+    STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, STAGE_STATES_NODE_ID_SENTINEL, SeasonManifest,
+    StageCutsPayload, StageStatesPayload, StateFamily,
 };
 use cobre_sddp::{SddpError, reserve_boundary_inflow_lag_slots};
 
@@ -28,19 +33,39 @@ pub(crate) struct PyEntitySlot {
     entity_id: i32,
     subindex: u32,
     was_active: bool,
-    #[pyo3(default = ENTITY_SLOT_DELIVERY_DATE_SENTINEL)]
-    delivery_date: i32,
+    #[pyo3(default = ENTITY_SLOT_DATE_SENTINEL)]
+    reference_date: i32,
+    #[pyo3(default = ENTITY_SLOT_DATE_SENTINEL)]
+    interval_start: i32,
+    #[pyo3(default = ENTITY_SLOT_DATE_SENTINEL)]
+    interval_end: i32,
 }
 
 impl From<&PyEntitySlot> for EntitySlot {
     fn from(slot: &PyEntitySlot) -> Self {
-        Self {
-            entity_type: slot.entity_type,
-            entity_id: slot.entity_id,
-            subindex: slot.subindex,
-            was_active: slot.was_active,
-            delivery_date: slot.delivery_date,
+        match StateFamily::from_code(slot.entity_type) {
+            Some(StateFamily::HydroStorage) => Self::storage(slot.entity_id, slot.was_active),
+            Some(StateFamily::HydroInflowLag) => {
+                Self::inflow_lag(slot.entity_id, slot.subindex, slot.was_active)
+            }
+            Some(StateFamily::HydroTransitBucket) => {
+                Self::transit_bucket(slot.entity_id, slot.subindex, slot.was_active)
+            }
+            Some(StateFamily::AnticipatedThermalState) => {
+                Self::anticipated(slot.entity_id, slot.subindex, slot.was_active)
+            }
+            None => Self {
+                entity_type: slot.entity_type,
+                entity_id: slot.entity_id,
+                subindex: slot.subindex,
+                was_active: slot.was_active,
+                reference_date: ENTITY_SLOT_DATE_SENTINEL,
+                interval_start: ENTITY_SLOT_DATE_SENTINEL,
+                interval_end: ENTITY_SLOT_DATE_SENTINEL,
+            },
         }
+        .with_reference_date(slot.reference_date)
+        .with_interval(slot.interval_start, slot.interval_end)
     }
 }
 
@@ -55,9 +80,8 @@ pub(crate) struct PyCutRecord {
     coefficients: Vec<f64>,
     is_active: bool,
     /// Inflow-lag gradient terms keyed by hydro id (`hydro_id -> [coef_by_depth]`,
-    /// index `0` = lag depth 1), separate from the storage-aligned
-    /// `coefficients`. Consumed only when the top-level `inflow_lag_depth` is
-    /// set; empty (the default) leaves the checkpoint byte-identical.
+    /// index `0` = lag depth 1). Requires the top-level `inflow_lag_depth`; empty
+    /// (the default) leaves the checkpoint byte-identical.
     #[pyo3(default)]
     inflow_lag_coefficients: HashMap<i32, Vec<f64>>,
 }
@@ -77,14 +101,16 @@ pub(crate) struct PyStageCutsPayload {
     populated_count: Option<u32>,
     #[pyo3(default)]
     entity_manifest: Vec<PyEntitySlot>,
-    /// Cost-scale provenance; defaults to the metadata producer block's factor
-    /// when omitted (see [`write_policy_checkpoint`]).
+    /// Defaults to the metadata producer block's factor when omitted (see
+    /// [`write_policy_checkpoint`]).
     #[pyo3(default)]
     cost_scale_factor: Option<f64>,
     #[pyo3(default = STAGE_CUTS_NODE_ID_SENTINEL)]
     node_id: i32,
     #[pyo3(default = STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL)]
     graph_stage_id: i32,
+    #[pyo3(default = STAGE_CUTS_PRICED_STATE_DATE_SENTINEL)]
+    priced_state_date: i32,
 }
 
 #[derive(Debug, FromPyObject)]
@@ -160,6 +186,38 @@ impl From<PyGraphManifest> for GraphManifest {
     }
 }
 
+#[derive(Debug, FromPyObject)]
+#[pyo3(from_item_all)]
+pub(crate) struct PyHydroSeasonOrders {
+    hydro_id: i32,
+    orders: Vec<u32>,
+}
+
+#[derive(Debug, FromPyObject)]
+#[pyo3(from_item_all)]
+pub(crate) struct PySeasonManifest {
+    cycle_code: u8,
+    n_seasons: u32,
+    hydro_orders: Vec<PyHydroSeasonOrders>,
+}
+
+impl From<PySeasonManifest> for SeasonManifest {
+    fn from(s: PySeasonManifest) -> Self {
+        Self {
+            cycle_code: s.cycle_code,
+            n_seasons: s.n_seasons,
+            hydro_orders: s
+                .hydro_orders
+                .into_iter()
+                .map(|h| HydroSeasonOrders {
+                    hydro_id: h.hydro_id,
+                    orders: h.orders,
+                })
+                .collect(),
+        }
+    }
+}
+
 /// The producer-namespaced metadata block, mirroring what
 /// [`crate::results::load_policy`] emits under `metadata["producer"]`.
 #[derive(Debug, FromPyObject)]
@@ -207,8 +265,6 @@ impl From<PyProducerBlock> for ProducerBlock {
 #[derive(Debug, FromPyObject)]
 #[pyo3(from_item_all)]
 pub(crate) struct PyPolicyCheckpointMetadata {
-    /// Stamped to [`FORMAT_VERSION`] when omitted, so a checkpoint authored from
-    /// raw records is always readable; a round-tripped one carries it back.
     #[pyo3(default = FORMAT_VERSION)]
     format_version: u32,
     cobre_version: String,
@@ -216,6 +272,8 @@ pub(crate) struct PyPolicyCheckpointMetadata {
     num_stages: u32,
     #[pyo3(default)]
     graph_manifest: Option<PyGraphManifest>,
+    #[pyo3(default)]
+    season_manifest: Option<PySeasonManifest>,
     producer: PyProducerBlock,
 }
 
@@ -230,20 +288,22 @@ impl From<PyPolicyCheckpointMetadata> for CheckpointManifest {
                 .graph_manifest
                 .map(GraphManifest::from)
                 .unwrap_or_default(),
+            season_manifest: m
+                .season_manifest
+                .map(SeasonManifest::from)
+                .unwrap_or_default(),
             producer: m.producer.into(),
         }
     }
 }
 
-/// Convert a length to `u32`, naming `what` in the overflow error.
 fn checked_u32_len(len: usize, what: &str) -> PyResult<u32> {
     u32::try_from(len)
         .map_err(|_| PyValueError::new_err(format!("{what} has {len} entries, exceeding u32::MAX")))
 }
 
-/// Validate each stage's cut coefficient lengths against its `state_dimension`
-/// and resolve the `populated_count` default (`cuts.len()`), naming the
-/// offending stage/cut on failure.
+/// Validates `coefficients.len() == state_dimension` per cut; resolves
+/// `populated_count` default to `cuts.len()`.
 fn resolve_populated_counts(stage_cuts: &[PyStageCutsPayload]) -> PyResult<Vec<u32>> {
     let mut resolved = Vec::with_capacity(stage_cuts.len());
     for sc in stage_cuts {
@@ -267,8 +327,7 @@ fn resolve_populated_counts(stage_cuts: &[PyStageCutsPayload]) -> PyResult<Vec<u
     Ok(resolved)
 }
 
-/// Validate each stage's flat state-data length against `count * state_dimension`,
-/// naming the offending stage on failure.
+/// Validates `data.len() == count * state_dimension` per stage.
 fn validate_stage_states(stage_states: &[PyStageStatesPayload]) -> PyResult<()> {
     for ss in stage_states {
         let expected = ss.count as usize * ss.state_dimension as usize;
@@ -284,15 +343,35 @@ fn validate_stage_states(stage_states: &[PyStageStatesPayload]) -> PyResult<()> 
     Ok(())
 }
 
-/// Owned per-stage payload data: the entity manifest and each cut's coefficient
-/// vector, either as supplied or widened by an inflow-lag reservation, plus the
-/// resulting `state_dimension`. Owning these lets the borrowed
-/// [`StageCutsPayload`]/[`PolicyCutRecord`] views reference the reserved
-/// coefficients (which the writer must own — the caller's `coefficients` are
-/// storage-only when a reservation runs).
-struct StageCutsData {
+/// Reject `inflow_lag_coefficients` supplied without a positive
+/// `inflow_lag_depth` — they would be silently dropped.
+fn reject_unreserved_lag_coefficients(
+    stage_cuts: &[PyStageCutsPayload],
+    reserve_depth: Option<u32>,
+) -> PyResult<()> {
+    if reserve_depth.is_some() {
+        return Ok(());
+    }
+    for sc in stage_cuts {
+        for cut in &sc.cuts {
+            if !cut.inflow_lag_coefficients.is_empty() {
+                return Err(PyValueError::new_err(format!(
+                    "stage {} cut {}: inflow_lag_coefficients supplied without \
+                     inflow_lag_depth; pass inflow_lag_depth=N to reserve the lag slots",
+                    sc.stage_id, cut.cut_id
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Owns the manifest and coefficients so borrowed [`StageCutsPayload`]/[`PolicyCutRecord`]
+/// views can reference them (reservation widens coefficients, requiring owned storage;
+/// no-reservation borrows `sc.cuts[*].coefficients` directly).
+struct StageCutsData<'a> {
     manifest: Vec<EntitySlot>,
-    coefficients: Vec<Vec<f64>>,
+    coefficients: Vec<Cow<'a, [f64]>>,
     state_dimension: u32,
 }
 
@@ -301,11 +380,12 @@ struct StageCutsData {
 fn build_stage_cuts_data(
     sc: &PyStageCutsPayload,
     reserve_depth: Option<u32>,
-) -> PyResult<StageCutsData> {
+) -> PyResult<StageCutsData<'_>> {
     let manifest: Vec<EntitySlot> = sc.entity_manifest.iter().map(EntitySlot::from).collect();
-    let coefficients: Vec<Vec<f64>> = sc.cuts.iter().map(|c| c.coefficients.clone()).collect();
     match reserve_depth {
         Some(depth) => {
+            let coefficients: Vec<Vec<f64>> =
+                sc.cuts.iter().map(|c| c.coefficients.clone()).collect();
             let cut_lag: Vec<HashMap<i32, Vec<f64>>> = sc
                 .cuts
                 .iter()
@@ -319,13 +399,17 @@ fn build_stage_cuts_data(
                     })?;
             Ok(StageCutsData {
                 manifest: reserved.manifest,
-                coefficients: reserved.coefficients,
+                coefficients: reserved.coefficients.into_iter().map(Cow::Owned).collect(),
                 state_dimension: reserved.state_dimension,
             })
         }
         None => Ok(StageCutsData {
             manifest,
-            coefficients,
+            coefficients: sc
+                .cuts
+                .iter()
+                .map(|c| Cow::Borrowed(c.coefficients.as_slice()))
+                .collect(),
             state_dimension: sc.state_dimension,
         }),
     }
@@ -350,8 +434,12 @@ fn build_stage_cuts_data(
 ///
 /// `ValueError` when a cut's `coefficients` length does not match its stage's
 /// `state_dimension`, a stage's state data length does not match
-/// `count * state_dimension`, or (under `inflow_lag_depth`) a manifest lacks a
-/// leading storage block or an inflow-lag coefficient is unplaceable; otherwise
+/// `count * state_dimension`, a cut carries `inflow_lag_coefficients` without a
+/// positive `inflow_lag_depth`, or (under `inflow_lag_depth`) a manifest lacks a
+/// leading storage block or an inflow-lag coefficient is unplaceable. A
+/// `season_manifest` whose `hydro_orders` are not ascending by `hydro_id` or
+/// whose `orders` lengths disagree with `n_seasons` is written as given and
+/// rejected by [`crate::results::load_policy`] with `OutputError`. Otherwise
 /// the `cobre.errors` leaf mapped from the underlying [`cobre_io::OutputError`].
 #[pyfunction]
 #[pyo3(signature = (path, stage_cuts, metadata, stage_bases=None, stage_states=None, inflow_lag_depth=None))]
@@ -372,7 +460,8 @@ pub fn write_policy_checkpoint(
     validate_stage_states(&stage_states)?;
 
     let reserve_depth = inflow_lag_depth.filter(|&n| n > 0);
-    let stage_data: Vec<StageCutsData> = stage_cuts
+    reject_unreserved_lag_coefficients(&stage_cuts, reserve_depth)?;
+    let stage_data: Vec<StageCutsData<'_>> = stage_cuts
         .iter()
         .map(|sc| build_stage_cuts_data(sc, reserve_depth))
         .collect::<PyResult<_>>()?;
@@ -414,14 +503,13 @@ pub fn write_policy_checkpoint(
                 active_cut_indices: &sc.active_cut_indices,
                 populated_count: populated_counts[i],
                 entity_manifest: &data.manifest,
-                // None (per-stage and metadata) is the legacy at-rest scale
-                // (`ProducerBlock::cost_scale_factor`).
                 cost_scale_factor: sc
                     .cost_scale_factor
                     .or(metadata_cost_scale_factor)
                     .unwrap_or(1_000_000.0),
                 node_id: sc.node_id,
                 graph_stage_id: sc.graph_stage_id,
+                priced_state_date: sc.priced_state_date,
             })
             .collect();
 
@@ -463,4 +551,32 @@ pub fn write_policy_checkpoint(
         )
     })
     .map_err(|e| convert_error(ErrorSource::Output(&e)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EntitySlot, PyEntitySlot};
+
+    #[test]
+    fn py_entity_slot_unclassified_entity_type_round_trips() {
+        let slot = PyEntitySlot {
+            entity_type: 200,
+            entity_id: 7,
+            subindex: 3,
+            was_active: true,
+            reference_date: 20_260_102,
+            interval_start: 20_260_103,
+            interval_end: 20_260_104,
+        };
+
+        let converted = EntitySlot::from(&slot);
+
+        assert_eq!(converted.entity_type, 200);
+        assert_eq!(converted.entity_id, 7);
+        assert_eq!(converted.subindex, 3);
+        assert!(converted.was_active);
+        assert_eq!(converted.reference_date, 20_260_102);
+        assert_eq!(converted.interval_start, 20_260_103);
+        assert_eq!(converted.interval_end, 20_260_104);
+    }
 }

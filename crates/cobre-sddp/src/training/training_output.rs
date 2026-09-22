@@ -44,12 +44,9 @@ struct PartialRecord {
     solve_time_ms: f64,
     state_exchange_ms: u64,
     cut_batch_build_ms: u64,
-    /// Backward thread-pool setup time.
-    bwd_setup_ms: u64,
     bwd_load_imbalance_ms: u64,
     bwd_scheduling_overhead_ms: u64,
     lower_bound_eval_ms: u64,
-    fwd_setup_ms: u64,
     fwd_load_imbalance_ms: u64,
     fwd_scheduling_overhead_ms: u64,
     /// Sum of resident rows-in-LP over this iteration's lazy solves (all ranks). Zero for non-lazy methods.
@@ -79,7 +76,6 @@ fn accumulate_partial_records(events: &[TrainingEvent]) -> (BTreeMap<u64, Partia
                 lp_solves,
                 solve_time_ms,
                 lower_bound_eval_ms,
-                fwd_setup_time_ms,
                 fwd_load_imbalance_ms,
                 fwd_scheduling_overhead_ms,
                 rows_in_lp_sum,
@@ -97,7 +93,6 @@ fn accumulate_partial_records(events: &[TrainingEvent]) -> (BTreeMap<u64, Partia
                 record.lp_solves = *lp_solves;
                 record.solve_time_ms = *solve_time_ms;
                 record.lower_bound_eval_ms = *lower_bound_eval_ms;
-                record.fwd_setup_ms = *fwd_setup_time_ms;
                 record.fwd_load_imbalance_ms = *fwd_load_imbalance_ms;
                 record.fwd_scheduling_overhead_ms = *fwd_scheduling_overhead_ms;
                 record.rows_in_lp_sum = *rows_in_lp_sum;
@@ -130,7 +125,6 @@ fn accumulate_partial_records(events: &[TrainingEvent]) -> (BTreeMap<u64, Partia
                 rows_generated,
                 state_exchange_time_ms,
                 row_batch_build_time_ms,
-                setup_time_ms,
                 load_imbalance_ms,
                 scheduling_overhead_ms,
                 ..
@@ -139,7 +133,6 @@ fn accumulate_partial_records(events: &[TrainingEvent]) -> (BTreeMap<u64, Partia
                 record.cuts_added = *rows_generated;
                 record.state_exchange_ms = *state_exchange_time_ms;
                 record.cut_batch_build_ms = *row_batch_build_time_ms;
-                record.bwd_setup_ms = *setup_time_ms;
                 record.bwd_load_imbalance_ms = *load_imbalance_ms;
                 record.bwd_scheduling_overhead_ms = *scheduling_overhead_ms;
             }
@@ -231,10 +224,8 @@ fn partial_to_iteration_record(iter: u64, partial: &PartialRecord) -> IterationR
         time_lower_bound_ms: partial.lower_bound_eval_ms,
         time_state_exchange_ms: partial.state_exchange_ms,
         time_cut_batch_build_ms: partial.cut_batch_build_ms,
-        time_bwd_setup_ms: partial.bwd_setup_ms,
         time_bwd_load_imbalance_ms: partial.bwd_load_imbalance_ms,
         time_bwd_scheduling_overhead_ms: partial.bwd_scheduling_overhead_ms,
-        time_fwd_setup_ms: partial.fwd_setup_ms,
         time_fwd_load_imbalance_ms: partial.fwd_load_imbalance_ms,
         time_fwd_scheduling_overhead_ms: partial.fwd_scheduling_overhead_ms,
         time_overhead_ms: overhead_ms,
@@ -1144,10 +1135,8 @@ mod tests {
             time_lower_bound_ms: 0,
             time_state_exchange_ms: 0,
             time_cut_batch_build_ms: 0,
-            time_bwd_setup_ms: 0,
             time_bwd_load_imbalance_ms: 0,
             time_bwd_scheduling_overhead_ms: 0,
-            time_fwd_setup_ms: 0,
             time_fwd_load_imbalance_ms: 0,
             time_fwd_scheduling_overhead_ms: 0,
             time_overhead_ms: 0,

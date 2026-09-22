@@ -83,9 +83,7 @@ mod anticipated_5stage_k2_smoke {
     //! commitment-hold carry, and basis-cache capture.
 
     use cobre_core::entities::{
-        bus::DeficitSegment,
-        hydro::{HydroGenerationModel, HydroPenalties},
-        thermal::AnticipatedConfig,
+        bus::DeficitSegment, hydro::HydroGenerationModel, thermal::AnticipatedConfig,
     };
     use cobre_core::scenario::{InflowModel, LoadModel};
     use cobre_core::temporal::{
@@ -94,7 +92,7 @@ mod anticipated_5stage_k2_smoke {
     };
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, EntityId,
-        HydroBlockBounds, HydroStageBounds, HydroStagePenalties, HydroStorage, InitialConditions,
+        HydroBlockBounds, HydroPenalties, HydroStageBounds, HydroStorage, InitialConditions,
         LineBlockBounds, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
         PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder,
         ThermalBlockBounds, ThermalStageBounds,
@@ -295,8 +293,8 @@ mod anticipated_5stage_k2_smoke {
             }
         }
 
-        fn default_hydro_penalties() -> HydroStagePenalties {
-            HydroStagePenalties {
+        fn default_hydro_penalties() -> HydroPenalties {
+            HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,
@@ -543,9 +541,7 @@ mod anticipated_two_plants_smoke {
     //! exercises a genuine forward-to-forward hold advancement.
 
     use cobre_core::entities::{
-        bus::DeficitSegment,
-        hydro::{HydroGenerationModel, HydroPenalties},
-        thermal::AnticipatedConfig,
+        bus::DeficitSegment, hydro::HydroGenerationModel, thermal::AnticipatedConfig,
     };
     use cobre_core::scenario::{InflowModel, LoadModel};
     use cobre_core::temporal::{
@@ -554,7 +550,7 @@ mod anticipated_two_plants_smoke {
     };
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, EntityId,
-        HydroBlockBounds, HydroStageBounds, HydroStagePenalties, HydroStorage, InitialConditions,
+        HydroBlockBounds, HydroPenalties, HydroStageBounds, HydroStorage, InitialConditions,
         LineBlockBounds, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
         PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder,
         ThermalBlockBounds, ThermalStageBounds,
@@ -774,8 +770,8 @@ mod anticipated_two_plants_smoke {
             }
         }
 
-        fn default_hydro_penalties() -> HydroStagePenalties {
-            HydroStagePenalties {
+        fn default_hydro_penalties() -> HydroPenalties {
+            HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,
@@ -1054,9 +1050,7 @@ mod anticipated_simulation_ring_buffer {
     use std::sync::mpsc;
 
     use cobre_core::entities::{
-        bus::DeficitSegment,
-        hydro::{HydroGenerationModel, HydroPenalties},
-        thermal::AnticipatedConfig,
+        bus::DeficitSegment, hydro::HydroGenerationModel, thermal::AnticipatedConfig,
     };
     use cobre_core::scenario::{InflowModel, LoadModel};
     use cobre_core::temporal::{
@@ -1065,7 +1059,7 @@ mod anticipated_simulation_ring_buffer {
     };
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, EntityId,
-        HydroBlockBounds, HydroStageBounds, HydroStagePenalties, HydroStorage, InitialConditions,
+        HydroBlockBounds, HydroPenalties, HydroStageBounds, HydroStorage, InitialConditions,
         LineBlockBounds, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
         PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder,
         ThermalBlockBounds, ThermalStageBounds,
@@ -1272,8 +1266,8 @@ mod anticipated_simulation_ring_buffer {
             }
         }
 
-        fn default_hydro_penalties() -> HydroStagePenalties {
-            HydroStagePenalties {
+        fn default_hydro_penalties() -> HydroPenalties {
+            HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,
@@ -1657,8 +1651,8 @@ mod anticipated_generic_constraint_e2e {
     use chrono::NaiveDate;
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ConstraintExpression,
-        ContractBlockBounds, EntityId, GenericConstraint, HydroBlockBounds, HydroStageBounds,
-        HydroStagePenalties, InitialConditions, LineBlockBounds, LineStagePenalties, LinearTerm,
+        ContractBlockBounds, EntityId, GenericConstraint, HydroBlockBounds, HydroPenalties,
+        HydroStageBounds, InitialConditions, LineBlockBounds, LineStagePenalties, LinearTerm,
         NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds,
         ResolvedBounds, ResolvedGenericConstraintBounds, ResolvedPenalties, SlackConfig,
         SystemBuilder, ThermalBlockBounds, ThermalStageBounds, VariableRef,
@@ -1875,7 +1869,7 @@ mod anticipated_generic_constraint_e2e {
                 n_stages: N_STAGES,
             },
             &PenaltiesDefaults {
-                hydro: HydroStagePenalties {
+                hydro: HydroPenalties {
                     spillage_cost: 0.0,
                     diversion_cost: 0.0,
                     turbined_cost: 0.0,
@@ -2466,8 +2460,8 @@ mod d37_anticipated_commissioning_simulation {
         let hydro_models = prepare_hydro_models(&system, case_dir, false)
             .expect("prepare_hydro_models must succeed");
 
-        let setup =
-            StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup::new");
+        let setup = StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
+            .expect("StudySetup::new");
         (setup, config)
     }
 
@@ -2641,23 +2635,18 @@ mod anticipated_commitment_at_cap {
     //! ring-carried commitment with no slack, so feasibility requires the
     //! commitment lie within the delivery stage's own `[min_gen, max_gen]`.
     //!
-    //! Three seeds carried through a `K = 2` in-LP ring pin the whole contract:
-    //! at the cap (feasible unrelaxed — no patch, so parity holds); a hair over it
+    //! Two seeds carried through a `K = 2` in-LP ring pin the contract: at the
+    //! cap (feasible unrelaxed — no patch, so parity holds) and a hair over it
     //! by less than the solver's own primal feasibility tolerance (feasible only
-    //! because `commitment_reconcile` relaxes the delivery bound — this is the
-    //! drift a carried commitment genuinely carries, since the ring slot is a
-    //! solver-computed BASIC variable, and it is what makes the reconciliation
-    //! permanent); and genuinely over the cap (a modelling error, refused as
-    //! `AnticipatedCommitmentOutOfBounds` rather than absorbed).
+    //! because the incoming state is canonicalized within the delivery stage's
+    //! own admissible box before it is ever pinned).
     //!
     //! Seeding exactly at the cap alone is NOT sufficient coverage: zero drift
-    //! never reaches the reconciliation, so an at-cap-only suite stays green while
+    //! exercises no canonicalization, so an at-cap-only suite stays green while
     //! studies whose commitments drift abort on a false infeasibility.
 
     use cobre_core::entities::{
-        bus::DeficitSegment,
-        hydro::{HydroGenerationModel, HydroPenalties},
-        thermal::AnticipatedConfig,
+        bus::DeficitSegment, hydro::HydroGenerationModel, thermal::AnticipatedConfig,
     };
     use cobre_core::scenario::{InflowModel, LoadModel};
     use cobre_core::temporal::{
@@ -2666,7 +2655,7 @@ mod anticipated_commitment_at_cap {
     };
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, EntityId,
-        HydroBlockBounds, HydroStageBounds, HydroStagePenalties, HydroStorage, InitialConditions,
+        HydroBlockBounds, HydroPenalties, HydroStageBounds, HydroStorage, InitialConditions,
         LineBlockBounds, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
         PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder,
         ThermalBlockBounds, ThermalStageBounds,
@@ -2678,7 +2667,6 @@ mod anticipated_commitment_at_cap {
         RowSelectionConfig, SimulationConfig as IoSimulationConfig, StoppingRuleConfig,
         TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
     };
-    use cobre_sddp::SddpError;
     use cobre_solver::ActiveSolver;
 
     use super::common::StubComm;
@@ -2690,12 +2678,8 @@ mod anticipated_commitment_at_cap {
     const CAP_MW: f64 = 100.0;
     const AT_CAP_SEED_MW: f64 = CAP_MW;
     /// `1e-12` (relative) over the cap: above the ring's own round-trip noise
-    /// (`~1e-16`) so the fail-without/pass-with split is deterministic, and below the
-    /// reconciliation's headroom so it is absorbed rather than refused.
+    /// (`~1e-16`), so the fail-without/pass-with split is deterministic.
     const DRIFTED_SEED_MW: f64 = CAP_MW * (1.0 + 1e-12);
-    /// `1e-6` (relative) over the cap — orders of magnitude past any solver drift, so
-    /// it is a modelling error, not noise.
-    const OVER_CAP_SEED_MW: f64 = CAP_MW * (1.0 + 1e-6);
 
     fn build_system(seed_mw: f64) -> cobre_core::System {
         use chrono::NaiveDate;
@@ -2908,7 +2892,7 @@ mod anticipated_commitment_at_cap {
                 n_stages,
             },
             &PenaltiesDefaults {
-                hydro: HydroStagePenalties {
+                hydro: HydroPenalties {
                     spillage_cost: 0.01,
                     diversion_cost: 0.0,
                     turbined_cost: 0.0,
@@ -3018,8 +3002,8 @@ mod anticipated_commitment_at_cap {
         );
     }
 
-    /// Fails without `commitment_reconcile`: the delivery LP reports `Infeasible` over
-    /// a drift the solver itself would report as feasible.
+    /// A commitment carried a hair past its delivery cap trains, not
+    /// `Infeasible`, over a drift the solver itself would report as feasible.
     #[test]
     fn anticipated_commitment_drifted_over_cap_is_absorbed() {
         let system = build_system(DRIFTED_SEED_MW);
@@ -3040,29 +3024,6 @@ mod anticipated_commitment_at_cap {
             outcome.error
         );
     }
-
-    #[test]
-    fn anticipated_commitment_over_cap_seed_is_refused() {
-        let system = build_system(OVER_CAP_SEED_MW);
-        let config = build_config();
-        let mut setup = build_setup_in_code(system, &config);
-        let comm = StubComm;
-        let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
-
-        let outcome = setup
-            .train(&mut solver, &comm, 4, ActiveSolver::new, None, None)
-            .expect("train must not return Err");
-
-        assert!(
-            matches!(
-                outcome.error,
-                Some(SddpError::AnticipatedCommitmentOutOfBounds { stage: 0, .. })
-            ),
-            "a commitment genuinely above its delivery cap must be refused by name, \
-             never absorbed as drift and never reported as a bare Infeasible, got: {:?}",
-            outcome.error
-        );
-    }
 }
 
 mod faithful_resolution {
@@ -3073,7 +3034,7 @@ mod faithful_resolution {
     //! only, read off the built setup through the two public terminal
     //! accessors with no training and no solve.
 
-    use chrono::{Datelike, NaiveDate};
+    use chrono::NaiveDate;
     use cobre_core::entities::bus::DeficitSegment;
     use cobre_core::entities::thermal::AnticipatedConfig;
     use cobre_core::temporal::{
@@ -3082,7 +3043,7 @@ mod faithful_resolution {
     };
     use cobre_core::{
         AnticipatedCommitmentHistory, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
-        ContractBlockBounds, EntityId, HydroBlockBounds, HydroStageBounds, HydroStagePenalties,
+        ContractBlockBounds, EntityId, HydroBlockBounds, HydroPenalties, HydroStageBounds,
         InitialConditions, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
         PenaltiesCountsSpec, PenaltiesDefaults, PostStudyStage, PostStudyStages,
         PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder, ThermalBlockBounds,
@@ -3095,6 +3056,8 @@ mod faithful_resolution {
         StoppingRuleConfig, TrainingConfig, TrainingSelection, TrainingSolverConfig,
         UpperBoundEvaluationConfig,
     };
+    use cobre_io::{ENTITY_SLOT_DATE_SENTINEL, StateFamily, decode_slot_date};
+    use cobre_sddp::study_horizon_end;
 
     use super::common::build_setup_in_code;
     use super::common::builders::{
@@ -3293,7 +3256,7 @@ mod faithful_resolution {
                 n_stages: N_STUDY_STAGES,
             },
             &PenaltiesDefaults {
-                hydro: HydroStagePenalties {
+                hydro: HydroPenalties {
                     spillage_cost: 0.0,
                     diversion_cost: 0.0,
                     turbined_cost: 0.0,
@@ -3425,35 +3388,35 @@ mod faithful_resolution {
         ]
     }
 
-    /// `YYYYMM01`, the same day-01 anchor `year_month_day_anchor` computes —
-    /// `EntitySlot::delivery_date` is month-granular by construction, never
-    /// the exact-day date.
-    fn month_anchor(d: NaiveDate) -> i32 {
-        d.year() * 10_000 + i32::try_from(d.month()).unwrap_or(1) * 100 + 1
-    }
-
     #[test]
     fn study_stage_deliveries_resolve_to_their_real_post_study_calendar_window() {
         let config = build_config();
         let setup = build_setup_in_code(build_system(), &config);
         let system = build_system();
 
-        let intervals = setup.build_terminal_anticipated_delivery_intervals(&system);
         let manifest = setup.build_terminal_entity_manifest(&system);
-        assert_eq!(
-            intervals.len(),
-            manifest.len(),
-            "the interval and manifest accessors must walk the same terminal projection"
-        );
+        let boundary_date =
+            study_horizon_end(&system).expect("a non-negative stage exists in this study");
 
         // A `LeadStages` plant's ring `k_max` is clamped up to its own declared
         // lead rather than the resolver's true occupancy, so the ring's own
         // slot order does not match ascending delivery-target order — compare
         // the carried set by value (sorted by start), never by vector position.
-        let mut carried: Vec<(usize, (NaiveDate, NaiveDate))> = intervals
+        let mut carried: Vec<(usize, (NaiveDate, NaiveDate))> = manifest
             .iter()
             .enumerate()
-            .filter_map(|(j, interval)| interval.map(|window| (j, window)))
+            .filter_map(|(j, slot)| {
+                if slot.entity_type != StateFamily::AnticipatedThermalState.code()
+                    || slot.interval_start == ENTITY_SLOT_DATE_SENTINEL
+                {
+                    return None;
+                }
+                let start = decode_slot_date(slot.interval_start)
+                    .expect("a live interval_start must decode");
+                let end =
+                    decode_slot_date(slot.interval_end).expect("a live interval_end must decode");
+                (end > boundary_date).then_some((j, (start, end)))
+            })
             .collect();
         carried.sort_by_key(|&(_, (start, _))| start);
 
@@ -3470,15 +3433,7 @@ mod faithful_resolution {
             assert_eq!(
                 window, *expected_window,
                 "a carried delivery interval must equal the literal reference window \
-                 {expected_window:?}, got {window:?}",
-            );
-
-            let expected_date = month_anchor(expected_window.0);
-            assert_eq!(
-                manifest[slot].delivery_date, expected_date,
-                "the manifest's delivery_date at slot {slot} must equal the month anchor \
-                 {expected_date} of the literal reference window's start, got {}",
-                manifest[slot].delivery_date,
+                 {expected_window:?}, got {window:?} (slot {slot})",
             );
         }
     }
@@ -3489,8 +3444,25 @@ mod faithful_resolution {
         let setup = build_setup_in_code(build_system(), &config);
         let system = build_system();
 
-        let intervals = setup.build_terminal_anticipated_delivery_intervals(&system);
-        let mut carried: Vec<(NaiveDate, NaiveDate)> = intervals.into_iter().flatten().collect();
+        let manifest = setup.build_terminal_entity_manifest(&system);
+        let boundary_date =
+            study_horizon_end(&system).expect("a non-negative stage exists in this study");
+
+        let mut carried: Vec<(NaiveDate, NaiveDate)> = manifest
+            .iter()
+            .filter_map(|slot| {
+                if slot.entity_type != StateFamily::AnticipatedThermalState.code()
+                    || slot.interval_start == ENTITY_SLOT_DATE_SENTINEL
+                {
+                    return None;
+                }
+                let start = decode_slot_date(slot.interval_start)
+                    .expect("a live interval_start must decode");
+                let end =
+                    decode_slot_date(slot.interval_end).expect("a live interval_end must decode");
+                (end > boundary_date).then_some((start, end))
+            })
+            .collect();
         carried.sort_by_key(|&(start, _)| start);
 
         let expected_days = [7_i64, 7, 7, 24];

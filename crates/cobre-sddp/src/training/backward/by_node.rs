@@ -29,7 +29,7 @@ use super::{
     by_scenario::StageOpeningSolver,
     duals_extraction::extract_duals_from_view,
     lp_setup::{fill_external_opening_noise, patch_opening_bounds},
-    outcome_aggregation::accumulate_opening_outcome,
+    outcome_aggregation::{accumulate_opening_outcome, fold_slot_increments_into_sync},
 };
 
 /// One solved (trial point, opening) outcome produced by an opening-block unit.
@@ -236,9 +236,6 @@ pub(crate) fn process_stage_backward_by_node<S: SolverInterface + Send>(
     let cursor = ClaimCursor::new(n_tiles * n_blocks);
     let tree_view = training_ctx.stochastic.tree_view();
     let s = succ.successor;
-    // Stage-level shortest-chain permutation shared by every Generated child at the
-    // successor stage (rule 39: no stage-skipping); an External child ignores it and
-    // reads its own declared column.
     let solve_order = tree_view.solve_order_data(s.0);
 
     workspaces
@@ -291,13 +288,9 @@ pub(crate) fn process_stage_backward_by_node<S: SolverInterface + Send>(
                 let block_lo = b * block_size;
                 let block_hi = (block_lo + block_size).min(n_openings);
 
-                // Walk the block's outcome range in canonical order (ascending child
-                // node id, then within-child ω), one contiguous same-child run at a
-                // time: a block may span a child boundary. Each run loads THAT child's
-                // frozen LP + delta cut batch, extracts duals against THAT child's pool,
-                // and reads THAT child's declared column when it is External — never
-                // child 0's. A single-child node has one run per block, reproducing the
-                // pre-fan claim loop byte-for-byte (no shape predicate).
+                // Canonical child order (sddp.md "The branching backward integrates
+                // every successor exhaustively"): each run loads THAT child's LP, never
+                // child 0's.
                 for ci in 0..outcomes.n_children() {
                     let child = outcomes.child(ci);
                     let run_lo = child.outcome_range.start.max(block_lo);
@@ -308,10 +301,7 @@ pub(crate) fn process_stage_backward_by_node<S: SolverInterface + Send>(
 
                     opening_solver.prepare(ws, ctx, succ, &child, iteration);
 
-                    // Assemble an External child's declared column once for the run
-                    // (a single realization, `len == 1`); a Generated child reads the
-                    // stage opening tree. The take/fill/restore reuses
-                    // `external_noise_buf` — no hot-path allocation.
+                    // take/fill/restore reuses `external_noise_buf`: no hot-path allocation.
                     let mut external_noise: Option<Vec<f64>> = None;
                     if child.openings.source == OpeningSource::External {
                         let mut buf = std::mem::take(&mut ws.backward_accum.external_noise_buf);
@@ -348,9 +338,7 @@ pub(crate) fn process_stage_backward_by_node<S: SolverInterface + Send>(
                             );
                             (child.outcome_range.start, buf.as_slice())
                         } else {
-                            // A Generated child: solve its openings in the stage
-                            // shortest-chain order, but write each outcome at its
-                            // canonical flattened index.
+                            // sddp.md "Backward opening order is warm-start-only".
                             let local_omega = solve_order[sp] as usize;
                             (
                                 child.outcome_range.start + local_omega,
@@ -374,7 +362,7 @@ pub(crate) fn process_stage_backward_by_node<S: SolverInterface + Send>(
                                 run_local_idx != 0,
                             )?;
                         } else {
-                            patch_opening_bounds(ws, ctx, training_ctx, raw_noise, x_hat, s)?;
+                            patch_opening_bounds(ws, ctx, training_ctx, raw_noise, x_hat, s);
 
                             let mut state_duals =
                                 std::mem::take(&mut ws.backward_accum.state_duals_buf);
@@ -477,12 +465,11 @@ pub(crate) fn process_stage_backward_by_node<S: SolverInterface + Send>(
                 }
             }
 
-            for slot in 0..pop {
-                let increment = ws.backward_accum.slot_increments[slot];
-                if increment > 0 {
-                    ws.backward_accum.metadata_sync_contribution[slot] += increment;
-                }
-            }
+            fold_slot_increments_into_sync(
+                &ws.backward_accum.slot_increments,
+                &mut ws.backward_accum.metadata_sync_contribution,
+                pop,
+            );
 
             ws.worker_timing_buf.backward_wall_ms +=
                 worker_stage_wall_start.elapsed().as_secs_f64() * 1_000.0;
@@ -536,9 +523,6 @@ pub(crate) fn by_node_finish<S: SolverInterface>(
         scratch.coeffs_buf.capacity()
     );
     scratch.coeffs_buf.resize(cut_n_state, 0.0_f64);
-    // `worker_out[w]` is worker `w`'s own `(w, count)` result (the `.enumerate()`
-    // that produced it preserves index order), so the redundant `w` is dropped
-    // here — `canonical_scatter` recovers it from position.
     let counts: Vec<usize> = worker_out
         .into_iter()
         .map(|res| res.map(|(_, c)| c))

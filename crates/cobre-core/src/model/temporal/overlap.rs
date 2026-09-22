@@ -22,6 +22,63 @@ pub fn window_period_overlaps(
     window_width_hours: f64,
     stage_lengths_hours: &[f64],
 ) -> Vec<f64> {
+    let mut overlaps: Vec<f64> = Vec::with_capacity(stage_lengths_hours.len());
+    overlaps.extend(period_overlaps_hours(
+        window_start_hours,
+        window_width_hours,
+        stage_lengths_hours,
+    ));
+
+    match overlaps.iter().rposition(|&overlap| overlap > 0.0) {
+        Some(last_nonzero) => {
+            overlaps.truncate(last_nonzero + 1);
+            overlaps
+        }
+        None => Vec::new(),
+    }
+}
+
+/// Whether the window reaches at least one period — the same `overlap > 0.0`
+/// sweep as [`window_period_overlaps`], equal to
+/// `!window_period_overlaps(...).is_empty()`, short-circuiting on the first
+/// match without allocating.
+#[must_use]
+pub fn window_reaches_any_period(
+    window_start_hours: f64,
+    window_width_hours: f64,
+    stage_lengths_hours: &[f64],
+) -> bool {
+    period_overlaps_hours(window_start_hours, window_width_hours, stage_lengths_hours)
+        .any(|overlap| overlap > 0.0)
+}
+
+/// Index of the deepest period the window reaches, or `0` if none — the same
+/// sweep as [`window_period_overlaps`], equal to
+/// `window_period_overlaps(...).len().saturating_sub(1)`, without allocating.
+#[must_use]
+pub fn window_period_reach_depth(
+    window_start_hours: f64,
+    window_width_hours: f64,
+    stage_lengths_hours: &[f64],
+) -> usize {
+    period_overlaps_hours(window_start_hours, window_width_hours, stage_lengths_hours)
+        .enumerate()
+        .fold(
+            0,
+            |depth, (index, overlap)| {
+                if overlap > 0.0 { index } else { depth }
+            },
+        )
+}
+
+/// Shared sweep behind [`window_period_overlaps`], [`window_reaches_any_period`],
+/// and [`window_period_reach_depth`]: one overlap-hours value per period, from
+/// period 0 through the last period starting before the window's end.
+fn period_overlaps_hours(
+    window_start_hours: f64,
+    window_width_hours: f64,
+    stage_lengths_hours: &[f64],
+) -> impl Iterator<Item = f64> + '_ {
     debug_assert!(
         window_start_hours.is_finite(),
         "window_start_hours must be finite"
@@ -38,27 +95,18 @@ pub fn window_period_overlaps(
     );
 
     let window_end_hours = window_start_hours + window_width_hours;
-
-    let mut overlaps = Vec::new();
     let mut period_start = 0.0_f64;
-    for &length in stage_lengths_hours {
+    stage_lengths_hours.iter().map_while(move |&length| {
         if period_start >= window_end_hours {
-            break;
+            return None;
         }
         let period_end = period_start + length;
         let overlap_start = window_start_hours.max(period_start);
         let overlap_end = window_end_hours.min(period_end);
-        overlaps.push((overlap_end - overlap_start).max(0.0));
+        let overlap = (overlap_end - overlap_start).max(0.0);
         period_start = period_end;
-    }
-
-    match overlaps.iter().rposition(|&overlap| overlap > 0.0) {
-        Some(last_nonzero) => {
-            overlaps.truncate(last_nonzero + 1);
-            overlaps
-        }
-        None => Vec::new(),
-    }
+        Some(overlap)
+    })
 }
 
 #[cfg(test)]
@@ -115,5 +163,29 @@ mod tests {
     fn test_exact_boundary_window_returns_depth_zero() {
         let overlaps = window_period_overlaps(0.0, 720.0, &[720.0, 168.0, 168.0]);
         assert_close(&overlaps, &[720.0]);
+    }
+
+    #[test]
+    fn test_predicate_and_depth_match_window_period_overlaps_across_golden_inputs() {
+        let cases: [(f64, f64, &[f64]); 5] = [
+            (0.0, 360.0, &[168.0, 168.0, 168.0]),
+            (360.0, 720.0, &[720.0, 168.0, 168.0, 168.0]),
+            (336.0, 200.0, &[168.0, 168.0, 168.0, 168.0]),
+            (1000.0, 10.0, &[168.0, 168.0]),
+            (0.0, 720.0, &[720.0, 168.0, 168.0]),
+        ];
+        for &(start, width, lengths) in &cases {
+            let overlaps = window_period_overlaps(start, width, lengths);
+            assert_eq!(
+                window_reaches_any_period(start, width, lengths),
+                !overlaps.is_empty(),
+                "predicate mismatch for ({start}, {width}, {lengths:?})"
+            );
+            assert_eq!(
+                window_period_reach_depth(start, width, lengths),
+                overlaps.len().saturating_sub(1),
+                "depth mismatch for ({start}, {width}, {lengths:?})"
+            );
+        }
     }
 }

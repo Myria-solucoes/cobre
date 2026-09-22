@@ -25,11 +25,13 @@ use cobre_stochastic::season_cast::{
 
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 
+/// Rules 29-34 (see the module table above for the row-to-check mapping).
 pub(super) fn validate_inflow_seeding(data: &ParsedData, ctx: &mut ValidationContext) {
+    let merged_by_hydro = merged_windows_by_hydro(data);
     warn_unresolvable_first_stage_season(data, ctx);
     check_conditioning_window_bound(data, ctx);
-    check_inprogress_partial_coverage(data, ctx);
-    check_slot_coverage(data, ctx);
+    check_inprogress_partial_coverage(data, ctx, &merged_by_hydro);
+    check_slot_coverage(data, ctx, &merged_by_hydro);
     report_negative_realized_inflows(data, ctx);
     check_annual_component_monthly_only(data, ctx);
 }
@@ -110,8 +112,6 @@ fn check_annual_component_monthly_only(data: &ParsedData, ctx: &mut ValidationCo
     );
 }
 
-/// The first study stage (`id >= 0`, lowest `id`; stages are canonical-sorted
-/// ascending). `None` when the study declares no study stages.
 fn first_study_stage(data: &ParsedData) -> Option<&Stage> {
     data.stages
         .stages
@@ -120,9 +120,7 @@ fn first_study_stage(data: &ParsedData) -> Option<&Stage> {
         .min_by_key(|s| s.id)
 }
 
-/// The classical AR order per (hydro, stage): the row count of
-/// `inflow_ar_coefficients` sharing that key (mirrors `InflowModel::ar_order`,
-/// which is `ar_coefficients.len()`). Zero without any rows.
+/// Mirrors `InflowModel::ar_order` per (hydro, stage).
 fn classical_max_ar_order(data: &ParsedData) -> usize {
     let mut counts: HashMap<(EntityId, i32), usize> = HashMap::new();
     for row in &data.inflow_ar_coefficients {
@@ -157,11 +155,8 @@ pub fn seed_lag_state_depth(classical_ar_order: usize, has_annual_component: boo
     }
 }
 
-/// `n_fin`: the number of season-period occurrences that finalize (complete)
-/// within the study horizon — the count of `finalize_period` transitions
-/// among study stages (`id >= 0`). Computed over the full canonical stage set
-/// (pre-study stages included) so `finalize_period`'s own stage lookahead
-/// resolves correctly; zero without a `season_map`.
+/// Pass all stages (including pre-study) to `precompute_stage_lag_transitions`
+/// so its lookahead resolves correctly.
 fn finalizing_period_count(data: &ParsedData) -> usize {
     let Some(season_map) = &data.stages.policy_graph.season_map else {
         return 0;
@@ -175,10 +170,53 @@ fn finalizing_period_count(data: &ParsedData) -> usize {
         .count()
 }
 
-/// `hydro_id`'s layered windows: `inflow_history` (record) shadowed day-wise
-/// by `recent_observations` (conditioning) — the same construction
-/// [`cobre_stochastic::derive_inflow_seeds`] uses per hydro.
-fn merged_windows_for_hydro(data: &ParsedData, hydro_id: EntityId) -> Vec<RealizedWindow> {
+/// Mirrors [`cobre_stochastic::derive_inflow_seeds`] per-hydro construction.
+/// Preserves row order: overlaps resolve to the first-listed window.
+fn merged_windows_by_hydro(data: &ParsedData) -> HashMap<EntityId, Vec<RealizedWindow>> {
+    let mut record: HashMap<EntityId, Vec<RealizedWindow>> = HashMap::new();
+    for row in &data.inflow_history {
+        record
+            .entry(row.hydro_id)
+            .or_default()
+            .push(RealizedWindow {
+                start_date: row.start_date,
+                end_date: row.end_date,
+                value_m3s: row.value_m3s,
+            });
+    }
+    let mut conditioning: HashMap<EntityId, Vec<RealizedWindow>> = HashMap::new();
+    for obs in &data.initial_conditions.recent_observations {
+        conditioning
+            .entry(obs.hydro_id)
+            .or_default()
+            .push(RealizedWindow {
+                start_date: obs.start_date,
+                end_date: obs.end_date,
+                value_m3s: obs.value_m3s,
+            });
+    }
+
+    let mut merged: HashMap<EntityId, Vec<RealizedWindow>> =
+        HashMap::with_capacity(record.len().max(conditioning.len()));
+    for (hydro_id, record_windows) in record.drain() {
+        let conditioning_windows = conditioning.remove(&hydro_id).unwrap_or_default();
+        merged.insert(
+            hydro_id,
+            merge_layered_windows(&record_windows, &conditioning_windows),
+        );
+    }
+    for (hydro_id, conditioning_windows) in conditioning.drain() {
+        merged.insert(hydro_id, merge_layered_windows(&[], &conditioning_windows));
+    }
+    merged
+}
+
+/// Test oracle: the retired per-hydro scan for equivalence validation.
+#[cfg(test)]
+fn merged_windows_for_hydro_reference(
+    data: &ParsedData,
+    hydro_id: EntityId,
+) -> Vec<RealizedWindow> {
     let record: Vec<RealizedWindow> = data
         .inflow_history
         .iter()
@@ -212,7 +250,11 @@ fn merged_windows_for_hydro(data: &ParsedData, hydro_id: EntityId) -> Vec<Realiz
 /// — that path has no load-time-knowable AR order and is already guarded by
 /// the record-coverage rules gating estimation itself.
 #[allow(clippy::float_cmp)] // cast's whole-day-hours arithmetic keeps a full-coverage ratio bit-exact
-fn check_slot_coverage(data: &ParsedData, ctx: &mut ValidationContext) {
+fn check_slot_coverage(
+    data: &ParsedData,
+    ctx: &mut ValidationContext,
+    merged_by_hydro: &HashMap<EntityId, Vec<RealizedWindow>>,
+) {
     if data.inflow_ar_coefficients.is_empty() {
         return;
     }
@@ -238,19 +280,22 @@ fn check_slot_coverage(data: &ParsedData, ctx: &mut ValidationContext) {
     let full_coverage_upper = max_ar_order.max(l_state.saturating_sub(n_fin));
 
     let anchor = season_period_window(season_map, season_def, first_stage);
-    let merged_by_hydro: Vec<(i32, Vec<RealizedWindow>)> = data
+    let coverage_by_hydro: Vec<(i32, &[RealizedWindow])> = data
         .hydros
         .iter()
-        .map(|h| (h.id.0, merged_windows_for_hydro(data, h.id)))
+        .map(|h| {
+            let windows: &[RealizedWindow] = merged_by_hydro.get(&h.id).map_or(&[], Vec::as_slice);
+            (h.id.0, windows)
+        })
         .collect();
 
     for k in 1..=l_state {
         let Some(occurrence) = nth_previous_occurrence(season_map, season_def, &anchor, k) else {
             continue;
         };
-        let gapped: Vec<i32> = merged_by_hydro
+        let gapped: Vec<i32> = coverage_by_hydro
             .iter()
-            .filter(|(_, windows)| cast(windows, &occurrence).coverage != 1.0)
+            .filter(|&(_, windows)| cast(windows, &occurrence).coverage != 1.0)
             .map(|(id, _)| *id)
             .collect();
         if gapped.is_empty() {
@@ -288,11 +333,8 @@ fn check_slot_coverage(data: &ParsedData, ctx: &mut ValidationContext) {
     }
 }
 
-/// Row 3: a `recent_observations` window extending past the study start would
-/// overlap the solved study itself — the same future-dating ban
-/// `travel_time.rs`'s defluence rule enforces on `past_defluences`, mirrored
-/// here on the same side: a conditioning window must stay entirely pre-study
-/// (lag-slot and in-progress seeding both read only pre-study days).
+/// Row 3: rejects `recent_observations` extending past study start
+/// (mirrors `travel_time.rs` defluence ban).
 fn check_conditioning_window_bound(data: &ParsedData, ctx: &mut ValidationContext) {
     let Some(study_start) = first_study_stage(data).map(|s| s.start_date) else {
         return;
@@ -319,7 +361,11 @@ fn check_conditioning_window_bound(data: &ParsedData, ctx: &mut ValidationContex
 /// strictly between 0 and 1 is legitimate (that is the accumulator's
 /// purpose) but worth a per-hydro advisory naming the fraction; full or zero
 /// coverage is silent.
-fn check_inprogress_partial_coverage(data: &ParsedData, ctx: &mut ValidationContext) {
+fn check_inprogress_partial_coverage(
+    data: &ParsedData,
+    ctx: &mut ValidationContext,
+    merged_by_hydro: &HashMap<EntityId, Vec<RealizedWindow>>,
+) {
     let Some(season_map) = &data.stages.policy_graph.season_map else {
         return;
     };
@@ -336,8 +382,8 @@ fn check_inprogress_partial_coverage(data: &ParsedData, ctx: &mut ValidationCont
     let in_progress = season_period_window(season_map, season_def, first_stage);
 
     for hydro in &data.hydros {
-        let merged = merged_windows_for_hydro(data, hydro.id);
-        let projection = cast(&merged, &in_progress);
+        let windows: &[RealizedWindow] = merged_by_hydro.get(&hydro.id).map_or(&[], Vec::as_slice);
+        let projection = cast(windows, &in_progress);
         if !(projection.coverage > 0.0 && projection.coverage < 1.0) {
             continue;
         }
@@ -356,13 +402,9 @@ fn check_inprogress_partial_coverage(data: &ParsedData, ctx: &mut ValidationCont
     }
 }
 
-/// Row 5 (PD-1): warns when the first study stage's season cannot resolve —
-/// no `season_map`, no `season_id` on the first study stage, or an unmatched
-/// `season_id` — the same three guards `derive_inflow_seeds` returns a zero
-/// seed under. Still fires alongside Layer 5b's season-id-consistency rule
-/// (which already hard-errors an unmatched id on any stage): the two
-/// diagnostics answer different questions — schema validity vs. seed
-/// derivability.
+/// Row 5: warns when the first stage's season is unresolvable
+/// (mirrors `derive_inflow_seeds` zero-seed path). Distinct from Layer 5b's
+/// schema validity check.
 fn warn_unresolvable_first_stage_season(data: &ParsedData, ctx: &mut ValidationContext) {
     if max_seed_lag_depth(data) == 0 || data.hydros.is_empty() {
         return;
@@ -408,9 +450,9 @@ fn warn_unresolvable_first_stage_season(data: &ParsedData, ctx: &mut ValidationC
     clippy::cast_precision_loss
 )]
 mod tests {
-    use super::super::test_support::*;
     use super::*;
     use crate::scenarios::InflowAnnualComponentRow;
+    use crate::test_support::*;
     use cobre_core::{RecentObservation, SeasonCycleType, SeasonMap};
 
     fn d(y: i32, m: u32, day: u32) -> chrono::NaiveDate {
@@ -585,7 +627,7 @@ mod tests {
             openings_declared: std::collections::HashSet::new(),
             stages,
             policy_graph: HorizonGraph {
-                stage_discount_rate_overrides: std::collections::HashMap::new(),
+                stage_discount_rate_overrides: std::collections::BTreeMap::new(),
                 graph_type: PolicyGraphType::FiniteHorizon,
                 annual_discount_rate: 0.06,
                 transitions: vec![],
@@ -1004,6 +1046,86 @@ mod tests {
             ctx.warnings().is_empty(),
             "no negative value must produce no warning, got: {:?}",
             ctx.warnings()
+        );
+    }
+
+    // ── merged_windows_by_hydro: bucketed-map equivalence ──────────────────
+
+    /// The bucketed one-pass map's merged windows must match, hydro-for-hydro
+    /// and window-for-window, the retired per-hydro filter-then-merge
+    /// ([`merged_windows_for_hydro_reference`]). Hydro 1's two overlapping
+    /// `inflow_history` rows make this discriminating: [`merge_layered_windows`]
+    /// resolves an overlap to the first-listed covering window, so a bucket
+    /// that reordered its rows would silently pick the second row's value
+    /// (999.0) instead of the first's (100.0).
+    #[test]
+    fn test_bucketed_merged_windows_match_per_hydro_reference() {
+        let stages = make_stages_with_seasons(3, true);
+        let mut data = make_data(
+            vec![make_hydro(1, None), make_hydro(2, None)],
+            vec![],
+            vec![],
+            stages,
+            vec![],
+            vec![],
+        );
+        data.inflow_history = vec![
+            crate::InflowHistoryRow {
+                hydro_id: EntityId::from(1),
+                start_date: d(1999, 10, 1),
+                end_date: d(1999, 12, 1),
+                value_m3s: 100.0,
+            },
+            crate::InflowHistoryRow {
+                hydro_id: EntityId::from(2),
+                start_date: d(1999, 10, 1),
+                end_date: d(2000, 1, 1),
+                value_m3s: 700.0,
+            },
+            crate::InflowHistoryRow {
+                hydro_id: EntityId::from(1),
+                start_date: d(1999, 10, 15),
+                end_date: d(1999, 11, 1),
+                value_m3s: 999.0,
+            },
+        ];
+        data.initial_conditions.recent_observations = vec![RecentObservation {
+            hydro_id: EntityId::from(1),
+            start_date: d(1999, 12, 1),
+            end_date: d(2000, 1, 1),
+            value_m3s: 50.0,
+        }];
+
+        let bucketed = merged_windows_by_hydro(&data);
+
+        for hydro_id in [EntityId::from(1), EntityId::from(2)] {
+            let expected = merged_windows_for_hydro_reference(&data, hydro_id);
+            let actual: &[RealizedWindow] = bucketed.get(&hydro_id).map_or(&[], Vec::as_slice);
+            assert_eq!(
+                actual.len(),
+                expected.len(),
+                "hydro {hydro_id}: window count mismatch"
+            );
+            for (a, e) in actual.iter().zip(&expected) {
+                assert_eq!(
+                    (a.start_date, a.end_date, a.value_m3s),
+                    (e.start_date, e.end_date, e.value_m3s),
+                    "hydro {hydro_id}: window mismatch"
+                );
+            }
+        }
+
+        let hydro1_windows: &[RealizedWindow] =
+            bucketed.get(&EntityId::from(1)).map_or(&[], Vec::as_slice);
+        assert!(
+            hydro1_windows
+                .iter()
+                .any(|w| w.start_date == d(1999, 10, 15) && w.value_m3s == 100.0),
+            "expected the overlap to resolve to the first-declared row, got: {:?}",
+            hydro1_windows
+                .iter()
+                .map(|w| (w.start_date, w.end_date, w.value_m3s))
+                .collect::<Vec<_>>()
         );
     }
 

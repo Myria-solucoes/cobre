@@ -27,11 +27,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use cobre_io::{
-    CheckpointManifest, ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, FORMAT_VERSION,
-    GraphManifest, ManifestEdge, ManifestNode, OwnedPolicyBasisRecord, OwnedPolicyCutRecord,
-    PolicyBasisRecord, PolicyCutRecord, ProducerBlock, STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL,
-    STAGE_CUTS_NODE_ID_SENTINEL, STAGE_STATES_NODE_ID_SENTINEL, StageCutsPayload,
-    StageCutsReadResult, StageStatesPayload, StageStatesReadResult,
+    CheckpointManifest, ENTITY_SLOT_DATE_SENTINEL, EntitySlot, FORMAT_VERSION, GraphManifest,
+    HydroSeasonOrders, ManifestEdge, ManifestNode, OwnedPolicyBasisRecord, OwnedPolicyCutRecord,
+    PolicyBasisRecord, PolicyCutRecord, ProducerBlock, SEASON_CYCLE_CODE_MONTHLY,
+    SEASON_CYCLE_CODE_WEEKLY, STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL, STAGE_CUTS_NODE_ID_SENTINEL,
+    STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, STAGE_STATES_NODE_ID_SENTINEL, SeasonManifest,
+    StageCutsPayload, StageCutsReadResult, StageStatesPayload, StageStatesReadResult,
     deserialize_checkpoint_manifest, deserialize_stage_basis, deserialize_stage_cuts,
     deserialize_stage_states, serialize_checkpoint_manifest, serialize_stage_basis,
     serialize_stage_cuts, serialize_stage_states,
@@ -212,11 +213,20 @@ fn assert_manifest_json_matches(manifest_json: &Value, expected: &[EntitySlot]) 
             slot.was_active,
             "slot {i} was_active"
         );
-        // flatc omits a scalar equal to its default (0); an absent field is 0.
         assert_eq!(
-            i64_or(obj, "delivery_date", 0),
-            i64::from(slot.delivery_date),
-            "slot {i} delivery_date"
+            i64_or(obj, "reference_date", 0),
+            i64::from(slot.reference_date),
+            "slot {i} reference_date"
+        );
+        assert_eq!(
+            i64_or(obj, "interval_start", 0),
+            i64::from(slot.interval_start),
+            "slot {i} interval_start"
+        );
+        assert_eq!(
+            i64_or(obj, "interval_end", 0),
+            i64::from(slot.interval_end),
+            "slot {i} interval_end"
         );
     }
 }
@@ -225,27 +235,9 @@ fn assert_manifest_json_matches(manifest_json: &Value, expected: &[EntitySlot]) 
 /// writer→flatc and flatc→reader paths cover every field including a signed id.
 fn conformance_manifest() -> Vec<EntitySlot> {
     vec![
-        EntitySlot {
-            entity_type: 2,
-            entity_id: 7,
-            subindex: 1,
-            was_active: true,
-            delivery_date: 20240501,
-        },
-        EntitySlot {
-            entity_type: 1,
-            entity_id: -1,
-            subindex: 3,
-            was_active: false,
-            delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-        },
-        EntitySlot {
-            entity_type: 3,
-            entity_id: 42,
-            subindex: 2,
-            was_active: true,
-            delivery_date: 20200101,
-        },
+        EntitySlot::anticipated(7, 1, true).with_interval(20_240_501, 20_240_601),
+        EntitySlot::inflow_lag(-1, 3, false),
+        EntitySlot::transit_bucket(42, 2, true).with_interval(20_200_101, 20_200_201),
     ]
 }
 
@@ -275,6 +267,7 @@ fn ser_cuts(
         cost_scale_factor: 1_000_000.0,
         node_id: -1,
         graph_stage_id: -1,
+        priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
     })
 }
 
@@ -404,22 +397,7 @@ fn stage_cuts_reader_consumes_flatc_buffer() {
 /// This is the reduced-per-stage case at the conformance level — a manifest
 /// shorter than the all-enabled count must round-trip in both directions.
 fn reduced_storage_manifest() -> Vec<EntitySlot> {
-    vec![
-        EntitySlot {
-            entity_type: 0,
-            entity_id: 1,
-            subindex: 0,
-            was_active: true,
-            delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-        },
-        EntitySlot {
-            entity_type: 0,
-            entity_id: 2,
-            subindex: 0,
-            was_active: true,
-            delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-        },
-    ]
+    vec![EntitySlot::storage(1, true), EntitySlot::storage(2, true)]
 }
 
 #[test]
@@ -499,10 +477,11 @@ fn stage_cuts_reduced_dimension_reader_consumes_flatc_buffer() {
 }
 
 /// Round-trip of the self-describing per-pool facts (`cost_scale_factor` id 8,
-/// `node_id` id 9, `graph_stage_id` id 10) in both directions: the hand-rolled
-/// writer→reader path preserves them, `flatc` decodes the hand-rolled buffer with
-/// the three at their slots, and a `flatc`-built buffer carrying them decodes
-/// identically through the hand-rolled reader.
+/// `node_id` id 9, `graph_stage_id` id 10, `priced_state_date` id 11) in both
+/// directions: the hand-rolled writer→reader path preserves them, `flatc`
+/// decodes the hand-rolled buffer with the four at their slots, and a
+/// `flatc`-built buffer carrying them decodes identically through the
+/// hand-rolled reader.
 #[test]
 fn stage_cuts_self_describing_facts_round_trip() {
     let coeffs = [1.0, 2.0, 3.0];
@@ -527,6 +506,7 @@ fn stage_cuts_self_describing_facts_round_trip() {
         cost_scale_factor: 1_000_000.0,
         node_id: 3,
         graph_stage_id: 7,
+        priced_state_date: 20_311_201,
     };
     let buf = serialize_stage_cuts(&payload);
 
@@ -535,11 +515,13 @@ fn stage_cuts_self_describing_facts_round_trip() {
     assert_eq!(hand_rolled.cost_scale_factor, Some(1_000_000.0));
     assert_eq!(hand_rolled.node_id, 3);
     assert_eq!(hand_rolled.graph_stage_id, 7);
+    assert_eq!(hand_rolled.priced_state_date, 20_311_201);
 
     let json = flatc_decode(&buf, "StageCuts");
     assert!((as_f64(&json, "cost_scale_factor") - 1_000_000.0).abs() < 1e-6);
     assert_eq!(i64_or(&json, "node_id", -1), 3);
     assert_eq!(i64_or(&json, "graph_stage_id", -1), 7);
+    assert_eq!(i64_or(&json, "priced_state_date", -1), 20_311_201);
 
     let document = json!({
         "stage_id": 4,
@@ -561,7 +543,8 @@ fn stage_cuts_self_describing_facts_round_trip() {
         ],
         "cost_scale_factor": 1_000_000.0,
         "node_id": 3,
-        "graph_stage_id": 7
+        "graph_stage_id": 7,
+        "priced_state_date": 20_311_201
     });
     let flatc_buf = flatc_encode(&document, "StageCuts");
     let from_flatc =
@@ -569,14 +552,15 @@ fn stage_cuts_self_describing_facts_round_trip() {
     assert_eq!(from_flatc.cost_scale_factor, Some(1_000_000.0));
     assert_eq!(from_flatc.node_id, 3);
     assert_eq!(from_flatc.graph_stage_id, 7);
+    assert_eq!(from_flatc.priced_state_date, 20_311_201);
 }
 
 /// Forward-compat: a buffer built from a pre-`id:8` `StageCuts` schema (no
-/// self-describing facts) reads back `cost_scale_factor == None`, `node_id` and
-/// `graph_stage_id` at their sentinels — never a bare `0`. Mirrors
-/// `pre_node_id_stage_states_reads_as_sentinel`: flatc cannot emit a field the
-/// schema lacks, so the buffer is built from a schema that stops at
-/// `entity_manifest (id: 7)`.
+/// self-describing facts) reads back `cost_scale_factor == None`, `node_id`,
+/// `graph_stage_id` and `priced_state_date` at their sentinels — never a bare
+/// `0`. Mirrors `pre_node_id_stage_states_reads_as_sentinel`: flatc cannot
+/// emit a field the schema lacks, so the buffer is built from a schema that
+/// stops at `entity_manifest (id: 7)`.
 #[test]
 fn pre_self_describing_stage_cuts_reads_as_absent_and_sentinels() {
     let schema_pre_self_describing = "
@@ -680,6 +664,10 @@ table StageCuts {
     assert_eq!(
         result.graph_stage_id, STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL,
         "a pre-id:8 buffer must read graph_stage_id as the sentinel, not 0"
+    );
+    assert_eq!(
+        result.priced_state_date, STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
+        "a pre-id:11 buffer must read priced_state_date as the sentinel, not 0"
     );
 }
 
@@ -790,7 +778,7 @@ fn stage_states_reader_consumes_flatc_buffer() {
 /// Forward-compat: a buffer written against a pre-`id:5` `StageStates` schema
 /// (no `node_id` field) must deserialize with `node_id` at
 /// [`STAGE_STATES_NODE_ID_SENTINEL`], never a bare `0` (a valid node id).
-/// Mirrors `pre_delivery_date_entity_slot_reads_as_sentinel`'s rewritten-schema
+/// Mirrors `pre_interval_entity_slot_reads_as_sentinel`'s rewritten-schema
 /// approach: flatc cannot emit a field the schema lacks, so the buffer is built
 /// from a schema that stops at `entity_manifest (id: 4)`.
 #[test]
@@ -907,6 +895,20 @@ fn conformance_manifest_value() -> CheckpointManifest {
             ],
             cost_scale_factor: Some(1_000_000.0),
         },
+        season_manifest: SeasonManifest {
+            cycle_code: SEASON_CYCLE_CODE_MONTHLY,
+            n_seasons: 12,
+            hydro_orders: vec![
+                HydroSeasonOrders {
+                    hydro_id: 3,
+                    orders: vec![1, 2, 1, 1, 3, 2, 1, 1, 2, 2, 1, 1],
+                },
+                HydroSeasonOrders {
+                    hydro_id: 9,
+                    orders: vec![4, 4, 3, 3, 2, 2, 1, 1, 2, 2, 3, 3],
+                },
+            ],
+        },
     }
 }
 
@@ -974,6 +976,15 @@ fn assert_manifest_eq(actual: &CheckpointManifest, expected: &CheckpointManifest
         ap.cost_scale_factor.map(f64::to_bits),
         ep.cost_scale_factor.map(f64::to_bits)
     );
+
+    let (asm, esm) = (&actual.season_manifest, &expected.season_manifest);
+    assert_eq!(asm.cycle_code, esm.cycle_code);
+    assert_eq!(asm.n_seasons, esm.n_seasons);
+    assert_eq!(asm.hydro_orders.len(), esm.hydro_orders.len());
+    for (a, e) in asm.hydro_orders.iter().zip(&esm.hydro_orders) {
+        assert_eq!(a.hydro_id, e.hydro_id);
+        assert_eq!(a.orders, e.orders);
+    }
 }
 
 /// Round-trip of the `CheckpointManifest` root in both directions: the
@@ -989,7 +1000,6 @@ fn checkpoint_manifest_round_trip() {
         .expect("hand-rolled reader must consume its own buffer");
     assert_manifest_eq(&hand_rolled, &manifest);
 
-    // Hand-rolled bytes → flatc decode of the CheckpointManifest root.
     let json = flatc_decode(&buf, "CheckpointManifest");
     assert_eq!(as_u64(&json, "format_version"), u64::from(FORMAT_VERSION));
     assert_eq!(get(&json, "cobre_version").as_str().unwrap(), "9.9.9");
@@ -1033,7 +1043,27 @@ fn checkpoint_manifest_round_trip() {
     assert_eq!(i64_or(&edges[0], "target_id", 0), 11);
     assert!((as_f64(&edges[0], "probability") - 0.75).abs() < 1e-12);
 
-    // flatc-built buffer → hand-rolled reader.
+    let season_manifest_json = get(&json, "season_manifest");
+    assert_eq!(
+        as_u64(season_manifest_json, "cycle_code"),
+        u64::from(SEASON_CYCLE_CODE_MONTHLY)
+    );
+    assert_eq!(as_u64(season_manifest_json, "n_seasons"), 12);
+    let hydro_orders = get(season_manifest_json, "hydro_orders")
+        .as_array()
+        .expect("hydro_orders is an array");
+    assert_eq!(hydro_orders.len(), 2);
+    assert_eq!(i64_or(&hydro_orders[0], "hydro_id", 0), 3);
+    assert_eq!(
+        get(&hydro_orders[0], "orders"),
+        &json!([1, 2, 1, 1, 3, 2, 1, 1, 2, 2, 1, 1])
+    );
+    assert_eq!(i64_or(&hydro_orders[1], "hydro_id", 0), 9);
+    assert_eq!(
+        get(&hydro_orders[1], "orders"),
+        &json!([4, 4, 3, 3, 2, 2, 1, 1, 2, 2, 3, 3])
+    );
+
     let document = json!({
         "format_version": FORMAT_VERSION,
         "cobre_version": "9.9.9",
@@ -1058,9 +1088,65 @@ fn checkpoint_manifest_round_trip() {
         "total_visited_states": 999,
         "training_block_mode": "parallel",
         "training_block_mode_per_stage": ["parallel", "chronological"],
-        "cost_scale_factor": 1_000_000.0
+        "cost_scale_factor": 1_000_000.0,
+        "season_manifest": {
+            "cycle_code": 0,
+            "n_seasons": 12,
+            "hydro_orders": [
+                {"hydro_id": 3, "orders": [1, 2, 1, 1, 3, 2, 1, 1, 2, 2, 1, 1]},
+                {"hydro_id": 9, "orders": [4, 4, 3, 3, 2, 2, 1, 1, 2, 2, 3, 3]}
+            ]
+        }
     });
     let flatc_buf = flatc_encode(&document, "CheckpointManifest");
+    let from_flatc = deserialize_checkpoint_manifest(&flatc_buf)
+        .expect("hand-rolled reader must consume flatc-built buffer");
+    assert_manifest_eq(&from_flatc, &manifest);
+}
+
+/// Dedicated round-trip for `season_manifest`, independent of
+/// [`checkpoint_manifest_round_trip`]'s fixture: hand-rolled writer → `flatc`
+/// reader (checked field by field) → `flatc` writer → hand-rolled reader.
+#[test]
+fn season_manifest_round_trips_through_flatc() {
+    let mut manifest = conformance_manifest_value();
+    manifest.season_manifest = SeasonManifest {
+        cycle_code: SEASON_CYCLE_CODE_WEEKLY,
+        n_seasons: 4,
+        hydro_orders: vec![
+            HydroSeasonOrders {
+                hydro_id: 1,
+                orders: vec![2, 2, 3, 1],
+            },
+            HydroSeasonOrders {
+                hydro_id: 5,
+                orders: vec![0, 1, 1, 2],
+            },
+        ],
+    };
+
+    let buf = serialize_checkpoint_manifest(&manifest);
+    let hand_rolled = deserialize_checkpoint_manifest(&buf)
+        .expect("hand-rolled reader must consume its own buffer");
+    assert_manifest_eq(&hand_rolled, &manifest);
+
+    let json = flatc_decode(&buf, "CheckpointManifest");
+    let season_manifest_json = get(&json, "season_manifest");
+    assert_eq!(
+        as_u64(season_manifest_json, "cycle_code"),
+        u64::from(SEASON_CYCLE_CODE_WEEKLY)
+    );
+    assert_eq!(as_u64(season_manifest_json, "n_seasons"), 4);
+    let hydro_orders = get(season_manifest_json, "hydro_orders")
+        .as_array()
+        .expect("hydro_orders is an array");
+    assert_eq!(hydro_orders.len(), 2);
+    assert_eq!(i64_or(&hydro_orders[0], "hydro_id", 0), 1);
+    assert_eq!(get(&hydro_orders[0], "orders"), &json!([2, 2, 3, 1]));
+    assert_eq!(i64_or(&hydro_orders[1], "hydro_id", 0), 5);
+    assert_eq!(get(&hydro_orders[1], "orders"), &json!([0, 1, 1, 2]));
+
+    let flatc_buf = flatc_encode(&json, "CheckpointManifest");
     let from_flatc = deserialize_checkpoint_manifest(&flatc_buf)
         .expect("hand-rolled reader must consume flatc-built buffer");
     assert_manifest_eq(&from_flatc, &manifest);
@@ -1151,10 +1237,9 @@ fn schema_carries_no_algorithm_vocabulary() {
     );
 }
 
-/// `EntitySlot`: id 4 is a burned `deprecated` placeholder, the
-/// `YYYYMMDD` `delivery_date` sits at id 5, and the artifact declares the
-/// `CBVF` `file_identifier` plus a `file_extension`. A text inspection of
-/// `schemas/policy.fbs`.
+/// `EntitySlot`: id 4 and id 5 are burned `deprecated` placeholders, and the
+/// artifact declares the `CBVF` `file_identifier` plus a `file_extension`. A
+/// text inspection of `schemas/policy.fbs`.
 #[test]
 fn schema_burns_delivery_anchor_and_declares_file_identifier() {
     let schema = std::fs::read_to_string(schema_path()).expect("read policy.fbs");
@@ -1163,8 +1248,8 @@ fn schema_burns_delivery_anchor_and_declares_file_identifier() {
         "EntitySlot id 4 must be the burned, deprecated delivery_anchor placeholder"
     );
     assert!(
-        schema.contains("delivery_date:int32 (id: 5);"),
-        "the YYYYMMDD delivery_date must sit at id 5"
+        schema.contains("delivery_date:int32 (id: 5, deprecated);"),
+        "EntitySlot id 5 must be the burned, deprecated delivery_date placeholder"
     );
     assert!(
         schema.contains("file_identifier \"CBVF\";"),
@@ -1176,13 +1261,14 @@ fn schema_burns_delivery_anchor_and_declares_file_identifier() {
     );
 }
 
-// ─── EntitySlot delivery_date (id: 5) round-trip + forward-compat ─────────────
+// ─── EntitySlot per-family dating (ids: 6/7/8) round-trip + forward-compat ────
 
-/// Round-trip: an `EntitySlot` carrying a non-sentinel `delivery_date`
-/// survives the hand-rolled writer → hand-rolled reader path, and the same
-/// buffer decodes through `flatc` with the date at slot id 5.
+/// Round-trip: an `EntitySlot` carrying `reference_date` (inflow-lag) or
+/// `interval_start`/`interval_end` (transit bucket) survives the hand-rolled
+/// writer -> hand-rolled reader path, and the same buffer decodes through
+/// `flatc` with each field at its own slot id (6/7/8).
 #[test]
-fn entity_slot_delivery_date_round_trips() {
+fn entity_slot_per_family_dates_round_trip() {
     let coeffs = [1.0, 2.0];
     let cuts = [PolicyCutRecord {
         cut_id: 1,
@@ -1194,30 +1280,28 @@ fn entity_slot_delivery_date_round_trips() {
         is_active: true,
     }];
     let manifest = vec![
-        EntitySlot {
-            entity_type: 2,
-            entity_id: 7,
-            subindex: 1,
-            was_active: true,
-            delivery_date: 20240501,
-        },
-        EntitySlot {
-            entity_type: 0,
-            entity_id: 1,
-            subindex: 0,
-            was_active: true,
-            delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-        },
+        EntitySlot::inflow_lag(5, 3, true).with_reference_date(20_310_401),
+        EntitySlot::transit_bucket(9, 2, true).with_interval(20_311_201, 20_320_101),
     ];
     let buf = ser_cuts(3, 2, 8, 0, &cuts, &[0], 1, &manifest);
 
     let result: StageCutsReadResult =
         deserialize_stage_cuts(&buf).expect("hand-rolled reader must consume its own buffer");
     assert_eq!(result.entity_manifest.len(), 2);
-    assert_eq!(result.entity_manifest[0].delivery_date, 20240501);
+    assert_eq!(result.entity_manifest[0].reference_date, 20_310_401);
     assert_eq!(
-        result.entity_manifest[1].delivery_date,
-        ENTITY_SLOT_DELIVERY_DATE_SENTINEL
+        result.entity_manifest[0].interval_start,
+        ENTITY_SLOT_DATE_SENTINEL
+    );
+    assert_eq!(
+        result.entity_manifest[0].interval_end,
+        ENTITY_SLOT_DATE_SENTINEL
+    );
+    assert_eq!(result.entity_manifest[1].interval_start, 20_311_201);
+    assert_eq!(result.entity_manifest[1].interval_end, 20_320_101);
+    assert_eq!(
+        result.entity_manifest[1].reference_date,
+        ENTITY_SLOT_DATE_SENTINEL
     );
 
     let json = flatc_decode(&buf, "StageCuts");
@@ -1225,24 +1309,21 @@ fn entity_slot_delivery_date_round_trips() {
         .as_array()
         .expect("entity_manifest is an array")
         .clone();
-    assert_eq!(i64_or(&arr[0], "delivery_date", 0), i64::from(20240501));
-    assert_eq!(
-        i64_or(&arr[1], "delivery_date", 0),
-        i64::from(ENTITY_SLOT_DELIVERY_DATE_SENTINEL)
-    );
+    assert_eq!(i64_or(&arr[0], "reference_date", 0), i64::from(20_310_401));
+    assert_eq!(i64_or(&arr[1], "interval_start", 0), i64::from(20_311_201));
+    assert_eq!(i64_or(&arr[1], "interval_end", 0), i64::from(20_320_101));
 }
 
-/// Forward-compat (the schema-evolution half of the reject-role for the
-/// `FlatBuffers` `policy/codec.rs` row; the identifier rejection is the codec
-/// unit test): a buffer written against a pre-`id:5` `EntitySlot` schema (no
-/// `delivery_date` field) must deserialize with every slot's date at the
-/// sentinel and no error. flatc cannot emit a field the schema lacks, so the
-/// buffer is built from a rewritten schema that stops at `was_active (id: 3)`;
-/// that schema still declares the `CBVF` `file_identifier`, so the buffer clears
-/// the read-path identifier gate that a genuine pre-0.14 buffer would fail.
+/// Forward-compat: a buffer written against a pre-`id:6` `EntitySlot` schema
+/// (fields through the now-retired `delivery_date` at id 5 only) must
+/// deserialize with every slot's `reference_date`, `interval_start` and
+/// `interval_end` at the sentinel and no error. The rewritten-schema
+/// technique this test uses (flatc cannot emit a field the schema lacks, so
+/// the buffer is built from a schema stopping short of the field under test)
+/// is mirrored by `pre_node_id_stage_states_reads_as_sentinel`.
 #[test]
-fn pre_delivery_date_entity_slot_reads_as_sentinel() {
-    let schema_pre_delivery_date = "
+fn pre_interval_entity_slot_reads_as_sentinel() {
+    let schema_pre_interval = "
 namespace Cobre.IO.Policy;
 
 file_identifier \"CBVF\";
@@ -1259,6 +1340,8 @@ table EntitySlot {
   entity_id:int32 (id: 1);
   subindex:uint32 (id: 2);
   was_active:bool (id: 3);
+  delivery_anchor:int32 (id: 4, deprecated);
+  delivery_date:int32 (id: 5);
 }
 
 table AffinePiece {
@@ -1284,8 +1367,8 @@ table StageCuts {
 }
 ";
     let dir = TempDir::new().unwrap();
-    let pre_delivery_date_schema = dir.path().join("pre_delivery_date.fbs");
-    std::fs::write(&pre_delivery_date_schema, schema_pre_delivery_date).unwrap();
+    let pre_interval_schema = dir.path().join("pre_interval.fbs");
+    std::fs::write(&pre_interval_schema, schema_pre_interval).unwrap();
 
     let document = json!({
         "stage_id": 1,
@@ -1306,8 +1389,8 @@ table StageCuts {
             }
         ],
         "entity_manifest": [
-            {"entity_type": "HydroStorage", "entity_id": 1, "subindex": 0, "was_active": true},
-            {"entity_type": "AnticipatedThermalState", "entity_id": 7, "subindex": 1, "was_active": true}
+            {"entity_type": "HydroStorage", "entity_id": 1, "subindex": 0, "was_active": true, "delivery_date": 20240101},
+            {"entity_type": "HydroInflowLag", "entity_id": 7, "subindex": 1, "was_active": true}
         ]
     });
     let json_path = dir.path().join("doc.json");
@@ -1319,23 +1402,28 @@ table StageCuts {
         .arg(qualified("StageCuts"))
         .arg("-o")
         .arg(dir.path())
-        .arg(&pre_delivery_date_schema)
+        .arg(&pre_interval_schema)
         .arg(&json_path)
         .status()
-        .expect("run flatc -b on pre-delivery_date schema");
-    assert!(
-        status.success(),
-        "flatc -b on pre-delivery_date schema failed"
-    );
+        .expect("run flatc -b on pre-interval schema");
+    assert!(status.success(), "flatc -b on pre-interval schema failed");
     let buf = std::fs::read(dir.path().join("doc.bin")).unwrap();
 
-    let result = deserialize_stage_cuts(&buf)
-        .expect("hand-rolled reader must accept pre-delivery_date buffer");
+    let result =
+        deserialize_stage_cuts(&buf).expect("hand-rolled reader must accept pre-interval buffer");
     assert_eq!(result.entity_manifest.len(), 2);
     for (i, slot) in result.entity_manifest.iter().enumerate() {
         assert_eq!(
-            slot.delivery_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-            "pre-delivery_date slot {i} must read back as the sentinel"
+            slot.reference_date, ENTITY_SLOT_DATE_SENTINEL,
+            "pre-interval slot {i} reference_date must read back as the sentinel"
+        );
+        assert_eq!(
+            slot.interval_start, ENTITY_SLOT_DATE_SENTINEL,
+            "pre-interval slot {i} interval_start must read back as the sentinel"
+        );
+        assert_eq!(
+            slot.interval_end, ENTITY_SLOT_DATE_SENTINEL,
+            "pre-interval slot {i} interval_end must read back as the sentinel"
         );
     }
 }

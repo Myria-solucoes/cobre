@@ -8,6 +8,10 @@
 //!
 //! Designed to be solver-agnostic for scenario-based iterative optimization.
 
+// Internal (unpublished) workspace crate: public items intra-doc-link their
+// pub(crate) collaborators as a maintainer aid (docs read with
+// --document-private-items); the public-only doc gate flags these intentional links.
+#![allow(rustdoc::private_intra_doc_links)]
 #![cfg_attr(
     test,
     allow(
@@ -29,13 +33,15 @@ pub mod provenance;
 pub mod sampling;
 pub mod season_cast;
 pub mod seeds;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 pub mod tree;
 
 pub use context::{
     ClassSchemes, NoiseEntityOrder, OpeningTreeInputs, StochasticContext, build_stochastic_context,
     noise_entity_order,
 };
-pub use correlation::{DecomposedCorrelation, GroupFactor, SpectralFactor};
+pub use correlation::{DecomposedCorrelation, EntityClass, GroupFactor, SpectralFactor};
 pub use error::StochasticError;
 pub use noise::quantile::norm_quantile;
 pub use noise::rng::rng_from_seed;
@@ -43,24 +49,23 @@ pub use noise::seed::{derive_forward_seed, derive_opening_seed, derive_stage_see
 pub use normal::precompute::{BlockFactorPair, EntityFactorEntry, PrecomputedNormal};
 #[allow(deprecated)]
 pub use par::{
-    ArCoefficientEstimate, ParValidationReport, ParWarning, PrecomputedPar, SeasonalStats,
-    estimate_ar_coefficients, estimate_seasonal_stats, evaluate_par, evaluate_par_batch,
+    ArCoefficientEstimate, PrecomputedPar, SeasonalStats, evaluate_par, evaluate_par_batch,
     evaluate_par_inflow, evaluate_par_inflows, solve_par_noise, solve_par_noise_batch,
     solve_par_noises, validate_par_parameters,
 };
 pub use provenance::{ComponentProvenance, StochasticProvenance};
 pub use sampling::insample::sample_forward;
 pub use sampling::{
-    ClassSampleRequest, ClassSampler, ExternalScenarioLibrary, ForwardNoise, ForwardSampler,
-    ForwardSamplerConfig, HistoricalScenarioLibrary, SampleRequest, build_forward_sampler,
-    derive_external_sample_moments, discover_historical_windows, pad_library_to_uniform,
-    select_transition_child, standardize_external_inflow, standardize_external_load,
-    standardize_external_ncs, standardize_historical_windows, validate_external_library,
-    validate_historical_library,
+    ClassNoiseTables, ClassSampleRequest, ClassSampler, ExternalScenarioLibrary, ForwardNoise,
+    ForwardNoiseTables, ForwardSampler, ForwardSamplerConfig, HistoricalScenarioLibrary,
+    NoiseTable, SampleRequest, build_forward_sampler, derive_external_sample_moments,
+    discover_historical_windows, pad_library_to_uniform, select_transition_child,
+    standardize_external_inflow, standardize_external_load, standardize_external_ncs,
+    standardize_historical_windows, validate_external_library, validate_historical_library,
 };
-pub use seeds::{DerivedInflowSeeds, derive_inflow_seeds};
+pub use seeds::{DerivedInflowSeeds, DerivedSeed, derive_inflow_seeds};
 pub use tree::{
-    ClassDimensions, OpeningTree, OpeningTreeView, SweepDirection, generate_opening_tree,
+    ClassDimensions, NoisePointSpec, OpeningTree, OpeningTreeView, generate_opening_tree,
 };
 
 #[cfg(test)]

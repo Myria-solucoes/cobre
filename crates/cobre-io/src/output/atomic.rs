@@ -12,11 +12,10 @@ use std::path::{Path, PathBuf};
 
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
-use parquet::file::properties::WriterProperties;
 use serde::Serialize;
 
 use super::error::OutputError;
-use super::parquet_config::ParquetWriterConfig;
+use super::parquet_config::WRITER_PROPERTIES;
 
 /// Temporary sibling path for an atomic write, preserving the original extension
 /// as a prefix of `.tmp` (`foo.json` → `foo.json.tmp`) so the temp never
@@ -26,6 +25,18 @@ pub(crate) fn tmp_path(path: &Path) -> PathBuf {
         || "tmp".to_string(),
         |ext| format!("{}.tmp", ext.to_string_lossy()),
     ))
+}
+
+/// Create `path`'s parent directory, if it has one and it does not already exist.
+///
+/// # Errors
+///
+/// Returns [`OutputError::IoError`] if directory creation fails.
+pub(crate) fn ensure_parent_dir(path: &Path) -> Result<(), OutputError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| OutputError::io(parent, e))?;
+    }
+    Ok(())
 }
 
 /// Write `bytes` to `path` atomically (write to `{path}.tmp`, flush, rename).
@@ -45,7 +56,7 @@ pub(crate) fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<(), Output
     writer
         .write_all(bytes)
         .map_err(|e| OutputError::io(&tmp, e))?;
-    // Explicit flush before rename — see module doc (drop-flush swallows errors).
+    // Explicit flush before rename — see module doc.
     writer.flush().map_err(|e| OutputError::io(&tmp, e))?;
 
     std::fs::rename(&tmp, path).map_err(|e| OutputError::io(path, e))?;
@@ -98,39 +109,28 @@ fn serialize_json_then_flush<W: Write>(
 
 /// Write a `RecordBatch` to `path` as a Parquet file, atomically.
 ///
-/// Honors `config` (compression, row-group size, dictionary encoding). The
-/// parent directory must already exist.
+/// Uses the crate-wide frozen encoding — see [`super::parquet_config`] for
+/// the parameters. The parent directory must already exist.
 ///
 /// # Errors
 ///
 /// Returns [`OutputError::SerializationError`] if the Parquet writer fails, or
 /// [`OutputError::IoError`] if creating, flushing, or renaming the temporary
 /// file fails.
-pub(crate) fn write_parquet_atomic(
-    path: &Path,
-    batch: &RecordBatch,
-    config: &ParquetWriterConfig,
-) -> Result<(), OutputError> {
+pub(crate) fn write_parquet_atomic(path: &Path, batch: &RecordBatch) -> Result<(), OutputError> {
     let tmp = tmp_path(path);
-
-    let props = WriterProperties::builder()
-        .set_compression(config.compression)
-        .set_max_row_group_row_count(Some(config.row_group_size))
-        .set_dictionary_enabled(config.dictionary_encoding)
-        .build();
 
     let file = std::fs::File::create(&tmp).map_err(|e| OutputError::io(&tmp, e))?;
     let buf = BufWriter::new(file);
 
-    let mut writer = ArrowWriter::try_new(buf, batch.schema(), Some(props))
+    let mut writer = ArrowWriter::try_new(buf, batch.schema(), Some(WRITER_PROPERTIES.clone()))
         .map_err(|e| OutputError::serialization("parquet_writer", e.to_string()))?;
     writer
         .write(batch)
         .map_err(|e| OutputError::serialization("parquet_writer", e.to_string()))?;
 
-    // Redundant with `into_inner`'s flush today, but kept to surface an I/O
-    // error before the rename rather than via drop-flush — do not remove without
-    // re-verifying the parquet version in `Cargo.lock`.
+    // Explicit flush to surface I/O errors before rename (into_inner's flush
+    // behavior may vary; do not remove without verifying the parquet version).
     let mut buf = writer
         .into_inner()
         .map_err(|e| OutputError::serialization("parquet_writer", e.to_string()))?;
@@ -140,14 +140,32 @@ pub(crate) fn write_parquet_atomic(
     Ok(())
 }
 
+/// Create `path`'s parent directory, then write `batch` as Parquet with the
+/// crate-default writer configuration, atomically.
+///
+/// # Errors
+///
+/// See [`write_parquet_atomic`].
+pub(crate) fn write_batch_atomic(path: &Path, batch: &RecordBatch) -> Result<(), OutputError> {
+    ensure_parent_dir(path)?;
+    write_parquet_atomic(path, batch)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::super::error::OutputError;
-    use super::{serialize_json_then_flush, tmp_path, write_bytes_atomic, write_json_atomic};
+    use super::{
+        serialize_json_then_flush, tmp_path, write_batch_atomic, write_bytes_atomic,
+        write_json_atomic,
+    };
+    use arrow::array::Int32Array;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
     use serde::Serialize;
     use std::io;
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
     use tempfile::TempDir;
 
     #[derive(Serialize)]
@@ -238,5 +256,39 @@ mod tests {
             !tmp_path(&path).exists(),
             "tmp file must be removed after rename"
         );
+    }
+
+    #[test]
+    fn write_batch_atomic_creates_missing_parent_and_round_trips() {
+        let dir = TempDir::new().expect("temp dir");
+        let target = dir.path().join("a").join("b").join("batch.parquet");
+
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int32,
+            false,
+        )]));
+        let record_batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![7, 9]))])
+                .expect("batch");
+
+        write_batch_atomic(&target, &record_batch).expect("write should succeed");
+
+        assert!(target.exists(), "target file must exist");
+        assert!(
+            !tmp_path(&target).exists(),
+            "tmp file must be removed after rename"
+        );
+
+        let read_back = crate::test_support::output::read_first_batch(&target);
+        assert_eq!(read_back.num_rows(), 2, "must round-trip two rows");
+        let values = read_back
+            .column_by_name("value")
+            .expect("value column")
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .expect("Int32Array");
+        assert_eq!(values.value(0), 7);
+        assert_eq!(values.value(1), 9);
     }
 }

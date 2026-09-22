@@ -11,12 +11,27 @@ pytest's tmp_path fixture. The 1dtoy case is small enough that tests complete
 in a few seconds.
 """
 
+import json
 import pathlib
+import shutil
 
 import pytest
 
 
 VALID_CASE = "examples/1dtoy"
+
+_REPO_ROOT = pathlib.Path(__file__).parents[3]
+
+# No single deck declares both travel-time arcs and post-study stages, so the
+# two feature classes are exercised by their respective decks; together they
+# make the four families a hardcoded reader list historically omitted
+# (in_transit, transit_seed, anticipated_lanes, hydro_bus_generation) present.
+TRAVEL_TIME_CASE = (
+    _REPO_ROOT / "crates" / "cobre-sddp" / "tests" / "fixtures" / "travel_time_arc"
+)
+POST_STUDY_CASE = (
+    _REPO_ROOT / "examples" / "deterministic" / "d55-post-study-anticipated-lanes"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +202,36 @@ def test_load_convergence_dict_keys(run_output: pathlib.Path) -> None:
         assert not missing, f"row {i} is missing keys: {missing}"
 
 
+def test_load_convergence_keys_equal_written_schema_fields(
+    run_output: pathlib.Path,
+) -> None:
+    """Every column the convergence file declares reaches the caller.
+
+    Reads the written field names from the Parquet schema itself (never a
+    frozen list) and asserts the returned dict's keys equal them, in order —
+    so no written column, `mean_rows_in_lp` included, is silently dropped.
+    """
+    import pyarrow.parquet as pq  # noqa: PLC0415
+
+    import cobre.results  # noqa: PLC0415
+
+    convergence_path = run_output / "training" / "convergence.parquet"
+    written_fields = pq.read_schema(convergence_path).names
+
+    assert "mean_rows_in_lp" in written_fields, (
+        "1dtoy after training must write mean_rows_in_lp, else this "
+        "regression does not exercise the dropped-column fix"
+    )
+
+    rows = cobre.results.load_convergence(str(run_output))
+    assert rows, "convergence list must be non-empty after a real run"
+    for i, row in enumerate(rows):
+        assert list(row.keys()) == written_fields, (
+            f"row {i} keys must equal the written schema fields "
+            f"(got {list(row.keys())}, want {written_fields})"
+        )
+
+
 def test_load_convergence_value_types(run_output: pathlib.Path) -> None:
     """Convergence rows have correct Python types for key columns."""
     import cobre.results  # noqa: PLC0415
@@ -270,114 +315,6 @@ def test_load_policy_missing_dir_raises(tmp_path: pathlib.Path) -> None:
 
     with pytest.raises(FileNotFoundError):
         cobre.results.load_policy(str(tmp_path))
-
-
-# ---------------------------------------------------------------------------
-# report / summary tests
-# ---------------------------------------------------------------------------
-
-
-def test_report_top_level_keys(run_output: pathlib.Path) -> None:
-    """report() returns a dict with the six expected top-level keys."""
-    import cobre.results  # noqa: PLC0415
-
-    report = cobre.results.report(str(run_output))
-
-    assert isinstance(report, dict), "report must return a dict"
-    expected_keys = {
-        "output_directory",
-        "status",
-        "bounds",
-        "training",
-        "cost",
-        "simulation",
-    }
-    missing = expected_keys - report.keys()
-    assert not missing, f"report is missing top-level keys: {missing}"
-
-
-def test_report_bounds_hoist_is_consistent(run_output: pathlib.Path) -> None:
-    """report()['bounds'] mirrors report()['training']['bounds']."""
-    import cobre.results  # noqa: PLC0415
-
-    report = cobre.results.report(str(run_output))
-
-    assert (
-        report["bounds"]["final_lower_bound"]
-        == (report["training"]["bounds"]["final_lower_bound"])
-    ), "top-level bounds must match nested training.bounds"
-
-
-def test_report_cost_hoist_is_consistent(run_output: pathlib.Path) -> None:
-    """report()['cost'] mirrors report()['simulation']['cost'] when simulation ran."""
-    import cobre.results  # noqa: PLC0415
-
-    report = cobre.results.report(str(run_output))
-
-    assert report["simulation"] is not None, "1dtoy runs simulation"
-    assert report["cost"] is not None, "cost must be present when simulation ran"
-    assert report["cost"]["mean_cost"] == (report["simulation"]["cost"]["mean_cost"]), (
-        "top-level cost must match nested simulation.cost"
-    )
-
-
-def test_report_simulation_none_when_absent(run_output: pathlib.Path) -> None:
-    """report() returns None for cost/simulation when simulation metadata is absent."""
-    import shutil
-
-    import cobre.results  # noqa: PLC0415
-
-    # Copy the run output and strip the simulation directory.
-    stripped = run_output.parent / "report_no_simulation"
-    if stripped.exists():
-        shutil.rmtree(stripped)
-    shutil.copytree(run_output, stripped)
-    shutil.rmtree(stripped / "simulation", ignore_errors=True)
-
-    report = cobre.results.report(str(stripped))
-
-    assert report["simulation"] is None, "simulation must be None when metadata absent"
-    assert report["cost"] is None, "cost must be None when simulation metadata absent"
-
-
-def test_report_missing_training_raises(tmp_path: pathlib.Path) -> None:
-    """report() raises FileNotFoundError when training/metadata.json is absent."""
-    import cobre.results  # noqa: PLC0415
-
-    with pytest.raises(FileNotFoundError):
-        cobre.results.report(str(tmp_path))
-
-
-def test_summary_returns_string(run_output: pathlib.Path) -> None:
-    """summary() returns a non-empty str containing a recognizable bounds label."""
-    import cobre.results  # noqa: PLC0415
-
-    text = cobre.results.summary(str(run_output))
-
-    assert isinstance(text, str), "summary must return a str"
-    assert len(text) > 0, "summary string must be non-empty"
-    assert "lower bound" in text.lower(), (
-        "summary must include the training bounds section"
-    )
-
-
-def test_report_still_returns_dict(run_output: pathlib.Path) -> None:
-    """report() still returns the structured dict with bounds + training keys."""
-    import cobre.results  # noqa: PLC0415
-
-    report = cobre.results.report(str(run_output))
-
-    assert isinstance(report, dict), "report must still return a dict"
-    assert "bounds" in report, "report must contain 'bounds'"
-    assert "training" in report, "report must contain 'training'"
-
-
-def test_summary_missing_dir_raises() -> None:
-    """summary() raises FileNotFoundError, delegated from report()."""
-    import cobre.results  # noqa: PLC0415
-
-    with pytest.raises(FileNotFoundError):
-        cobre.results.summary("/tmp/nonexistent_cobre_output_xzy123")
 
 
 # ---------------------------------------------------------------------------
@@ -467,9 +404,108 @@ def test_load_stochastic_opening_tree_bad_stage_raises(
 
 
 def test_load_stochastic_reexport_identity() -> None:
-    """load_stochastic is in __all__ and is the compiled function (identity)."""
+    """load_stochastic is present and is the compiled function (identity)."""
     import cobre._native.results  # noqa: PLC0415
     import cobre.results  # noqa: PLC0415
 
-    assert "load_stochastic" in cobre.results.__all__
+    assert hasattr(cobre.results, "load_stochastic")
     assert cobre.results.load_stochastic is cobre._native.results.load_stochastic
+
+
+# ---------------------------------------------------------------------------
+# load_simulation family-coverage regression
+# ---------------------------------------------------------------------------
+
+
+def _run_with_simulation(src: pathlib.Path, work: pathlib.Path) -> pathlib.Path:
+    """Run ``src`` with the simulation pass enabled and return the output dir.
+
+    Deterministic decks that ship ``simulation.enabled = false`` are copied and
+    flipped on so the simulation write path is exercised (mirrors the parity
+    suite's ``_make_case_with_simulation``).
+    """
+    import cobre.run  # noqa: PLC0415
+
+    case_dir = work / "case"
+    case_dir.mkdir()
+    for item in src.iterdir():
+        dst = case_dir / item.name
+        if item.is_dir():
+            shutil.copytree(item, dst)
+        else:
+            shutil.copy2(item, dst)
+    config = json.loads((case_dir / "config.json").read_text())
+    config.setdefault("simulation", {})["enabled"] = True
+    (case_dir / "config.json").write_text(json.dumps(config))
+
+    output_dir = work / "output"
+    cobre.run.run(str(case_dir), output_dir=str(output_dir))
+    return output_dir
+
+
+def _family_dirs_with_partitions(simulation_dir: pathlib.Path) -> set[str]:
+    """Family subpaths under ``simulation/`` that hold a scenario partition.
+
+    Discovered from the on-disk ``scenario_id=NNNN`` Hive layout, independent of
+    the reader's own family list — so a reader that skips a present family fails.
+    """
+    families: set[str] = set()
+    for scenario_dir in simulation_dir.rglob("scenario_id=*"):
+        if scenario_dir.is_dir():
+            rel = scenario_dir.parent.relative_to(simulation_dir)
+            families.add(rel.as_posix())
+    return families
+
+
+@pytest.fixture(scope="module")
+def travel_time_output(tmp_path_factory: pytest.TempPathFactory) -> pathlib.Path:
+    """Run the travel-time deck once; its output has in_transit/transit_seed."""
+    assert TRAVEL_TIME_CASE.is_dir(), (
+        f"the travel-time fixture must exist at {TRAVEL_TIME_CASE}"
+    )
+    return _run_with_simulation(
+        TRAVEL_TIME_CASE, tmp_path_factory.mktemp("travel_time")
+    )
+
+
+@pytest.fixture(scope="module")
+def post_study_output(tmp_path_factory: pytest.TempPathFactory) -> pathlib.Path:
+    """Run the post-study deck once; its output has anticipated_lanes."""
+    assert POST_STUDY_CASE.is_dir(), (
+        f"the post-study case must exist at {POST_STUDY_CASE}"
+    )
+    return _run_with_simulation(POST_STUDY_CASE, tmp_path_factory.mktemp("post_study"))
+
+
+def test_load_simulation_keys_cover_every_present_family(
+    travel_time_output: pathlib.Path,
+    post_study_output: pathlib.Path,
+) -> None:
+    """The no-argument load returns a key for every present family directory.
+
+    Exercises the two feature classes whose families the reader historically
+    omitted: the travel-time deck must surface ``in_transit`` and the post-study
+    deck ``anticipated_lanes``, and on each deck no present family directory may
+    be missing from the returned mapping.
+    """
+    import cobre.results  # noqa: PLC0415
+
+    for output_dir, must_include in (
+        (travel_time_output, "in_transit"),
+        (post_study_output, "anticipated_lanes"),
+    ):
+        simulation_dir = output_dir / "simulation"
+        present = _family_dirs_with_partitions(simulation_dir)
+        assert must_include in present, (
+            f"the deck at {output_dir} must exercise '{must_include}'; "
+            f"present families: {sorted(present)}"
+        )
+
+        data = cobre.results.load_simulation(str(output_dir))
+        assert isinstance(data, dict), "no-argument load must return a dict"
+
+        missing = present - set(data.keys())
+        assert not missing, (
+            f"load_simulation omitted present family directories {sorted(missing)} "
+            f"under {simulation_dir}"
+        )

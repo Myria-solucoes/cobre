@@ -41,7 +41,6 @@
 //! [`cobre_core::commissioning::Phase`] mask.
 
 mod columns;
-pub(crate) mod commitment_reconcile;
 pub(crate) mod delivery_ring;
 mod entries;
 mod fpha_cursor;
@@ -49,16 +48,17 @@ mod layout;
 mod patch;
 mod rows;
 mod scaling;
+pub(crate) mod state_box;
 mod template;
 
 #[cfg(test)]
 mod test_support;
 
 // --- Public re-exports (stable API) ---
-pub use commitment_reconcile::BoundRelaxations;
 #[cfg(any(test, feature = "test-support"))]
 pub use delivery_ring::DeliveryRing;
 pub use patch::PatchBuffer;
+pub use state_box::StateBox;
 #[cfg(any(test, feature = "test-support"))]
 pub use template::build_stage_templates_resolving_layout;
 pub use template::{StageGeometry, StageTemplates, build_stage_templates};
@@ -70,6 +70,7 @@ pub(crate) use scaling::{
     apply_col_scale, apply_commitment_hold_col_scale_unscale, apply_row_scale, compute_col_scale,
     compute_row_scale,
 };
+pub(crate) use state_box::build_state_box;
 pub(crate) use template::models_from_normal;
 
 // ---------------------------------------------------------------------------

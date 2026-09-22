@@ -234,15 +234,12 @@ pub struct MetadataBounds {
 }
 
 /// The pre-exact-regime default for [`MetadataBounds::final_upper_bound_kind`].
-#[must_use]
-pub fn default_upper_bound_kind() -> String {
+fn default_upper_bound_kind() -> String {
     "statistical".to_string()
 }
 
-/// Default bounds (`final_lower_bound` `0.0`, absent upper bounds) used when
-/// metadata omits the `bounds` field.
-#[must_use]
-pub fn default_bounds() -> MetadataBounds {
+/// Default bounds used when metadata omits the `bounds` field.
+fn default_bounds() -> MetadataBounds {
     MetadataBounds {
         final_lower_bound: 0.0,
         final_upper_bound: None,
@@ -529,7 +526,6 @@ pub fn read_simulation_metadata(path: &Path) -> Result<SimulationMetadata, Outpu
 
 // ── Internal helpers ─────────────────────────────────────────────────────────
 
-/// Read and deserialize a JSON file into `T`.
 fn read_json<T>(path: &Path, manifest_type: &str) -> Result<T, OutputError>
 where
     T: serde::de::DeserializeOwned,
@@ -541,7 +537,6 @@ where
     })
 }
 
-/// Serialize `value` to pretty-printed JSON and atomically write it to `path`.
 fn write_json_atomic<T: Serialize>(
     path: &Path,
     value: &T,

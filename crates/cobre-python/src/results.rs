@@ -4,23 +4,11 @@
 //! `cobre.run.run()`. JSON manifest and metadata files are read in Rust
 //! and returned as Python dicts. Parquet file paths are returned as strings
 //! so that callers can load them with `polars` or `pandas`.
-//!
-//! ## Design
-//!
-//! - [`load_results`] reads the JSON manifest/metadata files and returns a
-//!   nested dict with training and simulation sections.
-//! - [`load_convergence`] reads `training/convergence.parquet` using the
-//!   `parquet` + `arrow` crates and returns a list of dicts (one per row).
-//! - [`load_simulation`] reads Hive-partitioned Parquet files under
-//!   `simulation/{entity_type}/scenario_id=NNNN/data.parquet` with dynamic
-//!   schema discovery and returns rows as Python dicts.
-//! - [`load_policy`] reads a `FlatBuffers` policy checkpoint from
-//!   `<output_dir>/<policy_subdir>` (default `policy`) via
-//!   `cobre_io::read_policy_checkpoint` and returns a nested Python dict.
 
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use arrow::array::{
     Array, BooleanArray, Float64Array, Int8Array, Int32Array, Int64Array, StringArray, UInt32Array,
@@ -37,7 +25,6 @@ use pyo3::types::{PyBool, PyDict, PyList, PyString};
 
 use crate::errors::{ErrorSource, convert_error};
 
-/// Canonicalize a path and return an appropriate Python error on failure.
 fn canonicalize_dir(path: &Path) -> PyResult<PathBuf> {
     path.canonicalize().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
@@ -48,7 +35,6 @@ fn canonicalize_dir(path: &Path) -> PyResult<PathBuf> {
     })
 }
 
-/// Convert a `serde_json::Value` to a Python object recursively.
 fn json_value_to_py(py: Python<'_>, val: &serde_json::Value) -> PyResult<Py<PyAny>> {
     match val {
         serde_json::Value::Null => Ok(py.None()),
@@ -57,23 +43,14 @@ fn json_value_to_py(py: Python<'_>, val: &serde_json::Value) -> PyResult<Py<PyAn
 
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                Ok(i.into_pyobject(py)
-                    .map_err(|e| PyValueError::new_err(e.to_string()))?
-                    .unbind()
-                    .into())
+                into_py(py, i)
             } else if let Some(u) = n.as_u64() {
-                Ok(u.into_pyobject(py)
-                    .map_err(|e| PyValueError::new_err(e.to_string()))?
-                    .unbind()
-                    .into())
+                into_py(py, u)
             } else {
                 let f = n.as_f64().ok_or_else(|| {
                     PyValueError::new_err("JSON number is not representable as f64")
                 })?;
-                Ok(f.into_pyobject(py)
-                    .map_err(|e| PyValueError::new_err(e.to_string()))?
-                    .unbind()
-                    .into())
+                into_py(py, f)
             }
         }
 
@@ -97,8 +74,7 @@ fn json_value_to_py(py: Python<'_>, val: &serde_json::Value) -> PyResult<Py<PyAn
     }
 }
 
-/// Read a JSON file and return its contents as a `serde_json::Value`.
-fn read_json_file(path: &std::path::Path) -> PyResult<serde_json::Value> {
+fn read_json_file(path: &Path) -> PyResult<serde_json::Value> {
     let content = fs::read_to_string(path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             PyFileNotFoundError::new_err(format!("file not found: {}", path.display()))
@@ -109,6 +85,16 @@ fn read_json_file(path: &std::path::Path) -> PyResult<serde_json::Value> {
 
     serde_json::from_str(&content)
         .map_err(|e| PyValueError::new_err(format!("malformed JSON in {}: {e}", path.display())))
+}
+
+fn open_parquet_file(path: &Path, missing_label: &str) -> PyResult<fs::File> {
+    fs::File::open(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            PyFileNotFoundError::new_err(format!("{missing_label} not found: {}", path.display()))
+        } else {
+            PyOSError::new_err(format!("failed to open {}: {e}", path.display()))
+        }
+    })
 }
 
 /// Load and inspect the output artifacts produced by a completed solver run.
@@ -223,6 +209,11 @@ pub fn load_results(py: Python<'_>, output_dir: PathBuf) -> PyResult<Py<PyAny>> 
 /// | `time_total_ms`    | `int`           | Total iteration wall time (ms).                     |
 /// | `forward_passes`   | `int`           | Number of forward-pass scenarios.                   |
 /// | `lp_solves`        | `int`           | Total LP solves in this iteration.                  |
+/// | `mean_rows_in_lp`  | `float`         | Mean resident rows per lazy-selection LP solve (0 if none ran). |
+///
+/// The reader iterates the file's own schema, so the keys are exactly the
+/// columns the convergence Parquet schema declares; the rows above name the
+/// stable ones a caller indexes by hand.
 ///
 /// Returns an empty list if `training/convergence.parquet` has zero rows.
 ///
@@ -241,25 +232,14 @@ pub fn load_results(py: Python<'_>, output_dir: PathBuf) -> PyResult<Py<PyAny>> 
 /// for row in rows:
 ///     print(row["iteration"], row["lower_bound"], row["upper_bound"])
 /// ```
-// too_many_lines: a flat one-pass per-column projection into a Python dict;
-// splitting it would only thread the batch/index/dict through extra call frames.
 #[pyfunction]
-#[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value)]
 pub fn load_convergence(py: Python<'_>, output_dir: PathBuf) -> PyResult<Py<PyAny>> {
     let output_dir = canonicalize_dir(&output_dir)?;
 
     let parquet_path = output_dir.join("training").join("convergence.parquet");
 
-    let file = fs::File::open(&parquet_path).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            PyFileNotFoundError::new_err(format!(
-                "parquet file not found: {}",
-                parquet_path.display()
-            ))
-        } else {
-            PyOSError::new_err(format!("failed to open {}: {e}", parquet_path.display()))
-        }
-    })?;
+    let file = open_parquet_file(&parquet_path, "parquet file")?;
 
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
         .map_err(|e| PyOSError::new_err(format!("failed to open Parquet file: {e}")))?;
@@ -274,51 +254,25 @@ pub fn load_convergence(py: Python<'_>, output_dir: PathBuf) -> PyResult<Py<PyAn
         let batch = batch_result
             .map_err(|e| PyOSError::new_err(format!("error reading Parquet batch: {e}")))?;
 
+        let schema = batch.schema();
         let n_rows = batch.num_rows();
-
-        let col_iteration = get_column_by_name::<Int32Array>(&batch, "iteration")?;
-        let col_lower_bound = get_column_by_name::<Float64Array>(&batch, "lower_bound")?;
-        let col_upper_bound = get_column_by_name::<Float64Array>(&batch, "upper_bound")?;
-        let col_upper_bound_std = get_column_by_name::<Float64Array>(&batch, "upper_bound_std")?;
-        let col_upper_bound_kind = get_column_by_name::<StringArray>(&batch, "upper_bound_kind")?;
-        let col_gap_percent = get_column_by_name::<Float64Array>(&batch, "gap_percent")?;
-        let col_cuts_added = get_column_by_name::<Int32Array>(&batch, "cuts_added")?;
-        let col_cuts_removed = get_column_by_name::<Int32Array>(&batch, "cuts_removed")?;
-        let col_cuts_active = get_column_by_name::<Int64Array>(&batch, "cuts_active")?;
-        let col_time_forward_ms = get_column_by_name::<Int64Array>(&batch, "time_forward_ms")?;
-        let col_time_backward_ms = get_column_by_name::<Int64Array>(&batch, "time_backward_ms")?;
-        let col_time_total_ms = get_column_by_name::<Int64Array>(&batch, "time_total_ms")?;
-        let col_forward_passes = get_column_by_name::<Int32Array>(&batch, "forward_passes")?;
-        let col_lp_solves = get_column_by_name::<Int64Array>(&batch, "lp_solves")?;
 
         for i in 0..n_rows {
             let row = PyDict::new(py);
-
-            row.set_item("iteration", col_iteration.value(i))?;
-            row.set_item("lower_bound", col_lower_bound.value(i))?;
-            row.set_item("upper_bound", col_upper_bound.value(i))?;
-            if col_upper_bound_std.is_null(i) {
-                row.set_item("upper_bound_std", py.None())?;
-            } else {
-                row.set_item("upper_bound_std", col_upper_bound_std.value(i))?;
+            for (col_idx, field) in schema.fields().iter().enumerate() {
+                let col = batch.column(col_idx);
+                let val: Py<PyAny> = if !col.is_null(i) && matches!(col.data_type(), DataType::Utf8)
+                {
+                    let arr = col
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .ok_or_else(|| PyOSError::new_err("Utf8 column downcast failed"))?;
+                    PyString::new(py, arr.value(i)).unbind().into()
+                } else {
+                    arrow_value_to_py(py, col.as_ref(), i)?
+                };
+                row.set_item(field.name(), val)?;
             }
-            row.set_item("upper_bound_kind", col_upper_bound_kind.value(i))?;
-
-            if col_gap_percent.is_null(i) {
-                row.set_item("gap_percent", py.None())?;
-            } else {
-                row.set_item("gap_percent", col_gap_percent.value(i))?;
-            }
-
-            row.set_item("cuts_added", col_cuts_added.value(i))?;
-            row.set_item("cuts_removed", col_cuts_removed.value(i))?;
-            row.set_item("cuts_active", col_cuts_active.value(i))?;
-            row.set_item("time_forward_ms", col_time_forward_ms.value(i))?;
-            row.set_item("time_backward_ms", col_time_backward_ms.value(i))?;
-            row.set_item("time_total_ms", col_time_total_ms.value(i))?;
-            row.set_item("forward_passes", col_forward_passes.value(i))?;
-            row.set_item("lp_solves", col_lp_solves.value(i))?;
-
             result_list.append(row)?;
         }
     }
@@ -346,24 +300,10 @@ pub fn load_convergence(py: Python<'_>, output_dir: PathBuf) -> PyResult<Py<PyAn
 ///
 /// # Schema
 ///
-/// Matches the convergence Parquet schema written by the solver:
-///
-/// | Column              | Arrow type   | Nullable |
-/// |---------------------|-------------|----------|
-/// | `iteration`         | Int32        | No       |
-/// | `lower_bound`       | Float64      | No       |
-/// | `upper_bound`       | Float64      | No       |
-/// | `upper_bound_std`   | Float64      | Yes      |
-/// | `upper_bound_kind`  | Utf8         | No       |
-/// | `gap_percent`       | Float64      | Yes      |
-/// | `cuts_added`        | Int32        | No       |
-/// | `cuts_removed`      | Int32        | No       |
-/// | `cuts_active`       | Int64        | No       |
-/// | `time_forward_ms`   | Int64        | No       |
-/// | `time_backward_ms`  | Int64        | No       |
-/// | `time_total_ms`     | Int64        | No       |
-/// | `forward_passes`    | Int32        | No       |
-/// | `lp_solves`         | Int64        | No       |
+/// The returned table carries the convergence Parquet schema written by the
+/// solver (`convergence_schema` in `cobre-io`): its columns, types, and
+/// nullability are exactly the fields that schema declares, so a schema change
+/// flows through without editing this doc.
 ///
 /// # Errors
 ///
@@ -390,16 +330,7 @@ pub fn load_convergence_arrow(py: Python<'_>, output_dir: PathBuf) -> PyResult<P
     let parquet_path = output_dir.join("training").join("convergence.parquet");
 
     let ipc_bytes = py.detach(|| -> PyResult<Vec<u8>> {
-        let file = fs::File::open(&parquet_path).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                PyFileNotFoundError::new_err(format!(
-                    "parquet file not found: {}",
-                    parquet_path.display()
-                ))
-            } else {
-                PyOSError::new_err(format!("failed to open {}: {e}", parquet_path.display()))
-            }
-        })?;
+        let file = open_parquet_file(&parquet_path, "parquet file")?;
 
         let builder = ParquetRecordBatchReaderBuilder::try_new(file)
             .map_err(|e| PyOSError::new_err(format!("failed to open Parquet file: {e}")))?;
@@ -483,8 +414,6 @@ fn open_stochastic_parquet(path: &Path) -> PyResult<fs::File> {
     })
 }
 
-/// Extract a typed column from `batch` by name, mapping a missing column or a
-/// type mismatch to `OSError`.
 fn stochastic_column<'a, T: Array + 'static>(
     batch: &'a RecordBatch,
     file: &str,
@@ -667,23 +596,15 @@ impl Stochastic {
         })?;
 
         let rows = &self.opening_rows;
-        let mut start = None;
-        let mut end = 0usize;
-        for (i, &s) in rows.stage_id.iter().enumerate() {
-            if s == stage_i32 {
-                if start.is_none() {
-                    start = Some(i);
-                }
-                end = i + 1;
-            }
-        }
+        let start = rows.stage_id.partition_point(|&s| s < stage_i32);
+        let end = rows.stage_id.partition_point(|&s| s <= stage_i32);
 
-        let Some(start) = start else {
+        if start == end {
             let valid = stage_range_message(rows);
             return Err(PyIndexError::new_err(format!(
                 "stage {stage} not present in the opening tree ({valid})"
             )));
-        };
+        }
 
         // Rows are sorted, so the matching rows form a contiguous block; dim and
         // n_openings derive from the maxima within it.
@@ -781,19 +702,6 @@ pub fn load_stochastic(py: Python<'_>, output_dir: PathBuf) -> PyResult<Stochast
     })
 }
 
-/// Extract a column from a batch and downcast to its expected type, or return an error.
-fn get_column_by_name<'a, T: Array + 'static>(
-    batch: &'a RecordBatch,
-    name: &str,
-) -> PyResult<&'a T> {
-    batch
-        .column_by_name(name)
-        .ok_or_else(|| PyOSError::new_err(format!("convergence.parquet missing '{name}' column")))?
-        .as_any()
-        .downcast_ref::<T>()
-        .ok_or_else(|| PyOSError::new_err(format!("'{name}' column has unexpected type")))
-}
-
 /// Convert an Arrow column value at row `i` to a Python object based on the array's data type.
 ///
 /// Handles the Arrow types present in simulation output schemas (`Float64`,
@@ -810,47 +718,28 @@ fn arrow_value_to_py(py: Python<'_>, col: &dyn Array, i: usize) -> PyResult<Py<P
                 .as_any()
                 .downcast_ref::<Float64Array>()
                 .ok_or_else(|| PyOSError::new_err("Float64 column downcast failed"))?;
-            Ok(arr
-                .value(i)
-                .into_pyobject(py)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?
-                .unbind()
-                .into())
+            into_py(py, arr.value(i))
         }
         DataType::Int32 => {
             let arr = col
                 .as_any()
                 .downcast_ref::<Int32Array>()
                 .ok_or_else(|| PyOSError::new_err("Int32 column downcast failed"))?;
-            Ok(arr
-                .value(i)
-                .into_pyobject(py)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?
-                .unbind()
-                .into())
+            into_py(py, arr.value(i))
         }
         DataType::Int64 => {
             let arr = col
                 .as_any()
                 .downcast_ref::<Int64Array>()
                 .ok_or_else(|| PyOSError::new_err("Int64 column downcast failed"))?;
-            Ok(arr
-                .value(i)
-                .into_pyobject(py)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?
-                .unbind()
-                .into())
+            into_py(py, arr.value(i))
         }
         DataType::Int8 => {
             let arr = col
                 .as_any()
                 .downcast_ref::<Int8Array>()
                 .ok_or_else(|| PyOSError::new_err("Int8 column downcast failed"))?;
-            Ok(i32::from(arr.value(i))
-                .into_pyobject(py)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?
-                .unbind()
-                .into())
+            into_py(py, i32::from(arr.value(i)))
         }
         DataType::Boolean => {
             let arr = col
@@ -865,7 +754,6 @@ fn arrow_value_to_py(py: Python<'_>, col: &dyn Array, i: usize) -> PyResult<Py<P
     }
 }
 
-/// Convert a value to a Python object, mapping errors appropriately.
 fn into_py<'py, T>(py: Python<'py>, val: T) -> PyResult<Py<PyAny>>
 where
     T: pyo3::IntoPyObject<'py>,
@@ -874,13 +762,6 @@ where
     val.into_pyobject(py)
         .map_err(|e| PyValueError::new_err(e.to_string()))
         .map(|b| b.into_any().unbind())
-}
-
-/// Convert a [`cobre_io::OutputError`] to an appropriate Python exception via the
-/// single [`crate::errors::convert_error`] mapping site (which owns the per-variant
-/// mapping and the read-path `NotFound` fold).
-fn output_error_to_py(err: &cobre_io::OutputError) -> PyErr {
-    convert_error(ErrorSource::Output(err))
 }
 
 /// Build the `metadata` dict field-by-field from a [`cobre_io::CheckpointManifest`],
@@ -921,6 +802,24 @@ fn metadata_to_py<'py>(
     }
     graph_dict.set_item("edges", edges)?;
     dict.set_item("graph_manifest", graph_dict)?;
+
+    let season = &metadata.season_manifest;
+    let season_dict = PyDict::new(py);
+    season_dict.set_item("cycle_code", into_py(py, season.cycle_code)?)?;
+    season_dict.set_item("n_seasons", into_py(py, season.n_seasons)?)?;
+    let hydro_orders = PyList::empty(py);
+    for h in &season.hydro_orders {
+        let h_dict = PyDict::new(py);
+        h_dict.set_item("hydro_id", into_py(py, h.hydro_id)?)?;
+        let orders = PyList::empty(py);
+        for &o in &h.orders {
+            orders.append(into_py(py, o)?)?;
+        }
+        h_dict.set_item("orders", orders)?;
+        hydro_orders.append(h_dict)?;
+    }
+    season_dict.set_item("hydro_orders", hydro_orders)?;
+    dict.set_item("season_manifest", season_dict)?;
 
     let producer = &metadata.producer;
     let producer_dict = PyDict::new(py);
@@ -964,144 +863,17 @@ fn metadata_to_py<'py>(
     Ok(dict)
 }
 
-/// Read an optional simulation-metadata file, treating file-not-found as `None`.
-///
-/// Mirrors the CLI's `read_optional_metadata` (`cobre-cli`'s `report.rs`):
-/// a missing file yields `Ok(None)`; malformed JSON yields `Err(ValueError)`;
-/// any other I/O error yields `Err(OSError)`.
-fn read_optional_simulation_metadata(
-    path: &Path,
-) -> PyResult<Option<cobre_io::SimulationMetadata>> {
-    match fs::read_to_string(path) {
-        Ok(content) => {
-            let value: cobre_io::SimulationMetadata =
-                serde_json::from_str(&content).map_err(|e| {
-                    PyValueError::new_err(format!("malformed JSON in {}: {e}", path.display()))
-                })?;
-            Ok(Some(value))
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(PyOSError::new_err(format!(
-            "failed to read {}: {e}",
-            path.display()
-        ))),
-    }
-}
-
-/// Assemble the `cobre report` JSON value for `output_dir`.
-///
-/// Reproduces the CLI `report` subcommand's assembly exactly: it reads the
-/// required `training/metadata.json`, the optional `simulation/metadata.json`
-/// (absent → `None`), and builds a [`serde_json::Value`] with the same shape,
-/// including the hoisted top-level `bounds` and `cost` convenience keys.
-///
-/// Returns a plain [`serde_json::Value`] (no Python token) so this helper can be
-/// unit-tested without linking the Python interpreter; callers convert the value
-/// to a Python dict via [`json_value_to_py`].
-///
-/// # Errors
-///
-/// - `FileNotFoundError` when `training/metadata.json` is absent.
-/// - `ValueError` when a metadata file contains malformed JSON.
-/// - `OSError` for other I/O failures.
-fn build_report_value(output_dir: &Path) -> PyResult<serde_json::Value> {
-    let training_metadata_path = output_dir.join("training/metadata.json");
-    let training = cobre_io::read_training_metadata(&training_metadata_path)
-        .map_err(|e| output_error_to_py(&e))?;
-
-    let simulation_metadata_path = output_dir.join("simulation/metadata.json");
-    let simulation = read_optional_simulation_metadata(&simulation_metadata_path)?;
-
-    let output_directory = output_dir.canonicalize().map_or_else(
-        |_| output_dir.display().to_string(),
-        |p| p.display().to_string(),
-    );
-
-    let bounds = serde_json::to_value(&training.bounds)
-        .map_err(|e| PyValueError::new_err(format!("failed to serialize bounds: {e}")))?;
-    let cost = match simulation.as_ref().and_then(|s| s.cost.as_ref()) {
-        Some(cost) => serde_json::to_value(cost)
-            .map_err(|e| PyValueError::new_err(format!("failed to serialize cost: {e}")))?,
-        None => serde_json::Value::Null,
-    };
-    let simulation_value = match simulation.as_ref() {
-        Some(simulation) => serde_json::to_value(simulation)
-            .map_err(|e| PyValueError::new_err(format!("failed to serialize simulation: {e}")))?,
-        None => serde_json::Value::Null,
-    };
-
-    Ok(serde_json::json!({
-        "output_directory": output_directory,
-        "status": training.status.clone(),
-        "bounds": bounds,
-        "training": serde_json::to_value(&training)
-            .map_err(|e| PyValueError::new_err(format!("failed to serialize training: {e}")))?,
-        "cost": cost,
-        "simulation": simulation_value,
-    }))
-}
-
-/// Assemble the machine-readable `cobre report` summary for a run output directory.
-///
-/// Reads `training/metadata.json` (required) and `simulation/metadata.json`
-/// (optional — `None` when absent), and returns a dict matching the shape of the
-/// `cobre report` CLI subcommand, with top-level `bounds` and `cost` convenience
-/// keys hoisted from `training.bounds` and `simulation.cost`.
-///
-/// ## Returns
-///
-/// A dict with the keys:
-///
-/// - `output_directory` — canonicalized absolute path to `output_dir`.
-/// - `status` — run status from `training/metadata.json`.
-/// - `bounds` — headline final objective bounds (hoisted from `training.bounds`).
-/// - `training` — full training metadata.
-/// - `cost` — simulation expected cost (hoisted from `simulation.cost`), or `None`.
-/// - `simulation` — full simulation metadata, or `None` when simulation was skipped.
-///
-/// ## Errors
-///
-/// - `FileNotFoundError` if `training/metadata.json` is absent.
-/// - `ValueError` if a metadata file contains malformed JSON.
-/// - `OSError` for other I/O failures.
-///
-/// ## Examples (Python)
-///
-/// ```python
-/// import cobre.results
-///
-/// report = cobre.results.report("output/")
-/// print(report["bounds"]["final_lower_bound"])
-/// if report["cost"] is not None:
-///     print(report["cost"]["mean_cost"])
-/// ```
-#[pyfunction]
-#[allow(clippy::needless_pass_by_value)]
-pub fn report(py: Python<'_>, output_dir: PathBuf) -> PyResult<Py<PyAny>> {
-    let value = build_report_value(&output_dir)?;
-    json_value_to_py(py, &value)
-}
-
 /// Read one `scenario_id=NNNN/data.parquet` partition and append rows to `result_list`.
 ///
 /// Each row is a Python dict of column values. The `scenario_id` integer is injected
 /// into every row from `scenario_id_val`.
 fn read_parquet_partition_into(
     py: Python<'_>,
-    parquet_path: &std::path::Path,
+    parquet_path: &Path,
     scenario_id_val: i64,
     result_list: &Bound<'_, PyList>,
 ) -> PyResult<()> {
-    let file = fs::File::open(parquet_path).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            PyFileNotFoundError::new_err(format!(
-                "simulation Parquet file not found: {}",
-                parquet_path.display()
-            ))
-        } else {
-            PyOSError::new_err(format!("failed to open {}: {e}", parquet_path.display()))
-        }
-    })?;
+    let file = open_parquet_file(parquet_path, "simulation Parquet file")?;
 
     let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| {
         PyOSError::new_err(format!(
@@ -1146,9 +918,7 @@ fn read_parquet_partition_into(
 /// Collect the `scenario_id=NNNN` subdirectories of `entity_dir`, pairing each
 /// parsed id with its `data.parquet` path, sorted ascending by id for
 /// deterministic output order.
-fn collect_sorted_scenario_entries(
-    entity_dir: &std::path::Path,
-) -> PyResult<Vec<(i64, std::path::PathBuf)>> {
+fn collect_sorted_scenario_entries(entity_dir: &Path) -> PyResult<Vec<(i64, PathBuf)>> {
     let read_dir = fs::read_dir(entity_dir).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             PyFileNotFoundError::new_err(format!(
@@ -1163,7 +933,7 @@ fn collect_sorted_scenario_entries(
         }
     })?;
 
-    let mut entries: Vec<(i64, std::path::PathBuf)> = Vec::new();
+    let mut entries: Vec<(i64, PathBuf)> = Vec::new();
 
     for dir_entry in read_dir {
         let dir_entry = dir_entry.map_err(|e| {
@@ -1197,7 +967,7 @@ fn collect_sorted_scenario_entries(
 ///
 /// Returns an empty list if the directory exists but contains no scenario
 /// subdirectories.
-fn load_entity_type(py: Python<'_>, entity_dir: &std::path::Path) -> PyResult<Py<PyList>> {
+fn load_entity_type(py: Python<'_>, entity_dir: &Path) -> PyResult<Py<PyList>> {
     let result_list = PyList::empty(py);
 
     let entries = collect_sorted_scenario_entries(entity_dir)?;
@@ -1208,20 +978,6 @@ fn load_entity_type(py: Python<'_>, entity_dir: &std::path::Path) -> PyResult<Py
 
     Ok(result_list.unbind())
 }
-
-/// Entity types supported by the simulation output.
-const ENTITY_TYPES: &[&str] = &[
-    "costs",
-    "buses",
-    "hydros",
-    "thermals",
-    "exchanges",
-    "pumping_stations",
-    "contracts",
-    "non_controllables",
-    "inflow_lags",
-    "violations/generic",
-];
 
 /// Load simulation results from Hive-partitioned Parquet files.
 ///
@@ -1289,7 +1045,7 @@ pub fn load_simulation(
         load_entity_type(py, &entity_dir).map(Py::from)
     } else {
         let result = PyDict::new(py);
-        for et in ENTITY_TYPES {
+        for et in cobre_io::simulation_family_subpaths() {
             let entity_dir = simulation_dir.join(et);
             if entity_dir.exists() {
                 let rows = load_entity_type(py, &entity_dir)?;
@@ -1306,21 +1062,12 @@ pub fn load_simulation(
 /// `out_schema` is the extended schema, written on the first call (when `None`)
 /// and reused by later calls so all batches share one schema for concatenation.
 fn read_parquet_partition_as_batches(
-    parquet_path: &std::path::Path,
+    parquet_path: &Path,
     scenario_id_val: i64,
     out_batches: &mut Vec<RecordBatch>,
-    out_schema: &mut Option<std::sync::Arc<Schema>>,
+    out_schema: &mut Option<Arc<Schema>>,
 ) -> PyResult<()> {
-    let file = fs::File::open(parquet_path).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            PyFileNotFoundError::new_err(format!(
-                "simulation Parquet file not found: {}",
-                parquet_path.display()
-            ))
-        } else {
-            PyOSError::new_err(format!("failed to open {}: {e}", parquet_path.display()))
-        }
-    })?;
+    let file = open_parquet_file(parquet_path, "simulation Parquet file")?;
 
     let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| {
         PyOSError::new_err(format!(
@@ -1361,8 +1108,8 @@ fn read_parquet_partition_as_batches(
         }
 
         let n_rows = batch.num_rows();
-        let scenario_id_array = std::sync::Arc::new(Int64Array::from(vec![scenario_id_val; n_rows]))
-            as std::sync::Arc<dyn arrow::array::Array>;
+        let scenario_id_array =
+            Arc::new(Int64Array::from(vec![scenario_id_val; n_rows])) as Arc<dyn Array>;
 
         let extended_schema = if let Some(schema) = out_schema.as_ref() {
             schema.clone()
@@ -1370,13 +1117,12 @@ fn read_parquet_partition_as_batches(
             let orig_schema = batch.schema();
             let mut fields: Vec<Field> = vec![Field::new("scenario_id", DataType::Int64, false)];
             fields.extend(orig_schema.fields().iter().map(|f| f.as_ref().clone()));
-            let schema = std::sync::Arc::new(Schema::new(fields));
+            let schema = Arc::new(Schema::new(fields));
             *out_schema = Some(schema.clone());
             schema
         };
 
-        let mut columns: Vec<std::sync::Arc<dyn arrow::array::Array>> =
-            Vec::with_capacity(batch.num_columns() + 1);
+        let mut columns: Vec<Arc<dyn Array>> = Vec::with_capacity(batch.num_columns() + 1);
         columns.push(scenario_id_array);
         columns.extend(batch.columns().iter().cloned());
 
@@ -1394,9 +1140,7 @@ fn read_parquet_partition_as_batches(
 /// concatenated across scenarios (ordered by `scenario_id` ascending).
 ///
 /// Returns `None` when the directory exists but contains no scenario subdirectories.
-fn load_entity_type_as_batch(
-    entity_dir: &std::path::Path,
-) -> PyResult<Option<(RecordBatch, std::sync::Arc<Schema>)>> {
+fn load_entity_type_as_batch(entity_dir: &Path) -> PyResult<Option<(RecordBatch, Arc<Schema>)>> {
     let entries = collect_sorted_scenario_entries(entity_dir)?;
 
     if entries.is_empty() {
@@ -1404,7 +1148,7 @@ fn load_entity_type_as_batch(
     }
 
     let mut all_batches: Vec<RecordBatch> = Vec::new();
-    let mut schema: Option<std::sync::Arc<Schema>> = None;
+    let mut schema: Option<Arc<Schema>> = None;
 
     for (scenario_id, parquet_path) in &entries {
         read_parquet_partition_as_batches(
@@ -1425,7 +1169,6 @@ fn load_entity_type_as_batch(
     Ok(Some((concatenated, schema)))
 }
 
-/// Serialize a `RecordBatch` to an Arrow IPC stream buffer.
 fn batch_to_ipc_bytes(batch: &RecordBatch, schema: &Schema) -> PyResult<Vec<u8>> {
     let mut buf = Vec::new();
     let mut writer = StreamWriter::try_new(&mut buf, schema)
@@ -1447,12 +1190,11 @@ fn entity_type_ipc_bytes(entity_dir: &Path) -> PyResult<Vec<u8>> {
         batch_to_ipc_bytes(&batch, &schema)
     } else {
         let empty_schema = Schema::new(vec![Field::new("scenario_id", DataType::Int64, false)]);
-        let empty_batch = RecordBatch::new_empty(std::sync::Arc::new(empty_schema.clone()));
+        let empty_batch = RecordBatch::new_empty(Arc::new(empty_schema.clone()));
         batch_to_ipc_bytes(&empty_batch, &empty_schema)
     }
 }
 
-/// Reconstruct a `pyarrow.Table` from a raw Arrow IPC stream buffer.
 fn ipc_bytes_to_py_table<'py>(
     py: Python<'py>,
     ipc_bytes: &[u8],
@@ -1545,7 +1287,7 @@ pub fn load_simulation_arrow(
     } else {
         let result = PyDict::new(py);
 
-        for et in ENTITY_TYPES {
+        for et in cobre_io::simulation_family_subpaths() {
             let entity_dir = simulation_dir.join(et);
             if !entity_dir.exists() {
                 continue;
@@ -1577,8 +1319,9 @@ pub fn load_simulation_arrow(
 /// ```python
 /// {
 ///     "metadata": {
-///         "format_version": 1,
+///         "format_version": 2,
 ///         "cobre_version": "1.0.0",
+///         "created_at": "2026-01-15T12:00:00Z",
 ///         "num_stages": 60,
 ///         "graph_manifest": { "n_pools": 60, "nodes": [ ... ], "edges": [ ... ] },
 ///         "producer": {
@@ -1596,13 +1339,16 @@ pub fn load_simulation_arrow(
 ///             "cost_scale_factor": 2500000.0,
 ///             "node_id": 0,
 ///             "graph_stage_id": 0,
+///             "priced_state_date": -2147483648,
 ///             "entity_manifest": [
 ///                 {
 ///                     "entity_type": 0,
 ///                     "entity_id": 0,
 ///                     "subindex": 0,
 ///                     "was_active": True,
-///                     "delivery_date": -1,
+///                     "reference_date": -2147483648,
+///                     "interval_start": -2147483648,
+///                     "interval_end": -2147483648,
 ///                 },
 ///                 ...
 ///             ],
@@ -1671,8 +1417,8 @@ pub fn load_policy(
         )));
     }
 
-    let checkpoint =
-        cobre_io::read_policy_checkpoint(&policy_dir).map_err(|e| output_error_to_py(&e))?;
+    let checkpoint = cobre_io::read_policy_checkpoint(&policy_dir)
+        .map_err(|e| convert_error(ErrorSource::Output(&e)))?;
 
     let metadata_py = metadata_to_py(py, &checkpoint.metadata)?;
 
@@ -1691,6 +1437,7 @@ pub fn load_policy(
         sc_dict.set_item("cost_scale_factor", into_py(py, sc.cost_scale_factor)?)?;
         sc_dict.set_item("node_id", into_py(py, sc.node_id)?)?;
         sc_dict.set_item("graph_stage_id", into_py(py, sc.graph_stage_id)?)?;
+        sc_dict.set_item("priced_state_date", into_py(py, sc.priced_state_date)?)?;
 
         // Emit the per-slot entity manifest so a loaded checkpoint round-trips
         // through `write_policy_checkpoint` (whose binding already accepts this
@@ -1703,7 +1450,9 @@ pub fn load_policy(
             slot_dict.set_item("entity_id", into_py(py, slot.entity_id)?)?;
             slot_dict.set_item("subindex", into_py(py, slot.subindex)?)?;
             slot_dict.set_item("was_active", PyBool::new(py, slot.was_active).to_owned())?;
-            slot_dict.set_item("delivery_date", into_py(py, slot.delivery_date)?)?;
+            slot_dict.set_item("reference_date", into_py(py, slot.reference_date)?)?;
+            slot_dict.set_item("interval_start", into_py(py, slot.interval_start)?)?;
+            slot_dict.set_item("interval_end", into_py(py, slot.interval_end)?)?;
             manifest_list.append(slot_dict)?;
         }
         sc_dict.set_item("entity_manifest", manifest_list)?;
@@ -1761,216 +1510,4 @@ pub fn load_policy(
     result.set_item("stage_bases", stage_bases_list)?;
 
     Ok(result.unbind().into())
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-mod tests {
-    use std::fs;
-
-    use pyo3::Python;
-    use tempfile::TempDir;
-
-    use super::build_report_value;
-
-    /// Training metadata carrying an explicit `bounds` object.
-    ///
-    /// Mirrors the shape of the CLI report test's `make_training_metadata_json`
-    /// fixture (`cobre-cli`'s `report.rs`).
-    fn training_metadata_json() -> &'static str {
-        r#"{
-            "cobre_version": "0.3.2",
-            "hostname": "test-host",
-            "solver": "highs",
-            "started_at": "2026-01-17T08:00:00Z",
-            "completed_at": "2026-01-17T12:30:00Z",
-            "duration_seconds": 16200.0,
-            "status": "complete",
-            "configuration": {
-                "seed": 42,
-                "max_iterations": 100,
-                "forward_passes": 192,
-                "stopping_mode": "any",
-                "policy_mode": "fresh"
-            },
-            "problem_dimensions": {
-                "num_stages": 12,
-                "num_hydros": 160,
-                "num_thermals": 200,
-                "num_buses": 5,
-                "num_lines": 8
-            },
-            "iterations": { "completed": 10, "converged_at": 10 },
-            "convergence": {
-                "achieved": true,
-                "final_gap_percent": 0.45,
-                "termination_reason": "bound_stalling"
-            },
-            "row_pool": {
-                "total_generated": 1250000,
-                "total_active": 980000,
-                "peak_active": 1100000
-            },
-            "bounds": {
-                "final_lower_bound": 123456.0,
-                "final_upper_bound": 124000.0,
-                "final_upper_bound_std": 12.5
-            },
-            "distribution": {
-                "backend": "local",
-                "world_size": 1,
-                "ranks_participated": 1,
-                "num_hosts": 1,
-                "threads_per_rank": 1
-            }
-        }"#
-    }
-
-    /// Simulation metadata carrying an explicit `cost` object.
-    fn simulation_metadata_json() -> &'static str {
-        r#"{
-            "cobre_version": "0.3.2",
-            "hostname": "test-host",
-            "solver": "highs",
-            "started_at": "2026-01-17T13:00:00Z",
-            "completed_at": "2026-01-17T13:15:00Z",
-            "duration_seconds": 900.0,
-            "status": "complete",
-            "scenarios": { "total": 100, "completed": 100, "failed": 0 },
-            "cost": {
-                "mean_cost": 789012.0,
-                "std_cost": 4321.0
-            },
-            "distribution": {
-                "backend": "local",
-                "world_size": 1,
-                "ranks_participated": 1,
-                "num_hosts": 1,
-                "threads_per_rank": 1
-            }
-        }"#
-    }
-
-    /// Write `training/metadata.json` under `dir`, creating the subdirectory.
-    fn write_training_metadata(dir: &std::path::Path, json: &str) {
-        let training_dir = dir.join("training");
-        fs::create_dir_all(&training_dir).unwrap();
-        fs::write(training_dir.join("metadata.json"), json).unwrap();
-    }
-
-    /// Write `simulation/metadata.json` under `dir`, creating the subdirectory.
-    fn write_simulation_metadata(dir: &std::path::Path, json: &str) {
-        let simulation_dir = dir.join("simulation");
-        fs::create_dir_all(&simulation_dir).unwrap();
-        fs::write(simulation_dir.join("metadata.json"), json).unwrap();
-    }
-
-    #[test]
-    fn build_report_value_has_six_top_level_keys() {
-        let dir = TempDir::new().unwrap();
-        write_training_metadata(dir.path(), training_metadata_json());
-        write_simulation_metadata(dir.path(), simulation_metadata_json());
-
-        let value = build_report_value(dir.path()).unwrap();
-
-        let obj = value.as_object().expect("report value must be an object");
-        for key in [
-            "output_directory",
-            "status",
-            "bounds",
-            "training",
-            "cost",
-            "simulation",
-        ] {
-            assert!(
-                obj.contains_key(key),
-                "report must contain top-level '{key}'"
-            );
-        }
-        assert_eq!(value["status"].as_str(), Some("complete"));
-    }
-
-    #[test]
-    fn build_report_value_hoists_bounds() {
-        let dir = TempDir::new().unwrap();
-        write_training_metadata(dir.path(), training_metadata_json());
-
-        let value = build_report_value(dir.path()).unwrap();
-
-        assert_eq!(
-            value["bounds"]["final_lower_bound"].as_f64(),
-            Some(123_456.0),
-            "top-level .bounds.final_lower_bound must match the fixture"
-        );
-        assert_eq!(
-            value["training"]["bounds"]["final_lower_bound"].as_f64(),
-            Some(123_456.0),
-            "nested .training.bounds.final_lower_bound must match the fixture"
-        );
-        assert_eq!(
-            value["bounds"]["final_lower_bound"].as_f64(),
-            value["training"]["bounds"]["final_lower_bound"].as_f64(),
-            "the bounds hoist must be consistent with the nested value"
-        );
-    }
-
-    #[test]
-    fn build_report_value_hoists_cost() {
-        let dir = TempDir::new().unwrap();
-        write_training_metadata(dir.path(), training_metadata_json());
-        write_simulation_metadata(dir.path(), simulation_metadata_json());
-
-        let value = build_report_value(dir.path()).unwrap();
-
-        assert_eq!(
-            value["cost"]["mean_cost"].as_f64(),
-            Some(789_012.0),
-            "top-level .cost.mean_cost must match the fixture"
-        );
-        assert_eq!(
-            value["simulation"]["cost"]["mean_cost"].as_f64(),
-            Some(789_012.0),
-            "nested .simulation.cost.mean_cost must match the fixture"
-        );
-        assert_eq!(
-            value["cost"]["mean_cost"].as_f64(),
-            value["simulation"]["cost"]["mean_cost"].as_f64(),
-            "the cost hoist must be consistent with the nested value"
-        );
-    }
-
-    #[test]
-    fn build_report_value_simulation_none_when_absent() {
-        let dir = TempDir::new().unwrap();
-        write_training_metadata(dir.path(), training_metadata_json());
-        // No simulation/metadata.json written.
-
-        let value = build_report_value(dir.path()).unwrap();
-
-        assert!(
-            value["simulation"].is_null(),
-            ".simulation must be null when simulation metadata is absent"
-        );
-        assert!(
-            value["cost"].is_null(),
-            ".cost must be null when simulation metadata is absent"
-        );
-    }
-
-    #[test]
-    fn build_report_value_missing_training_is_err() {
-        // This error path routes through `crate::errors::convert_error`, which
-        // attaches the GIL (`Python::attach`) to build the typed exception, so the
-        // interpreter must be initialized first.
-        Python::initialize();
-        let dir = TempDir::new().unwrap();
-        // No training/metadata.json written.
-
-        let result = build_report_value(dir.path());
-
-        assert!(
-            result.is_err(),
-            "missing training/metadata.json must produce an error"
-        );
-    }
 }
