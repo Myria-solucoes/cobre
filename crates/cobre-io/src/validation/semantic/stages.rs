@@ -781,6 +781,40 @@ pub(super) fn check_sampling_method_meaningfulness(data: &ParsedData, ctx: &mut 
     }
 }
 
+/// Rule 52: every study stage declares at least one block, and every block's
+/// `duration_hours` is finite and positive — the stage-average stored-energy
+/// columns divide by a stage's summed block hours with no guard.
+pub(super) fn check_study_stage_blocks(data: &ParsedData, ctx: &mut ValidationContext) {
+    for stage in data.stages.stages.iter().filter(|s| s.id >= 0) {
+        if stage.blocks.is_empty() {
+            ctx.add_error(
+                ErrorKind::InvalidValue,
+                "stages.json",
+                None::<&str>,
+                format!(
+                    "stage {} declares no blocks; every study stage must declare at least one \
+                     block",
+                    stage.id
+                ),
+            );
+            continue;
+        }
+        for block in &stage.blocks {
+            if !block.duration_hours.is_finite() || block.duration_hours <= 0.0 {
+                ctx.add_error(
+                    ErrorKind::InvalidValue,
+                    "stages.json",
+                    None::<&str>,
+                    format!(
+                        "stage {} block {} has duration_hours {}, which must be finite and > 0.0",
+                        stage.id, block.index, block.duration_hours
+                    ),
+                );
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -798,7 +832,8 @@ mod tests {
     use cobre_core::EntityId;
     use cobre_core::scenario::ExternalScenarioRow;
     use cobre_core::temporal::{
-        Node, PolicyGraphType, SeasonCycleType, SeasonDefinition, SeasonMap, Transition,
+        Block, Node, PolicyGraphType, SeasonCycleType, SeasonDefinition, SeasonMap, Stage,
+        Transition,
     };
 
     use crate::scenarios::{InflowArCoefficientRow, InflowSeasonalStatsRow};
@@ -1803,6 +1838,96 @@ mod tests {
                     && w.message.contains("sampling_method is ignored")),
             "multi-node stage must warn naming the stage: {:?}",
             ctx.warnings()
+        );
+    }
+
+    // ── Study stage blocks (rule 52) ──────────────────────────────────────────
+
+    fn stage_with_block_hours(id: i32, hours: &[f64]) -> Stage {
+        let mut stage = make_stage(id);
+        stage.blocks = hours
+            .iter()
+            .enumerate()
+            .map(|(index, &duration_hours)| Block {
+                index,
+                name: format!("B{index}"),
+                duration_hours,
+            })
+            .collect();
+        stage
+    }
+
+    fn blocks_data(stages: Vec<Stage>) -> ParsedData {
+        let mut data = make_data_5b(
+            vec![make_hydro_ordered_penalties(1)],
+            make_stages_5b(vec![]),
+            vec![make_bus_with_deficit(1, 10.0)],
+            vec![],
+            vec![],
+            None,
+        );
+        data.stages.stages = stages;
+        data
+    }
+
+    /// An empty-blocks study stage produces exactly one `InvalidValue` error
+    /// naming the stage, and the context fails.
+    #[test]
+    fn test_study_stage_blocks_empty_rejected() {
+        let data = blocks_data(vec![stage_with_block_hours(3, &[])]);
+        let mut ctx = ValidationContext::new();
+        super::check_study_stage_blocks(&data, &mut ctx);
+        let errors = ctx.errors();
+        assert_eq!(errors.len(), 1, "expected exactly one error: {errors:?}");
+        assert_eq!(errors[0].kind, ErrorKind::InvalidValue);
+        assert!(
+            errors[0].message.contains("stage 3"),
+            "message must name stage 3: {}",
+            errors[0].message
+        );
+        assert!(ctx.into_result().is_err());
+    }
+
+    /// A stage with blocks `[100.0, 0.0, -5.0, NaN]` produces exactly three
+    /// errors — one per non-positive or non-finite block, naming the stage,
+    /// the block index, and the offending value; the `100.0` block is clean.
+    #[test]
+    fn test_study_stage_blocks_mixed_hours_rejects_each_bad_block() {
+        let data = blocks_data(vec![stage_with_block_hours(
+            0,
+            &[100.0, 0.0, -5.0, f64::NAN],
+        )]);
+        let mut ctx = ValidationContext::new();
+        super::check_study_stage_blocks(&data, &mut ctx);
+        let errors = ctx.errors();
+        assert_eq!(errors.len(), 3, "expected exactly three errors: {errors:?}");
+        for (index, value) in [(1, "0"), (2, "-5"), (3, "NaN")] {
+            assert!(
+                errors.iter().any(|e| e.kind == ErrorKind::InvalidValue
+                    && e.message.contains("stage 0")
+                    && e.message.contains(&format!("block {index}"))
+                    && e.message.contains(&format!("duration_hours {value},"))),
+                "expected an error naming stage 0, block {index}, duration_hours {value}: \
+                 {errors:?}"
+            );
+        }
+    }
+
+    /// A well-formed multi-stage deck (every stage carries positive-duration
+    /// blocks) produces no error.
+    #[test]
+    fn test_study_stage_blocks_well_formed_deck_no_error() {
+        let data = blocks_data(vec![
+            make_stage_with_blocks(0, 3),
+            make_stage_with_blocks(1, 1),
+            make_stage_with_blocks(2, 2),
+        ]);
+        let mut ctx = ValidationContext::new();
+        super::check_study_stage_blocks(&data, &mut ctx);
+        assert!(
+            !ctx.has_errors(),
+            "well-formed deck must not error: {:?}",
+            ctx.errors()
         );
     }
 }

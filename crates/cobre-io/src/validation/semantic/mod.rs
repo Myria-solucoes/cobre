@@ -135,6 +135,7 @@
 //! |47  | Every external scenario row's `stage_id` resolves to a declared study stage via the [`crate::StageIdResolver`], never silently dropped (A2) | `scenarios/external_*_scenarios.parquet` | `InvalidValue` |
 //! |48  | Per edge `n → m` and slot-occupying external class, the raw cells of columns `scenario_id(n)`/`scenario_id(m)` agree bitwise over the shared prefix `s <= t(n)` (declared `nodes[]` only) | `scenarios/external_*_scenarios.parquet` | `ModelQuality` (warning) |
 //! |50  | Under External, load/NCS get no σ check at all (their μ is defined by the external file itself, so there is no seasonal μ left to disagree with); inflow's remaining σ = 0 case is decided from the same external cells' own sample σ ([`cobre_stochastic::derive_external_sample_moments`], the reduction the engine also derives its `(μ, σ)` from) — accepted for an AR(0) hydro (no declared lag coefficient or annual component: its deterministic base is exactly μ), rejected for an AR(p > 0) hydro, naming the entity and stage, since a deterministic value there would have to equal that model's own deterministic PAR output, which this loader does not compute upstream | `scenarios/external_*_scenarios.parquet` | `BusinessRuleViolation` |
+//! |52  | Every study stage declares at least one block and every block's `hours` is finite and `> 0` | `stages.json` | `InvalidValue` |
 //!
 //! Rule 49 (G2 — each standardized external library's `n_entities()` matches its
 //! `noise_entity_order` block width) is enforced downstream at study setup
@@ -203,6 +204,7 @@ pub(crate) fn validate_semantic_stages_penalties_scenarios(
     stages::check_nodes_and_noise_openings(data, ctx);
     stages::check_sampling_method_meaningfulness(data, ctx);
     stages::check_inflow_lags_vs_par_order(data, ctx);
+    stages::check_study_stage_blocks(data, ctx);
     sobol::check_sobol_power_of_2(data, ctx);
     scenarios::check_penalty_ordering(data, ctx);
     scenarios::check_filling_sufficiency(data, ctx);

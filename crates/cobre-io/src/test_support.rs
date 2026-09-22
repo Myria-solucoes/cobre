@@ -619,7 +619,21 @@ pub fn make_thermal(id: i32, min_mw: f64, max_mw: f64) -> Thermal {
     }
 }
 
-/// Build one study stage with the given `id`.
+/// `n` equal-duration blocks spanning a 720-hour stage, shared by
+/// [`make_stage`] (`n = 1`) and [`make_stage_with_blocks`] so the two
+/// builders cannot drift apart.
+fn stage_blocks(n: usize) -> Vec<Block> {
+    (0..n)
+        .map(|index| Block {
+            index,
+            name: format!("B{index}"),
+            duration_hours: 720.0 / n as f64,
+        })
+        .collect()
+}
+
+/// Build one study stage with the given `id`, carrying a single block
+/// spanning the full stage.
 #[must_use]
 pub fn make_stage(id: i32) -> Stage {
     Stage {
@@ -628,7 +642,7 @@ pub fn make_stage(id: i32) -> Stage {
         start_date: date(2024, 1, 1),
         end_date: date(2024, 2, 1),
         season_id: None,
-        blocks: vec![],
+        blocks: stage_blocks(1),
         block_mode: BlockMode::Parallel,
         state_config: StageStateConfig {
             storage: true,
@@ -642,18 +656,12 @@ pub fn make_stage(id: i32) -> Stage {
     }
 }
 
-/// Build a stage with `id` and `n` blocks of equal duration, reusing
-/// [`make_stage`] for every other field so the two builders cannot drift.
+/// Build a stage with `id` and `n` equal-duration blocks; every other field
+/// comes from [`make_stage`].
 #[must_use]
 pub fn make_stage_with_blocks(id: i32, n: usize) -> Stage {
     let mut stage = make_stage(id);
-    stage.blocks = (0..n)
-        .map(|index| Block {
-            index,
-            name: format!("B{index}"),
-            duration_hours: 720.0 / n as f64,
-        })
-        .collect();
+    stage.blocks = stage_blocks(n);
     stage
 }
 
