@@ -1877,6 +1877,23 @@ mod tests {
 
     // ── ρ_esp parquet override resolution tests ────────────────────────────
 
+    /// A single-row override setting only `specific_productivity_mw_per_m3s_per_m`
+    /// for `hydro_id` at `stage_id` (`None` = per-hydro default); every other
+    /// column stays `None`.
+    fn rho_esp_override_row(
+        hydro_id: EntityId,
+        stage_id: Option<i32>,
+        rho_esp: Option<f64>,
+    ) -> HydroEnergyProductivityRow {
+        HydroEnergyProductivityRow {
+            hydro_id,
+            stage_id,
+            equivalent_productivity_mw_per_m3s: None,
+            reference_outflow_m3s: None,
+            specific_productivity_mw_per_m3s_per_m: rho_esp,
+        }
+    }
+
     /// A per-stage ρ_esp override shifts BOTH the FPHA reference-point ρ_eq and
     /// the mean own term at that stage only; the other stage, with no override,
     /// keeps the entity ρ_esp. Every operand is exactly representable in binary
@@ -1907,15 +1924,12 @@ mod tests {
         let mut map = HashMap::new();
         map.insert(id, rows);
         let override_esp = 0.375;
-        let override_table =
-            build_hydro_energy_productivity_override(&[HydroEnergyProductivityRow {
-                hydro_id: hydros[0].id,
-                stage_id: Some(1),
-                equivalent_productivity_mw_per_m3s: None,
-                reference_outflow_m3s: None,
-                specific_productivity_mw_per_m3s_per_m: Some(override_esp),
-            }])
-            .expect("override builds");
+        let override_table = build_hydro_energy_productivity_override(&[rho_esp_override_row(
+            hydros[0].id,
+            Some(1),
+            Some(override_esp),
+        )])
+        .expect("override builds");
 
         let set = build_energy_conversion_set(
             &hydros,
@@ -1976,15 +1990,12 @@ mod tests {
         let mut map = HashMap::new();
         map.insert(id, rows);
         let override_esp = 0.375;
-        let override_table =
-            build_hydro_energy_productivity_override(&[HydroEnergyProductivityRow {
-                hydro_id: hydros[0].id,
-                stage_id: None,
-                equivalent_productivity_mw_per_m3s: None,
-                reference_outflow_m3s: None,
-                specific_productivity_mw_per_m3s_per_m: Some(override_esp),
-            }])
-            .expect("override builds");
+        let override_table = build_hydro_energy_productivity_override(&[rho_esp_override_row(
+            hydros[0].id,
+            None,
+            Some(override_esp),
+        )])
+        .expect("override builds");
 
         let set = build_energy_conversion_set(
             &hydros,
@@ -2023,15 +2034,12 @@ mod tests {
         let (id, rows) = vha_constant_height(hydros[0].id, 400.0);
         let mut map = HashMap::new();
         map.insert(id, rows);
-        let override_table =
-            build_hydro_energy_productivity_override(&[HydroEnergyProductivityRow {
-                hydro_id: hydros[0].id,
-                stage_id: None,
-                equivalent_productivity_mw_per_m3s: None,
-                reference_outflow_m3s: None,
-                specific_productivity_mw_per_m3s_per_m: Some(0.02),
-            }])
-            .expect("override builds");
+        let override_table = build_hydro_energy_productivity_override(&[rho_esp_override_row(
+            hydros[0].id,
+            None,
+            Some(0.02),
+        )])
+        .expect("override builds");
 
         let set = build_energy_conversion_set(
             &hydros,
@@ -2124,20 +2132,8 @@ mod tests {
         map.insert(id_b, rows_b);
 
         let override_table = build_hydro_energy_productivity_override(&[
-            HydroEnergyProductivityRow {
-                hydro_id: hydro_a.id,
-                stage_id: None,
-                equivalent_productivity_mw_per_m3s: None,
-                reference_outflow_m3s: None,
-                specific_productivity_mw_per_m3s_per_m: Some(0.02),
-            },
-            HydroEnergyProductivityRow {
-                hydro_id: hydro_b.id,
-                stage_id: None,
-                equivalent_productivity_mw_per_m3s: None,
-                reference_outflow_m3s: None,
-                specific_productivity_mw_per_m3s_per_m: Some(0.05),
-            },
+            rho_esp_override_row(hydro_a.id, None, Some(0.02)),
+            rho_esp_override_row(hydro_b.id, None, Some(0.05)),
         ])
         .expect("override builds");
 
@@ -2203,15 +2199,12 @@ mod tests {
         let mut map = HashMap::new();
         map.insert(id, rows);
 
-        let all_null_override =
-            build_hydro_energy_productivity_override(&[HydroEnergyProductivityRow {
-                hydro_id: hydros[0].id,
-                stage_id: None,
-                equivalent_productivity_mw_per_m3s: None,
-                reference_outflow_m3s: None,
-                specific_productivity_mw_per_m3s_per_m: None,
-            }])
-            .expect("override builds");
+        let all_null_override = build_hydro_energy_productivity_override(&[rho_esp_override_row(
+            hydros[0].id,
+            None,
+            None,
+        )])
+        .expect("override builds");
 
         let without_table = build_energy_conversion_set(
             &hydros,
