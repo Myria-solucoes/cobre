@@ -546,8 +546,11 @@ fn resolve_computed(
                 hydro.max_storage_hm3
             }
             ComputedParameter::SpecificProductivity { .. } => override_table
-                .specific_productivity(hydro_id, stage_id)
-                .or(hydro.specific_productivity_mw_per_m3s_per_m)
+                .resolve_specific_productivity(
+                    hydro_id,
+                    stage_id,
+                    hydro.specific_productivity_mw_per_m3s_per_m,
+                )
                 .ok_or_else(|| ResolvedParametersError::MissingSpecificProductivity {
                     name: name.to_string(),
                     hydro_id,
@@ -570,16 +573,20 @@ fn resolve_computed(
 #[allow(clippy::cast_precision_loss)]
 mod tests {
     use cobre_core::{
-        ComputedParameter, EntityId, ParameterKind, ScalarParameter,
+        CascadeTopology, ComputedParameter, EntityId, ParameterKind, ScalarParameter, StudyPos,
         entities::hydro::{HydroGenerationModel, HydroPenalties},
     };
 
-    use cobre_io::HydroEnergyProductivityRow;
+    use cobre_io::{
+        HydroEnergyProductivityRow, HydroGeometryRow, build_hydro_reference_volumes_resolved,
+    };
 
     use super::*;
     use crate::energy_conversion::{
-        EnergyConversion, EnergyConversionSet, build_hydro_energy_productivity_override,
+        EnergyConversion, EnergyConversionSet, build_energy_conversion_set,
+        build_hydro_energy_productivity_override,
     };
+    use crate::fpha_fitting::ForebayTable;
 
     // -------------------------------------------------------------------------
     // Shared test helpers
@@ -1168,6 +1175,94 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// The `SpecificProductivity` tag and the energy-conversion builder's mean
+    /// own term resolve the override table through the same
+    /// `resolve_specific_productivity` method: recomputing the mean own term as
+    /// `tag_value · mean_head` from an independently built `ForebayTable`
+    /// (identical VHA rows) recovers the builder's grid cell bit-for-bit.
+    #[test]
+    fn specific_productivity_tag_and_builder_resolve_the_same_rho_esp() {
+        let hydro = make_hydro(1, 100.0, 300.0, None);
+        let hydro_id = hydro.id;
+        let hydros = vec![hydro];
+        let cascade = CascadeTopology::build(&hydros);
+        let resolver =
+            build_hydro_reference_volumes_resolved(&[(hydro_id, StudyPos(0), 200.0)], 0.0);
+        let rows = vec![
+            HydroGeometryRow {
+                hydro_id,
+                volume_hm3: 0.0,
+                height_m: 100.0,
+                area_km2: 1.0,
+            },
+            HydroGeometryRow {
+                hydro_id,
+                volume_hm3: 1000.0,
+                height_m: 200.0,
+                area_km2: 1.0,
+            },
+        ];
+        let mut vha = HashMap::new();
+        vha.insert(hydro_id, rows.clone());
+        let override_esp = 0.0123;
+        let override_table =
+            build_hydro_energy_productivity_override(&[HydroEnergyProductivityRow {
+                hydro_id,
+                stage_id: None,
+                equivalent_productivity_mw_per_m3s: None,
+                reference_outflow_m3s: None,
+                specific_productivity_mw_per_m3s_per_m: Some(override_esp),
+            }])
+            .expect("override builds");
+        let stage_ids = stage_ids_0_based(1);
+
+        let energy_conversion = build_energy_conversion_set(
+            &hydros,
+            &stage_ids,
+            &cascade,
+            &resolver,
+            &vha,
+            Some(&override_table),
+            None,
+        )
+        .expect("builder succeeds");
+
+        let params = vec![make_param(
+            0,
+            ParameterKind::Computed {
+                computed_spec: ComputedParameter::SpecificProductivity { hydro_id },
+            },
+        )];
+        let table = build_resolved_parameters(
+            &params,
+            &energy_conversion,
+            &override_table,
+            &hydros,
+            &[0i32],
+            &stage_ids,
+            &one_block_per_stage(1),
+            1_000_000.0,
+        )
+        .expect("tag resolves");
+        let tag_value = table.get(EntityId(0), 0, 0);
+        assert_eq!(
+            tag_value.to_bits(),
+            override_esp.to_bits(),
+            "the tag resolves the same override the builder consults"
+        );
+
+        let recomputed_table = ForebayTable::new(&rows, "coherence").expect("table builds");
+        let mean_head = recomputed_table.mean_height(100.0, 300.0);
+        let expected_integrated = tag_value * mean_head;
+        assert_eq!(
+            expected_integrated.to_bits(),
+            energy_conversion
+                .integrated_equivalent_productivity(0, 0)
+                .to_bits(),
+            "the builder must apply the same resolved ρ_esp the tag resolves"
+        );
     }
 
     // -------------------------------------------------------------------------

@@ -12,9 +12,13 @@
 //! exactly one source supplies the value for each non-FPHA `(hydro, stage)`
 //! pair — see [`crate::validation::productivity_resolution`].
 //!
-//! The other two override columns (`reference_outflow_m3s`,
-//! `specific_productivity_mw_per_m3s_per_m`) apply independently of the
-//! generation model.
+//! The `specific_productivity_mw_per_m3s_per_m` (`ρ_esp`) override feeds the
+//! head-derived productivity of both the reference-point and mean
+//! energy-conversion evaluators, and the `specific_productivity` computed tag
+//! — the same override-then-entity precedence in both. The
+//! `reference_outflow_m3s` (`Q_ref`) override reaches only the
+//! `reference_turbine` computed tag; the energy-conversion head evaluation
+//! always reads `max_turbined_m3s`, never this column.
 //!
 //! The reference operating volume is declared in `hydro_production_models.json`
 //! (`reference_volume`), the single source of truth, not here. A stale

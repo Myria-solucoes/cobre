@@ -53,6 +53,19 @@ impl HydroEnergyProductivityOverride {
         }
         self.rho_esp_per_hydro_default.get(&hydro).copied()
     }
+
+    /// Resolves `ρ_esp` for `(hydro, stage)` as override → `entity_default`. The
+    /// single owner of the `ρ_esp` precedence shared by the energy-conversion
+    /// builder and the `SpecificProductivity` tag.
+    #[must_use]
+    pub fn resolve_specific_productivity(
+        &self,
+        hydro: EntityId,
+        stage: StageId,
+        entity_default: Option<f64>,
+    ) -> Option<f64> {
+        self.specific_productivity(hydro, stage).or(entity_default)
+    }
 }
 
 /// Build a [`HydroEnergyProductivityOverride`] from parsed rows.
@@ -232,6 +245,34 @@ mod tests {
         assert_eq!(
             o.equivalent_productivity(EntityId(1), StageId(1)),
             Some(2.0)
+        );
+    }
+
+    #[test]
+    fn resolve_specific_productivity_applies_override_then_entity_default() {
+        let rows = vec![HydroEnergyProductivityRow {
+            hydro_id: EntityId(1),
+            stage_id: None,
+            equivalent_productivity_mw_per_m3s: None,
+            reference_outflow_m3s: None,
+            specific_productivity_mw_per_m3s_per_m: Some(0.009),
+        }];
+        let o = build_hydro_energy_productivity_override(&rows).expect("override builds");
+
+        assert_eq!(
+            o.resolve_specific_productivity(EntityId(1), StageId(0), Some(0.5)),
+            Some(0.009),
+            "override wins over entity_default"
+        );
+        assert_eq!(
+            o.resolve_specific_productivity(EntityId(2), StageId(0), Some(0.5)),
+            Some(0.5),
+            "entity_default applies when no override exists"
+        );
+        assert_eq!(
+            o.resolve_specific_productivity(EntityId(3), StageId(0), None),
+            None,
+            "None when neither source supplies a value"
         );
     }
 

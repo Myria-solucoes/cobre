@@ -19,16 +19,18 @@ use crate::hydro_models::ResolvedProductionModel::Fpha;
 ///
 /// - **Reference-point** (`equivalent_productivity_mw_per_m3s`, gated by the
 ///   generation model): for FPHA hydros `ρ_eq` resolves in priority order —
-///   (1) an `override_table` value, (2) `ρ_esp · h_eq(V_ref, Q_ref)` from VHA
-///   geometry, else (3) [`EnergyConversionError::FphaMissingEquivalentProductivity`];
-///   for non-FPHA hydros `ρ_eq` comes from `production_models` (passing `None`
-///   yields `0.0`, only appropriate in tests that do not require accurate `ρ_eq`).
+///   (1) an `override_table` `ρ_eq` value, (2) the resolved `ρ_esp` (override →
+///   entity) times `h_eq(V_ref, Q_ref)` from VHA geometry, else (3)
+///   [`EnergyConversionError::FphaMissingEquivalentProductivity`]; for non-FPHA
+///   hydros `ρ_eq` comes from `production_models` (passing `None` yields `0.0`,
+///   only appropriate in tests that do not require accurate `ρ_eq`).
 /// - **Mean** (`integrated_equivalent_productivity`, gated by geometry, not the
-///   generation model): for ANY hydro with VHA geometry and `ρ_esp` the own term is
-///   (1) an `override_table` value, else (2) the reference-point value when the
-///   entity physical range is collapsed or the hydro has no geometry, else (3)
-///   `ρ_esp · (mean_height(V_lo, V_hi) − cf − losses)` over the entity physical
-///   range `hydro.{min,max}_storage_hm3`, reusing `Q_ref` and the reference-point
+///   generation model): for ANY hydro with VHA geometry and a resolved `ρ_esp`
+///   the own term is (1) an `override_table` `ρ_eq` value, else (2) the
+///   reference-point value when the entity physical range is collapsed or the
+///   hydro has no geometry, else (3) the resolved `ρ_esp` times
+///   `(mean_height(V_lo, V_hi) − cf − losses)` over the entity physical range
+///   `hydro.{min,max}_storage_hm3`, reusing `Q_ref` and the reference-point
 ///   `cf`/`losses` evaluation.
 ///
 /// # Errors
@@ -80,21 +82,30 @@ pub fn build_energy_conversion_set<S: BuildHasher>(
             });
         }
 
+        // Resolved once per stage (override → entity) via the shared resolver,
+        // so the builder and the SpecificProductivity tag can never drift.
+        let entity_esp = hydro.specific_productivity_mw_per_m3s_per_m;
+        let resolved_rho_esp: Vec<Option<f64>> = stage_ids
+            .iter()
+            .map(|&stage_id| {
+                override_table.map_or(entity_esp, |o| {
+                    o.resolve_specific_productivity(hydro.id, stage_id, entity_esp)
+                })
+            })
+            .collect();
+
         // Geometry, not the generation model, gates the mean-evaluator: build the
-        // forebay table for ANY hydro with VHA rows and ρ_esp, so a construction
-        // failure surfaces as ForebayTableInvalid uniformly (never gated on FPHA).
-        let geometry_derivation = match (
-            vha_rows_by_hydro.get(&hydro.id),
-            hydro.specific_productivity_mw_per_m3s_per_m,
-        ) {
-            (Some(rows), Some(rho_esp)) => {
-                let table = ForebayTable::new(rows, &hydro.name).map_err(|e| {
+        // forebay table for ANY hydro with VHA rows and a resolved ρ_esp at any
+        // stage, so a construction failure surfaces as ForebayTableInvalid
+        // uniformly (never gated on FPHA).
+        let forebay_table = match vha_rows_by_hydro.get(&hydro.id) {
+            Some(rows) if resolved_rho_esp.iter().any(Option::is_some) => {
+                Some(ForebayTable::new(rows, &hydro.name).map_err(|e| {
                     EnergyConversionError::ForebayTableInvalid {
                         hydro_id: hydro.id,
                         message: e.to_string(),
                     }
-                })?;
-                Some((table, rho_esp))
+                })?)
             }
             _ => None,
         };
@@ -120,11 +131,14 @@ pub fn build_energy_conversion_set<S: BuildHasher>(
             // cobre_io's validator keys it) — never the study position.
             let parquet_rho_eq =
                 override_table.and_then(|o| o.equivalent_productivity(hydro.id, stage_id));
+            let rho_esp_at_stage = resolved_rho_esp[stage_pos];
 
             if is_fpha {
                 let rho_eq = if let Some(value) = parquet_rho_eq {
                     value
-                } else if let Some((ref table, rho_esp)) = geometry_derivation {
+                } else if let (Some(table), Some(rho_esp)) =
+                    (forebay_table.as_ref(), rho_esp_at_stage)
+                {
                     let h_eq = fpha_equivalent_head(
                         hydro,
                         conversion.reference_volume_hm3,
@@ -147,7 +161,8 @@ pub fn build_energy_conversion_set<S: BuildHasher>(
             // bit-for-bit; only a genuine range integrates the forebay height.
             let mean_own = if parquet_rho_eq.is_some() {
                 conversion.equivalent_productivity_mw_per_m3s
-            } else if let Some((ref table, rho_esp)) = geometry_derivation {
+            } else if let (Some(table), Some(rho_esp)) = (forebay_table.as_ref(), rho_esp_at_stage)
+            {
                 let (v_lo, v_hi) = (v_min, v_max);
                 if v_hi <= v_lo {
                     conversion.equivalent_productivity_mw_per_m3s
@@ -1857,6 +1872,389 @@ mod tests {
                 assert!(h_eq <= 0.0, "expected non-positive mean head, got {h_eq}");
             }
             other => panic!("expected NonPositiveEquivalentHead, got: {other:?}"),
+        }
+    }
+
+    // ── ρ_esp parquet override resolution tests ────────────────────────────
+
+    /// A per-stage ρ_esp override shifts BOTH the FPHA reference-point ρ_eq and
+    /// the mean own term at that stage only; the other stage, with no override,
+    /// keeps the entity ρ_esp. Every operand is exactly representable in binary
+    /// so the comparison is `to_bits()`, not a tolerance.
+    #[test]
+    fn per_stage_rho_esp_override_shifts_mean_own_and_point_fpha_at_that_stage_only() {
+        let mut hydro = make_hydro_with(
+            1,
+            HydroGenerationModel::Fpha,
+            256.0,
+            768.0,
+            50.0,
+            Some(0.125),
+        );
+        hydro.tailrace = None;
+        hydro.hydraulic_losses = None;
+        let hydros = vec![hydro];
+        let cascade = CascadeTopology::build(&hydros);
+        // V_ref = 896 at every stage, decoupled from the physical range [256, 768].
+        let resolver = build_hydro_reference_volumes_resolved(
+            &[
+                (hydros[0].id, StudyPos(0), 896.0),
+                (hydros[0].id, StudyPos(1), 896.0),
+            ],
+            0.0,
+        );
+        let (id, rows) = vha_rows(hydros[0].id, &[(0.0, 100.0), (1024.0, 356.0)]);
+        let mut map = HashMap::new();
+        map.insert(id, rows);
+        let override_esp = 0.375;
+        let override_table =
+            build_hydro_energy_productivity_override(&[HydroEnergyProductivityRow {
+                hydro_id: hydros[0].id,
+                stage_id: Some(1),
+                equivalent_productivity_mw_per_m3s: None,
+                reference_outflow_m3s: None,
+                specific_productivity_mw_per_m3s_per_m: Some(override_esp),
+            }])
+            .expect("override builds");
+
+        let set = build_energy_conversion_set(
+            &hydros,
+            &stage_ids_0_based(2),
+            &cascade,
+            &resolver,
+            &map,
+            Some(&override_table),
+            None,
+        )
+        .expect("builder succeeds");
+
+        // height(896) = 324, mean_height(256,768) = 228 on this table.
+        // Stage 0: no override -> resolved ρ_esp = entity 0.125.
+        assert_eq!(
+            set.conversion(0, 0)
+                .equivalent_productivity_mw_per_m3s
+                .to_bits(),
+            40.5_f64.to_bits(),
+            "stage 0 point ρ_eq must use the entity ρ_esp (0.125 * 324 = 40.5)"
+        );
+        assert_eq!(
+            set.integrated_equivalent_productivity(0, 0).to_bits(),
+            28.5_f64.to_bits(),
+            "stage 0 mean own must use the entity ρ_esp (0.125 * 228 = 28.5)"
+        );
+
+        // Stage 1: override -> resolved ρ_esp = 0.375.
+        assert_eq!(
+            set.conversion(0, 1)
+                .equivalent_productivity_mw_per_m3s
+                .to_bits(),
+            121.5_f64.to_bits(),
+            "stage 1 point ρ_eq must use the override ρ_esp (0.375 * 324 = 121.5)"
+        );
+        assert_eq!(
+            set.integrated_equivalent_productivity(0, 1).to_bits(),
+            85.5_f64.to_bits(),
+            "stage 1 mean own must use the override ρ_esp (0.375 * 228 = 85.5)"
+        );
+    }
+
+    /// A per-hydro default override (`stage_id = NULL`) applies at every stage.
+    #[test]
+    fn per_hydro_default_rho_esp_override_applies_at_every_stage() {
+        let hydro = make_hydro_with(
+            1,
+            HydroGenerationModel::ConstantProductivity,
+            256.0,
+            768.0,
+            50.0,
+            None,
+        );
+        let hydros = vec![hydro];
+        let cascade = CascadeTopology::build(&hydros);
+        let resolver = constant_resolver(&hydros, 0.5, 3);
+        let (id, rows) = vha_rows(hydros[0].id, &[(0.0, 100.0), (1024.0, 356.0)]);
+        let mut map = HashMap::new();
+        map.insert(id, rows);
+        let override_esp = 0.375;
+        let override_table =
+            build_hydro_energy_productivity_override(&[HydroEnergyProductivityRow {
+                hydro_id: hydros[0].id,
+                stage_id: None,
+                equivalent_productivity_mw_per_m3s: None,
+                reference_outflow_m3s: None,
+                specific_productivity_mw_per_m3s_per_m: Some(override_esp),
+            }])
+            .expect("override builds");
+
+        let set = build_energy_conversion_set(
+            &hydros,
+            &stage_ids_0_based(3),
+            &cascade,
+            &resolver,
+            &map,
+            Some(&override_table),
+            None,
+        )
+        .expect("builder succeeds");
+
+        // mean_height(256, 768) = 228 on this table.
+        let expected = override_esp * 228.0;
+        for s in 0..3 {
+            assert_eq!(
+                set.integrated_equivalent_productivity(0, s).to_bits(),
+                expected.to_bits(),
+                "stage {s}: per-hydro default override must apply, got {}",
+                set.integrated_equivalent_productivity(0, s)
+            );
+        }
+    }
+
+    /// An FPHA hydro with entity ρ_esp `None` and an override ρ_esp `Some`
+    /// derives ρ_eq via the resolved override instead of failing
+    /// `FphaMissingEquivalentProductivity`.
+    #[test]
+    fn fpha_with_override_only_rho_esp_derives_rho_eq() {
+        let mut hydro = make_hydro_with(1, HydroGenerationModel::Fpha, 100.0, 200.0, 50.0, None);
+        hydro.tailrace = None;
+        hydro.hydraulic_losses = None;
+        let hydros = vec![hydro];
+        let cascade = CascadeTopology::build(&hydros);
+        let resolver = constant_resolver(&hydros, 0.5, 1);
+        let (id, rows) = vha_constant_height(hydros[0].id, 400.0);
+        let mut map = HashMap::new();
+        map.insert(id, rows);
+        let override_table =
+            build_hydro_energy_productivity_override(&[HydroEnergyProductivityRow {
+                hydro_id: hydros[0].id,
+                stage_id: None,
+                equivalent_productivity_mw_per_m3s: None,
+                reference_outflow_m3s: None,
+                specific_productivity_mw_per_m3s_per_m: Some(0.02),
+            }])
+            .expect("override builds");
+
+        let set = build_energy_conversion_set(
+            &hydros,
+            &stage_ids_0_based(1),
+            &cascade,
+            &resolver,
+            &map,
+            Some(&override_table),
+            None,
+        )
+        .expect("override-only ρ_esp must derive ρ_eq, not FphaMissingEquivalentProductivity");
+
+        assert_eq!(
+            set.conversion(0, 0)
+                .equivalent_productivity_mw_per_m3s
+                .to_bits(),
+            (0.02_f64 * 400.0).to_bits(),
+            "override ρ_esp * flat height(400) must derive ρ_eq"
+        );
+    }
+
+    /// A ρ_eq override still wins outright over a CO-PRESENT ρ_esp override —
+    /// not merely over the entity ρ_esp (already covered by
+    /// `override_wins_both_evaluators`).
+    #[test]
+    fn rho_eq_override_wins_over_rho_esp_override() {
+        let hydro = make_hydro_with(1, HydroGenerationModel::Fpha, 200.0, 300.0, 50.0, None);
+        let hydros = vec![hydro];
+        let cascade = CascadeTopology::build(&hydros);
+        let resolver = constant_resolver(&hydros, 0.65, 1);
+        let (id, rows) = vha_rows(hydros[0].id, &[(0.0, 100.0), (1000.0, 200.0)]);
+        let mut map = HashMap::new();
+        map.insert(id, rows);
+        let override_table =
+            build_hydro_energy_productivity_override(&[HydroEnergyProductivityRow {
+                hydro_id: hydros[0].id,
+                stage_id: None,
+                equivalent_productivity_mw_per_m3s: Some(2.5),
+                reference_outflow_m3s: None,
+                specific_productivity_mw_per_m3s_per_m: Some(0.01),
+            }])
+            .expect("override builds");
+
+        let set = build_energy_conversion_set(
+            &hydros,
+            &stage_ids_0_based(1),
+            &cascade,
+            &resolver,
+            &map,
+            Some(&override_table),
+            None,
+        )
+        .expect("builder succeeds");
+
+        assert_eq!(
+            set.conversion(0, 0)
+                .equivalent_productivity_mw_per_m3s
+                .to_bits(),
+            2.5_f64.to_bits(),
+            "ρ_eq override wins the reference-point evaluator over a co-present ρ_esp override"
+        );
+        assert_eq!(
+            set.integrated_equivalent_productivity(0, 0).to_bits(),
+            2.5_f64.to_bits(),
+            "ρ_eq override wins the mean evaluator over a co-present ρ_esp override"
+        );
+    }
+
+    /// Permuting the hydro declaration order leaves every ρ_esp-override-derived
+    /// grid cell bit-identical when re-keyed by hydro id — the resolver and the
+    /// geometry gate key by `hydro.id`, never by declaration position.
+    #[test]
+    fn rho_esp_override_grids_are_declaration_order_invariant() {
+        let mut hydro_a = make_hydro_with(1, HydroGenerationModel::Fpha, 100.0, 300.0, 50.0, None);
+        hydro_a.tailrace = None;
+        hydro_a.hydraulic_losses = None;
+        let hydro_b = make_hydro_with(
+            2,
+            HydroGenerationModel::ConstantProductivity,
+            50.0,
+            150.0,
+            30.0,
+            None,
+        );
+
+        let (id_a, rows_a) = vha_constant_height(hydro_a.id, 400.0);
+        let (id_b, rows_b) = vha_constant_height(hydro_b.id, 200.0);
+        let mut map = HashMap::new();
+        map.insert(id_a, rows_a);
+        map.insert(id_b, rows_b);
+
+        let override_table = build_hydro_energy_productivity_override(&[
+            HydroEnergyProductivityRow {
+                hydro_id: hydro_a.id,
+                stage_id: None,
+                equivalent_productivity_mw_per_m3s: None,
+                reference_outflow_m3s: None,
+                specific_productivity_mw_per_m3s_per_m: Some(0.02),
+            },
+            HydroEnergyProductivityRow {
+                hydro_id: hydro_b.id,
+                stage_id: None,
+                equivalent_productivity_mw_per_m3s: None,
+                reference_outflow_m3s: None,
+                specific_productivity_mw_per_m3s_per_m: Some(0.05),
+            },
+        ])
+        .expect("override builds");
+
+        for hydros in [
+            vec![hydro_a.clone(), hydro_b.clone()],
+            vec![hydro_b.clone(), hydro_a.clone()],
+        ] {
+            let cascade = CascadeTopology::build(&hydros);
+            let resolver = constant_resolver(&hydros, 0.5, 1);
+            let set = build_energy_conversion_set(
+                &hydros,
+                &stage_ids_0_based(1),
+                &cascade,
+                &resolver,
+                &map,
+                Some(&override_table),
+                None,
+            )
+            .expect("builder succeeds");
+
+            let idx_a = hydros.iter().position(|h| h.id == hydro_a.id).unwrap();
+            let idx_b = hydros.iter().position(|h| h.id == hydro_b.id).unwrap();
+
+            assert_eq!(
+                set.conversion(idx_a, 0)
+                    .equivalent_productivity_mw_per_m3s
+                    .to_bits(),
+                (0.02_f64 * 400.0).to_bits(),
+                "hydro A's overridden ρ_eq must be order-invariant"
+            );
+            assert_eq!(
+                set.integrated_equivalent_productivity(idx_a, 0).to_bits(),
+                (0.02_f64 * 400.0).to_bits(),
+                "hydro A's overridden mean own term must be order-invariant"
+            );
+            assert_eq!(
+                set.integrated_equivalent_productivity(idx_b, 0).to_bits(),
+                (0.05_f64 * 200.0).to_bits(),
+                "hydro B's overridden mean own term must be order-invariant"
+            );
+        }
+    }
+
+    /// An override table with every column NULL for every hydro yields grids
+    /// bit-identical to passing `None` — an all-absent override degenerates to
+    /// the entity-only path exactly.
+    #[test]
+    fn all_null_rho_esp_override_is_bit_identical_to_no_override() {
+        let mut hydro = make_hydro_with(
+            1,
+            HydroGenerationModel::Fpha,
+            100.0,
+            300.0,
+            50.0,
+            Some(0.02),
+        );
+        hydro.tailrace = None;
+        hydro.hydraulic_losses = None;
+        let hydros = vec![hydro];
+        let cascade = CascadeTopology::build(&hydros);
+        let resolver = constant_resolver(&hydros, 0.5, 2);
+        let (id, rows) = vha_rows(hydros[0].id, &[(0.0, 100.0), (1000.0, 200.0)]);
+        let mut map = HashMap::new();
+        map.insert(id, rows);
+
+        let all_null_override =
+            build_hydro_energy_productivity_override(&[HydroEnergyProductivityRow {
+                hydro_id: hydros[0].id,
+                stage_id: None,
+                equivalent_productivity_mw_per_m3s: None,
+                reference_outflow_m3s: None,
+                specific_productivity_mw_per_m3s_per_m: None,
+            }])
+            .expect("override builds");
+
+        let without_table = build_energy_conversion_set(
+            &hydros,
+            &stage_ids_0_based(2),
+            &cascade,
+            &resolver,
+            &map,
+            None,
+            None,
+        )
+        .expect("builder succeeds without a table");
+        let with_all_null_table = build_energy_conversion_set(
+            &hydros,
+            &stage_ids_0_based(2),
+            &cascade,
+            &resolver,
+            &map,
+            Some(&all_null_override),
+            None,
+        )
+        .expect("builder succeeds with an all-NULL table");
+
+        for s in 0..2 {
+            assert_eq!(
+                without_table
+                    .conversion(0, s)
+                    .equivalent_productivity_mw_per_m3s
+                    .to_bits(),
+                with_all_null_table
+                    .conversion(0, s)
+                    .equivalent_productivity_mw_per_m3s
+                    .to_bits(),
+                "stage {s}: point ρ_eq must be bit-identical"
+            );
+            assert_eq!(
+                without_table
+                    .integrated_equivalent_productivity(0, s)
+                    .to_bits(),
+                with_all_null_table
+                    .integrated_equivalent_productivity(0, s)
+                    .to_bits(),
+                "stage {s}: mean own term must be bit-identical"
+            );
         }
     }
 }
