@@ -709,7 +709,7 @@ fn d07_fpha_computed() {
 
 /// Conversion factor from hm³·MW/(m³/s) to MWh (= 10⁶ / 3600).
 ///
-/// `stored_energy_mwh = (volume_hm3 − V_min) × ρ_acum × ENERGY_FACTOR`
+/// `stored_energy_mwh = (volume_hm3 − V_min) × ρ_acum_integrated × ENERGY_FACTOR`
 const ENERGY_FACTOR: f64 = 1.0e6 / 3600.0;
 
 /// Expected `ρ_eq` and `ρ_acum` for D02 (single hydro, `constant_productivity = 1.0`,
@@ -756,7 +756,9 @@ const D03_H1_V_INIT: f64 = 50.0;
 /// Verify the natural-inflow-energy and stored-energy columns in
 /// `simulation/hydros` for D02 and D03. Both use `ConstantProductivity` hydros
 /// (bypassing the FPHA gate), so `ρ_eq` and `ρ_acum` are directly computable
-/// from `hydros.json` without running the LP.
+/// from `hydros.json` without running the LP. Neither deck declares VHA geometry,
+/// so the integrated cascade grid `stored_energy_*_mwh` reads is bit-identical to
+/// `ρ_acum` and the `*_RHO_ACUM` constants serve both.
 #[cfg_attr(
     not(feature = "slow-tests"),
     ignore = "slow: run with --features slow-tests"
@@ -807,7 +809,7 @@ fn d_case_energy_outputs() {
             );
 
             let expected_earm = (h.storage_initial_hm3 - V_MIN)
-                * h.accumulated_productivity_mw_per_m3s
+                * h.integrated_accumulated_productivity_mw_per_m3s
                 * ENERGY_FACTOR;
             let diff_earm = (h.stored_energy_initial_mwh - expected_earm).abs();
             assert!(
@@ -910,7 +912,7 @@ fn d_case_energy_outputs() {
                 );
 
                 let expected_earm = (h.storage_initial_hm3 - V_MIN)
-                    * h.accumulated_productivity_mw_per_m3s
+                    * h.integrated_accumulated_productivity_mw_per_m3s
                     * ENERGY_FACTOR;
                 let diff_earm = (h.stored_energy_initial_mwh - expected_earm).abs();
                 assert!(

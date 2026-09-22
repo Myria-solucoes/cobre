@@ -706,7 +706,7 @@ pub struct StageExtractionSpec<'a> {
     /// `ρ_eq` and `ρ_acum` scalars per `(hydro, stage)` via [`EnergyConversionSet`].
     pub energy_conversion: &'a EnergyConversionSet,
     /// `V_min` per hydro (hm³), in `entity_counts.hydro_ids` order. Feeds
-    /// `stored_energy_mwh = (V - V_min) · ρ_acum · ENERGY_FACTOR`.
+    /// `stored_energy_mwh = (V - V_min) · ρ_acum_integrated · ENERGY_FACTOR`.
     pub hydro_min_storage_hm3: &'a [f64],
     /// Stage index within the planning horizon (0-based).
     pub stage_index: usize,
@@ -856,8 +856,16 @@ fn extract_hydro_no_turbine(
         equivalent_productivity_mw_per_m3s: ctx.equivalent_productivity_mw_per_m3s,
         accumulated_productivity_mw_per_m3s: ctx.accumulated_productivity_mw_per_m3s,
         incremental_inflow_energy_mw: ctx.incremental_inflow_energy_mw,
-        stored_energy_initial_mwh: stored_energy_mwh(ctx.storage_initial, ctx.v_min, ctx.rho_acum),
-        stored_energy_final_mwh: stored_energy_mwh(ctx.storage_final, ctx.v_min, ctx.rho_acum),
+        stored_energy_initial_mwh: stored_energy_mwh(
+            ctx.storage_initial,
+            ctx.v_min,
+            ctx.rho_acum_integrated,
+        ),
+        stored_energy_final_mwh: stored_energy_mwh(
+            ctx.storage_final,
+            ctx.v_min,
+            ctx.rho_acum_integrated,
+        ),
         spillage_cost: 0.0,
         water_value_per_hm3: ctx.water_value,
         storage_binding_code: 0,
@@ -902,10 +910,13 @@ struct HydroStageContext {
     integrated_equivalent_productivity_mw_per_m3s: f64,
     integrated_accumulated_productivity_mw_per_m3s: f64,
     incremental_inflow_energy_mw: f64,
-    /// `V_min` (hm³) and `ρ_acum`, both block-invariant, retained so the per-block
-    /// closure derives each boundary's stored energy without re-querying conversions.
+    /// `V_min` (hm³), block-invariant, retained so the per-block closure derives
+    /// each boundary's stored energy without re-querying conversions.
     v_min: f64,
-    rho_acum: f64,
+    /// Cascade mean-evaluator grid (`integrated_accumulated_productivity`) stored
+    /// energy rides — `incremental_inflow_energy_mw` stays on the reference-point
+    /// grid instead; repointing it here is the forbidden alternative.
+    rho_acum_integrated: f64,
     evaporation_m3s: Option<f64>,
     evaporation_violation_neg_m3s: f64,
     evaporation_violation_pos_m3s: f64,
@@ -1006,7 +1017,7 @@ impl HydroStageContext {
             integrated_accumulated_productivity_mw_per_m3s: integrated_accumulated,
             incremental_inflow_energy_mw: rho_acum * incremental_inflow,
             v_min,
-            rho_acum,
+            rho_acum_integrated: integrated_accumulated,
             evaporation_m3s,
             evaporation_violation_neg_m3s,
             evaporation_violation_pos_m3s,
@@ -1109,8 +1120,10 @@ fn extract_hydro_per_block<'a>(
             }
             BlockMode::Parallel => (ctx.storage_initial, ctx.storage_final),
         };
-        let stored_energy_initial_mwh = stored_energy_mwh(storage_initial, ctx.v_min, ctx.rho_acum);
-        let stored_energy_final_mwh = stored_energy_mwh(storage_final, ctx.v_min, ctx.rho_acum);
+        let stored_energy_initial_mwh =
+            stored_energy_mwh(storage_initial, ctx.v_min, ctx.rho_acum_integrated);
+        let stored_energy_final_mwh =
+            stored_energy_mwh(storage_final, ctx.v_min, ctx.rho_acum_integrated);
 
         // Chronological block `b` reports its own block's evaporation triple
         // (`evap_indices[local * n_blks + b]`); parallel keeps the stage-level block-0
