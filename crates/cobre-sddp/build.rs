@@ -96,13 +96,11 @@ fn main() {
         build.file(path);
     }
 
-    build.compile("qhull_r");
-
     // The C shim `csrc/qhull_wrapper.c` is a thin reentrant wrapper exposing a
     // stable convex-hull entry point to Rust; unlike the vendored build above,
     // it compiles with `.warnings(true)` since it's cobre's own code. It
     // includes `qhull_ra.h` from the vendored tree, so the same include dir is
-    // required; it links against the `qhull_r` archive compiled above (both
+    // required; it links against the `qhull_r` archive (both
     // archives are linked into the crate, resolving the shim's qhull symbols).
     let shim_dir = manifest_dir.join("csrc");
     let shim_source = shim_dir.join("qhull_wrapper.c");
@@ -122,4 +120,6 @@ fn main() {
     shim.opt_level(2);
     shim.file(&shim_source);
     shim.compile("cobre_qhull_shim");
+    // GNU ld resolves static archives left to right: the shim must precede qhull.
+    build.compile("qhull_r");
 }

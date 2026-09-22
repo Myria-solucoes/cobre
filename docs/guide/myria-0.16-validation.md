@@ -10,7 +10,8 @@ This report records integration correctness, not a new speedup measurement.
   checkpoint/resume support and the optimization series through `3e3bdbc4`).
 - Worker affinity: public PR #64, `3d3cef3be72a2112a9152ccffc5db846db361763`.
 - Merge commits: `88b4cef4` and `2740d9c1`. Subsequent integration fixes share
-  periodic checkpoint writing between CLI and both Python event paths.
+  periodic checkpoint writing between CLI and both Python event paths, and put
+  the Qhull shim before its static dependency for GNU ld on Linux ARM64.
 
 The release tag identifies the final source commit. The release includes SHA-256
 checksums for both CLI archives and both Python wheels. Existing Myria runtimes
@@ -21,6 +22,7 @@ and their pins are not replaced by publishing this candidate.
 - Workspace/all-target checks, Rust formatting and workspace/Python Clippy with
   warnings denied passed.
 - CLI/Python output parity: 20 shared writer functions, no mismatch.
+- All 18 exported JSON schemas match their committed files.
 - Unit suites: 5,480 passed across comm, core, IO, SDDP, solver and stochastic;
   one SDDP failure reproduced unchanged on upstream (see below), one ignored.
 - CLI tests: 244 passed, including checkpoint/resume and output parity.
