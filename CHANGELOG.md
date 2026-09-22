@@ -387,6 +387,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resolved is now also rejected at construction, rather than silently
   resolving to `0.0`. A previously-accepted empty-table boundary-configured
   deck with a genuine gap now fails validation.
+- **`cobre.write_policy_checkpoint` raises `ValueError` when a cut carries
+  `inflow_lag_coefficients` but no positive `inflow_lag_depth` is passed.**
+  Previously the coefficients were silently dropped and the checkpoint
+  written without the lag slots they targeted; the error names the stage and
+  cut and asks for `inflow_lag_depth=N` so the slots are reserved.
 
 - **A boundary policy load whose study horizon covers only part of the
   source's declared season cycle no longer rejects on an artifact of the
