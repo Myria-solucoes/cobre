@@ -1848,13 +1848,12 @@ mod tests {
         }
     }
 
-    /// On a hydro with a genuine `[V_lo, V_hi]` range, the per-hydro coefficient on
-    /// the integrated cascade grid cancels the same grid's factor in
-    /// `MaxStoredEnergy`: the normalized bound reduces to `pct * (V_hi - V_lo)`, a
-    /// pure volume quantity, whether it is priced against the integrated grid or
-    /// the reference-point grid — even though the two grids genuinely differ.
+    /// On a hydro with a genuine `[V_lo, V_hi]` range whose integrated grid differs
+    /// from the reference-point grid, dividing `pct * MaxStoredEnergy` by that
+    /// hydro's integrated cascade productivity leaves `pct * (V_hi - V_lo)`, a pure
+    /// volume quantity.
     #[test]
-    fn normalized_max_stored_energy_bound_is_evaluator_independent_on_a_real_range() {
+    fn normalized_max_stored_energy_bound_cancels_the_grid_on_a_real_range() {
         let n_stages = 1;
         let t = 0;
         let (hydros, base_ec, override_table, stage_to_season, stage_ids) =
@@ -1906,15 +1905,6 @@ mod tests {
         assert!(
             (normalized_integrated - expected).abs() <= rel_tol,
             "normalized bound on the integrated grid: got {normalized_integrated}, expected {expected}"
-        );
-
-        // Same normalized target on the reference-point grid: the feasible set
-        // `useful >= pct * useful_max` is evaluator-independent even though
-        // `int_rho != rho_acum`.
-        let normalized_reference = pct * (rho_acum * (v_hi - v_lo)) / rho_acum;
-        assert!(
-            (normalized_reference - expected).abs() <= rel_tol,
-            "normalized bound on the reference-point grid: got {normalized_reference}, expected {expected}"
         );
     }
 }

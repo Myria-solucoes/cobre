@@ -1144,6 +1144,13 @@ mod tests {
     ) {
         for t in 0..n_stages {
             for (h_idx, hydro) in hydros.iter().enumerate() {
+                assert_ne!(
+                    set.integrated_equivalent_productivity(h_idx, t).to_bits(),
+                    set.conversion(h_idx, t)
+                        .equivalent_productivity_mw_per_m3s
+                        .to_bits(),
+                    "hydro {h_idx}, stage {t}: fixture must make the two evaluators differ"
+                );
                 let downstream_contrib = cascade.downstream(hydro.id).map_or(0.0, |ds_id| {
                     let ds_idx = hydros
                         .iter()
