@@ -1090,9 +1090,6 @@ fn build_energy_conversion_and_resolved_parameters(
         &study_stage_ids,
         system.cascade(),
         &reference_volume_fractions,
-        // Per-stage physical storage range [V_lo, V_hi] for the mean evaluator — the
-        // resolved table already on `System`, never reconstructed from raw fields.
-        system.bounds(),
         // Feeds the FPHA ρ_eq derivation only for plants with no parquet override
         // (the override still wins when present). Per-rank, never broadcast, so every
         // rank sees the same map.
@@ -1116,7 +1113,6 @@ fn build_energy_conversion_and_resolved_parameters(
         &study_stage_ids,
         &stage_block_counts,
         cost_scale_factor,
-        system.bounds(),
     )
     .map_err(|e| SddpError::Validation(e.to_string()))?;
 

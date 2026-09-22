@@ -166,7 +166,7 @@
           "type": "object"
         },
         {
-          "description": "Maximum stored energy: `integrated_accumulated_productivity * (V_hi -\nV_lo)` over the hydro plant's physical per-stage storage range. Unit is\nproductivity `[MW/(m3/s)]` times volume `[hm3]` — the same unit as a\nproductivity-times-storage-volume constraint term, not `MWh`.",
+          "description": "Maximum stored energy: `integrated_accumulated_productivity * (V_hi -\nV_lo)` over the hydro plant's physical storage range (stage-invariant).\nUnit is productivity `[MW/(m3/s)]` times volume `[hm3]` — the same unit\nas a productivity-times-storage-volume constraint term, not `MWh`.",
           "properties": {
             "hydro_id": {
               "$ref": "#/$defs/EntityId",

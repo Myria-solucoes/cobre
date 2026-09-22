@@ -232,9 +232,9 @@ pub struct Hydro {
     pub entry_stage_id: Option<i32>,
     /// Stage index when the plant is decommissioned. None = never decommissioned.
     pub exit_stage_id: Option<i32>,
-    /// Minimum operational storage (dead volume) \[hm³\].
+    /// Physical (cadastro) minimum storage \[hm³\], stage-invariant — not the per-stage operative bound.
     pub min_storage_hm3: f64,
-    /// Maximum operational storage (flood control level) \[hm³\].
+    /// Physical (cadastro) maximum storage \[hm³\], stage-invariant — not the per-stage operative bound.
     pub max_storage_hm3: f64,
     /// Minimum outflow down the natural river reach (turbined + spilled)
     /// required at all times \[m³/s\]. Excludes any `diversion` flow, which

@@ -3,9 +3,7 @@
 use std::collections::HashMap;
 use std::hash::BuildHasher;
 
-use cobre_core::{
-    CascadeTopology, EntityId, Hydro, HydroGenerationModel, ResolvedBounds, StageId, StudyPos,
-};
+use cobre_core::{CascadeTopology, EntityId, Hydro, HydroGenerationModel, StageId, StudyPos};
 use cobre_io::{HydroGeometryRow, HydroReferenceVolumeFractions};
 
 use super::productivity_override::HydroEnergyProductivityOverride;
@@ -28,9 +26,9 @@ use crate::hydro_models::ResolvedProductionModel::Fpha;
 /// - **Mean** (`integrated_equivalent_productivity`, gated by geometry, not the
 ///   generation model): for ANY hydro with VHA geometry and `ρ_esp` the own term is
 ///   (1) an `override_table` value, else (2) the reference-point value when the
-///   `bounds` range is collapsed or the hydro has no geometry, else (3)
-///   `ρ_esp · (mean_height(V_lo, V_hi) − cf − losses)` over the per-stage physical
-///   range `bounds.hydro_bounds(h, t)`, reusing `Q_ref` and the reference-point
+///   entity physical range is collapsed or the hydro has no geometry, else (3)
+///   `ρ_esp · (mean_height(V_lo, V_hi) − cf − losses)` over the entity physical
+///   range `hydro.{min,max}_storage_hm3`, reusing `Q_ref` and the reference-point
 ///   `cf`/`losses` evaluation.
 ///
 /// # Errors
@@ -52,7 +50,6 @@ pub fn build_energy_conversion_set<S: BuildHasher>(
     stage_ids: &[StageId],
     cascade: &CascadeTopology,
     reference_volume_fractions: &HydroReferenceVolumeFractions,
-    bounds: &ResolvedBounds,
     vha_rows_by_hydro: &HashMap<EntityId, Vec<HydroGeometryRow>, S>,
     override_table: Option<&HydroEnergyProductivityOverride>,
     production_models: Option<&ProductionModelSet>,
@@ -151,8 +148,7 @@ pub fn build_energy_conversion_set<S: BuildHasher>(
             let mean_own = if parquet_rho_eq.is_some() {
                 conversion.equivalent_productivity_mw_per_m3s
             } else if let Some((ref table, rho_esp)) = geometry_derivation {
-                let hb = bounds.hydro_bounds(h_idx, stage_pos);
-                let (v_lo, v_hi) = (hb.min_storage_hm3, hb.max_storage_hm3);
+                let (v_lo, v_hi) = (v_min, v_max);
                 if v_hi <= v_lo {
                     conversion.equivalent_productivity_mw_per_m3s
                 } else {
@@ -365,10 +361,8 @@ fn fpha_equivalent_head(
 )]
 mod tests {
     use cobre_core::{
-        BoundsCountsSpec, BoundsDefaults, CascadeTopology, ContractBlockBounds, EntityId,
-        HydraulicLossesModel, Hydro, HydroBlockBounds, HydroGenerationModel, HydroPenalties,
-        HydroStageBounds, LineBlockBounds, PumpingBlockBounds, TailraceModel, ThermalBlockBounds,
-        ThermalStageBounds,
+        CascadeTopology, EntityId, HydraulicLossesModel, Hydro, HydroGenerationModel,
+        HydroPenalties, TailraceModel,
     };
     use cobre_io::{
         HydroEnergyProductivityRow, HydroGeometryRow, HydroReferenceVolumeFractions,
@@ -468,73 +462,6 @@ mod tests {
             .collect()
     }
 
-    /// A `ResolvedBounds` whose only populated axis is the hydro storage range;
-    /// `ranges[h] = (V_lo, V_hi)` is replicated across all `n_stages`, every other
-    /// entity/column left at zero.
-    fn hydro_storage_bounds(ranges: &[(f64, f64)], n_stages: usize) -> ResolvedBounds {
-        let zero_stage = HydroStageBounds {
-            min_storage_hm3: 0.0,
-            max_storage_hm3: 0.0,
-            filling_min_rate_m3s: 0.0,
-            water_withdrawal_m3s: 0.0,
-        };
-        let mut bounds = ResolvedBounds::new(
-            &BoundsCountsSpec {
-                n_hydros: ranges.len(),
-                n_thermals: 0,
-                n_lines: 0,
-                n_pumping: 0,
-                n_contracts: 0,
-                n_stages: n_stages.max(1),
-                k_max: 0,
-            },
-            &BoundsDefaults {
-                hydro: zero_stage,
-                hydro_block: HydroBlockBounds::default(),
-                thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
-                thermal_block: ThermalBlockBounds {
-                    min_generation_mw: 0.0,
-                    max_generation_mw: 0.0,
-                },
-                line_block: LineBlockBounds {
-                    direct_mw: 0.0,
-                    reverse_mw: 0.0,
-                },
-                pumping_block: PumpingBlockBounds {
-                    min_flow_m3s: 0.0,
-                    max_flow_m3s: 0.0,
-                },
-                contract_block: ContractBlockBounds {
-                    min_mw: 0.0,
-                    max_mw: 0.0,
-                    price_per_mwh: 0.0,
-                },
-            },
-        );
-        for (h_idx, &(v_lo, v_hi)) in ranges.iter().enumerate() {
-            for s in 0..n_stages {
-                *bounds.hydro_bounds_mut(h_idx, s) = HydroStageBounds {
-                    min_storage_hm3: v_lo,
-                    max_storage_hm3: v_hi,
-                    filling_min_rate_m3s: 0.0,
-                    water_withdrawal_m3s: 0.0,
-                };
-            }
-        }
-        bounds
-    }
-
-    /// Each hydro's declared `[min, max]` storage band on every stage — the physical
-    /// range the production path reads for a plant with no per-stage override. Sized
-    /// past every fixture's horizon; the builder reads only the study's own stages.
-    fn resolved_bounds_for(hydros: &[Hydro]) -> ResolvedBounds {
-        let ranges: Vec<(f64, f64)> = hydros
-            .iter()
-            .map(|h| (h.min_storage_hm3, h.max_storage_hm3))
-            .collect();
-        hydro_storage_bounds(&ranges, 16)
-    }
-
     #[test]
     fn builder_returns_grid_with_expected_dimensions() {
         // hydro id=1 (downstream=2) and hydro id=2 (terminal), both ρ_eq=1.0.
@@ -552,7 +479,6 @@ mod tests {
             &stage_ids_0_based(n_stages),
             &cascade,
             &resolver,
-            &resolved_bounds_for(&hydros),
             &HashMap::new(),
             None,
             Some(&pm),
@@ -632,7 +558,6 @@ mod tests {
             &stage_ids_0_based(n_stages),
             &cascade,
             &resolver,
-            &resolved_bounds_for(&hydros),
             &HashMap::new(),
             None,
             Some(&pm),
@@ -665,7 +590,6 @@ mod tests {
             &stage_ids_0_based(n_stages),
             &cascade,
             &resolver,
-            &resolved_bounds_for(&hydros),
             &HashMap::new(),
             None,
             Some(&pm),
@@ -694,7 +618,6 @@ mod tests {
                 &stage_ids_0_based(1),
                 &cascade,
                 &resolver,
-                &resolved_bounds_for(&hydros),
                 &HashMap::new(),
                 None,
                 None,
@@ -737,7 +660,6 @@ mod tests {
             &stage_ids_0_based(n_stages),
             &cascade,
             &resolver,
-            &resolved_bounds_for(&hydros),
             &HashMap::new(),
             None,
             Some(&pm),
@@ -773,7 +695,6 @@ mod tests {
             &stage_ids_0_based(1),
             &cascade,
             &resolver,
-            &resolved_bounds_for(&hydros),
             &HashMap::new(),
             None,
             None,
@@ -805,7 +726,6 @@ mod tests {
             &stage_ids_0_based(1),
             &cascade,
             &resolver,
-            &resolved_bounds_for(&hydros),
             &HashMap::new(),
             None,
             None,
@@ -840,7 +760,6 @@ mod tests {
             &stage_ids_0_based(1),
             &cascade,
             &resolver,
-            &resolved_bounds_for(&hydros),
             &HashMap::new(),
             None,
             None,
@@ -914,7 +833,6 @@ mod tests {
             &stage_ids_0_based(1),
             &cascade,
             &resolver,
-            &resolved_bounds_for(&hydros),
             &map,
             None,
             None,
@@ -946,7 +864,6 @@ mod tests {
             &stage_ids_0_based(1),
             &cascade,
             &resolver,
-            &resolved_bounds_for(&hydros),
             &map,
             None,
             None,
@@ -979,7 +896,6 @@ mod tests {
             &stage_ids_0_based(1),
             &cascade,
             &resolver,
-            &resolved_bounds_for(&hydros),
             &map,
             None,
             None,
@@ -1015,7 +931,6 @@ mod tests {
             &stage_ids_0_based(1),
             &cascade,
             &resolver,
-            &resolved_bounds_for(&hydros),
             &map,
             None,
             None,
@@ -1051,7 +966,6 @@ mod tests {
             &stage_ids_0_based(1),
             &cascade,
             &resolver,
-            &resolved_bounds_for(&hydros),
             &HashMap::new(),
             None,
             None,
@@ -1091,7 +1005,6 @@ mod tests {
             &stage_ids_0_based(1),
             &cascade,
             &resolver,
-            &resolved_bounds_for(&hydros),
             &map,
             None,
             None,
@@ -1123,7 +1036,6 @@ mod tests {
             &stage_ids_0_based(1),
             &cascade,
             &resolver,
-            &resolved_bounds_for(&hydros),
             &map,
             None,
             None,
@@ -1160,7 +1072,6 @@ mod tests {
             &stage_ids_0_based(1),
             &cascade,
             &resolver,
-            &resolved_bounds_for(&hydros),
             &HashMap::new(),
             None,
             Some(&pm),
@@ -1194,7 +1105,6 @@ mod tests {
             &stage_ids_0_based(1),
             &cascade,
             &resolver,
-            &resolved_bounds_for(&hydros),
             &HashMap::new(),
             None,
             Some(&pm),
@@ -1263,7 +1173,6 @@ mod tests {
             &stage_ids_0_based(1),
             &cascade_abc,
             &resolver_abc,
-            &resolved_bounds_for(&hydros_abc),
             &HashMap::new(),
             None,
             Some(&pm_abc),
@@ -1274,7 +1183,6 @@ mod tests {
             &stage_ids_0_based(1),
             &cascade_cab,
             &resolver_cab,
-            &resolved_bounds_for(&hydros_cab),
             &HashMap::new(),
             None,
             Some(&pm_cab),
@@ -1353,7 +1261,6 @@ mod tests {
             &stage_ids_0_based(n_stages),
             &cascade,
             &resolver,
-            &resolved_bounds_for(&hydros),
             &HashMap::new(),
             None,
             Some(&pm),
@@ -1397,7 +1304,6 @@ mod tests {
             &stage_ids_0_based(1),
             &cascade,
             &resolver,
-            &resolved_bounds_for(&hydros),
             &HashMap::new(),
             None,
             None,
@@ -1433,7 +1339,6 @@ mod tests {
             &stage_ids_0_based(1),
             &short_cascade,
             &resolver,
-            &resolved_bounds_for(&hydros_three),
             &HashMap::new(),
             None,
             None,
@@ -1475,7 +1380,6 @@ mod tests {
             &stage_ids_0_based(3),
             &cascade,
             &resolver,
-            &resolved_bounds_for(&hydros),
             &HashMap::new(),
             Some(&override_table),
             None,
@@ -1520,7 +1424,6 @@ mod tests {
             &[StageId(60)],
             &cascade,
             &resolver,
-            &resolved_bounds_for(&hydros),
             &HashMap::new(),
             Some(&override_table),
             None,
@@ -1556,7 +1459,6 @@ mod tests {
             &stage_ids_0_based(1),
             &cascade,
             &resolver,
-            &resolved_bounds_for(&hydros),
             &HashMap::new(),
             None,
             Some(&pm),
@@ -1595,7 +1497,6 @@ mod tests {
             &stage_ids_0_based(n_stages),
             &cascade,
             &resolver,
-            &resolved_bounds_for(&hydros),
             &HashMap::new(),
             None,
             Some(&pm),
@@ -1651,7 +1552,6 @@ mod tests {
             &stage_ids_0_based(n_stages),
             &cascade,
             &resolver,
-            &resolved_bounds_for(&hydros),
             &HashMap::new(),
             Some(&override_table),
             Some(&pm),
@@ -1689,7 +1589,6 @@ mod tests {
             &stage_ids_0_based(n_stages),
             &cascade,
             &resolver,
-            &resolved_bounds_for(&hydros),
             &HashMap::new(),
             None,
             Some(&pm),
@@ -1729,8 +1628,14 @@ mod tests {
     /// while the reference-point value (at V_ref) is unchanged and distinct.
     #[test]
     fn mean_evaluator_own_term_matches_hand_oracle() {
-        let mut hydro =
-            make_hydro_with(1, HydroGenerationModel::Fpha, 0.0, 1000.0, 40.0, Some(0.02));
+        let mut hydro = make_hydro_with(
+            1,
+            HydroGenerationModel::Fpha,
+            100.0,
+            700.0,
+            40.0,
+            Some(0.02),
+        );
         hydro.hydraulic_losses = Some(HydraulicLossesModel::Factor { value: 0.1 });
         let hydros = vec![hydro];
         let cascade = CascadeTopology::build(&hydros);
@@ -1743,14 +1648,12 @@ mod tests {
         );
         let mut map = HashMap::new();
         map.insert(id, rows);
-        let bounds = hydro_storage_bounds(&[(100.0, 700.0)], 1);
 
         let set = build_energy_conversion_set(
             &hydros,
             &stage_ids_0_based(1),
             &cascade,
             &resolver,
-            &bounds,
             &map,
             None,
             None,
@@ -1779,7 +1682,14 @@ mod tests {
 
     #[test]
     fn mean_evaluator_tracks_physical_range_not_v_ref() {
-        let hydro = make_hydro_with(1, HydroGenerationModel::Fpha, 0.0, 1000.0, 50.0, Some(0.01));
+        let hydro = make_hydro_with(
+            1,
+            HydroGenerationModel::Fpha,
+            100.0,
+            300.0,
+            50.0,
+            Some(0.01),
+        );
         let hydros = vec![hydro];
         let cascade = CascadeTopology::build(&hydros);
         // V_ref sits at 900, far above the physical range [100, 300].
@@ -1788,14 +1698,12 @@ mod tests {
         let (id, rows) = vha_rows(hydros[0].id, &[(0.0, 100.0), (1000.0, 200.0)]);
         let mut map = HashMap::new();
         map.insert(id, rows);
-        let bounds = hydro_storage_bounds(&[(100.0, 300.0)], 1);
 
         let set = build_energy_conversion_set(
             &hydros,
             &stage_ids_0_based(1),
             &cascade,
             &resolver,
-            &bounds,
             &map,
             None,
             None,
@@ -1820,23 +1728,28 @@ mod tests {
     /// bit-for-bit rather than re-deriving it.
     #[test]
     fn collapsed_range_copies_reference_point_bit_for_bit() {
-        let hydro = make_hydro_with(1, HydroGenerationModel::Fpha, 0.0, 1000.0, 50.0, Some(0.01));
+        let v_ref = 650.0;
+        let hydro = make_hydro_with(
+            1,
+            HydroGenerationModel::Fpha,
+            v_ref,
+            v_ref,
+            50.0,
+            Some(0.01),
+        );
         let hydros = vec![hydro];
         let cascade = CascadeTopology::build(&hydros);
-        let v_ref = 650.0;
         let resolver =
             build_hydro_reference_volumes_resolved(&[(hydros[0].id, StudyPos(0), v_ref)], 0.0);
         let (id, rows) = vha_rows(hydros[0].id, &[(0.0, 100.0), (1000.0, 200.0)]);
         let mut map = HashMap::new();
         map.insert(id, rows);
-        let bounds = hydro_storage_bounds(&[(v_ref, v_ref)], 1);
 
         let set = build_energy_conversion_set(
             &hydros,
             &stage_ids_0_based(1),
             &cascade,
             &resolver,
-            &bounds,
             &map,
             None,
             None,
@@ -1855,15 +1768,21 @@ mod tests {
     /// suppresses the mean computation, even on a genuine (non-collapsed) range.
     #[test]
     fn override_wins_both_evaluators() {
-        let hydro = make_hydro_with(1, HydroGenerationModel::Fpha, 0.0, 1000.0, 50.0, Some(0.01));
+        // A genuine range whose mean term (0.01·height(250)=1.25) must be suppressed.
+        let hydro = make_hydro_with(
+            1,
+            HydroGenerationModel::Fpha,
+            200.0,
+            300.0,
+            50.0,
+            Some(0.01),
+        );
         let hydros = vec![hydro];
         let cascade = CascadeTopology::build(&hydros);
         let resolver = constant_resolver(&hydros, 0.65, 1);
         let (id, rows) = vha_rows(hydros[0].id, &[(0.0, 100.0), (1000.0, 200.0)]);
         let mut map = HashMap::new();
         map.insert(id, rows);
-        // A genuine range whose mean term (0.01·height(250)=1.25) must be suppressed.
-        let bounds = hydro_storage_bounds(&[(200.0, 300.0)], 1);
         let override_table =
             build_hydro_energy_productivity_override(&[HydroEnergyProductivityRow {
                 hydro_id: hydros[0].id,
@@ -1879,7 +1798,6 @@ mod tests {
             &stage_ids_0_based(1),
             &cascade,
             &resolver,
-            &bounds,
             &map,
             Some(&override_table),
             None,
@@ -1907,8 +1825,8 @@ mod tests {
         let mut hydro = make_hydro_with(
             3,
             HydroGenerationModel::ConstantProductivity,
-            0.0,
-            1000.0,
+            100.0,
+            300.0,
             50.0,
             Some(0.01),
         );
@@ -1922,14 +1840,12 @@ mod tests {
         let (id, rows) = vha_rows(hydros[0].id, &[(0.0, 100.0), (1000.0, 200.0)]);
         let mut map = HashMap::new();
         map.insert(id, rows);
-        let bounds = hydro_storage_bounds(&[(100.0, 300.0)], 1);
 
         let err = build_energy_conversion_set(
             &hydros,
             &stage_ids_0_based(1),
             &cascade,
             &resolver,
-            &bounds,
             &map,
             None,
             None,

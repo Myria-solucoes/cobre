@@ -53,9 +53,9 @@ use super::{ResolvedBlockBounds, ResolvedHydroUnitGroupBounds};
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct HydroStageBounds {
-    /// Dead volume \[hm³\]. Soft lower bound; slack `storage_violation_below`.
+    /// Operative per-stage storage floor \[hm³\] (dead volume, per-stage modif) — not the entity's physical minimum. Soft lower bound; slack `storage_violation_below`.
     pub min_storage_hm3: f64,
-    /// Physical capacity \[hm³\]. Hard upper bound.
+    /// Operative per-stage storage ceiling \[hm³\] (flood control, RHV, per-stage modif) — not the entity's physical capacity. Hard upper bound.
     pub max_storage_hm3: f64,
     /// Minimum dead-volume filling rate \[m³/s\], anchoring a per-stage minimum
     /// target-storage trajectory on `min_storage_hm3`. Not an inflow and not a cap. Default `0.0`.

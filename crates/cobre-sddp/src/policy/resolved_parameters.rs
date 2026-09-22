@@ -12,9 +12,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use cobre_core::{
-    ComputedParameter, EntityId, Hydro, ParameterKind, ResolvedBounds, ScalarParameter, StageId,
-};
+use cobre_core::{ComputedParameter, EntityId, Hydro, ParameterKind, ScalarParameter, StageId};
 use thiserror::Error;
 
 use crate::energy_conversion::{EnergyConversionSet, HydroEnergyProductivityOverride};
@@ -221,7 +219,7 @@ impl ResolvedParameters {
 /// # Examples
 ///
 /// ```
-/// use cobre_core::{EntityId, ParameterKind, ResolvedBounds, ScalarParameter, StageId};
+/// use cobre_core::{EntityId, ParameterKind, ScalarParameter, StageId};
 /// use cobre_sddp::energy_conversion::{
 ///     EnergyConversionSet, HydroEnergyProductivityOverride,
 /// };
@@ -238,7 +236,7 @@ impl ResolvedParameters {
 ///
 /// let table = build_resolved_parameters(
 ///     &params, &ec, &overrides, &[], &[0, 0, 1, 1], &stage_ids, &[1, 1, 1, 1],
-///     1_000_000.0, &ResolvedBounds::empty(),
+///     1_000_000.0,
 /// )
 ///     .unwrap();
 ///
@@ -255,7 +253,6 @@ pub fn build_resolved_parameters(
     stage_ids: &[StageId],
     stage_block_counts: &[usize],
     cost_scale_factor: f64,
-    bounds: &ResolvedBounds,
 ) -> Result<ResolvedParameters, ResolvedParametersError> {
     debug_assert_eq!(
         stage_block_counts.len(),
@@ -285,7 +282,6 @@ pub fn build_resolved_parameters(
             override_table,
             hydros,
             &hydro_index,
-            bounds,
         )?;
         per_param.push(values);
         id_to_slot.push((param.id.0, slot));
@@ -338,7 +334,6 @@ fn resolve_kind(
     override_table: &HydroEnergyProductivityOverride,
     hydros: &[Hydro],
     hydro_index: &HashMap<EntityId, usize>,
-    bounds: &ResolvedBounds,
 ) -> Result<Vec<Vec<f64>>, ResolvedParametersError> {
     let n_stages = stage_axis.ids.len();
     match kind {
@@ -383,7 +378,6 @@ fn resolve_kind(
                 override_table,
                 hydros,
                 hydro_index,
-                bounds,
             )?;
             Ok(per_stage.into_iter().map(|x| vec![x]).collect())
         }
@@ -469,7 +463,6 @@ fn resolve_computed(
     override_table: &HydroEnergyProductivityOverride,
     hydros: &[Hydro],
     hydro_index: &HashMap<EntityId, usize>,
-    bounds: &ResolvedBounds,
 ) -> Result<Vec<f64>, ResolvedParametersError> {
     let hydro_id = match cp {
         ComputedParameter::EquivalentProductivity { hydro_id }
@@ -560,9 +553,8 @@ fn resolve_computed(
                     hydro_id,
                 })?,
             ComputedParameter::MaxStoredEnergy { .. } => {
-                let hb = bounds.hydro_bounds(hydro_idx, t);
                 energy_conversion.integrated_accumulated_productivity(hydro_idx, t)
-                    * (hb.max_storage_hm3 - hb.min_storage_hm3)
+                    * (hydro.max_storage_hm3 - hydro.min_storage_hm3)
             }
         };
         values.push(value);
@@ -578,9 +570,7 @@ fn resolve_computed(
 #[allow(clippy::cast_precision_loss)]
 mod tests {
     use cobre_core::{
-        BoundsCountsSpec, BoundsDefaults, ComputedParameter, ContractBlockBounds, EntityId,
-        HydroBlockBounds, HydroStageBounds, LineBlockBounds, ParameterKind, PumpingBlockBounds,
-        ScalarParameter, ThermalBlockBounds, ThermalStageBounds,
+        ComputedParameter, EntityId, ParameterKind, ScalarParameter,
         entities::hydro::{HydroGenerationModel, HydroPenalties},
     };
 
@@ -749,7 +739,6 @@ mod tests {
             &stage_ids,
             &one_block_per_stage(4),
             1_000_000.0,
-            &ResolvedBounds::empty(),
         )
         .unwrap();
 
@@ -785,7 +774,6 @@ mod tests {
             &stage_ids,
             &one_block_per_stage(3),
             1_000_000.0,
-            &ResolvedBounds::empty(),
         );
 
         assert!(matches!(
@@ -824,7 +812,6 @@ mod tests {
             &stage_ids,
             &one_block_per_stage(3),
             1_000_000.0,
-            &ResolvedBounds::empty(),
         )
         .unwrap();
 
@@ -861,7 +848,6 @@ mod tests {
             &stage_ids,
             &one_block_per_stage(n_stages),
             1_000_000.0,
-            &ResolvedBounds::empty(),
         )
         .unwrap();
 
@@ -939,7 +925,6 @@ mod tests {
             &stage_ids,
             &one_block_per_stage(n_stages),
             1_000_000.0,
-            &ResolvedBounds::empty(),
         )
         .unwrap();
 
@@ -1006,7 +991,6 @@ mod tests {
             &stage_ids,
             &one_block_per_stage(n_stages),
             1_000_000.0,
-            &ResolvedBounds::empty(),
         )
         .unwrap();
 
@@ -1064,7 +1048,6 @@ mod tests {
             &stage_ids,
             &one_block_per_stage(n_stages),
             1_000_000.0,
-            &ResolvedBounds::empty(),
         )
         .unwrap();
 
@@ -1129,7 +1112,6 @@ mod tests {
             &stage_ids,
             &one_block_per_stage(1),
             1_000_000.0,
-            &ResolvedBounds::empty(),
         )
         .unwrap();
 
@@ -1177,7 +1159,6 @@ mod tests {
             &stage_ids,
             &one_block_per_stage(n_stages),
             1_000_000.0,
-            &ResolvedBounds::empty(),
         );
 
         assert!(matches!(
@@ -1227,7 +1208,6 @@ mod tests {
             &stage_ids,
             &one_block_per_stage(n_stages),
             1_000_000.0,
-            &ResolvedBounds::empty(),
         )
         .unwrap();
         let table_cab = build_resolved_parameters(
@@ -1239,7 +1219,6 @@ mod tests {
             &stage_ids,
             &one_block_per_stage(n_stages),
             1_000_000.0,
-            &ResolvedBounds::empty(),
         )
         .unwrap();
 
@@ -1283,7 +1262,6 @@ mod tests {
             &stage_ids,
             &one_block_per_stage(n_stages),
             1_000_000.0,
-            &ResolvedBounds::empty(),
         );
 
         assert!(matches!(
@@ -1333,7 +1311,6 @@ mod tests {
             &stage_ids,
             &one_block_per_stage(n_stages),
             1_000_000.0,
-            &ResolvedBounds::empty(),
         )
         .unwrap();
 
@@ -1362,18 +1339,9 @@ mod tests {
         let ec = EnergyConversionSet::new(vec![], vec![], 0, 0);
         let overrides = HydroEnergyProductivityOverride::default();
 
-        let table = build_resolved_parameters(
-            &[],
-            &ec,
-            &overrides,
-            &[],
-            &[],
-            &[],
-            &[],
-            1_000_000.0,
-            &ResolvedBounds::empty(),
-        )
-        .unwrap();
+        let table =
+            build_resolved_parameters(&[], &ec, &overrides, &[], &[], &[], &[], 1_000_000.0)
+                .unwrap();
         // Nothing to query — just verify it doesn't panic.
         let _ = table;
     }
@@ -1402,7 +1370,6 @@ mod tests {
             &stage_ids,
             block_counts,
             1_000_000.0,
-            &ResolvedBounds::empty(),
         )
     }
 
@@ -1583,72 +1550,11 @@ mod tests {
     // physical-bounds source, and declaration-order invariance.
     // -------------------------------------------------------------------------
 
-    /// Zero-valued `ResolvedBounds` sized for `n_hydros` x `n_stages`, every
-    /// axis at its zero default — [`make_varying_bounds`] and
-    /// `max_stored_energy_is_invariant_to_hydro_declaration_order`'s per-order
-    /// fixture both mutate only the hydro storage cells they need.
-    fn zero_resolved_bounds(n_hydros: usize, n_stages: usize) -> ResolvedBounds {
-        ResolvedBounds::new(
-            &BoundsCountsSpec {
-                n_hydros,
-                n_thermals: 0,
-                n_lines: 0,
-                n_pumping: 0,
-                n_contracts: 0,
-                n_stages,
-                k_max: 0,
-            },
-            &BoundsDefaults {
-                hydro: HydroStageBounds {
-                    min_storage_hm3: 0.0,
-                    max_storage_hm3: 0.0,
-                    filling_min_rate_m3s: 0.0,
-                    water_withdrawal_m3s: 0.0,
-                },
-                hydro_block: HydroBlockBounds::default(),
-                thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
-                thermal_block: ThermalBlockBounds {
-                    min_generation_mw: 0.0,
-                    max_generation_mw: 0.0,
-                },
-                line_block: LineBlockBounds {
-                    direct_mw: 0.0,
-                    reverse_mw: 0.0,
-                },
-                pumping_block: PumpingBlockBounds {
-                    min_flow_m3s: 0.0,
-                    max_flow_m3s: 0.0,
-                },
-                contract_block: ContractBlockBounds {
-                    min_mw: 0.0,
-                    max_mw: 0.0,
-                    price_per_mwh: 0.0,
-                },
-            },
-        )
-    }
-
-    /// A `ResolvedBounds` whose hydro storage range varies by stage and by
-    /// hydro — proves a `MaxStoredEnergy` resolution tracks `system.bounds()`
-    /// rather than a stage-invariant field.
-    fn make_varying_bounds(n_hydros: usize, n_stages: usize) -> ResolvedBounds {
-        let mut bounds = zero_resolved_bounds(n_hydros, n_stages);
-        for h in 0..n_hydros {
-            for t in 0..n_stages {
-                let cell = bounds.hydro_bounds_mut(h, t);
-                cell.min_storage_hm3 = 10.0 * (t as f64 + 1.0) + h as f64;
-                cell.max_storage_hm3 = 200.0 * (t as f64 + 1.0) + h as f64 * 5.0;
-            }
-        }
-        bounds
-    }
-
     #[test]
     fn max_stored_energy_matches_oracle_on_integrated_accumulated_grid() {
         let n_stages = 4;
         let (hydros, energy_conversion, override_table, stage_to_season, stage_ids) =
             make_setup_inputs(n_stages);
-        let bounds = make_varying_bounds(hydros.len(), n_stages);
 
         let params = vec![make_param(
             0,
@@ -1668,14 +1574,13 @@ mod tests {
             &stage_ids,
             &one_block_per_stage(n_stages),
             1_000_000.0,
-            &bounds,
         )
         .unwrap();
 
+        let physical_range = hydros[1].max_storage_hm3 - hydros[1].min_storage_hm3;
         for t in 0..n_stages {
-            let hb = bounds.hydro_bounds(1, t);
-            let expected = energy_conversion.integrated_accumulated_productivity(1, t)
-                * (hb.max_storage_hm3 - hb.min_storage_hm3);
+            let expected =
+                energy_conversion.integrated_accumulated_productivity(1, t) * physical_range;
             assert_eq!(
                 table.get(EntityId(0), t, 0).to_bits(),
                 expected.to_bits(),
@@ -1684,24 +1589,31 @@ mod tests {
             );
         }
 
-        // Stage-varying bounds produce a stage-varying resolved value.
+        // The resolved value still varies across stages here — driven entirely by
+        // the integrated_accumulated_productivity grid; the physical range factor
+        // (hydro.{min,max}_storage_hm3) is stage-invariant.
         assert_ne!(
             table.get(EntityId(0), 0, 0).to_bits(),
             table.get(EntityId(0), n_stages - 1, 0).to_bits(),
-            "MaxStoredEnergy must vary across stages when the physical bounds vary"
+            "MaxStoredEnergy must vary across stages when the integrated productivity grid varies"
         );
     }
 
+    /// `MaxStoredEnergy` reads the hydro entity's own `[min, max]_storage_hm3` —
+    /// stage-invariant by construction. Pinning `integrated_accumulated_productivity`
+    /// stage-invariant too isolates the range factor: a stage-varying resolved value
+    /// here could only come from reading something other than the entity fields.
     #[test]
     fn max_stored_energy_reads_physical_bounds_not_operative_hydro_fields() {
         let n_stages = 3;
-        let (hydros, energy_conversion, override_table, stage_to_season, stage_ids) =
+        let (hydros, base_ec, override_table, stage_to_season, stage_ids) =
             make_setup_inputs(n_stages);
-        // `hydros[0]` (make_setup_inputs) declares operative min/max = 50.0 / 2000.0;
-        // the varying-bounds fixture below carries a different, stage-varying range,
-        // so a resolve arm reading the operative hydro fields instead of `bounds`
-        // would produce a stage-invariant `2000.0 - 50.0` range instead.
-        let bounds = make_varying_bounds(hydros.len(), n_stages);
+
+        let integrated_accumulated: Vec<Vec<f64>> =
+            (0..hydros.len()).map(|_| vec![2.0; n_stages]).collect();
+        let integrated_equivalent = integrated_accumulated.clone();
+        let energy_conversion =
+            base_ec.with_integrated(integrated_equivalent, integrated_accumulated);
 
         let params = vec![make_param(
             0,
@@ -1721,25 +1633,15 @@ mod tests {
             &stage_ids,
             &one_block_per_stage(n_stages),
             1_000_000.0,
-            &bounds,
         )
         .unwrap();
 
-        let operative_range = 2000.0 - 50.0;
+        let expected = 2.0 * (hydros[0].max_storage_hm3 - hydros[0].min_storage_hm3);
         for t in 0..n_stages {
-            let hb = bounds.hydro_bounds(0, t);
-            let physical_range = hb.max_storage_hm3 - hb.min_storage_hm3;
-            assert!(
-                (physical_range - operative_range).abs() > 1.0,
-                "fixture must exercise a physical range that differs from the operative one"
-            );
-            let expected =
-                energy_conversion.integrated_accumulated_productivity(0, t) * physical_range;
             assert_eq!(
                 table.get(EntityId(0), t, 0).to_bits(),
                 expected.to_bits(),
-                "stage {t}: MaxStoredEnergy must read system.bounds(), not \
-                 hydro.{{min,max}}_storage_hm3"
+                "stage {t}: MaxStoredEnergy must read hydro.{{min,max}}_storage_hm3"
             );
         }
     }
@@ -1755,13 +1657,13 @@ mod tests {
         // indexing bug that conflates the two surfaces as a mismatch between
         // the two orderings built below.
         let integrated_for = |id: i32, t: usize| 10.0 + f64::from(id) + t as f64 * 0.3;
-        let min_storage_for = |id: i32, t: usize| 5.0 * f64::from(id) + t as f64;
-        let max_storage_for = |id: i32, t: usize| 100.0 * f64::from(id) + 50.0 + t as f64 * 2.0;
+        let min_storage_for = |id: i32| 5.0 * f64::from(id);
+        let max_storage_for = |id: i32| 100.0 * f64::from(id) + 50.0;
 
-        let build_for_order = |order: &[i32]| -> (Vec<Hydro>, EnergyConversionSet, ResolvedBounds) {
+        let build_for_order = |order: &[i32]| -> (Vec<Hydro>, EnergyConversionSet) {
             let hydros: Vec<Hydro> = order
                 .iter()
-                .map(|&id| make_hydro(id, 0.0, 1.0, Some(0.0085)))
+                .map(|&id| make_hydro(id, min_storage_for(id), max_storage_for(id), Some(0.0085)))
                 .collect();
             let n_hydros = hydros.len();
 
@@ -1781,26 +1683,17 @@ mod tests {
                 EnergyConversionSet::new(per_hydro_stage, accumulated, n_hydros, n_stages)
                     .with_integrated(integrated_equivalent, integrated_accumulated);
 
-            let mut bounds = zero_resolved_bounds(n_hydros, n_stages);
-            for (pos, &id) in order.iter().enumerate() {
-                for t in 0..n_stages {
-                    let cell = bounds.hydro_bounds_mut(pos, t);
-                    cell.min_storage_hm3 = min_storage_for(id, t);
-                    cell.max_storage_hm3 = max_storage_for(id, t);
-                }
-            }
-
-            (hydros, energy_conversion, bounds)
+            (hydros, energy_conversion)
         };
 
         let order_abc = [1_i32, 2, 3];
         let order_cab = [3_i32, 1, 2];
 
-        let (hydros_abc, ec_abc, bounds_abc) = build_for_order(&order_abc);
-        let (hydros_cab, ec_cab, bounds_cab) = build_for_order(&order_cab);
+        let (hydros_abc, ec_abc) = build_for_order(&order_abc);
+        let (hydros_cab, ec_cab) = build_for_order(&order_cab);
 
         // Same parameters — referencing hydro identity, not position — resolved
-        // against each self-consistent (hydros, energy_conversion, bounds) triple.
+        // against each self-consistent (hydros, energy_conversion) pair.
         let params: Vec<ScalarParameter> = order_abc
             .iter()
             .enumerate()
@@ -1825,7 +1718,6 @@ mod tests {
             &stage_ids,
             &one_block_per_stage(n_stages),
             1_000_000.0,
-            &bounds_abc,
         )
         .unwrap();
         let table_cab = build_resolved_parameters(
@@ -1837,7 +1729,6 @@ mod tests {
             &stage_ids,
             &one_block_per_stage(n_stages),
             1_000_000.0,
-            &bounds_cab,
         )
         .unwrap();
 
@@ -1852,8 +1743,7 @@ mod tests {
                     "hydro_id={id}, stage={t}: MaxStoredEnergy must not depend on hydro \
                      declaration order"
                 );
-                let expected =
-                    integrated_for(id, t) * (max_storage_for(id, t) - min_storage_for(id, t));
+                let expected = integrated_for(id, t) * (max_storage_for(id) - min_storage_for(id));
                 assert_eq!(
                     a.to_bits(),
                     expected.to_bits(),

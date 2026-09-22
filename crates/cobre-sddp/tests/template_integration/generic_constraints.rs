@@ -1793,7 +1793,6 @@ fn resolved_params_single_stage(
         &[StageId(0)],
         &[n_blks],
         COST_SCALE_FACTOR,
-        &ResolvedBounds::empty(),
     )
     .expect("resolved parameters build")
 }

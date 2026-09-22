@@ -1048,8 +1048,8 @@ fn fold_endpoint(
 /// Final}` terms, or `None` when none are present (the no-term path must leave the
 /// folded endpoints untouched, never add `0.0`). A useful-volume term resolves to
 /// the absolute storage column, so its dead volume shifts onto the bound instead of
-/// the column; `V_lo` is the per-stage resolved `HydroStageBounds.min_storage_hm3`,
-/// never a per-block or raw entity-level value.
+/// the column; `V_lo` is the entity-level physical `Hydro.min_storage_hm3`, never
+/// the per-stage resolved `HydroStageBounds.min_storage_hm3`.
 fn useful_volume_bound_shift(
     constraint: &GenericConstraint,
     ctx: &TemplateBuildCtx<'_>,
@@ -1083,11 +1083,7 @@ fn useful_volume_bound_shift(
                 resolved_parameters.get(param_id, stage_idx, block_idx)
             }
         };
-        let v_lo = ctx
-            .resolved
-            .bounds
-            .hydro_bounds(h_idx, stage_idx)
-            .min_storage_hm3;
+        let v_lo = ctx.hydros[h_idx].min_storage_hm3;
         shift += coef * term.scale * v_lo;
     }
     found.then_some(shift)

@@ -1970,7 +1970,6 @@ mod parameter_resolution_tests {
             &stage_ids,
             &vec![1usize; n_stages],
             1_000_000.0,
-            &ResolvedBounds::empty(),
         )
         .expect("empty_resolved_params: valid")
     }
@@ -2000,7 +1999,6 @@ mod parameter_resolution_tests {
             &stage_ids,
             &vec![1usize; n_stages],
             1_000_000.0,
-            &ResolvedBounds::empty(),
         )
         .expect("constant_param_resolved: valid")
     }
@@ -2027,7 +2025,6 @@ mod parameter_resolution_tests {
             &stage_ids,
             &vec![1usize; n_stages],
             1_000_000.0,
-            &ResolvedBounds::empty(),
         )
         .expect("per_stage_param_resolved: valid")
     }

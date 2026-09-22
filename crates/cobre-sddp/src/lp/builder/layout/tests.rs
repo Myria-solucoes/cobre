@@ -552,6 +552,7 @@ type RawBoundRow = (i32, Option<i32>, Option<f64>, Option<f64>);
 /// under test.
 struct UsefulVolumeFixtures {
     par_lp: PrecomputedPar,
+    hydros: Vec<Hydro>,
     cascade: CascadeTopology,
     hydro_cell_index: HydroCellIndex,
     bounds: ResolvedBounds,
@@ -569,14 +570,26 @@ struct UsefulVolumeFixtures {
 
 impl UsefulVolumeFixtures {
     /// `n_hydros` hydros at ids `1..=n_hydros` (positions `0..n_hydros`), `n_stages`
-    /// stages, every `min_storage_hm3` defaulted to `0.0` — set per test via
-    /// `bounds.hydro_bounds_mut`.
+    /// stages, every entity `min_storage_hm3` defaulted to `0.0` — set per test via
+    /// `hydros[pos].min_storage_hm3` (the useful-volume fold's source); `bounds`
+    /// stays available to set a differing per-stage operative value.
     fn new(n_hydros: usize, n_stages: usize) -> Self {
         let hydro_pos = (0..n_hydros)
             .map(|i| (EntityId(i32::try_from(i + 1).expect("small test id")), i))
             .collect();
+        let hydros: Vec<Hydro> = (0..n_hydros)
+            .map(|i| {
+                membership_hydro(
+                    i32::try_from(i + 1).expect("small test id"),
+                    false,
+                    None,
+                    None,
+                )
+            })
+            .collect();
         Self {
             par_lp: PrecomputedPar::default(),
+            hydros,
             cascade: CascadeTopology::build(&[]),
             hydro_cell_index: HydroCellIndex::build(&[]),
             bounds: ResolvedBounds::new(
@@ -661,7 +674,7 @@ impl UsefulVolumeFixtures {
     fn make_ctx(&self) -> TemplateBuildCtx<'_> {
         let n_stages = self.bounds.n_stages();
         TemplateBuildCtx {
-            hydros: &[],
+            hydros: &self.hydros,
             thermals: &[],
             lines: &[],
             buses: &[],
@@ -725,7 +738,7 @@ impl UsefulVolumeFixtures {
 fn useful_volume_single_term_lower_bound_folds_v_lo() {
     let mut fixtures = UsefulVolumeFixtures::new(1, 1);
     let h = EntityId(1);
-    fixtures.bounds.hydro_bounds_mut(0, 0).min_storage_hm3 = 12.5;
+    fixtures.hydros[0].min_storage_hm3 = 12.5;
     fixtures.install_constraint(
         vec![LinearTerm::literal(
             1.0,
@@ -757,8 +770,8 @@ fn useful_volume_multi_term_lower_bound_sums_each_hydros_v_lo() {
     let mut fixtures = UsefulVolumeFixtures::new(2, 1);
     let h1 = EntityId(1);
     let h2 = EntityId(2);
-    fixtures.bounds.hydro_bounds_mut(0, 0).min_storage_hm3 = 10.0;
-    fixtures.bounds.hydro_bounds_mut(1, 0).min_storage_hm3 = 4.0;
+    fixtures.hydros[0].min_storage_hm3 = 10.0;
+    fixtures.hydros[1].min_storage_hm3 = 4.0;
     fixtures.install_constraint(
         vec![
             LinearTerm::literal(
@@ -798,7 +811,7 @@ fn useful_volume_multi_term_lower_bound_sums_each_hydros_v_lo() {
 #[test]
 fn useful_volume_fold_inert_for_non_useful_volume_constraint() {
     let mut fixtures = UsefulVolumeFixtures::new(1, 1);
-    fixtures.bounds.hydro_bounds_mut(0, 0).min_storage_hm3 = 99.0;
+    fixtures.hydros[0].min_storage_hm3 = 99.0;
     fixtures.install_constraint(vec![], vec![(0, None, Some(-0.0), None)]);
     let ctx = fixtures.make_ctx();
     let state = state_layout_for(&ctx);
@@ -821,7 +834,7 @@ fn useful_volume_fold_inert_for_non_useful_volume_constraint() {
 fn useful_volume_fold_leaves_untargeted_lower_endpoint_as_none() {
     let mut fixtures = UsefulVolumeFixtures::new(1, 1);
     let h = EntityId(1);
-    fixtures.bounds.hydro_bounds_mut(0, 0).min_storage_hm3 = 7.0;
+    fixtures.hydros[0].min_storage_hm3 = 7.0;
     fixtures.install_constraint(
         vec![LinearTerm::literal(
             1.0,
@@ -856,7 +869,7 @@ fn useful_volume_fold_leaves_untargeted_lower_endpoint_as_none() {
 fn useful_volume_fold_collapses_block_independent_expression_to_one_row() {
     let mut fixtures = UsefulVolumeFixtures::new(1, 1);
     let h = EntityId(1);
-    fixtures.bounds.hydro_bounds_mut(0, 0).min_storage_hm3 = 5.0;
+    fixtures.hydros[0].min_storage_hm3 = 5.0;
     fixtures.install_constraint(
         vec![LinearTerm::literal(
             1.0,
@@ -886,14 +899,18 @@ fn useful_volume_fold_collapses_block_independent_expression_to_one_row() {
     );
 }
 
-/// C5: the fold reads the resolved `(hydro, stage)` dead volume, so the same
-/// constraint folds differently at different stages — never a per-block value.
+/// C5: the fold reads the ENTITY physical `min_storage_hm3` — stage-invariant —
+/// never the per-stage resolved `HydroStageBounds.min_storage_hm3`, which can
+/// carry an operative floor (flood control, DECOMP RHV) diverging from it.
 #[test]
-fn useful_volume_fold_uses_per_stage_resolved_v_lo() {
+fn useful_volume_fold_uses_entity_physical_v_lo_not_per_stage_operative_bounds() {
     let mut fixtures = UsefulVolumeFixtures::new(1, 2);
     let h = EntityId(1);
+    // Per-stage operative bounds differ from each other and from the entity
+    // physical value; the fold must track neither.
     fixtures.bounds.hydro_bounds_mut(0, 0).min_storage_hm3 = 5.0;
     fixtures.bounds.hydro_bounds_mut(0, 1).min_storage_hm3 = 8.0;
+    fixtures.hydros[0].min_storage_hm3 = 20.0;
     fixtures.install_constraint(
         vec![LinearTerm::literal(
             1.0,
@@ -914,8 +931,8 @@ fn useful_volume_fold_uses_per_stage_resolved_v_lo() {
             .bound_lower
             .expect("present")
             .to_bits(),
-        15.0_f64.to_bits(),
-        "stage 0: 10 + 5.0"
+        30.0_f64.to_bits(),
+        "stage 0: 10 + 20.0 (entity physical value, not the operative 5.0)"
     );
 
     let stage1 = stage_with_id(1);
@@ -925,8 +942,8 @@ fn useful_volume_fold_uses_per_stage_resolved_v_lo() {
             .bound_lower
             .expect("present")
             .to_bits(),
-        18.0_f64.to_bits(),
-        "stage 1: 10 + 8.0"
+        30.0_f64.to_bits(),
+        "stage 1: same entity value 20.0 — stage-invariant, not the operative 8.0"
     );
 }
 
@@ -938,7 +955,7 @@ fn useful_volume_fold_uses_per_stage_resolved_v_lo() {
 fn useful_volume_fold_effective_coefficient_includes_term_scale() {
     let mut fixtures = UsefulVolumeFixtures::new(1, 1);
     let h = EntityId(1);
-    fixtures.bounds.hydro_bounds_mut(0, 0).min_storage_hm3 = 3.0;
+    fixtures.hydros[0].min_storage_hm3 = 3.0;
     fixtures.resolved_parameters = ResolvedParameters {
         per_param: vec![vec![vec![4.0]]],
         id_to_slot: vec![(9, 0)],

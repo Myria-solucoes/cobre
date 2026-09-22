@@ -127,9 +127,9 @@ pub enum ComputedParameter {
         hydro_id: EntityId,
     },
     /// Maximum stored energy: `integrated_accumulated_productivity * (V_hi -
-    /// V_lo)` over the hydro plant's physical per-stage storage range. Unit is
-    /// productivity `[MW/(m3/s)]` times volume `[hm3]` — the same unit as a
-    /// productivity-times-storage-volume constraint term, not `MWh`.
+    /// V_lo)` over the hydro plant's physical storage range (stage-invariant).
+    /// Unit is productivity `[MW/(m3/s)]` times volume `[hm3]` — the same unit
+    /// as a productivity-times-storage-volume constraint term, not `MWh`.
     MaxStoredEnergy {
         /// Hydro plant identifier.
         hydro_id: EntityId,
