@@ -764,6 +764,38 @@ fn useful_volume_single_term_lower_bound_folds_v_lo() {
     assert_eq!(row.bound_upper, None);
 }
 
+/// A negative useful-volume coefficient SUBTRACTS `|coef| * V_lo` from the fold
+/// — every other fold test here exercises a positive coefficient only.
+#[test]
+fn useful_volume_negative_coefficient_lower_bound_subtracts_v_lo() {
+    let mut fixtures = UsefulVolumeFixtures::new(1, 1);
+    let h = EntityId(1);
+    fixtures.hydros[0].min_storage_hm3 = 12.5;
+    fixtures.install_constraint(
+        vec![LinearTerm::literal(
+            -1.0,
+            VariableRef::HydroUsefulVolumeFinal {
+                hydro_id: h,
+                block_id: None,
+            },
+        )],
+        vec![(0, None, Some(20.0), None)],
+    );
+    let ctx = fixtures.make_ctx();
+    let state = state_layout_for(&ctx);
+    let stage = minimal_stage();
+    let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+    assert_eq!(layout.generic_constraint_rows.len(), 1);
+    let row = &layout.generic_constraint_rows[0];
+    assert_eq!(
+        row.bound_lower.expect("lower present").to_bits(),
+        7.5_f64.to_bits(),
+        "B + (-1.0) * V_lo = 20.0 - 12.5"
+    );
+    assert_eq!(row.bound_upper, None);
+}
+
 /// AC2: `c1*ufv(h1) + c2*ufv(h2) >= B` resolves to `B + c1*V_lo(h1,t) + c2*V_lo(h2,t)`.
 #[test]
 fn useful_volume_multi_term_lower_bound_sums_each_hydros_v_lo() {

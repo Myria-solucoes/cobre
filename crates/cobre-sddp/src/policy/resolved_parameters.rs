@@ -1847,4 +1847,74 @@ mod tests {
             }
         }
     }
+
+    /// On a hydro with a genuine `[V_lo, V_hi]` range, the per-hydro coefficient on
+    /// the integrated cascade grid cancels the same grid's factor in
+    /// `MaxStoredEnergy`: the normalized bound reduces to `pct * (V_hi - V_lo)`, a
+    /// pure volume quantity, whether it is priced against the integrated grid or
+    /// the reference-point grid — even though the two grids genuinely differ.
+    #[test]
+    fn normalized_max_stored_energy_bound_is_evaluator_independent_on_a_real_range() {
+        let n_stages = 1;
+        let t = 0;
+        let (hydros, base_ec, override_table, stage_to_season, stage_ids) =
+            make_setup_inputs(n_stages);
+
+        // Distinct from the reference-point grid, so the real-range precondition
+        // below is genuinely exercised, not a collapsed-range triviality.
+        let int_rho = 0.625_f64;
+        let integrated_equivalent = vec![vec![int_rho; n_stages]; hydros.len()];
+        let integrated_accumulated = integrated_equivalent.clone();
+        let energy_conversion =
+            base_ec.with_integrated(integrated_equivalent, integrated_accumulated);
+
+        let rho_acum = energy_conversion.accumulated_productivity(0, t);
+        assert_ne!(
+            int_rho.to_bits(),
+            rho_acum.to_bits(),
+            "fixture must exercise a real range, not the collapsed-range triviality"
+        );
+
+        let params = vec![make_param(
+            0,
+            ParameterKind::Computed {
+                computed_spec: ComputedParameter::MaxStoredEnergy {
+                    hydro_id: EntityId(0),
+                },
+            },
+        )];
+        let table = build_resolved_parameters(
+            &params,
+            &energy_conversion,
+            &override_table,
+            &hydros,
+            &stage_to_season,
+            &stage_ids,
+            &one_block_per_stage(n_stages),
+            1_000_000.0,
+        )
+        .unwrap();
+
+        let v_lo = hydros[0].min_storage_hm3;
+        let v_hi = hydros[0].max_storage_hm3;
+        let pct = 0.25_f64;
+        let expected = pct * (v_hi - v_lo);
+        let rel_tol = 1e-9 * expected.abs().max(1.0);
+
+        let max_stored_energy = table.get(EntityId(0), t, 0);
+        let normalized_integrated = pct * max_stored_energy / int_rho;
+        assert!(
+            (normalized_integrated - expected).abs() <= rel_tol,
+            "normalized bound on the integrated grid: got {normalized_integrated}, expected {expected}"
+        );
+
+        // Same normalized target on the reference-point grid: the feasible set
+        // `useful >= pct * useful_max` is evaluator-independent even though
+        // `int_rho != rho_acum`.
+        let normalized_reference = pct * (rho_acum * (v_hi - v_lo)) / rho_acum;
+        assert!(
+            (normalized_reference - expected).abs() <= rel_tol,
+            "normalized bound on the reference-point grid: got {normalized_reference}, expected {expected}"
+        );
+    }
 }

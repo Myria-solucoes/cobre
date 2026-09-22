@@ -3036,3 +3036,53 @@ fn hydro_useful_volume_boundary_matches_storage_boundary() {
         ));
     }
 }
+
+/// `resolve_hydro_storage_boundary` resolves both useful-volume boundary
+/// variants at coefficient exactly `1.0` — the unit coefficient
+/// `useful_volume_bound_shift` relies on when it folds `V_lo` without a
+/// `* multiplier` factor.
+#[test]
+fn hydro_useful_volume_boundary_multiplier_is_exactly_one() {
+    let indexer = make_indexer();
+    let state = make_state();
+    let geom = make_chronological_geom(&indexer, &state);
+    let prod = make_production_models();
+    let hpos = make_hydro_pos();
+    let tpos = make_thermal_pos();
+    let bpos = make_bus_pos();
+    let lpos = make_line_pos();
+
+    let useful_initial = call(
+        VariableRef::HydroUsefulVolumeInitial {
+            hydro_id: EntityId(10),
+            block_id: Some(0),
+        },
+        0,
+        &geom,
+        &prod,
+        &hpos,
+        &tpos,
+        &bpos,
+        &lpos,
+    );
+    assert_eq!(useful_initial, vec![(8, 1.0)], "S⁰ = storage_in.start + 0");
+
+    let useful_final = call(
+        VariableRef::HydroUsefulVolumeFinal {
+            hydro_id: EntityId(10),
+            block_id: Some(2),
+        },
+        0,
+        &geom,
+        &prod,
+        &hpos,
+        &tpos,
+        &bpos,
+        &lpos,
+    );
+    assert_eq!(
+        useful_final,
+        vec![(0, 1.0)],
+        "S³ = Sᴷ = storage.start + 0 (K=3, last block)"
+    );
+}

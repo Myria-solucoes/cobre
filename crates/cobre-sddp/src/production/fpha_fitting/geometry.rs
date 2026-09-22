@@ -580,6 +580,17 @@ mod tests {
     }
 
     #[test]
+    fn mean_height_both_endpoints_within_one_segment_averages_the_two_heights() {
+        let table = non_uniform_table();
+        // Both v_lo and v_hi land strictly inside the [100, 300] segment, so
+        // `locate` resolves the same segment index for each.
+        let v_lo = 150.0;
+        let v_hi = 250.0;
+        let expected = 0.5 * (table.height(v_lo) + table.height(v_hi));
+        assert_eq!(table.mean_height(v_lo, v_hi), expected);
+    }
+
+    #[test]
     fn mean_height_inverted_range_returns_height_at_clamped_lo() {
         let table = non_uniform_table();
         // v_lo clamps to v_max (1000.0), which then exceeds the clamped v_hi.

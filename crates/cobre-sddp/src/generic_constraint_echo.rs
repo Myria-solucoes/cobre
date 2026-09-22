@@ -446,6 +446,37 @@ mod tests {
         assert_eq!(rows[0].derived_shape, "cap");
     }
 
+    /// A `hydro_useful_volume_final` constraint's `V_lo`-folded lower bound
+    /// (already composed by the layout fold before the row entry is built)
+    /// reaches `GenericConstraintEchoRow.bound_lower` verbatim, not only the
+    /// internal `generic_constraint_rows` layout row it is read from.
+    #[test]
+    fn useful_volume_folded_lower_bound_reaches_the_echo_row() {
+        let hydro_ref = VariableRef::HydroUsefulVolumeFinal {
+            hydro_id: EntityId(9),
+            block_id: None,
+        };
+        let constraints = vec![constraint(
+            9,
+            "useful_volume_floor",
+            vec![LinearTerm::literal(1.0, hydro_ref)],
+        )];
+        // 20.0 (raw) + 1.0 * V_lo(9) = 32.5, already folded by the time it reaches
+        // this row entry.
+        let entries = vec![vec![entry(0, 9, 0, true, Some(32.5), None, false, 0.0)]];
+        let resolved = ResolvedParameters::default();
+
+        let rows = build_echo_rows_from_parts(&entries, &[0], &resolved, &constraints);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].bound_lower, Some(32.5));
+        assert_eq!(rows[0].derived_shape, "floor");
+        assert_eq!(
+            rows[0].variable_kind.as_deref(),
+            Some("hydro_useful_volume_final")
+        );
+    }
+
     /// A two-endpoint per-block entry (the d54 shape) renders a `band` row with
     /// `block_id = Some(block_idx)` and both bounds carried through.
     #[test]

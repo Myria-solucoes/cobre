@@ -1132,6 +1132,133 @@ mod tests {
         assert_eq!(set.accumulated_productivity(1, 0), 6.0); // B = 2 + 4
     }
 
+    /// Assert `integrated_accumulated_productivity(h,t) ==
+    /// integrated_equivalent_productivity(h,t) + Σ
+    /// integrated_accumulated_productivity(direct_downstream, t)` for every hydro
+    /// and stage, walking the cascade's own downstream links.
+    fn assert_integrated_cascade_recurrence_holds(
+        hydros: &[Hydro],
+        cascade: &CascadeTopology,
+        set: &EnergyConversionSet,
+        n_stages: usize,
+    ) {
+        for t in 0..n_stages {
+            for (h_idx, hydro) in hydros.iter().enumerate() {
+                let downstream_contrib = cascade.downstream(hydro.id).map_or(0.0, |ds_id| {
+                    let ds_idx = hydros
+                        .iter()
+                        .position(|h| h.id == ds_id)
+                        .expect("downstream id present in hydros");
+                    set.integrated_accumulated_productivity(ds_idx, t)
+                });
+                let expected =
+                    set.integrated_equivalent_productivity(h_idx, t) + downstream_contrib;
+                assert_eq!(
+                    set.integrated_accumulated_productivity(h_idx, t).to_bits(),
+                    expected.to_bits(),
+                    "hydro {h_idx}, stage {t}: integrated cascade recurrence"
+                );
+            }
+        }
+    }
+
+    /// A->B->C linear cascade where every plant has real VHA geometry and a
+    /// resolved ρ_esp, so the mean own term genuinely diverges from the
+    /// reference-point own term; the integrated cascade grid must still satisfy
+    /// the downstream-sum recurrence.
+    #[test]
+    fn integrated_cascade_recurrence_holds_on_a_linear_topology() {
+        let n_stages = 1;
+        let mut a = make_hydro(0, Some(1));
+        a.generation_model = HydroGenerationModel::ConstantProductivity;
+        a.min_storage_hm3 = 100.0;
+        a.max_storage_hm3 = 300.0;
+        a.specific_productivity_mw_per_m3s_per_m = Some(0.01);
+        let mut b = make_hydro(1, Some(2));
+        b.generation_model = HydroGenerationModel::ConstantProductivity;
+        b.min_storage_hm3 = 200.0;
+        b.max_storage_hm3 = 600.0;
+        b.specific_productivity_mw_per_m3s_per_m = Some(0.02);
+        let mut c = make_hydro(2, None);
+        c.generation_model = HydroGenerationModel::ConstantProductivity;
+        c.min_storage_hm3 = 50.0;
+        c.max_storage_hm3 = 150.0;
+        c.specific_productivity_mw_per_m3s_per_m = Some(0.03);
+        let hydros = vec![a, b, c];
+        let cascade = CascadeTopology::build(&hydros);
+        let resolver = constant_resolver(&hydros, 0.65, n_stages);
+        let pm = production_set(&[2.0, 3.0, 5.0], n_stages);
+
+        let mut vha_map = HashMap::new();
+        let (id_a, rows_a) = vha_rows(hydros[0].id, &[(0.0, 500.0), (1000.0, 700.0)]);
+        vha_map.insert(id_a, rows_a);
+        let (id_b, rows_b) = vha_rows(hydros[1].id, &[(0.0, 300.0), (1000.0, 500.0)]);
+        vha_map.insert(id_b, rows_b);
+        let (id_c, rows_c) = vha_rows(hydros[2].id, &[(0.0, 200.0), (1000.0, 260.0)]);
+        vha_map.insert(id_c, rows_c);
+
+        let set = build_energy_conversion_set(
+            &hydros,
+            &stage_ids_0_based(n_stages),
+            &cascade,
+            &resolver,
+            &vha_map,
+            None,
+            Some(&pm),
+        )
+        .expect("builder succeeds");
+
+        assert_integrated_cascade_recurrence_holds(&hydros, &cascade, &set, n_stages);
+    }
+
+    /// A->C, B->C branching cascade with the same real-range/VHA setup as the
+    /// linear case; the integrated cascade grid must satisfy the downstream-sum
+    /// recurrence at the branch point too.
+    #[test]
+    fn integrated_cascade_recurrence_holds_on_a_branching_topology() {
+        let n_stages = 1;
+        let mut a = make_hydro(0, Some(2));
+        a.generation_model = HydroGenerationModel::ConstantProductivity;
+        a.min_storage_hm3 = 100.0;
+        a.max_storage_hm3 = 300.0;
+        a.specific_productivity_mw_per_m3s_per_m = Some(0.01);
+        let mut b = make_hydro(1, Some(2));
+        b.generation_model = HydroGenerationModel::ConstantProductivity;
+        b.min_storage_hm3 = 150.0;
+        b.max_storage_hm3 = 450.0;
+        b.specific_productivity_mw_per_m3s_per_m = Some(0.02);
+        let mut c = make_hydro(2, None);
+        c.generation_model = HydroGenerationModel::ConstantProductivity;
+        c.min_storage_hm3 = 50.0;
+        c.max_storage_hm3 = 150.0;
+        c.specific_productivity_mw_per_m3s_per_m = Some(0.03);
+        let hydros = vec![a, b, c];
+        let cascade = CascadeTopology::build(&hydros);
+        let resolver = constant_resolver(&hydros, 0.65, n_stages);
+        let pm = production_set(&[1.0, 2.0, 4.0], n_stages);
+
+        let mut vha_map = HashMap::new();
+        let (id_a, rows_a) = vha_rows(hydros[0].id, &[(0.0, 500.0), (1000.0, 700.0)]);
+        vha_map.insert(id_a, rows_a);
+        let (id_b, rows_b) = vha_rows(hydros[1].id, &[(0.0, 400.0), (1000.0, 600.0)]);
+        vha_map.insert(id_b, rows_b);
+        let (id_c, rows_c) = vha_rows(hydros[2].id, &[(0.0, 200.0), (1000.0, 260.0)]);
+        vha_map.insert(id_c, rows_c);
+
+        let set = build_energy_conversion_set(
+            &hydros,
+            &stage_ids_0_based(n_stages),
+            &cascade,
+            &resolver,
+            &vha_map,
+            None,
+            Some(&pm),
+        )
+        .expect("builder succeeds");
+
+        assert_integrated_cascade_recurrence_holds(&hydros, &cascade, &set, n_stages);
+    }
+
     /// Build the same A->C, B->C branching cascade with two different
     /// declaration orders, non-zero mutually distinct productivities, and
     /// confirm all four scope x evaluator accessors are bit-for-bit identical
@@ -1776,6 +1903,47 @@ mod tests {
             set.integrated_equivalent_productivity(0, 0).to_bits(),
             reference.to_bits(),
             "collapsed range must copy the reference-point own value bit-for-bit"
+        );
+    }
+
+    /// A single-row VHA table is degenerate in a DIFFERENT way than a collapsed
+    /// physical range: the range is genuine (`V_lo != V_hi`), but the table
+    /// returns one constant height for any query, so the integrated own term
+    /// still copies the reference-point own term bit-for-bit.
+    #[test]
+    fn single_row_vha_table_copies_reference_point_own_term_bit_for_bit() {
+        let hydro = make_hydro_with(
+            1,
+            HydroGenerationModel::Fpha,
+            100.0,
+            700.0,
+            50.0,
+            Some(0.01),
+        );
+        let hydros = vec![hydro];
+        let cascade = CascadeTopology::build(&hydros);
+        let resolver =
+            build_hydro_reference_volumes_resolved(&[(hydros[0].id, StudyPos(0), 650.0)], 0.0);
+        let (id, rows) = vha_rows(hydros[0].id, &[(400.0, 386.5)]);
+        let mut map = HashMap::new();
+        map.insert(id, rows);
+
+        let set = build_energy_conversion_set(
+            &hydros,
+            &stage_ids_0_based(1),
+            &cascade,
+            &resolver,
+            &map,
+            None,
+            None,
+        )
+        .expect("builder succeeds");
+
+        let reference = set.conversion(0, 0).equivalent_productivity_mw_per_m3s;
+        assert_eq!(
+            set.integrated_equivalent_productivity(0, 0).to_bits(),
+            reference.to_bits(),
+            "a single-row VHA table's constant height must copy the reference-point own term"
         );
     }
 

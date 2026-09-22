@@ -1077,6 +1077,18 @@ mod tests {
                 hydro_id: EntityId(0),
                 block_id: None,
             },
+            VariableRef::HydroStorageInitial {
+                hydro_id: EntityId(0),
+                block_id: None,
+            },
+            VariableRef::HydroUsefulVolumeInitial {
+                hydro_id: EntityId(0),
+                block_id: None,
+            },
+            VariableRef::HydroUsefulVolumeFinal {
+                hydro_id: EntityId(0),
+                block_id: None,
+            },
         ];
         let mut keys: Vec<_> = vars.iter().map(canonical_variable_key).collect();
         let n = keys.len();
