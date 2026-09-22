@@ -857,6 +857,52 @@ mod tests {
         );
     }
 
+    /// Full postcard round-trip for `HydroUsefulVolumeInitial` across both
+    /// block selectors; `test_variable_ref_postcard_discriminant_pin` owns the
+    /// discriminant byte.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn hydro_useful_volume_initial_postcard_roundtrip() {
+        let stage_initial = VariableRef::HydroUsefulVolumeInitial {
+            hydro_id: EntityId(7),
+            block_id: None,
+        };
+        let bytes = postcard::to_allocvec(&stage_initial).expect("serialize");
+        let recovered: VariableRef = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(stage_initial, recovered);
+
+        let block = VariableRef::HydroUsefulVolumeInitial {
+            hydro_id: EntityId(7),
+            block_id: Some(2),
+        };
+        let bytes = postcard::to_allocvec(&block).expect("serialize");
+        let recovered: VariableRef = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(block, recovered);
+    }
+
+    /// Full postcard round-trip for `HydroUsefulVolumeFinal` across both
+    /// block selectors; `test_variable_ref_postcard_discriminant_pin` owns the
+    /// discriminant byte.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn hydro_useful_volume_final_postcard_roundtrip() {
+        let stage_final = VariableRef::HydroUsefulVolumeFinal {
+            hydro_id: EntityId(7),
+            block_id: None,
+        };
+        let bytes = postcard::to_allocvec(&stage_final).expect("serialize");
+        let recovered: VariableRef = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(stage_final, recovered);
+
+        let block = VariableRef::HydroUsefulVolumeFinal {
+            hydro_id: EntityId(7),
+            block_id: Some(2),
+        };
+        let bytes = postcard::to_allocvec(&block).expect("serialize");
+        let recovered: VariableRef = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(block, recovered);
+    }
+
     #[test]
     fn test_generic_constraint_construction() {
         let expr = ConstraintExpression {
