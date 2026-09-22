@@ -47,7 +47,12 @@ losses)`, where `cf`/`losses` are the same tailrace and hydraulic-loss terms
 the reference-point evaluator already applies, and `mean_head` is
 `ForebayTable::mean_height(v_lo, v_hi)` — the exact integral of the
 piecewise-linear forebay-height curve over the plant's VHA breakpoints,
-computed by composite trapezoid quadrature. This is exact for the
+computed by composite trapezoid quadrature. `mean_height` clamps `v_lo` and
+`v_hi` to the table's own breakpoint extent before integrating, so a VHA table
+that does not span the plant's physical range integrates over the narrower
+extent it does cover; authoring the table to span
+`[Hydro.min_storage_hm3, Hydro.max_storage_hm3]` is the input author's
+responsibility. This is exact for the
 piecewise-linear table the composite trapezoid rule integrates, never an
 approximation via Simpson's rule or any other quadrature scheme, and never a
 read from fitted polynomial coefficients — the VHA table's own breakpoints are
@@ -165,12 +170,14 @@ resolves to the exact same LP column as the corresponding
 receives the same referential and per-block validation the storage pair
 already receives — it names no new LP variable. What differs is the bound: at
 LP build time, `useful_volume_bound_shift` (in
-`crates/cobre-sddp/src/lp/builder/layout.rs`) folds `-V_lo` — the entity
-physical `Hydro.min_storage_hm3` — into the constraint's resolved bound
-endpoint for every `hydro_useful_volume_*` term the constraint's expression
-contains, so the constraint reads as a useful-volume (above-dead-storage)
-quantity while the underlying LP column still carries the absolute storage
-value.
+`crates/cobre-sddp/src/lp/builder/layout.rs`) moves each term's dead volume
+onto the bound: a term `coef * hydro_useful_volume_*(h)` stands for
+`coef * (storage - V_lo)`, so `coef * V_lo` — with `V_lo` the entity physical
+`Hydro.min_storage_hm3` — is ADDED to every resolved bound endpoint the
+constraint carries, one such term per `hydro_useful_volume_*` reference. The
+constraint reads as a useful-volume (above-dead-storage) quantity while the
+underlying LP column still carries the absolute storage value; a negative
+coefficient lowers the bound by the same rule.
 
 The folded bound is publicly observable: `build_generic_constraint_echo_rows`
 (`crates/cobre-sddp/src/generic_constraint_echo.rs`) reports the
