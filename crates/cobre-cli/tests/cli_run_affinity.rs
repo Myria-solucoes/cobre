@@ -91,7 +91,15 @@ fn assert_directory_bytes_equal(lhs: &Path, rhs: &Path) {
     for relative in lhs_files {
         let normalized_artifact = |root: &Path| {
             let bytes = fs::read(root.join(&relative)).expect("artifact must be readable");
-            if relative == Path::new("metadata.json") {
+            if relative == Path::new("manifest.bin") {
+                use cobre_io::output::policy::codec::{
+                    deserialize_checkpoint_manifest, serialize_checkpoint_manifest,
+                };
+                let mut manifest =
+                    deserialize_checkpoint_manifest(&bytes).expect("policy manifest must decode");
+                manifest.created_at.clear();
+                serialize_checkpoint_manifest(&manifest)
+            } else if relative == Path::new("metadata.json") {
                 let mut metadata: serde_json::Value =
                     serde_json::from_slice(&bytes).expect("metadata must be JSON");
                 metadata

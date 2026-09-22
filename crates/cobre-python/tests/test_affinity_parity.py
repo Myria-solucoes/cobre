@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import pathlib
+import struct
 import subprocess
 import sys
+from datetime import datetime
 
 import pytest
 
@@ -23,10 +25,29 @@ def _cli_binary() -> pathlib.Path:
     raise RuntimeError("unreachable: pytest.skip raises Skipped")
 
 
+def _policy_bytes(path: pathlib.Path) -> bytes:
+    data = path.read_bytes()
+    if path.name != "manifest.bin":
+        return data
+    assert data[4:8] == b"CBVF"
+    table = struct.unpack_from("<I", data)[0]
+    vtable = table - struct.unpack_from("<i", data, table)[0]
+    # CheckpointManifest.created_at is id 2 (vtable slot 8) in policy.fbs.
+    offset = struct.unpack_from("<H", data, vtable + 8)[0]
+    assert offset > 0
+    field = table + offset
+    string = field + struct.unpack_from("<I", data, field)[0]
+    size = struct.unpack_from("<I", data, string)[0]
+    begin = string + 4
+    assert size == 20
+    datetime.strptime(data[begin:begin + size].decode("ascii"), "%Y-%m-%dT%H:%M:%SZ")
+    return data[:begin] + b"0" * size + data[begin + size:]
+
+
 def _policy_files(root: pathlib.Path) -> dict[pathlib.Path, bytes]:
     policy = root / "policy"
     return {
-        path.relative_to(policy): path.read_bytes()
+        path.relative_to(policy): _policy_bytes(path)
         for path in sorted(policy.rglob("*"))
         if path.is_file()
     }

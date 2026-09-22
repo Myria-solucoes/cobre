@@ -26,6 +26,9 @@ and their pins are not replaced by publishing this candidate.
 - Unit suites: 5,480 passed across comm, core, IO, SDDP, solver and stochastic;
   one SDDP failure reproduced unchanged on upstream (see below), one ignored.
 - CLI tests: 244 passed, including checkpoint/resume and output parity.
+- The Linux affinity parity gates normalize the manifest's creation timestamp;
+  numerical policy contents remain compared exactly. The 0.16 timestamp lives
+  inside `manifest.bin`, replacing the older JSON location.
 - Python study/run/IO/affinity suites: 44 passed, two Linux-only tests skipped.
   Both new periodic-checkpoint tests resumed an iteration-2 generation to
   iteration 4 and reproduced the uninterrupted final lower bound, with and
