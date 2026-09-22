@@ -724,7 +724,7 @@ mod tests {
     /// when `base.num_nz + rows_nnz` exceeds `i32::MAX`.
     ///
     /// Release-only: debug asserts on fabricated sizes fire first in debug builds.
-    /// Run `cargo test --release` to exercise the i32::try_from guard.
+    /// Run `cargo test --release` to exercise the `i32::try_from` guard.
     #[test]
     #[cfg(not(debug_assertions))]
     #[should_panic(expected = "total nnz exceeds i32::MAX")]

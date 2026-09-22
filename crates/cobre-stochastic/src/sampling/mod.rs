@@ -785,9 +785,11 @@ mod tests {
     };
     use tracing::{Event, Level, Metadata, Subscriber, span};
 
+    #[cfg(debug_assertions)]
+    use super::ClassSampleRequest;
     use super::{
-        ClassNoiseTables, ClassSampleRequest, ClassSampler, ForwardNoise, ForwardNoiseTables,
-        ForwardSampler, ForwardSamplerConfig, NoiseTable, SampleRequest, build_forward_sampler,
+        ClassNoiseTables, ClassSampler, ForwardNoise, ForwardNoiseTables, ForwardSampler,
+        ForwardSamplerConfig, NoiseTable, SampleRequest, build_forward_sampler,
         rebuild_class_tables,
     };
     use crate::{
