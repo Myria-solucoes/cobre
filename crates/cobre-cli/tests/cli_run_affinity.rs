@@ -113,26 +113,31 @@ fn assert_directory_bytes_equal(lhs: &Path, rhs: &Path) {
 }
 
 fn assert_convergence_equal(lhs: &Path, rhs: &Path) {
-    let lhs = cobre_io::read_convergence_summary(&lhs.join("training/convergence.parquet"))
-        .expect("left convergence must be readable");
-    let rhs = cobre_io::read_convergence_summary(&rhs.join("training/convergence.parquet"))
-        .expect("right convergence must be readable");
-    assert_eq!(lhs.total_lp_solves, rhs.total_lp_solves);
+    let lhs = cobre_io::read_training_metadata(&lhs.join("training/metadata.json"))
+        .expect("left training metadata must be readable");
+    let rhs = cobre_io::read_training_metadata(&rhs.join("training/metadata.json"))
+        .expect("right training metadata must be readable");
+    assert!(lhs.solve_stats.total_lp_solves.is_some());
+    assert!(lhs.bounds.final_upper_bound.is_some());
     assert_eq!(
-        lhs.final_lower_bound.to_bits(),
-        rhs.final_lower_bound.to_bits()
+        lhs.solve_stats.total_lp_solves,
+        rhs.solve_stats.total_lp_solves
     );
     assert_eq!(
-        lhs.final_upper_bound_mean.to_bits(),
-        rhs.final_upper_bound_mean.to_bits()
+        lhs.bounds.final_lower_bound.to_bits(),
+        rhs.bounds.final_lower_bound.to_bits()
     );
     assert_eq!(
-        lhs.final_upper_bound_std.to_bits(),
-        rhs.final_upper_bound_std.to_bits()
+        lhs.bounds.final_upper_bound.map(f64::to_bits),
+        rhs.bounds.final_upper_bound.map(f64::to_bits)
     );
     assert_eq!(
-        lhs.final_gap_percent.map(f64::to_bits),
-        rhs.final_gap_percent.map(f64::to_bits)
+        lhs.bounds.final_upper_bound_std.map(f64::to_bits),
+        rhs.bounds.final_upper_bound_std.map(f64::to_bits)
+    );
+    assert_eq!(
+        lhs.convergence.final_gap_percent.map(f64::to_bits),
+        rhs.convergence.final_gap_percent.map(f64::to_bits)
     );
 }
 
