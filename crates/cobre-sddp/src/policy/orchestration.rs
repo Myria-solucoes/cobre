@@ -227,7 +227,6 @@ pub struct CheckpointParams {
 /// Propagates [`OutputError`] from
 /// [`cobre_io::output::policy::write_policy_checkpoint`] if any of the
 /// `FlatBuffers` files cannot be written.
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub fn write_checkpoint(
     policy_dir: &Path,
     setup: &StudySetup,
@@ -246,6 +245,11 @@ pub fn write_checkpoint(
 }
 
 /// Write the live iteration policy while setup's cut storage is borrowed by training.
+///
+/// # Errors
+///
+/// Propagates the native output error when a checkpoint cannot be written.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub fn write_checkpoint_with_fcf(
     policy_dir: &Path,
     setup: &StudySetup,
@@ -458,6 +462,70 @@ pub fn export_stochastic_artifacts(
             on_warning(&format!("fitting_report: {e}"));
         }
     }
+}
+
+/// Persist a configured completed iteration as an atomic checkpoint generation.
+///
+/// # Errors
+///
+/// Returns the native output error if the policy or generation cannot be written.
+pub fn write_periodic_checkpoint(
+    output_dir: &Path,
+    setup: &StudySetup,
+    fcf: &crate::FutureCostFunction,
+    system: &cobre_core::System,
+    config: &cobre_io::Config,
+    result: &TrainingResult,
+) -> Result<(), OutputError> {
+    let settings = &config.policy.checkpointing;
+    if settings.enabled != Some(true) {
+        return Ok(());
+    }
+    let first = u64::from(settings.initial_iteration.unwrap_or(1).max(1));
+    let interval = u64::from(settings.interval_iterations.unwrap_or(1).max(1));
+    if result.iterations < first || !(result.iterations - first).is_multiple_of(interval) {
+        return Ok(());
+    }
+    let root = output_dir.join("checkpoints");
+    let generation = format!("iteration-{:010}", result.iterations);
+    let destination = root.join(&generation);
+    if destination.exists() {
+        return Ok(());
+    }
+    let pending = root.join(format!(".{generation}.pending"));
+    let io = |e: std::io::Error| OutputError::io(&pending, e);
+    std::fs::create_dir_all(&root).map_err(io)?;
+    if pending.exists() {
+        std::fs::remove_dir_all(&pending).map_err(io)?;
+    }
+    std::fs::create_dir(&pending).map_err(io)?;
+    let mut snapshot = result.clone();
+    if settings.store_basis != Some(true) {
+        snapshot.basis_cache.clear();
+    }
+    write_checkpoint_with_fcf(
+        &pending.join("policy"),
+        setup,
+        fcf,
+        system,
+        &snapshot,
+        &CheckpointParams {
+            max_iterations: setup.loop_params.max_iterations,
+            forward_passes: setup.loop_params.forward_passes,
+            seed: setup.loop_params.seed,
+            export_states: false,
+        },
+    )?;
+    std::fs::write(
+        pending.join("checkpoint.json"),
+        format!(
+            "{{\"schema\":\"cobre-checkpoint/v1\",\"completed_iterations\":{}}}\n",
+            result.iterations
+        ),
+    )
+    .map_err(io)?;
+    std::fs::rename(&pending, &destination).map_err(io)?;
+    Ok(())
 }
 
 #[cfg(test)]

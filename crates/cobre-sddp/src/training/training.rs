@@ -358,6 +358,10 @@ pub type CheckpointCallback<'a> =
     dyn FnMut(&FutureCostFunction, &TrainingResult) -> Result<(), SddpError> + 'a;
 
 /// Train without changing convergence history, optionally persisting each completed iteration.
+///
+/// # Errors
+///
+/// Propagates setup and communication failures; a mid-run failure is retained in the outcome.
 #[allow(clippy::too_many_arguments)]
 pub fn train_with_checkpoint<S, C: Communicator>(
     solver: &mut S,
@@ -393,10 +397,10 @@ where
     for iteration in session.iteration_range() {
         match session.run_iteration(iteration) {
             Ok(outcome) => {
-                if let Some(callback) = checkpoint.as_deref_mut() {
-                    if let Err(error) = session.checkpoint(callback) {
-                        return Ok(session.finalize_with_error(error));
-                    }
+                if let Some(callback) = checkpoint.as_deref_mut()
+                    && let Err(error) = session.checkpoint(callback)
+                {
+                    return Ok(session.finalize_with_error(error));
                 }
                 if !matches!(outcome, IterationOutcome::Continue) {
                     break;

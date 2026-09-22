@@ -358,8 +358,18 @@ impl Study {
                 apply_training_policy_mode(setup, system, config, &output_dir, &case_dir)?;
 
                 let (training, callback_error) = match on_iteration {
-                    Some(callback) => run_training_phase_py_streaming(setup, n, callback)?,
-                    None => (run_training_phase_py(setup, n)?, None),
+                    Some(callback) => run_training_phase_py_streaming(
+                        setup,
+                        n,
+                        system,
+                        config,
+                        &output_dir,
+                        callback,
+                    )?,
+                    None => (
+                        run_training_phase_py(setup, n, system, config, &output_dir)?,
+                        None,
+                    ),
                 };
 
                 write_training_artifacts(

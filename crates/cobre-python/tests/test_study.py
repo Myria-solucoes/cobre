@@ -577,3 +577,43 @@ def test_study_summary_properties_match_run_result(tmp_path: pathlib.Path) -> No
     assert study.provenance == study.provenance, (
         "repeated access to Study.provenance must return equal dicts"
     )
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_periodic_checkpoint_can_resume_python_training(tmp_path, streaming):
+    """Both event paths persist a complete iteration that a new Study can load."""
+    import shutil
+
+    import cobre
+
+    output = tmp_path / "full"
+    overrides = {
+        "training.stopping_rules": [{"type": "iteration_limit", "limit": 4}],
+        "policy.checkpointing.enabled": True,
+        "policy.checkpointing.initial_iteration": 1,
+        "policy.checkpointing.interval_iterations": 1,
+        "simulation.enabled": False,
+    }
+    study = cobre.Study(VALID_CASE, output_dir=str(output), config_overrides=overrides)
+    events = []
+
+    def collect(event):
+        events.append(event)
+        return False
+
+    study.train(on_iteration=collect if streaming else None)
+    if streaming:
+        assert events
+    saved = output / "checkpoints/iteration-0000000002"
+    assert json.loads((saved / "checkpoint.json").read_text())["completed_iterations"] == 2
+    assert (saved / "policy/manifest.bin").is_file()
+    assert not (output / "checkpoints/.iteration-0000000002.pending").exists()
+
+    resumed = tmp_path / "resumed"
+    shutil.copytree(saved / "policy", resumed / "policy")
+    overrides["policy.mode"] = "resume"
+    cobre.Study(VALID_CASE, output_dir=str(resumed), config_overrides=overrides).train()
+    full_metadata = _read_training_metadata(output)
+    resumed_metadata = _read_training_metadata(resumed)
+    assert resumed_metadata["iterations"]["completed"] == 4
+    assert resumed_metadata["bounds"]["final_lower_bound"] == full_metadata["bounds"]["final_lower_bound"]

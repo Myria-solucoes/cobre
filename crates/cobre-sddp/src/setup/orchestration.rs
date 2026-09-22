@@ -30,8 +30,12 @@ use super::{SimulationEnumeratedRequest, StudySetup, Traversal};
 use crate::build_training_output;
 use crate::simulate;
 
+type StudyCheckpointCallback<'a> = dyn FnMut(&StudySetup, &crate::FutureCostFunction, &TrainingResult) -> Result<(), SddpError>
+    + 'a;
+
 impl StudySetup {
     /// Number of iterations restored from the input policy.
+    #[must_use]
     pub fn start_iteration(&self) -> u64 {
         self.loop_params.start_iteration
     }
@@ -73,6 +77,10 @@ impl StudySetup {
     }
 
     /// Train with a synchronous checkpoint writer without restarting the loop.
+    ///
+    /// # Errors
+    ///
+    /// Propagates training, communication and checkpoint-writer failures.
     #[allow(clippy::too_many_arguments)]
     pub fn train_checkpointed<S, C: Communicator>(
         &mut self,
@@ -81,6 +89,7 @@ impl StudySetup {
         n_threads: usize,
         solver_factory: impl Fn() -> Result<S, SolverError>,
         event_sender: Option<Sender<TrainingEvent>>,
+        shutdown_flag: Option<&Arc<AtomicBool>>,
         checkpoint: &mut dyn FnMut(
             &StudySetup,
             &crate::FutureCostFunction,
@@ -102,7 +111,7 @@ impl StudySetup {
             n_threads,
             solver_factory,
             event_sender,
-            None,
+            shutdown_flag,
             profiles,
             Some(checkpoint),
         )
@@ -157,13 +166,7 @@ impl StudySetup {
         event_sender: Option<Sender<TrainingEvent>>,
         shutdown_flag: Option<&Arc<AtomicBool>>,
         solver_profiles: SolverProfiles,
-        mut checkpoint: Option<
-            &mut dyn FnMut(
-                &StudySetup,
-                &crate::FutureCostFunction,
-                &TrainingResult,
-            ) -> Result<(), SddpError>,
-        >,
+        mut checkpoint: Option<&mut StudyCheckpointCallback<'_>>,
     ) -> Result<TrainingOutcome, SddpError>
     where
         S: SolverInterface<Profile = ActiveProfile> + Send,

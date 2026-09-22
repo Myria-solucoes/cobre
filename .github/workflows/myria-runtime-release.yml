@@ -1,6 +1,6 @@
 name: Release Myria runtime
 
-# Produces the two immutable artifacts consumed by Myria's Cobre worker:
+# Produces matching immutable artifacts for both Linux architectures:
 # the Linux CLI archive used on OCI and the matching Python wheel used by the
 # bridge/validation worker.  This intentionally does not publish to PyPI.
 on:
@@ -13,7 +13,7 @@ on:
       prerelease:
         description: Publish an opt-in preview without changing the latest release
         type: boolean
-        default: false
+        default: true
 
       validate_only:
         description: Validate an existing optimized release without publishing artifacts
@@ -26,8 +26,20 @@ permissions:
 jobs:
   release:
     if: ${{ !inputs.validate_only }}
-    name: Build Linux runtime artifacts
-    runs-on: ubuntu-24.04
+    name: Build and validate Linux runtime (${{ matrix.arch }})
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+            manylinux: "2_34"
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+            manylinux: "2_28"
+    runs-on: ${{ matrix.runner }}
     env:
       CARGO_INCREMENTAL: 0
       CARGO_NET_RETRY: 10
@@ -46,20 +58,24 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake
 
       - name: Validate native affinity and checkpoint integration
-        run: cargo test --locked -p cobre-comm --features affinity && cargo test --locked -p cobre-cli --test cli_run --test cli_run_affinity
+        run: |
+          cargo test --locked -p cobre-comm --features affinity
+          cargo test --locked -p cobre-sddp --lib convergence::risk_measure
+          cargo test --locked -p cobre-sddp --features test-support --test mpi_wire progressive
+          cargo test --locked -p cobre-cli --test cli_run --test cli_run_affinity
 
       - name: Build CLI archive
         run: |
           cargo build --release -p cobre-cli
           mkdir -p dist/cli
           cp target/release/cobre dist/cli/cobre
-          tar --create --xz --file dist/cobre-cli-x86_64-unknown-linux-gnu.tar.xz \
+          tar --create --xz --file dist/cobre-cli-${{ matrix.arch }}-unknown-linux-gnu.tar.xz \
             --directory dist/cli cobre
 
       - uses: PyO3/maturin-action@v1
         with:
-          target: x86_64-unknown-linux-gnu
-          manylinux: "2_34"
+          target: ${{ matrix.arch }}-unknown-linux-gnu
+          manylinux: ${{ matrix.manylinux }}
           args: --release --out dist
           working-directory: crates/cobre-python
           before-script-linux: |
@@ -75,13 +91,39 @@ jobs:
       - name: Validate matching CLI and wheel
         run: |
           python -m pip install --no-deps dist/*.whl
+          python -m pip install pytest numpy pyarrow
           python scripts/benchmarks/verify_runtime.py --cli dist/cli/cobre --case examples/4ree
+          python -m pytest -q crates/cobre-python/tests/test_study.py crates/cobre-python/tests/test_affinity_parity.py --require-cli-binary
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runtime-${{ matrix.arch }}
+          path: |
+            dist/*.tar.xz
+            dist/*.whl
+
+  publish:
+    if: ${{ !inputs.validate_only }}
+    needs: release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+      PRERELEASE: ${{ inputs.prerelease }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: runtime-*
+          merge-multiple: true
+          path: dist
       - name: Publish immutable GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          test "$(find dist -maxdepth 1 -name '*.whl' | wc -l)" -eq 1
+          test "$(find dist -maxdepth 1 -name '*.whl' | wc -l)" -eq 2
+          test "$(find dist -maxdepth 1 -name '*.tar.xz' | wc -l)" -eq 2
+          sha256sum dist/* > dist/SHA256SUMS
           release_options=()
           if [[ "$PRERELEASE" == "true" ]]; then
             release_options+=(--prerelease --latest=false)
@@ -89,9 +131,8 @@ jobs:
           gh release create "$RELEASE_TAG" "${release_options[@]}" \
             --target "$GITHUB_SHA" \
             --title "Myria Cobre runtime ${RELEASE_TAG#v}" \
-            --notes "Pinned Myria runtime built from ${GITHUB_SHA}." \
-            dist/cobre-cli-x86_64-unknown-linux-gnu.tar.xz \
-            dist/*.whl
+            --notes "Pinned Myria runtime built from ${GITHUB_SHA}. CLI and Python artifacts validated on native Linux x86_64 and ARM64." \
+            dist/*.tar.xz dist/*.whl dist/SHA256SUMS
 
   validate:
     if: ${{ inputs.validate_only }}
@@ -136,5 +177,6 @@ jobs:
           PY
           tar -xJf "dist/cobre-cli-${ARTIFACT_ARCH}-unknown-linux-gnu.tar.xz" -C dist
           python -m pip install --no-deps dist/*.whl
+          python -m pip install pytest numpy pyarrow
       - name: Exercise CLI and Python runtime
         run: python scripts/benchmarks/verify_runtime.py --cli dist/cobre --case release-source/examples/4ree

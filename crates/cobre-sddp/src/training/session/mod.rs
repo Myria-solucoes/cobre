@@ -632,7 +632,7 @@ where
             r.final_gap,
             r.completed_iterations,
             "checkpoint".into(),
-            r.start_time.elapsed().as_millis() as u64,
+            u64::try_from(r.start_time.elapsed().as_millis()).unwrap_or(u64::MAX),
             broadcast_basis_cache(&self.basis_store, self.comm)?,
             Vec::new(),
             None,

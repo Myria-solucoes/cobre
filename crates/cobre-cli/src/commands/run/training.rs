@@ -100,7 +100,21 @@ pub(super) fn run_training_phase(
 
     let mut checkpoint =
         |setup: &StudySetup, fcf: &cobre_sddp::FutureCostFunction, result: &TrainingResult| {
-            write_periodic_checkpoint(ctx, setup, fcf, system, config, result)
+            if !ctx.is_root {
+                return Ok(());
+            }
+            let Some(config) = config else {
+                return Ok(());
+            };
+            cobre_sddp::policy::orchestration::write_periodic_checkpoint(
+                &ctx.output_dir,
+                setup,
+                fcf,
+                system,
+                config,
+                result,
+            )
+            .map_err(|error| SddpError::Validation(format!("checkpoint write: {error}")))
         };
     let training_outcome = match setup.train_checkpointed(
         &mut solver,
@@ -108,6 +122,7 @@ pub(super) fn run_training_phase(
         ctx.n_threads,
         solver_factory,
         Some(event_tx),
+        None,
         &mut checkpoint,
     ) {
         Ok(outcome) => outcome,
@@ -275,71 +290,4 @@ pub(super) fn run_training_phase(
         output: training_output,
         error: training_outcome.error,
     })
-}
-
-/// A generation becomes visible only after its complete native policy is written.
-fn write_periodic_checkpoint(
-    ctx: &RunContext<impl Communicator>,
-    setup: &StudySetup,
-    fcf: &cobre_sddp::FutureCostFunction,
-    system: &cobre_core::System,
-    config: Option<&cobre_io::Config>,
-    result: &TrainingResult,
-) -> Result<(), SddpError> {
-    if !ctx.is_root {
-        return Ok(());
-    }
-    let Some(config) = config else {
-        return Ok(());
-    };
-    let settings = &config.policy.checkpointing;
-    if settings.enabled != Some(true) {
-        return Ok(());
-    }
-    let first = u64::from(settings.initial_iteration.unwrap_or(1).max(1));
-    let interval = u64::from(settings.interval_iterations.unwrap_or(1).max(1));
-    if result.iterations < first || (result.iterations - first) % interval != 0 {
-        return Ok(());
-    }
-    let root = ctx.output_dir.join("checkpoints");
-    let generation = format!("iteration-{:010}", result.iterations);
-    let destination = root.join(&generation);
-    if destination.exists() {
-        return Ok(());
-    }
-    let pending = root.join(format!(".{generation}.pending"));
-    let io = |e: std::io::Error| SddpError::Validation(format!("checkpoint I/O: {e}"));
-    std::fs::create_dir_all(&root).map_err(io)?;
-    if pending.exists() {
-        std::fs::remove_dir_all(&pending).map_err(io)?;
-    }
-    std::fs::create_dir(&pending).map_err(io)?;
-    let mut snapshot = result.clone();
-    if settings.store_basis != Some(true) {
-        snapshot.basis_cache.clear();
-    }
-    cobre_sddp::policy::orchestration::write_checkpoint_with_fcf(
-        &pending.join("policy"),
-        setup,
-        fcf,
-        system,
-        &snapshot,
-        &cobre_sddp::policy::orchestration::CheckpointParams {
-            max_iterations: setup.loop_params.max_iterations,
-            forward_passes: setup.loop_params.forward_passes,
-            seed: setup.loop_params.seed,
-            export_states: false,
-        },
-    )
-    .map_err(|e| SddpError::Validation(format!("checkpoint write: {e}")))?;
-    std::fs::write(
-        pending.join("checkpoint.json"),
-        format!(
-            "{{\"schema\":\"cobre-checkpoint/v1\",\"completed_iterations\":{}}}\n",
-            result.iterations
-        ),
-    )
-    .map_err(io)?;
-    std::fs::rename(&pending, &destination).map_err(io)?;
-    Ok(())
 }

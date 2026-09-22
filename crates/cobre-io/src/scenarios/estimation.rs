@@ -260,7 +260,7 @@ fn run_estimation(
     )?;
 
     let inflow_models = assemble_with_stationarity_fallback(
-        seasonal_stats_to_rows(&seasonal_stats, stages),
+        &seasonal_stats_to_rows(&seasonal_stats, stages),
         &mut ar_estimates,
         stages,
         season_map,
@@ -356,7 +356,7 @@ fn run_partial_estimation(
     stats_rows.extend(prestudy_seasonal_rows(&fitting_stats, &prestudy));
     stats_rows.sort_by_key(|r| (r.hydro_id.0, r.stage_id));
     let inflow_models = assemble_with_stationarity_fallback(
-        stats_rows,
+        &stats_rows,
         &mut ar_estimates,
         stages,
         season_map,
@@ -391,7 +391,7 @@ fn run_partial_estimation(
 /// estimation report so Python validation, the CLI and output artifacts can
 /// tell the user that an approximation was applied.
 fn assemble_with_stationarity_fallback(
-    stats_rows: Vec<InflowSeasonalStatsRow>,
+    stats_rows: &[InflowSeasonalStatsRow],
     estimates: &mut [ArCoefficientEstimate],
     stages: &[Stage],
     season_map: Option<&SeasonMap>,
@@ -403,7 +403,7 @@ fn assemble_with_stationarity_fallback(
     for _ in 0..max_repairs {
         let coeff_rows = ar_estimates_to_rows(estimates, stages);
         let annual_rows = ar_estimates_to_annual_rows(estimates, stages);
-        let mut models = assemble_inflow_models(stats_rows.clone(), coeff_rows, annual_rows)?;
+        let mut models = assemble_inflow_models(stats_rows.to_vec(), coeff_rows, annual_rows)?;
         match populate_derived_residual_ratios(&mut models, &stage_to_season, n_seasons) {
             Ok(()) => {
                 refresh_report_after_stationarity_fallback(estimates, n_seasons, report);
@@ -519,10 +519,11 @@ fn refresh_report_after_stationarity_fallback(
             .filter(|estimate| estimate.hydro_id == *hydro_id)
         {
             if estimate.season_id < n_seasons {
-                coefficients[estimate.season_id] = estimate.coefficients.clone();
+                coefficients[estimate.season_id].clone_from(&estimate.coefficients);
             }
         }
-        entry.selected_order = coefficients.iter().map(Vec::len).max().unwrap_or(0) as u32;
+        entry.selected_order =
+            u32::try_from(coefficients.iter().map(Vec::len).max().unwrap_or(0)).unwrap_or(u32::MAX);
         entry.coefficients = coefficients;
     }
 }

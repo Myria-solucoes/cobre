@@ -381,6 +381,9 @@ fn build_training_phase_result(
 pub(crate) fn run_training_phase_py(
     setup: &mut StudySetup,
     n_threads: usize,
+    system: &System,
+    config: &Config,
+    output_dir: &Path,
 ) -> Result<TrainingPhaseResult, PhaseError> {
     let started_at = now_iso8601();
     let mut solver = ActiveSolver::new().map_err(|e| {
@@ -390,14 +393,21 @@ pub(crate) fn run_training_phase_py(
         )
     })?;
     let (event_tx, event_rx) = mpsc::channel();
+    let mut checkpoint = |setup: &StudySetup, fcf: &FutureCostFunction, result: &TrainingResult| {
+        cobre_sddp::policy::orchestration::write_periodic_checkpoint(
+            output_dir, setup, fcf, system, config, result,
+        )
+        .map_err(|error| SddpError::Validation(format!("checkpoint write: {error}")))
+    };
     let training_outcome = setup
-        .train(
+        .train_checkpointed(
             &mut solver,
             &LocalBackend,
             n_threads,
             ActiveSolver::new,
             Some(event_tx),
             None,
+            &mut checkpoint,
         )
         .map_err(|e| PhaseError::Sddp {
             message: format!("{TRAINING_ERROR_PREFIX}: {e}"),
@@ -434,6 +444,9 @@ pub(crate) fn run_training_phase_py(
 pub(crate) fn run_training_phase_py_streaming(
     setup: &mut StudySetup,
     n_threads: usize,
+    system: &System,
+    config: &Config,
+    output_dir: &Path,
     on_iteration: Py<PyAny>,
 ) -> Result<(TrainingPhaseResult, Option<PyErr>), PhaseError> {
     let started_at = now_iso8601();
@@ -450,13 +463,20 @@ pub(crate) fn run_training_phase_py_streaming(
     let drain_handle =
         std::thread::spawn(move || drain_training_events(&event_rx, &drain_flag, &on_iteration));
 
-    let training_outcome = setup.train(
+    let mut checkpoint = |setup: &StudySetup, fcf: &FutureCostFunction, result: &TrainingResult| {
+        cobre_sddp::policy::orchestration::write_periodic_checkpoint(
+            output_dir, setup, fcf, system, config, result,
+        )
+        .map_err(|error| SddpError::Validation(format!("checkpoint write: {error}")))
+    };
+    let training_outcome = setup.train_checkpointed(
         &mut solver,
         &LocalBackend,
         n_threads,
         ActiveSolver::new,
         Some(event_tx),
         Some(&shutdown_flag),
+        &mut checkpoint,
     );
 
     // The channel is already closed: `event_tx` was moved into `setup.train`,

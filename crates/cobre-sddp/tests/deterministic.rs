@@ -11497,7 +11497,7 @@ mod enumerated_cvar_gap {
             }
             assert_eq!(counts, expected);
             for (index, count) in expected.iter().enumerate() {
-                let solves: u64 = outcome
+                let lp_count: u64 = outcome
                     .result
                     .solver_stats_log
                     .iter()
@@ -11505,7 +11505,7 @@ mod enumerated_cvar_gap {
                     .map(|row| row.delta.lp_solves)
                     .sum();
                 assert_eq!(
-                    solves,
+                    lp_count,
                     u64::from(*count) * 2,
                     "inactive trajectories were solved"
                 );

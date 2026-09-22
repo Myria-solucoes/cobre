@@ -27,6 +27,8 @@ def configure(case, dynamic):
          'max_added_per_round': 2, 'adaptive_max_added_per_round': 8}
         if dynamic else {'method': 'lml1', 'check_frequency': 1})}
     config['simulation'] = {'enabled': False}
+    config['policy'] = {'mode': 'fresh', 'checkpointing': {
+        'enabled': True, 'initial_iteration': 1, 'interval_iterations': 1}}
     config_path.write_text(json.dumps(config, indent=2) + '\n')
     stages_path = case / 'stages.json'
     stages = json.loads(stages_path.read_text())
@@ -65,6 +67,10 @@ def main():
                 assert result['iterations'] == 4, result
                 assert math.isclose(result['lower_bound'], cli_lb, rel_tol=1e-8), (result, cli_lb)
             assert py_results[0]['lower_bound'] == py_results[1]['lower_bound'], py_results
+            for output in [cli_output, *(root / f'{case.name}-py-{n}' for n in (1, 2))]:
+                saved = output / 'checkpoints/iteration-0000000002'
+                assert (saved / 'policy/manifest.bin').is_file(), saved
+                assert json.loads((saved / 'checkpoint.json').read_text())['completed_iterations'] == 2
             invalid_training = json.loads((case / 'config.json').read_text())['training']
             invalid_training['forward_schedule']['initial_passes'] = 9
             invalid = cobre.io.validate(str(case), config_overrides={'training': invalid_training})

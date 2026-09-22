@@ -1296,6 +1296,19 @@ fn progressive_forward_checkpoint_resumes_before_refinement() {
     check_checkpoint_resume(true, true);
 }
 
+fn copy_tree(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.path().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
 fn check_checkpoint_resume(selected: bool, progressive: bool) {
     let dir = TempDir::new().unwrap();
     make_valid_case(dir.path(), None, None, None, None);
@@ -1347,18 +1360,6 @@ fn check_checkpoint_resume(selected: bool, progressive: bool) {
             .exists()
     );
     let resumed = TempDir::new().unwrap();
-    fn copy_tree(from: &Path, to: &Path) {
-        fs::create_dir_all(to).unwrap();
-        for entry in fs::read_dir(from).unwrap() {
-            let entry = entry.unwrap();
-            let target = to.join(entry.file_name());
-            if entry.path().is_dir() {
-                copy_tree(&entry.path(), &target);
-            } else {
-                fs::copy(entry.path(), target).unwrap();
-            }
-        }
-    }
     copy_tree(&saved.join("policy"), &resumed.path().join("policy"));
     config["policy"]["mode"] = "resume".into();
     write_file(dir.path(), "config.json", &config.to_string());

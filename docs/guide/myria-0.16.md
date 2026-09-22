@@ -20,7 +20,8 @@ the Myria build by its immutable release tag, source commit and artifact SHA-256
   work units retain independent solver history.
 - Optional complete-state deduplication, audited backward-point selection,
   progressive forward populations and fixed cross-point basis groups are retained.
-- Periodic atomic checkpoints, completed-training resume and the separate
+- Periodic atomic checkpoints work in the CLI and both Python training paths
+  (including iteration callbacks). Completed-training CLI resume and the separate
   `lb_stability_v1` diagnostic remain available. The diagnostic is not a stopping rule.
 - CLI `--cpu-bind none|core|numa` and Python `cpu_bind` expose the same optional
   Linux worker-affinity policy, inherited-CPU-set restrictions and placement metadata.
@@ -55,3 +56,6 @@ mixed CVaR, progressive population, audited point selection, grouped bases,
 and both frozen and dynamic cut selection. Linux x86_64 and ARM64 artifacts are
 validated independently. All outputs are temporary and separate from an installed
 Myria runtime. Release provenance and test results accompany the build report.
+
+See the [integration validation report](myria-0.16-validation.md) for the local
+results, reproduced upstream failures and remaining operational checks.
