@@ -3361,13 +3361,16 @@ mod tests {
         );
 
         // The four tail-appended integrated-productivity and stored-energy-power
-        // columns round-trip as non-nullable Float64.
+        // columns round-trip as non-nullable Float64, at their declared tail
+        // positions — CLI and Python write through this one shared writer
+        // (python_parity_script_passes), so a reordered column would mislabel
+        // both front ends' output identically.
         let schema = batch.schema();
-        for col in [
-            "integrated_equivalent_productivity_mw_per_m3s",
-            "integrated_accumulated_productivity_mw_per_m3s",
-            "stored_energy_initial_mw",
-            "stored_energy_final_mw",
+        for (col, expected_index) in [
+            ("integrated_equivalent_productivity_mw_per_m3s", 37),
+            ("integrated_accumulated_productivity_mw_per_m3s", 38),
+            ("stored_energy_initial_mw", 39),
+            ("stored_energy_final_mw", 40),
         ] {
             let field = schema
                 .field_with_name(col)
@@ -3378,6 +3381,11 @@ mod tests {
                 "{col} must be Float64"
             );
             assert!(!field.is_nullable(), "{col} must be non-nullable");
+            assert_eq!(
+                schema.index_of(col).expect("column must exist"),
+                expected_index,
+                "{col} must sit at its declared tail position"
+            );
         }
         let read_f64 = |col: &str| -> f64 {
             batch
@@ -3576,6 +3584,25 @@ mod tests {
             read_f64("stored_energy_final_mwh"),
             1240.0,
             "stored_energy_final_mwh must round-trip"
+        );
+
+        // The moved pair sits at its mid-schema position — CLI and Python write
+        // through this one shared writer (python_parity_script_passes), so a
+        // reordered column would mislabel both front ends' output identically.
+        let schema = batch.schema();
+        assert_eq!(
+            schema
+                .index_of("stored_energy_initial_mwh")
+                .expect("column must exist"),
+            20,
+            "stored_energy_initial_mwh must sit at its declared mid-schema position"
+        );
+        assert_eq!(
+            schema
+                .index_of("stored_energy_final_mwh")
+                .expect("column must exist"),
+            21,
+            "stored_energy_final_mwh must sit at its declared mid-schema position"
         );
     }
 

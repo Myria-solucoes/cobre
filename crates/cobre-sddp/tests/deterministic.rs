@@ -12026,3 +12026,388 @@ mod security_curve_integrated_productivity_equivalence {
         assert_eq!(h1_int.to_bits(), HYDRO1_OVERRIDE_RHO_EQ.to_bits());
     }
 }
+
+/// The six simulation-output hydro columns the parity hash deliberately
+/// excludes (`tests/common/parity_hash.rs`'s module doc) — the four
+/// integrated-grid/stored-energy-power columns and the moved
+/// `stored_energy_{initial,final}_mwh` pair — must still be declaration-order
+/// invariant and run-to-run reproducible, exactly like every hashed column.
+/// The fixture's VHA-geometry hydro gives the gate power: its integrated
+/// productivity genuinely differs from its reference-point productivity, so a
+/// permutation that left the two coincidentally equal could not hide a bug.
+mod stored_energy_columns_determinism {
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use arrow::array::{Float64Array, Int32Array};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use parquet::arrow::ArrowWriter;
+
+    use cobre_core::scenario::ScenarioSource;
+    use cobre_io::config::SimulationSelection;
+    use cobre_sddp::hydro_models::prepare_hydro_models;
+    use cobre_sddp::setup::prepare_stochastic;
+    use cobre_sddp::{SimulationHydroResult, SimulationScenarioResult};
+
+    use crate::common::permute::permute_case;
+    use crate::common::{build_setup_for_case, run_simulation};
+
+    /// Fixed seed for the declaration-order-invariance probe, matching the
+    /// sibling `nonzero_stage_fpha_override_regression` idiom.
+    const PERMUTATION_SEED: u64 = 20_260_922;
+
+    fn write_hydro_geometry(dest: &Path, rows: &[(i32, f64, f64, f64)]) {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("hydro_id", DataType::Int32, false),
+            Field::new("volume_hm3", DataType::Float64, false),
+            Field::new("height_m", DataType::Float64, false),
+            Field::new("area_km2", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(
+                    rows.iter().map(|r| r.0).collect::<Vec<_>>(),
+                )),
+                Arc::new(Float64Array::from(
+                    rows.iter().map(|r| r.1).collect::<Vec<_>>(),
+                )),
+                Arc::new(Float64Array::from(
+                    rows.iter().map(|r| r.2).collect::<Vec<_>>(),
+                )),
+                Arc::new(Float64Array::from(
+                    rows.iter().map(|r| r.3).collect::<Vec<_>>(),
+                )),
+            ],
+        )
+        .expect("valid RecordBatch for hydro_geometry");
+        let file = std::fs::File::create(dest).expect("create hydro_geometry.parquet");
+        let mut writer =
+            ArrowWriter::try_new(file, schema, None).expect("ArrowWriter for geometry");
+        writer.write(&batch).expect("write geometry batch");
+        writer.close().expect("close geometry writer");
+    }
+
+    fn write_seasonal_stats(
+        dest: &Path,
+        id_col: &str,
+        mean_col: &str,
+        std_col: &str,
+        rows: &[(i32, i32, f64, f64)],
+    ) {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(id_col, DataType::Int32, false),
+            Field::new("stage_id", DataType::Int32, false),
+            Field::new(mean_col, DataType::Float64, false),
+            Field::new(std_col, DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(
+                    rows.iter().map(|r| r.0).collect::<Vec<_>>(),
+                )),
+                Arc::new(Int32Array::from(
+                    rows.iter().map(|r| r.1).collect::<Vec<_>>(),
+                )),
+                Arc::new(Float64Array::from(
+                    rows.iter().map(|r| r.2).collect::<Vec<_>>(),
+                )),
+                Arc::new(Float64Array::from(
+                    rows.iter().map(|r| r.3).collect::<Vec<_>>(),
+                )),
+            ],
+        )
+        .expect("valid RecordBatch for seasonal stats");
+        let file = std::fs::File::create(dest).expect("create seasonal stats parquet");
+        let mut writer =
+            ArrowWriter::try_new(file, schema, None).expect("ArrowWriter for seasonal stats");
+        writer.write(&batch).expect("write seasonal stats batch");
+        writer.close().expect("close seasonal stats writer");
+    }
+
+    const CONFIG_JSON: &str = r#"{
+  "training": { "selection": { "method": "sampled", "forward_passes": 1 },
+    "stopping_rules": [ { "type": "iteration_limit", "limit": 10 } ] },
+  "simulation": { "enabled": false },
+  "modeling": { "inflow_non_negativity": { "method": "none" } }
+}"#;
+
+    const PENALTIES_JSON: &str = r#"{
+  "bus": { "deficit_segments": [ { "depth_mw": null, "cost": 1000.0 } ], "excess_cost": 0.01 },
+  "line": { "exchange_cost": 0.01 },
+  "hydro": {
+    "spillage_cost": 0.01, "turbined_cost": 0.01, "diversion_cost": 0.01,
+    "storage_violation_below_cost": 10000.0, "filling_target_violation_cost": 10000.0,
+    "turbined_violation_below_cost": 10000.0, "outflow_violation_below_cost": 10000.0,
+    "outflow_violation_above_cost": 10000.0, "generation_violation_below_cost": 10000.0,
+    "evaporation_violation_cost": 10000.0, "water_withdrawal_violation_cost": 10000.0
+  },
+  "non_controllable_source": { "curtailment_cost": 0.005 }
+}"#;
+
+    const STAGES_JSON: &str = r#"{
+  "policy_graph": { "type": "finite_horizon", "annual_discount_rate": 0.0 },
+  "stages": [
+    { "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
+      "blocks": [ { "id": 0, "name": "SINGLE", "hours": 730 } ], "num_openings": 1 },
+    { "id": 1, "start_date": "2024-02-01", "end_date": "2024-03-01",
+      "blocks": [ { "id": 0, "name": "SINGLE", "hours": 730 } ], "num_openings": 1 }
+  ]
+}"#;
+
+    const INITIAL_CONDITIONS_JSON: &str = r#"{
+  "storage": [
+    { "hydro_id": 0, "value_hm3": 500.0 },
+    { "hydro_id": 1, "value_hm3": 100.0 }
+  ],
+  "filling_storage": []
+}"#;
+
+    const BUSES_JSON: &str = r#"{
+  "buses": [
+    { "id": 0, "name": "B0", "operational_start_date": "2020-01-01",
+      "deficit_segments": [ { "depth_mw": null, "cost": 1000.0 } ] }
+  ]
+}"#;
+
+    const LINES_JSON: &str = r#"{ "lines": [] }"#;
+
+    const THERMALS_JSON: &str = r#"{
+  "thermals": [
+    { "id": 0, "name": "T0", "operational_start_date": "2020-01-01", "bus_id": 0,
+      "generation": { "min_mw": 0.0, "max_mw": 200.0 }, "cost_per_mwh": 50.0 }
+  ]
+}"#;
+
+    /// Hydro 0 carries the exactly-representable VHA range `[256, 1280]` and the
+    /// entity `ρ_esp = 0.125`, so its integrated equivalent productivity
+    /// (`ρ_esp * mean_height`) differs from its `ConstantProductivity`
+    /// reference-point value (`1.0`) — the fixture's "gate has power" property.
+    /// Hydro 1 carries no geometry (its two grids coincide); its only role is
+    /// giving the declaration-order permutation a second entity to reorder.
+    const HYDROS_JSON: &str = r#"{
+  "hydros": [
+    { "id": 0, "name": "H0", "operational_start_date": "2020-01-01", "downstream_id": null,
+      "reservoir": { "min_storage_hm3": 256.0, "max_storage_hm3": 1280.0 },
+      "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": 100.0 },
+      "generation": { "model": "constant_productivity", "min_turbined_m3s": 0.0,
+        "max_turbined_m3s": 100.0, "min_generation_mw": 0.0, "max_generation_mw": 100.0 },
+      "unit_groups": [ { "id": 0, "name": "H0", "bus_id": 0, "min_generation_mw": 0.0,
+        "max_generation_mw": 100.0, "min_turbined_m3s": 0.0, "max_turbined_m3s": 100.0 } ],
+      "specific_productivity_mw_per_m3s_per_m": 0.125 },
+    { "id": 1, "name": "H1", "operational_start_date": "2020-01-01", "downstream_id": null,
+      "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 500.0 },
+      "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": 80.0 },
+      "generation": { "model": "constant_productivity", "min_turbined_m3s": 0.0,
+        "max_turbined_m3s": 80.0, "min_generation_mw": 0.0, "max_generation_mw": 160.0 },
+      "unit_groups": [ { "id": 0, "name": "H1", "bus_id": 0, "min_generation_mw": 0.0,
+        "max_generation_mw": 160.0, "min_turbined_m3s": 0.0, "max_turbined_m3s": 80.0 } ] }
+  ]
+}"#;
+
+    const PRODUCTION_MODELS_JSON: &str = r#"{
+  "production_models": [
+    { "hydro_id": 0, "selection_mode": "stage_ranges", "stage_ranges": [
+      { "start_stage_id": 0, "end_stage_id": null, "model": "constant_productivity",
+        "productivity_mw_per_m3s": 1.0 } ] },
+    { "hydro_id": 1, "selection_mode": "stage_ranges", "stage_ranges": [
+      { "start_stage_id": 0, "end_stage_id": null, "model": "constant_productivity",
+        "productivity_mw_per_m3s": 2.0 } ] }
+  ]
+}"#;
+
+    /// Builds the fixture deck in a fresh `TempDir`: two `ConstantProductivity`
+    /// hydros on one bus, one carrying VHA geometry so its integrated grid
+    /// genuinely differs from its reference-point grid.
+    fn build_fixture() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tempdir must succeed");
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("system")).expect("create system dir");
+        std::fs::create_dir_all(root.join("scenarios")).expect("create scenarios dir");
+
+        std::fs::write(root.join("config.json"), CONFIG_JSON).expect("write config.json");
+        std::fs::write(root.join("penalties.json"), PENALTIES_JSON).expect("write penalties.json");
+        std::fs::write(root.join("stages.json"), STAGES_JSON).expect("write stages.json");
+        std::fs::write(
+            root.join("initial_conditions.json"),
+            INITIAL_CONDITIONS_JSON,
+        )
+        .expect("write initial_conditions.json");
+        std::fs::write(root.join("system/buses.json"), BUSES_JSON).expect("write buses.json");
+        std::fs::write(root.join("system/lines.json"), LINES_JSON).expect("write lines.json");
+        std::fs::write(root.join("system/thermals.json"), THERMALS_JSON)
+            .expect("write thermals.json");
+        std::fs::write(root.join("system/hydros.json"), HYDROS_JSON).expect("write hydros.json");
+        std::fs::write(
+            root.join("system/hydro_production_models.json"),
+            PRODUCTION_MODELS_JSON,
+        )
+        .expect("write hydro_production_models.json");
+
+        write_hydro_geometry(
+            &root.join("system/hydro_geometry.parquet"),
+            &[
+                (0, 256.0, 300.0, 1.0),
+                (0, 768.0, 340.0, 1.0),
+                (0, 1280.0, 348.0, 1.0),
+            ],
+        );
+
+        write_seasonal_stats(
+            &root.join("scenarios/inflow_seasonal_stats.parquet"),
+            "hydro_id",
+            "mean_m3s",
+            "std_m3s",
+            &[
+                (0, 0, 30.0, 0.0),
+                (0, 1, 20.0, 0.0),
+                (1, 0, 15.0, 0.0),
+                (1, 1, 10.0, 0.0),
+            ],
+        );
+        write_seasonal_stats(
+            &root.join("scenarios/load_seasonal_stats.parquet"),
+            "bus_id",
+            "mean_mw",
+            "std_mw",
+            &[(0, 0, 40.0, 0.0), (0, 1, 35.0, 0.0)],
+        );
+
+        tmp
+    }
+
+    /// Train + one-scenario-simulate `dir` and return the drained per-scenario
+    /// results — the same `build_setup_for_case`/`run_simulation` harness the
+    /// sibling permutation probe (`nonzero_stage_fpha_override_regression`) uses.
+    fn train_and_simulate(dir: &Path) -> Vec<SimulationScenarioResult> {
+        let config_path = dir.join("config.json");
+        let config = cobre_io::parse_config(&config_path).expect("config must parse");
+        let system = cobre_io::load_case(dir).expect("load_case must succeed");
+
+        let pr = prepare_stochastic(system, dir, &config, 42, &ScenarioSource::default(), None)
+            .expect("prepare_stochastic must succeed");
+        let system = pr.system;
+        let stochastic = pr.stochastic;
+
+        let hydro_models =
+            prepare_hydro_models(&system, dir, false).expect("prepare_hydro_models must succeed");
+
+        let mut config_with_sim = config.clone();
+        config_with_sim.simulation.enabled = true;
+        config_with_sim.simulation.selection =
+            Some(SimulationSelection::Sampled { num_scenarios: 1 });
+
+        let mut setup =
+            build_setup_for_case(dir, &config_with_sim, &system, stochastic, hydro_models);
+        run_simulation(&mut setup, 1)
+    }
+
+    /// Flattens every scenario's per-stage hydro rows (the stage aggregate row,
+    /// `block_id: None`, and each per-block row) into one canonically ordered
+    /// list — the comparison unit the assertions below key on.
+    fn sorted_hydro_rows(results: &[SimulationScenarioResult]) -> Vec<SimulationHydroResult> {
+        let mut rows: Vec<SimulationHydroResult> = results
+            .iter()
+            .flat_map(|s| &s.stages)
+            .flat_map(|stage| stage.hydros.iter().cloned())
+            .collect();
+        rows.sort_by_key(|h| (h.stage_id, h.block_id, h.hydro_id));
+        rows
+    }
+
+    /// Asserts `to_bits()` equality of the six parity-hash-excluded columns at
+    /// every `(hydro_id, stage_id, block_id)` key, between two comparably
+    /// ordered row lists.
+    fn assert_six_columns_bit_identical(
+        label: &str,
+        base: &[SimulationHydroResult],
+        other: &[SimulationHydroResult],
+    ) {
+        assert_eq!(base.len(), other.len(), "{label}: row count differs");
+        for (b, o) in base.iter().zip(other) {
+            assert_eq!(
+                (b.hydro_id, b.stage_id, b.block_id),
+                (o.hydro_id, o.stage_id, o.block_id),
+                "{label}: row key mismatch"
+            );
+            let key = format!(
+                "hydro {} stage {} block {:?}",
+                b.hydro_id, b.stage_id, b.block_id
+            );
+            assert_eq!(
+                b.integrated_equivalent_productivity_mw_per_m3s.to_bits(),
+                o.integrated_equivalent_productivity_mw_per_m3s.to_bits(),
+                "{label}: integrated_equivalent_productivity_mw_per_m3s differs at {key}"
+            );
+            assert_eq!(
+                b.integrated_accumulated_productivity_mw_per_m3s.to_bits(),
+                o.integrated_accumulated_productivity_mw_per_m3s.to_bits(),
+                "{label}: integrated_accumulated_productivity_mw_per_m3s differs at {key}"
+            );
+            assert_eq!(
+                b.stored_energy_initial_mw.to_bits(),
+                o.stored_energy_initial_mw.to_bits(),
+                "{label}: stored_energy_initial_mw differs at {key}"
+            );
+            assert_eq!(
+                b.stored_energy_final_mw.to_bits(),
+                o.stored_energy_final_mw.to_bits(),
+                "{label}: stored_energy_final_mw differs at {key}"
+            );
+            assert_eq!(
+                b.stored_energy_initial_mwh.to_bits(),
+                o.stored_energy_initial_mwh.to_bits(),
+                "{label}: stored_energy_initial_mwh differs at {key}"
+            );
+            assert_eq!(
+                b.stored_energy_final_mwh.to_bits(),
+                o.stored_energy_final_mwh.to_bits(),
+                "{label}: stored_energy_final_mwh differs at {key}"
+            );
+        }
+    }
+
+    /// Permuting hydro (and every other whitelisted registry's) declaration
+    /// order must not change the six parity-hash-excluded columns.
+    #[test]
+    fn declaration_order_is_invariant() {
+        let base_dir = build_fixture();
+        let permuted_dir = permute_case(base_dir.path(), PERMUTATION_SEED);
+
+        let base_rows = sorted_hydro_rows(&train_and_simulate(base_dir.path()));
+        let permuted_rows = sorted_hydro_rows(&train_and_simulate(permuted_dir.path()));
+
+        assert_six_columns_bit_identical(
+            "declaration-order permutation",
+            &base_rows,
+            &permuted_rows,
+        );
+
+        let h0_stage0 = base_rows
+            .iter()
+            .find(|h| h.hydro_id == 0 && h.stage_id == 0 && h.block_id == Some(0))
+            .expect("hydro 0 stage 0 block 0 present");
+        assert_ne!(
+            h0_stage0
+                .integrated_equivalent_productivity_mw_per_m3s
+                .to_bits(),
+            h0_stage0.equivalent_productivity_mw_per_m3s.to_bits(),
+            "fixture must exercise the integrated grid: hydro 0's integrated \
+             productivity must differ from its reference-point productivity"
+        );
+    }
+
+    /// Two fresh training + simulation runs over the SAME (unpermuted) deck must
+    /// produce `to_bits()`-identical values for the six columns — the
+    /// `clp_determinism.rs` fresh-instance idiom applied to the output layer.
+    #[test]
+    fn run_to_run_is_reproducible() {
+        let dir = build_fixture();
+        let run_a = sorted_hydro_rows(&train_and_simulate(dir.path()));
+        let run_b = sorted_hydro_rows(&train_and_simulate(dir.path()));
+
+        assert_six_columns_bit_identical("run-to-run reproducibility", &run_a, &run_b);
+    }
+}
