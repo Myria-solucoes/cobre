@@ -26,7 +26,7 @@ slow-tests = []
 test-support = ["cobre-core/test-support"]
 
 [dependencies]
-cobre-core = { version = "0.15.0", path = "../cobre-core" }
+cobre-core = { version = "0.16.0", path = "../cobre-core" }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 siphasher = "1"
 rand = "0.10"
@@ -38,7 +38,7 @@ tracing = "0.1"
 
 [dev-dependencies]
 chrono = "0.4"
-cobre-core = { version = "0.15.0", path = "../cobre-core", features = ["test-support"] }
+cobre-core = { version = "0.16.0", path = "../cobre-core", features = ["test-support"] }
 cobre-stochastic = { path = ".", features = ["test-support"] }
 proptest = "1"
 

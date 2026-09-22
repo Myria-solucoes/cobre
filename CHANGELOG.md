@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-09-22
+
 ### Added
 
 - **Two new simulation output columns publish the useful-range mean-evaluator
@@ -69,6 +71,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   running a phase. The same three reports were already returned as keys of
   `cobre.run.run`'s result dict; they are now reachable from the `Study`
   object too.
+
+- **`cobre.model.EnergyContract`, `cobre.model.PumpingStation` and
+  `cobre.model.NonControllableSource` now expose every declared attribute.**
+  Each previously carried only `id` and `name`. `EnergyContract` gains
+  `operational_start_date`, `bus_id`, `contract_type`, `entry_stage_id`,
+  `exit_stage_id`, `price_per_mwh`, `min_mw` and `max_mw`; `PumpingStation`
+  gains `operational_start_date`, `bus_id`, `source_hydro_id`,
+  `destination_hydro_id`, `entry_stage_id`, `exit_stage_id`,
+  `consumption_mw_per_m3s`, `min_flow_m3s` and `max_flow_m3s`;
+  `NonControllableSource` gains `operational_start_date`, `bus_id`,
+  `entry_stage_id`, `exit_stage_id`, `max_generation_mw`, `allow_curtailment`
+  and `curtailment_cost`.
 
 - **`cobre.errors.InternalError` completes the exception hierarchy the module's
   documentation described.** Software and environment faults raise
@@ -244,6 +258,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `LoadError::CrossReferenceError`; and the `resolution::load_factors` and
     `resolution::ncs_factors` module paths (`resolve_load_factors` and
     `resolve_ncs_factors` stay at `cobre_io::resolution`) are removed.
+    `ParquetWriterConfig` is removed and no longer a parameter of the
+    simulation and row-selection writers: Parquet encoding (Zstd level 3,
+    row groups of 100000 rows, dictionary encoding) is a fixed internal
+    setting; output bytes are unchanged.
   - `cobre-stochastic`: `ParValidationReport` and `ParWarning` are removed
     (`validate_par_parameters` returns only the fatal result); the three
     PAR-fitting entry points that took no season map are removed (call the
@@ -252,7 +270,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     key, as every run already did); and
     `StochasticError::SpectralDecompositionFailed`,
     `StochasticError::SeedDerivationError` and
-    `StochasticError::UnsupportedSamplingScheme` are removed.
+    `StochasticError::UnsupportedSamplingScheme` are removed. The per-method
+    point-generation spec structs (`tree::LhsPointSpec` and the Halton
+    counterpart) are unified into one `NoisePointSpec`, re-exported at the
+    crate root, whose `stage_id` field is renamed `stream_id`: forward-pass
+    producers pass the noise-group id there, opening-tree producers the stage
+    id.
 
 - **The out-of-sample forward draw no longer rebuilds per-draw sampling state for
   the Sobol, Halton and Latin-hypercube noise methods, and no longer allocates
@@ -330,7 +353,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `config_overrides={"simulation": {"enabled": False}}` to `cobre.run.run`, or
   construct a `Study` and call `train()` without `simulate()`.
 
-- **BREAKING — six unused or superseded Rust-API surfaces are removed from
+- **BREAKING — seven unused or superseded Rust-API surfaces are removed from
   `cobre-sddp` and `cobre-solver`.** No deck, output file, schema or
   checkpoint format changed:
   - `CutManagementConfig::warm_start_cuts` is removed; the field had no
@@ -348,6 +371,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `solve` and `unmark` functions and their `ClpSolver` wrappers — is
     removed. It guarded a basis-invalidation path that never fired; no
     solver behaviour changes.
+  - `StudySetup::set_budget` is removed; it had no caller. The active-cut
+    budget is set through `config.json`'s cut-management section as before.
 
 ### Fixed
 
@@ -3897,7 +3922,10 @@ disappears from `cobre.results.load_policy` per-cut dicts.
 
 <!-- next-url -->
 
-[Unreleased]: https://github.com/cobre-rs/cobre/compare/v0.14.2...HEAD
+[Unreleased]: https://github.com/cobre-rs/cobre/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/cobre-rs/cobre/compare/v0.15.0...v0.16.0
+[0.15.0]: https://github.com/cobre-rs/cobre/compare/v0.14.3...v0.15.0
+[0.14.3]: https://github.com/cobre-rs/cobre/compare/v0.14.2...v0.14.3
 [0.14.2]: https://github.com/cobre-rs/cobre/compare/v0.14.1...v0.14.2
 [0.14.1]: https://github.com/cobre-rs/cobre/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/cobre-rs/cobre/compare/v0.13.0...v0.14.0
