@@ -11461,12 +11461,12 @@ mod enumerated_cvar_gap {
 /// below the entity's physical range, and both productivity override columns.
 mod security_curve_integrated_productivity_equivalence {
     use std::path::Path;
+    use std::sync::Arc;
 
     use arrow::array::{Float64Array, Int32Array};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
     use parquet::arrow::ArrowWriter;
-    use std::sync::Arc;
 
     use cobre_sddp::{
         build_generic_constraint_echo_rows, hydro_models::prepare_hydro_models,
@@ -11474,38 +11474,7 @@ mod security_curve_integrated_productivity_equivalence {
     };
 
     use crate::common::build_setup_for_case;
-
-    fn write_hydro_geometry(dest: &Path, rows: &[(i32, f64, f64, f64)]) {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("hydro_id", DataType::Int32, false),
-            Field::new("volume_hm3", DataType::Float64, false),
-            Field::new("height_m", DataType::Float64, false),
-            Field::new("area_km2", DataType::Float64, false),
-        ]));
-        let batch = RecordBatch::try_new(
-            Arc::clone(&schema),
-            vec![
-                Arc::new(Int32Array::from(
-                    rows.iter().map(|r| r.0).collect::<Vec<_>>(),
-                )),
-                Arc::new(Float64Array::from(
-                    rows.iter().map(|r| r.1).collect::<Vec<_>>(),
-                )),
-                Arc::new(Float64Array::from(
-                    rows.iter().map(|r| r.2).collect::<Vec<_>>(),
-                )),
-                Arc::new(Float64Array::from(
-                    rows.iter().map(|r| r.3).collect::<Vec<_>>(),
-                )),
-            ],
-        )
-        .expect("valid RecordBatch for hydro_geometry");
-        let file = std::fs::File::create(dest).expect("create hydro_geometry.parquet");
-        let mut writer =
-            ArrowWriter::try_new(file, schema, None).expect("ArrowWriter for geometry");
-        writer.write(&batch).expect("write geometry batch");
-        writer.close().expect("close geometry writer");
-    }
+    use crate::common::parquet_fixtures::{write_hydro_geometry, write_seasonal_stats};
 
     /// `(hydro_id, stage_id, equivalent_productivity_mw_per_m3s override,
     /// specific_productivity_mw_per_m3s_per_m override)` — `reference_outflow_m3s`
@@ -11612,44 +11581,6 @@ mod security_curve_integrated_productivity_equivalence {
             ArrowWriter::try_new(file, schema, None).expect("ArrowWriter for constraint bounds");
         writer.write(&batch).expect("write constraint bounds batch");
         writer.close().expect("close constraint bounds writer");
-    }
-
-    fn write_seasonal_stats(
-        dest: &Path,
-        id_col: &str,
-        mean_col: &str,
-        std_col: &str,
-        rows: &[(i32, i32, f64, f64)],
-    ) {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new(id_col, DataType::Int32, false),
-            Field::new("stage_id", DataType::Int32, false),
-            Field::new(mean_col, DataType::Float64, false),
-            Field::new(std_col, DataType::Float64, false),
-        ]));
-        let batch = RecordBatch::try_new(
-            Arc::clone(&schema),
-            vec![
-                Arc::new(Int32Array::from(
-                    rows.iter().map(|r| r.0).collect::<Vec<_>>(),
-                )),
-                Arc::new(Int32Array::from(
-                    rows.iter().map(|r| r.1).collect::<Vec<_>>(),
-                )),
-                Arc::new(Float64Array::from(
-                    rows.iter().map(|r| r.2).collect::<Vec<_>>(),
-                )),
-                Arc::new(Float64Array::from(
-                    rows.iter().map(|r| r.3).collect::<Vec<_>>(),
-                )),
-            ],
-        )
-        .expect("valid RecordBatch for seasonal stats");
-        let file = std::fs::File::create(dest).expect("create seasonal stats parquet");
-        let mut writer =
-            ArrowWriter::try_new(file, schema, None).expect("ArrowWriter for seasonal stats");
-        writer.write(&batch).expect("write seasonal stats batch");
-        writer.close().expect("close seasonal stats writer");
     }
 
     const CONFIG_JSON: &str = r#"{
@@ -12037,12 +11968,6 @@ mod security_curve_integrated_productivity_equivalence {
 /// permutation that left the two coincidentally equal could not hide a bug.
 mod stored_energy_columns_determinism {
     use std::path::Path;
-    use std::sync::Arc;
-
-    use arrow::array::{Float64Array, Int32Array};
-    use arrow::datatypes::{DataType, Field, Schema};
-    use arrow::record_batch::RecordBatch;
-    use parquet::arrow::ArrowWriter;
 
     use cobre_core::scenario::ScenarioSource;
     use cobre_io::config::SimulationSelection;
@@ -12050,82 +11975,13 @@ mod stored_energy_columns_determinism {
     use cobre_sddp::setup::prepare_stochastic;
     use cobre_sddp::{SimulationHydroResult, SimulationScenarioResult};
 
+    use crate::common::parquet_fixtures::{write_hydro_geometry, write_seasonal_stats};
     use crate::common::permute::permute_case;
     use crate::common::{build_setup_for_case, run_simulation};
 
     /// Fixed seed for the declaration-order-invariance probe, matching the
     /// sibling `nonzero_stage_fpha_override_regression` idiom.
     const PERMUTATION_SEED: u64 = 20_260_922;
-
-    fn write_hydro_geometry(dest: &Path, rows: &[(i32, f64, f64, f64)]) {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("hydro_id", DataType::Int32, false),
-            Field::new("volume_hm3", DataType::Float64, false),
-            Field::new("height_m", DataType::Float64, false),
-            Field::new("area_km2", DataType::Float64, false),
-        ]));
-        let batch = RecordBatch::try_new(
-            Arc::clone(&schema),
-            vec![
-                Arc::new(Int32Array::from(
-                    rows.iter().map(|r| r.0).collect::<Vec<_>>(),
-                )),
-                Arc::new(Float64Array::from(
-                    rows.iter().map(|r| r.1).collect::<Vec<_>>(),
-                )),
-                Arc::new(Float64Array::from(
-                    rows.iter().map(|r| r.2).collect::<Vec<_>>(),
-                )),
-                Arc::new(Float64Array::from(
-                    rows.iter().map(|r| r.3).collect::<Vec<_>>(),
-                )),
-            ],
-        )
-        .expect("valid RecordBatch for hydro_geometry");
-        let file = std::fs::File::create(dest).expect("create hydro_geometry.parquet");
-        let mut writer =
-            ArrowWriter::try_new(file, schema, None).expect("ArrowWriter for geometry");
-        writer.write(&batch).expect("write geometry batch");
-        writer.close().expect("close geometry writer");
-    }
-
-    fn write_seasonal_stats(
-        dest: &Path,
-        id_col: &str,
-        mean_col: &str,
-        std_col: &str,
-        rows: &[(i32, i32, f64, f64)],
-    ) {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new(id_col, DataType::Int32, false),
-            Field::new("stage_id", DataType::Int32, false),
-            Field::new(mean_col, DataType::Float64, false),
-            Field::new(std_col, DataType::Float64, false),
-        ]));
-        let batch = RecordBatch::try_new(
-            Arc::clone(&schema),
-            vec![
-                Arc::new(Int32Array::from(
-                    rows.iter().map(|r| r.0).collect::<Vec<_>>(),
-                )),
-                Arc::new(Int32Array::from(
-                    rows.iter().map(|r| r.1).collect::<Vec<_>>(),
-                )),
-                Arc::new(Float64Array::from(
-                    rows.iter().map(|r| r.2).collect::<Vec<_>>(),
-                )),
-                Arc::new(Float64Array::from(
-                    rows.iter().map(|r| r.3).collect::<Vec<_>>(),
-                )),
-            ],
-        )
-        .expect("valid RecordBatch for seasonal stats");
-        let file = std::fs::File::create(dest).expect("create seasonal stats parquet");
-        let mut writer =
-            ArrowWriter::try_new(file, schema, None).expect("ArrowWriter for seasonal stats");
-        writer.write(&batch).expect("write seasonal stats batch");
-        writer.close().expect("close seasonal stats writer");
-    }
 
     const CONFIG_JSON: &str = r#"{
   "training": { "selection": { "method": "sampled", "forward_passes": 1 },
