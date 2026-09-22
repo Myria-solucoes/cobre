@@ -11456,3 +11456,573 @@ mod enumerated_cvar_gap {
         }
     }
 }
+
+/// In-code deck with real VHA geometry, an operative `hydro_bounds` ceiling
+/// below the entity's physical range, and both productivity override columns.
+mod security_curve_integrated_productivity_equivalence {
+    use std::path::Path;
+
+    use arrow::array::{Float64Array, Int32Array};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use parquet::arrow::ArrowWriter;
+    use std::sync::Arc;
+
+    use cobre_sddp::{
+        build_generic_constraint_echo_rows, hydro_models::prepare_hydro_models,
+        setup::prepare_stochastic,
+    };
+
+    use crate::common::build_setup_for_case;
+
+    fn write_hydro_geometry(dest: &Path, rows: &[(i32, f64, f64, f64)]) {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("hydro_id", DataType::Int32, false),
+            Field::new("volume_hm3", DataType::Float64, false),
+            Field::new("height_m", DataType::Float64, false),
+            Field::new("area_km2", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(
+                    rows.iter().map(|r| r.0).collect::<Vec<_>>(),
+                )),
+                Arc::new(Float64Array::from(
+                    rows.iter().map(|r| r.1).collect::<Vec<_>>(),
+                )),
+                Arc::new(Float64Array::from(
+                    rows.iter().map(|r| r.2).collect::<Vec<_>>(),
+                )),
+                Arc::new(Float64Array::from(
+                    rows.iter().map(|r| r.3).collect::<Vec<_>>(),
+                )),
+            ],
+        )
+        .expect("valid RecordBatch for hydro_geometry");
+        let file = std::fs::File::create(dest).expect("create hydro_geometry.parquet");
+        let mut writer =
+            ArrowWriter::try_new(file, schema, None).expect("ArrowWriter for geometry");
+        writer.write(&batch).expect("write geometry batch");
+        writer.close().expect("close geometry writer");
+    }
+
+    /// `(hydro_id, stage_id, equivalent_productivity_mw_per_m3s override,
+    /// specific_productivity_mw_per_m3s_per_m override)` — `reference_outflow_m3s`
+    /// stays `NULL` for every row (Q_ref override is out of this fixture's scope).
+    fn write_hydro_energy_productivity(dest: &Path, rows: &[(i32, i32, Option<f64>, Option<f64>)]) {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("hydro_id", DataType::Int32, false),
+            Field::new("stage_id", DataType::Int32, true),
+            Field::new(
+                "equivalent_productivity_mw_per_m3s",
+                DataType::Float64,
+                true,
+            ),
+            Field::new("reference_outflow_m3s", DataType::Float64, true),
+            Field::new(
+                "specific_productivity_mw_per_m3s_per_m",
+                DataType::Float64,
+                true,
+            ),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(
+                    rows.iter().map(|r| r.0).collect::<Vec<_>>(),
+                )),
+                Arc::new(Int32Array::from(
+                    rows.iter().map(|r| Some(r.1)).collect::<Vec<_>>(),
+                )),
+                Arc::new(Float64Array::from(
+                    rows.iter().map(|r| r.2).collect::<Vec<_>>(),
+                )),
+                Arc::new(Float64Array::from(vec![None::<f64>; rows.len()])),
+                Arc::new(Float64Array::from(
+                    rows.iter().map(|r| r.3).collect::<Vec<_>>(),
+                )),
+            ],
+        )
+        .expect("valid RecordBatch for hydro_energy_productivity");
+        let file = std::fs::File::create(dest).expect("create hydro_energy_productivity.parquet");
+        let mut writer = ArrowWriter::try_new(file, schema, None)
+            .expect("ArrowWriter for productivity override");
+        writer.write(&batch).expect("write productivity batch");
+        writer.close().expect("close productivity writer");
+    }
+
+    fn write_hydro_bounds_max_storage(
+        dest: &Path,
+        hydro_id: i32,
+        stage_id: i32,
+        max_storage_hm3: f64,
+    ) {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("hydro_id", DataType::Int32, false),
+            Field::new("stage_id", DataType::Int32, false),
+            Field::new("max_storage_hm3", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(vec![hydro_id])),
+                Arc::new(Int32Array::from(vec![stage_id])),
+                Arc::new(Float64Array::from(vec![max_storage_hm3])),
+            ],
+        )
+        .expect("valid RecordBatch for hydro_bounds");
+        let file = std::fs::File::create(dest).expect("create hydro_bounds.parquet");
+        let mut writer =
+            ArrowWriter::try_new(file, schema, None).expect("ArrowWriter for hydro bounds");
+        writer.write(&batch).expect("write hydro bounds batch");
+        writer.close().expect("close hydro bounds writer");
+    }
+
+    /// `(constraint_id, stage_id, bound_lower)` — `block_id` and `bound_upper`
+    /// stay `NULL` for every row; every constraint in this fixture is stage-level
+    /// and lower-bounded (or driven entirely by its own inline affine remainder).
+    fn write_generic_constraint_bounds(dest: &Path, rows: &[(i32, i32, Option<f64>)]) {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("constraint_id", DataType::Int32, false),
+            Field::new("stage_id", DataType::Int32, false),
+            Field::new("block_id", DataType::Int32, true),
+            Field::new("bound_lower", DataType::Float64, true),
+            Field::new("bound_upper", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(
+                    rows.iter().map(|r| r.0).collect::<Vec<_>>(),
+                )),
+                Arc::new(Int32Array::from(
+                    rows.iter().map(|r| r.1).collect::<Vec<_>>(),
+                )),
+                Arc::new(Int32Array::new_null(rows.len())),
+                Arc::new(Float64Array::from(
+                    rows.iter().map(|r| r.2).collect::<Vec<_>>(),
+                )),
+                Arc::new(Float64Array::new_null(rows.len())),
+            ],
+        )
+        .expect("valid RecordBatch for generic_constraint_bounds");
+        let file = std::fs::File::create(dest).expect("create generic_constraint_bounds.parquet");
+        let mut writer =
+            ArrowWriter::try_new(file, schema, None).expect("ArrowWriter for constraint bounds");
+        writer.write(&batch).expect("write constraint bounds batch");
+        writer.close().expect("close constraint bounds writer");
+    }
+
+    fn write_seasonal_stats(
+        dest: &Path,
+        id_col: &str,
+        mean_col: &str,
+        std_col: &str,
+        rows: &[(i32, i32, f64, f64)],
+    ) {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(id_col, DataType::Int32, false),
+            Field::new("stage_id", DataType::Int32, false),
+            Field::new(mean_col, DataType::Float64, false),
+            Field::new(std_col, DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(
+                    rows.iter().map(|r| r.0).collect::<Vec<_>>(),
+                )),
+                Arc::new(Int32Array::from(
+                    rows.iter().map(|r| r.1).collect::<Vec<_>>(),
+                )),
+                Arc::new(Float64Array::from(
+                    rows.iter().map(|r| r.2).collect::<Vec<_>>(),
+                )),
+                Arc::new(Float64Array::from(
+                    rows.iter().map(|r| r.3).collect::<Vec<_>>(),
+                )),
+            ],
+        )
+        .expect("valid RecordBatch for seasonal stats");
+        let file = std::fs::File::create(dest).expect("create seasonal stats parquet");
+        let mut writer =
+            ArrowWriter::try_new(file, schema, None).expect("ArrowWriter for seasonal stats");
+        writer.write(&batch).expect("write seasonal stats batch");
+        writer.close().expect("close seasonal stats writer");
+    }
+
+    const CONFIG_JSON: &str = r#"{
+  "training": { "selection": { "method": "sampled", "forward_passes": 1 },
+    "stopping_rules": [ { "type": "iteration_limit", "limit": 1 } ] },
+  "simulation": { "enabled": false },
+  "modeling": { "inflow_non_negativity": { "method": "none" } }
+}"#;
+
+    const PENALTIES_JSON: &str = r#"{
+  "bus": { "deficit_segments": [ { "depth_mw": null, "cost": 1000.0 } ], "excess_cost": 0.01 },
+  "line": { "exchange_cost": 0.01 },
+  "hydro": {
+    "spillage_cost": 0.01, "turbined_cost": 0.01, "diversion_cost": 0.01,
+    "storage_violation_below_cost": 10000.0, "filling_target_violation_cost": 10000.0,
+    "turbined_violation_below_cost": 10000.0, "outflow_violation_below_cost": 10000.0,
+    "outflow_violation_above_cost": 10000.0, "generation_violation_below_cost": 10000.0,
+    "evaporation_violation_cost": 10000.0, "water_withdrawal_violation_cost": 10000.0
+  },
+  "non_controllable_source": { "curtailment_cost": 0.005 }
+}"#;
+
+    const STAGES_JSON: &str = r#"{
+  "policy_graph": { "type": "finite_horizon", "annual_discount_rate": 0.0 },
+  "stages": [
+    { "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
+      "blocks": [ { "id": 0, "name": "SINGLE", "hours": 730 } ], "num_openings": 1 },
+    { "id": 1, "start_date": "2024-02-01", "end_date": "2024-03-01",
+      "blocks": [ { "id": 0, "name": "SINGLE", "hours": 730 } ], "num_openings": 1 }
+  ]
+}"#;
+
+    const INITIAL_CONDITIONS_JSON: &str = r#"{
+  "storage": [
+    { "hydro_id": 0, "value_hm3": 500.0 },
+    { "hydro_id": 1, "value_hm3": 100.0 }
+  ],
+  "filling_storage": []
+}"#;
+
+    const BUSES_JSON: &str = r#"{
+  "buses": [
+    { "id": 0, "name": "B0", "operational_start_date": "2020-01-01",
+      "deficit_segments": [ { "depth_mw": null, "cost": 1000.0 } ] }
+  ]
+}"#;
+
+    const LINES_JSON: &str = r#"{ "lines": [] }"#;
+
+    const THERMALS_JSON: &str = r#"{
+  "thermals": [
+    { "id": 0, "name": "T0", "operational_start_date": "2020-01-01", "bus_id": 0,
+      "generation": { "min_mw": 0.0, "max_mw": 100.0 }, "cost_per_mwh": 50.0 }
+  ]
+}"#;
+
+    /// Hydro 0 carries the exactly-representable VHA range `[256, 1280]` (a
+    /// power-of-two multiple of 256, per the exact-geometry hand-oracle
+    /// convention) and the entity `ρ_esp = 0.125`; hydro 1 is a bare
+    /// non-FPHA plant whose `ρ_eq` is only ever supplied by the
+    /// `hydro_energy_productivity.parquet` override at stage 1.
+    const HYDROS_JSON: &str = r#"{
+  "hydros": [
+    { "id": 0, "name": "H0", "operational_start_date": "2020-01-01", "downstream_id": null,
+      "reservoir": { "min_storage_hm3": 256.0, "max_storage_hm3": 1280.0 },
+      "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": 50.0 },
+      "generation": { "model": "constant_productivity", "min_turbined_m3s": 0.0,
+        "max_turbined_m3s": 50.0, "min_generation_mw": 0.0, "max_generation_mw": 50.0 },
+      "unit_groups": [ { "id": 0, "name": "H0", "bus_id": 0, "min_generation_mw": 0.0,
+        "max_generation_mw": 50.0, "min_turbined_m3s": 0.0, "max_turbined_m3s": 50.0 } ],
+      "specific_productivity_mw_per_m3s_per_m": 0.125 },
+    { "id": 1, "name": "H1", "operational_start_date": "2020-01-01", "downstream_id": null,
+      "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 200.0 },
+      "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": 50.0 },
+      "generation": { "model": "constant_productivity", "min_turbined_m3s": 0.0,
+        "max_turbined_m3s": 50.0, "min_generation_mw": 0.0, "max_generation_mw": 50.0 },
+      "unit_groups": [ { "id": 0, "name": "H1", "bus_id": 0, "min_generation_mw": 0.0,
+        "max_generation_mw": 50.0, "min_turbined_m3s": 0.0, "max_turbined_m3s": 50.0 } ] }
+  ]
+}"#;
+
+    /// Hydro 1's `stage_ranges` covers ONLY stage 0, leaving stage 1 with no JSON
+    /// productivity source — the `equivalent_productivity_mw_per_m3s` override at
+    /// stage 1 is then the sole supplier there (the Layer-6 exactly-one-source rule).
+    const PRODUCTION_MODELS_JSON: &str = r#"{
+  "production_models": [
+    { "hydro_id": 0, "selection_mode": "stage_ranges", "stage_ranges": [
+      { "start_stage_id": 0, "end_stage_id": null, "model": "constant_productivity",
+        "productivity_mw_per_m3s": 1.0 } ] },
+    { "hydro_id": 1, "selection_mode": "stage_ranges", "stage_ranges": [
+      { "start_stage_id": 0, "end_stage_id": 0, "model": "constant_productivity",
+        "productivity_mw_per_m3s": 2.0 } ] }
+  ]
+}"#;
+
+    const GENERIC_PARAMETERS_JSON: &str = r#"{
+  "scalar_parameters": [
+    { "id": 1, "name": "int_rho", "kind": "computed",
+      "computed_spec": { "tag": "integrated_accumulated_productivity", "hydro_id": 0 } },
+    { "id": 2, "name": "max_energy", "kind": "computed",
+      "computed_spec": { "tag": "max_stored_energy", "hydro_id": 0 } },
+    { "id": 3, "name": "rho_point", "kind": "computed",
+      "computed_spec": { "tag": "accumulated_productivity", "hydro_id": 0 } },
+    { "id": 4, "name": "h1_ref", "kind": "computed",
+      "computed_spec": { "tag": "equivalent_productivity", "hydro_id": 1 } },
+    { "id": 5, "name": "h1_int", "kind": "computed",
+      "computed_spec": { "tag": "integrated_equivalent_productivity", "hydro_id": 1 } }
+  ]
+}"#;
+
+    /// Builds the fixture deck in a fresh `TempDir`. `int_rho_stage1` is baked in
+    /// as the "before" form's literal coefficient (`hydro_storage_final`, no
+    /// `@name` reference — the hand-folded form the bridge injects today);
+    /// `bound_stage1`/`max_storage_ceiling` similarly drive the "before" form's
+    /// literal RHS and the operative storage ceiling below the entity max.
+    fn build_fixture(int_rho_stage1: f64, bound_stage1: f64) -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tempdir must succeed");
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("system")).expect("create system dir");
+        std::fs::create_dir_all(root.join("constraints")).expect("create constraints dir");
+        std::fs::create_dir_all(root.join("scenarios")).expect("create scenarios dir");
+
+        std::fs::write(root.join("config.json"), CONFIG_JSON).expect("write config.json");
+        std::fs::write(root.join("penalties.json"), PENALTIES_JSON).expect("write penalties.json");
+        std::fs::write(root.join("stages.json"), STAGES_JSON).expect("write stages.json");
+        std::fs::write(
+            root.join("initial_conditions.json"),
+            INITIAL_CONDITIONS_JSON,
+        )
+        .expect("write initial_conditions.json");
+        std::fs::write(root.join("system/buses.json"), BUSES_JSON).expect("write buses.json");
+        std::fs::write(root.join("system/lines.json"), LINES_JSON).expect("write lines.json");
+        std::fs::write(root.join("system/thermals.json"), THERMALS_JSON)
+            .expect("write thermals.json");
+        std::fs::write(root.join("system/hydros.json"), HYDROS_JSON).expect("write hydros.json");
+        std::fs::write(
+            root.join("system/hydro_production_models.json"),
+            PRODUCTION_MODELS_JSON,
+        )
+        .expect("write hydro_production_models.json");
+        std::fs::write(
+            root.join("constraints/generic_parameters.json"),
+            GENERIC_PARAMETERS_JSON,
+        )
+        .expect("write generic_parameters.json");
+
+        let constraints_json = format!(
+            r#"{{
+  "constraints": [
+    {{ "id": 0, "name": "after_form", "slack": {{ "enabled": false }},
+       "expression": "@int_rho * hydro_useful_volume_final(0) >= 0.5 * @max_energy" }},
+    {{ "id": 1, "name": "before_form", "slack": {{ "enabled": false }},
+       "expression": "{int_rho_stage1} * hydro_storage_final(0)" }},
+    {{ "id": 2, "name": "hydro0_reference_point_probe", "slack": {{ "enabled": false }},
+       "expression": "@rho_point * hydro_storage(1)" }},
+    {{ "id": 3, "name": "hydro1_reference_point_override_probe", "slack": {{ "enabled": false }},
+       "expression": "@h1_ref * hydro_storage(1)" }},
+    {{ "id": 4, "name": "hydro1_integrated_override_probe", "slack": {{ "enabled": false }},
+       "expression": "@h1_int * hydro_storage(1)" }},
+    {{ "id": 5, "name": "hydro0_max_stored_energy_probe", "slack": {{ "enabled": false }},
+       "expression": "@max_energy * hydro_storage(1)" }}
+  ]
+}}"#
+        );
+        std::fs::write(
+            root.join("constraints/generic_constraints.json"),
+            constraints_json,
+        )
+        .expect("write generic_constraints.json");
+
+        write_hydro_geometry(
+            &root.join("system/hydro_geometry.parquet"),
+            &[
+                (0, 256.0, 300.0, 1.0),
+                (0, 768.0, 340.0, 1.0),
+                (0, 1280.0, 348.0, 1.0),
+            ],
+        );
+        write_hydro_energy_productivity(
+            &root.join("system/hydro_energy_productivity.parquet"),
+            &[
+                // Hydro 0: ρ_esp override at stage 1 only; stage 0 uses the entity value.
+                (0, 1, None, Some(0.375)),
+                // Hydro 1: ρ_eq override at stage 1, the sole productivity source there.
+                (1, 1, Some(0.75), None),
+            ],
+        );
+        write_hydro_bounds_max_storage(&root.join("constraints/hydro_bounds.parquet"), 0, 0, 700.0);
+        write_generic_constraint_bounds(
+            &root.join("constraints/generic_constraint_bounds.parquet"),
+            &[
+                (0, 0, None),
+                (0, 1, None),
+                (1, 1, Some(bound_stage1)),
+                (2, 0, Some(0.0)),
+                (3, 1, Some(0.0)),
+                (4, 1, Some(0.0)),
+                (5, 0, Some(0.0)),
+            ],
+        );
+
+        write_seasonal_stats(
+            &root.join("scenarios/inflow_seasonal_stats.parquet"),
+            "hydro_id",
+            "mean_m3s",
+            "std_m3s",
+            &[
+                (0, 0, 40.0, 0.0),
+                (0, 1, 10.0, 0.0),
+                (1, 0, 0.0, 0.0),
+                (1, 1, 0.0, 0.0),
+            ],
+        );
+        write_seasonal_stats(
+            &root.join("scenarios/load_seasonal_stats.parquet"),
+            "bus_id",
+            "mean_mw",
+            "std_mw",
+            &[(0, 0, 80.0, 0.0), (0, 1, 80.0, 0.0)],
+        );
+
+        tmp
+    }
+
+    /// The security curve `useful >= pct * useful_max` authored both as
+    /// primitives (`hydro_useful_volume_final`, coefficient `@int_rho`, bound
+    /// `pct * @max_energy`) and hand-folded (a literal `int_rho` on
+    /// `hydro_storage_final`, bound `pct*int_rho*(V_hi-V_lo) + int_rho*V_lo`)
+    /// resolve to the same coefficient and the same folded bound, at both an
+    /// unoverridden and a ρ_esp-overridden stage, unaffected by an operative
+    /// `hydro_bounds` ceiling below the entity range, and distinct from the
+    /// plant's reference-point productivity; a non-FPHA `ρ_eq` override
+    /// separately wins both evaluators for its own (hydro, stage).
+    #[test]
+    fn after_and_before_forms_match_the_hand_oracle() {
+        // VHA breakpoints spanning hydro 0's entity range exactly (no fractional
+        // interpolation in `ForebayTable::mean_height`): volumes at multiples of
+        // 256, heights non-uniform so the mean genuinely integrates the curve.
+        const V_LO: f64 = 256.0;
+        const V_MID: f64 = 768.0;
+        const V_HI: f64 = 1280.0;
+        const H_LO: f64 = 300.0;
+        const H_MID: f64 = 340.0;
+        const H_HI: f64 = 348.0;
+        const ENTITY_RHO_ESP: f64 = 0.125;
+        const OVERRIDE_RHO_ESP: f64 = 0.375;
+        const PCT: f64 = 0.5;
+        const HYDRO1_OVERRIDE_RHO_EQ: f64 = 0.75;
+
+        let mean_height = (0.5 * (H_LO + H_MID) * (V_MID - V_LO)
+            + 0.5 * (H_MID + H_HI) * (V_HI - V_MID))
+            / (V_HI - V_LO);
+
+        let int_rho_stage0 = ENTITY_RHO_ESP * mean_height;
+        let int_rho_stage1 = OVERRIDE_RHO_ESP * mean_height;
+        let max_energy_stage0 = int_rho_stage0 * (V_HI - V_LO);
+        let max_energy_stage1 = int_rho_stage1 * (V_HI - V_LO);
+        let bound_stage0 = PCT * max_energy_stage0 + int_rho_stage0 * V_LO;
+        let bound_stage1 = PCT * max_energy_stage1 + int_rho_stage1 * V_LO;
+
+        let tmp = build_fixture(int_rho_stage1, bound_stage1);
+        let case_dir = tmp.path();
+
+        let config_path = case_dir.join("config.json");
+        let config = cobre_io::parse_config(&config_path).expect("config must parse");
+        let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
+        let training_source = config
+            .training_scenario_source(&config_path)
+            .expect("training_scenario_source must parse");
+        let prepare_result =
+            prepare_stochastic(system, case_dir, &config, 42, &training_source, None)
+                .expect("prepare_stochastic must succeed");
+        let system = prepare_result.system;
+        let stochastic = prepare_result.stochastic;
+        let hydro_models = prepare_hydro_models(&system, case_dir, false)
+            .expect("prepare_hydro_models must succeed");
+        let setup = build_setup_for_case(case_dir, &config, &system, stochastic, hydro_models);
+
+        let echo_rows = build_generic_constraint_echo_rows(&setup, &system);
+        let find = |constraint_id: i32, stage_id: i32| {
+            echo_rows
+                .iter()
+                .find(|r| r.constraint_id == constraint_id && r.stage_id == stage_id)
+                .unwrap_or_else(|| {
+                    panic!("no echo row for constraint {constraint_id} at stage {stage_id}")
+                })
+        };
+        let close =
+            |value: f64, expected: f64| (value - expected).abs() <= 1e-9 * expected.abs().max(1.0);
+
+        // after == before == hand oracle at the overridden stage, to tolerance —
+        // never `==` on a trapezoid-derived value.
+        let after1 = find(0, 1);
+        let before1 = find(1, 1);
+        let after1_coef = after1.coefficient.expect("after1 coefficient");
+        let after1_bound = after1.bound_lower.expect("after1 bound_lower");
+        let before1_coef = before1.coefficient.expect("before1 coefficient");
+        let before1_bound = before1.bound_lower.expect("before1 bound_lower");
+        assert!(
+            close(after1_coef, int_rho_stage1),
+            "after-form coefficient {after1_coef} != hand oracle {int_rho_stage1}"
+        );
+        assert!(
+            close(after1_bound, bound_stage1),
+            "after-form bound_lower {after1_bound} != hand oracle {bound_stage1}"
+        );
+        assert!(
+            close(before1_coef, int_rho_stage1),
+            "before-form coefficient {before1_coef} != hand oracle {int_rho_stage1}"
+        );
+        assert!(
+            close(before1_bound, bound_stage1),
+            "before-form bound_lower {before1_bound} != hand oracle {bound_stage1}"
+        );
+        assert!(
+            close(after1_coef, before1_coef),
+            "after coefficient {after1_coef} != before coefficient {before1_coef}"
+        );
+        assert!(
+            close(after1_bound, before1_bound),
+            "after bound_lower {after1_bound} != before bound_lower {before1_bound}"
+        );
+        // `HydroStorageFinal` and `HydroUsefulVolumeFinal` both resolve through
+        // `resolve_hydro_storage_boundary` to the same fixed boundary column
+        // (crates/cobre-sddp/src/lp/generic_constraints.rs); the coefficient and
+        // bound_lower agreement above is that shared-column fact's only
+        // observable surface at this build-time, no-solve echo layer.
+        assert_eq!(
+            after1.variable_kind.as_deref(),
+            Some("hydro_useful_volume_final")
+        );
+        assert_eq!(
+            before1.variable_kind.as_deref(),
+            Some("hydro_storage_final")
+        );
+
+        // The after-form at stage 0 — under an operative `hydro_bounds` ceiling
+        // (700) below the entity max (1280) — still reflects the entity range,
+        // and so does `max_stored_energy` itself.
+        let after0 = find(0, 0);
+        let after0_coef = after0.coefficient.expect("after0 coefficient");
+        let after0_bound = after0.bound_lower.expect("after0 bound_lower");
+        assert!(
+            close(after0_bound, bound_stage0),
+            "hydro_bounds ceiling leaked into the folded bound: {after0_bound} != {bound_stage0}"
+        );
+        let max_energy0 = find(5, 0)
+            .coefficient
+            .expect("max_energy probe coefficient");
+        assert!(
+            close(max_energy0, max_energy_stage0),
+            "hydro_bounds ceiling leaked into max_stored_energy: {max_energy0} != {max_energy_stage0}"
+        );
+
+        // The integrated cascade productivity genuinely differs from the
+        // plant's reference-point `accumulated_productivity`.
+        let rho_point0 = find(2, 0).coefficient.expect("rho_point coefficient");
+        assert!(
+            (after0_coef - rho_point0).abs() > 1.0,
+            "integrated ({after0_coef}) must differ from reference-point ({rho_point0})"
+        );
+
+        // The ρ_esp override shifts int_rho only at its own stage;
+        // exactly-representable geometry makes `to_bits()` provable, not
+        // coincidental.
+        assert_eq!(after0_coef.to_bits(), int_rho_stage0.to_bits());
+        assert_eq!(after1_coef.to_bits(), int_rho_stage1.to_bits());
+
+        // A non-FPHA ρ_eq override wins both evaluators (the resolved
+        // reference-point and integrated own terms) for its own (hydro, stage).
+        let h1_ref = find(3, 1).coefficient.expect("h1_ref coefficient");
+        let h1_int = find(4, 1).coefficient.expect("h1_int coefficient");
+        assert_eq!(h1_ref.to_bits(), HYDRO1_OVERRIDE_RHO_EQ.to_bits());
+        assert_eq!(h1_int.to_bits(), HYDRO1_OVERRIDE_RHO_EQ.to_bits());
+    }
+}
