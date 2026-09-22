@@ -11,6 +11,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Two new simulation output columns publish the useful-range mean-evaluator
+  hydro productivity, alongside the existing reference-point pair.**
+  `integrated_equivalent_productivity_mw_per_m3s` and
+  `integrated_accumulated_productivity_mw_per_m3s` (unit `MW/(m3/s)`) are
+  written after the existing `equivalent_productivity_mw_per_m3s` /
+  `accumulated_productivity_mw_per_m3s` pair, by both the CLI and the Python
+  bindings, so the cascade recurrence is checkable on disk under either
+  evaluator.
+
+- **Two new `stored_energy_initial_mw` and `stored_energy_final_mw` columns
+  report stored energy as a power instead of an energy quantity.** Each is the
+  corresponding `stored_energy_{initial,final}_mwh` value divided by the
+  stage's total block hours; `_mwh` itself is stage-length independent, so the
+  two forms diverge by exactly the stage's own duration — reconciling either
+  against a month-based source convention is left to the consumer.
+
+- **Three new computed scalar-parameter tags expose the useful-range mean
+  evaluator.** `integrated_equivalent_productivity` and
+  `integrated_accumulated_productivity` are the useful-range-mean counterparts
+  of the existing `equivalent_productivity` / `accumulated_productivity` tags
+  (own-plant and whole-cascade respectively), and `max_stored_energy` is the
+  matching security-curve reference — the useful-range-mean cascade
+  productivity times the plant's physical storage range, in the raw
+  productivity-times-volume unit rather than MWh.
+
+- **`hydro_useful_volume_initial(id)` and `hydro_useful_volume_final(id)` are
+  now authorable generic-constraint variable references.** Each resolves to
+  the same LP column as the corresponding `hydro_storage_{initial,final}`
+  reference, with the constraint's resolved bound shifted by the plant's
+  physical dead volume, so an authored constraint reads as an
+  above-dead-storage quantity while the underlying storage column is
+  unchanged.
+
+- **A non-blocking validation warning flags a security-curve constraint that
+  pairs `max_stored_energy(h)` with the mismatched reference-point
+  `accumulated_productivity(h)` tag for the same hydro.** The matching
+  (cancelling) coefficient is `integrated_accumulated_productivity`; the
+  warning never rejects the constraint, since a study author may have a
+  reason to combine them the checker cannot see.
+
 - **Every stored state value is canonicalized onto its admissible bounds at
   read-back, so an out-of-tolerance solver drift can no longer abort a run.** On
   the training and simulation solve path each outgoing state — reservoir storage,
@@ -44,6 +84,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   check of a seasonal study, and a loaded checkpoint round-trips unchanged.
 
 ### Changed
+
+- **`stored_energy_initial_mwh` and `stored_energy_final_mwh` now read the
+  useful-range mean evaluator's `integrated_accumulated_productivity` grid
+  and the plant's physical dead volume, in place of what they read before.**
+  This is a declared, intentional value change, not a silent rebaseline: a
+  study with at least one plant whose physical storage range is genuinely
+  non-collapsed and whose VHA geometry resolves — where the mean and
+  reference-point evaluators diverge — now reports a different stored-energy
+  value than earlier releases. A study where every hydro's physical range is
+  collapsed, or where no hydro has resolvable geometry, sees the two
+  evaluators coincide and the columns stay byte-neutral.
+
+- **The `specific_productivity_mw_per_m3s_per_m` override column in
+  `hydro_energy_productivity.parquet` now reaches the head-derived
+  productivity of both the reference-point and the useful-range mean
+  evaluator, through the same resolver the `specific_productivity` computed
+  tag already used.** A study that leaves every row of the column `NULL` is
+  byte-neutral: the resolved value equals the entity-level
+  `specific_productivity_mw_per_m3s_per_m` default on every `(hydro, stage)`,
+  exactly as before.
+
+- **A study stage declaring no block, or a block whose duration is not
+  finite and strictly positive, is now rejected at validation.** This guards
+  the new `stored_energy_*_mw` power columns against a zero or non-finite
+  divisor; a stage that already declares only well-formed blocks is
+  unaffected.
+
+- **`generic_parameters.schema.json` is regenerated for the three new
+  `computed` tags — `integrated_equivalent_productivity`,
+  `integrated_accumulated_productivity`, and `max_stored_energy`.** No other
+  schema changed.
 
 - **`cobre validate` now runs the generic-constraint parameter check for every
   deck, not only boundary-configured ones, so a scalar-parameter resolution gap

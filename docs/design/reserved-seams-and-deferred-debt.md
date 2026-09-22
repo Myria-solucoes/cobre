@@ -548,6 +548,36 @@ unknown-field / unknown-variant deserialize error, pinned by the reject tests in
 `crates/cobre-io/src/config/{training,simulation}.rs` and the FlatBuffers schema
 conformance test — the invariant that stands in for a version snapshot.
 
+### cobre-bridge and cobre-docs adoption of the integrated-productivity contract
+
+**What it is.** Two external-repository follow-ups from the stored-energy /
+2x2 scope x evaluator productivity feature remain open; the contract itself
+is published in `docs/design/hydro-productivity-and-stored-energy.md`, but
+performing the adoption in each downstream repository is deferred:
+
+- `cobre-bridge` (an external repository, not part of this tree) must author
+  a security-curve constraint's coefficient as a `computed` scalar parameter
+  carrying `"tag": "integrated_accumulated_productivity"` — never a
+  `"basis"` field on `computed_spec` and never a `"head"` field on the
+  existing `equivalent_productivity` / `accumulated_productivity` tags —
+  keep every flood-control and stored-volume ceiling as an operative
+  `HydroStageBounds` (`hydro_bounds`) row rather than migrating it to a
+  separate physical-range-purity channel (that migration is retired), and
+  retire its own per-plant basis-selection field, since a plant's evaluator
+  now falls out of its physical range and VHA geometry alone (the
+  collapsed-range rule), with no field left to set.
+  **Owner.** The `cobre-bridge` integration owner.
+  **Trigger.** The next `cobre-bridge` release that authors or updates a
+  security-curve constraint against this contract.
+- `cobre-docs` (an external repository, not part of this tree) methodology
+  pages must document the integrated productivity / computed-parameter
+  surface — the 2x2 scope x evaluator model, the quadrature invariant, and
+  the physical/operative split — currently published only in this
+  repository's own `docs/design/hydro-productivity-and-stored-energy.md`.
+  **Owner.** The `cobre-docs` methodology owner.
+  **Trigger.** The next `cobre-docs` methodology-page revision cycle that
+  covers hydro productivity.
+
 ## Deferred-debt register — whole-lifecycle audit findings
 
 Findings of the full `cobre run` lifecycle read, described by behavior. Each
