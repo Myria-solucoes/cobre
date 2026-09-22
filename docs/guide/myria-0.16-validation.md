@@ -30,6 +30,11 @@ and their pins are not replaced by publishing this candidate.
   Both new periodic-checkpoint tests resumed an iteration-2 generation to
   iteration 4 and reproduced the uninterrupted final lower bound, with and
   without an iteration callback.
+  On Linux x86_64 the initial bit-equality assertion instead found a one-ULP
+  difference: 7354884.974416634 resumed versus 7354884.974416635 uninterrupted.
+  A checkpoint without solver bases takes a cold simplex path; the test now
+  uses the existing CLI resume tolerance (absolute 1e-6) for that comparison
+  and requires exact equality between two resumes from the same checkpoint.
 - Integration: anticipated core 29 passed/one ignored; deterministic 114 passed
   and one upstream-reproduced failure; boundary format three passed; MPI wire
   40 passed; right-boundary output six passed. Wire tests exercise communication

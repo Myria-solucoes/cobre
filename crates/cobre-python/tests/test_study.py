@@ -616,4 +616,15 @@ def test_periodic_checkpoint_can_resume_python_training(tmp_path, streaming):
     full_metadata = _read_training_metadata(output)
     resumed_metadata = _read_training_metadata(resumed)
     assert resumed_metadata["iterations"]["completed"] == 4
-    assert resumed_metadata["bounds"]["final_lower_bound"] == full_metadata["bounds"]["final_lower_bound"]
+    assert not (resumed / "checkpoints/iteration-0000000001").exists()
+    assert (resumed / "checkpoints/iteration-0000000003/policy/manifest.bin").is_file()
+    # Without solver bases, resume need not follow the uninterrupted simplex path.
+    assert resumed_metadata["bounds"]["final_lower_bound"] == pytest.approx(
+        full_metadata["bounds"]["final_lower_bound"], rel=0, abs=1e-6
+    )
+    repeated = tmp_path / "resumed-repeat"
+    shutil.copytree(saved / "policy", repeated / "policy")
+    cobre.Study(VALID_CASE, output_dir=str(repeated), config_overrides=overrides).train()
+    repeated_metadata = _read_training_metadata(repeated)
+    assert repeated_metadata["iterations"]["completed"] == 4
+    assert repeated_metadata["bounds"]["final_lower_bound"] == resumed_metadata["bounds"]["final_lower_bound"]

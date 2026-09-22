@@ -23,6 +23,8 @@ the Myria build by its immutable release tag, source commit and artifact SHA-256
 - Periodic atomic checkpoints work in the CLI and both Python training paths
   (including iteration callbacks). Completed-training CLI resume and the separate
   `lb_stability_v1` diagnostic remain available. The diagnostic is not a stopping rule.
+  Resuming without saved solver bases can change rounding relative to uninterrupted
+  training; identical resumed runs retain the reproducibility contract.
 - CLI `--cpu-bind none|core|numa` and Python `cpu_bind` expose the same optional
   Linux worker-affinity policy, inherited-CPU-set restrictions and placement metadata.
   `none` is the default. On unsupported platforms explicit binding is rejected.
