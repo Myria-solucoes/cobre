@@ -53,7 +53,7 @@ The tapes:
 
 | Tape                    | GIF                    | Demo                                                         |
 | ----------------------- | ---------------------- | ------------------------------------------------------------ |
-| `quickstart.tape`       | `quickstart.gif`       | `init` → `run` → `report`                                    |
+| `quickstart.tape`       | `quickstart.gif`       | `init` → `run` → `jq` metadata query                         |
 | `validation.tape`       | `validation.gif`       | `init` → `validate` on a valid case                          |
 | `validation-error.tape` | `validation-error.gif` | `init` → corrupt with `jq` → `validate` surfacing the errors |
 | `multithreading.tape`   | `multithreading.gif`   | `run --threads 1` vs `--threads 4`, side-by-side timing      |

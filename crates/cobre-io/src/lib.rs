@@ -7,8 +7,10 @@
 //!
 //! - [`load_case`] — reads a case directory and produces a fully-validated
 //!   [`cobre_core::System`] ready for use by the solver.
-//! - [`write_results`] — accepts aggregate result types and writes all output
-//!   artifacts to a specified root directory.
+//! - [`write_results`] — writes the training result tables, the training
+//!   dictionaries, and the training/simulation completion metadata under a
+//!   root directory; the remaining artifacts are written by the callers through
+//!   the individual [`output`] writer modules.
 //!
 //! ## Loading pipeline
 //!
@@ -30,16 +32,8 @@
 //! failing, so users see every problem in a single report.  Final errors are reported
 //! via [`LoadError`], which carries enough context for diagnostic messages without
 //! re-reading input files.
-//!
-//! ## Status
-//!
-//! This crate is in early development. The API **will** change.
-//!
-//! See the [repository](https://github.com/cobre-rs/cobre) for the current status.
 
-// Internal (unpublished) workspace crate: public items intra-doc-link their
-// pub(crate) collaborators as a maintainer aid (docs read with
-// --document-private-items); the public-only doc gate flags these intentional links.
+// Intentional for maintainer docs with --document-private-items.
 #![allow(rustdoc::private_intra_doc_links)]
 
 #[cfg(feature = "schema")]
@@ -62,13 +56,12 @@ pub mod scenarios;
 pub mod stage_resolve;
 pub mod stages;
 pub mod system;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 pub mod validation;
 pub(crate) mod windowed_history;
 
-pub use broadcast::{
-    BroadcastComputedParameter, BroadcastParameterKind, BroadcastScalarParameter,
-    deserialize_parameters, deserialize_system, serialize_parameters, serialize_system,
-};
+pub use broadcast::{BroadcastComputedParameter, BroadcastParameterKind, BroadcastScalarParameter};
 pub use config::{
     BoundaryPolicy, Config, EstimationConfig, OrderSelectionMethod, PolicyMode, parse_config,
 };
@@ -91,38 +84,39 @@ pub use extensions::{
     PlaneReductionConfig, ProductionModelConfig, ProductionModelFile, SeasonConfig, SelectionMode,
     StageRange, build_hydro_reference_volumes_resolved, load_fpha_hyperplanes,
     load_hydro_energy_productivity, load_hydro_geometry, load_production_models,
-    load_scalar_parameters_json, parse_evaporation_models, parse_fpha_deviation_points,
-    parse_fpha_hyperplanes, parse_hydro_energy_productivity, parse_hydro_geometry,
-    parse_production_models, parse_scalar_parameters_json,
+    parse_evaporation_models, parse_fpha_deviation_points, parse_fpha_hyperplanes,
+    parse_hydro_energy_productivity, parse_hydro_geometry, parse_production_models,
+    parse_scalar_parameters_json,
 };
 pub use initial_conditions::parse_initial_conditions;
 pub use output::policy::codec::{deserialize_checkpoint_manifest, serialize_checkpoint_manifest};
 pub use output::policy::records::CheckpointManifest;
 pub use output::policy::{
-    ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, FORMAT_VERSION, GraphManifest, ManifestEdge,
-    ManifestNode, OwnedPolicyBasisRecord, OwnedPolicyCutRecord, PolicyBasisRecord,
-    PolicyCheckpoint, PolicyCutRecord, ProducerBlock, STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL,
-    STAGE_CUTS_NODE_ID_SENTINEL, STAGE_STATES_NODE_ID_SENTINEL, StageCutsPayload,
-    StageCutsReadResult, StageStatesPayload, StageStatesReadResult, StateFamily,
-    deserialize_stage_basis, deserialize_stage_cuts, deserialize_stage_states,
-    read_policy_checkpoint, serialize_stage_basis, serialize_stage_cuts, serialize_stage_states,
-    write_policy_checkpoint,
+    ENTITY_SLOT_DATE_SENTINEL, EntitySlot, FORMAT_VERSION, GraphManifest, HydroSeasonOrders,
+    ManifestEdge, ManifestNode, OwnedPolicyBasisRecord, OwnedPolicyCutRecord, PolicyBasisRecord,
+    PolicyCheckpoint, PolicyCutRecord, ProducerBlock, SEASON_CYCLE_CODE_ABSENT,
+    SEASON_CYCLE_CODE_CUSTOM, SEASON_CYCLE_CODE_MONTHLY, SEASON_CYCLE_CODE_WEEKLY,
+    STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL, STAGE_CUTS_NODE_ID_SENTINEL,
+    STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, STAGE_STATES_NODE_ID_SENTINEL, SeasonManifest,
+    StageCutsPayload, StageCutsReadResult, StageStatesPayload, StageStatesReadResult, StateFamily,
+    decode_slot_date, deserialize_stage_basis, deserialize_stage_cuts, deserialize_stage_states,
+    encode_slot_date, read_policy_checkpoint, serialize_stage_basis, serialize_stage_cuts,
+    serialize_stage_states, write_policy_checkpoint,
 };
 pub use output::{
-    ConvergenceSummary, DeviationSummary, DeviationWorstEntry, DistributionInfo, FixedDeliveryRow,
+    DeviationSummary, DeviationWorstEntry, DistributionInfo, FixedDeliveryRow,
     GenericConstraintEchoRow, HostLayout, IterationRecord, MetadataBounds, MetadataConfiguration,
     MetadataConvergence, MetadataCost, MetadataIterations, MetadataProblemDimensions,
     MetadataRowPool, MetadataScenarios, MetadataSimulationSolveStats, MetadataTrainingSolveStats,
-    OutputContext, OutputError, ParquetWriterConfig, RowPoolStatistics, RowSelectionRecord,
-    SetupTimings, SimulationMetadata, SimulationOutput, SolverStatsRow, TrainingMetadata,
-    TrainingOutput, TrainingParquetWriter, WorkerTimingRecord, get_hostname, now_iso8601,
-    read_convergence_summary, read_hydro_model_summary, read_provenance_report,
-    read_simulation_metadata, read_training_metadata, write_dictionaries, write_evaporation_models,
-    write_fixed_delivery, write_fpha_deviation_points, write_fpha_hyperplanes,
-    write_generic_constraint_echo, write_hydro_model_summary, write_provenance_report,
-    write_results, write_row_selection_records, write_scaling_report, write_simulation_metadata,
-    write_simulation_results, write_simulation_solver_stats, write_solver_stats,
-    write_training_metadata, write_training_results,
+    OutputContext, OutputError, RowPoolStatistics, RowSelectionRecord, SetupTimings,
+    SimulationMetadata, SimulationOutput, SolverStatsRow, TrainingMetadata, TrainingOutput,
+    TrainingParquetWriter, WorkerTimingRecord, get_hostname, now_iso8601, read_simulation_metadata,
+    read_training_metadata, simulation_family_subpaths, write_dictionaries,
+    write_evaporation_models, write_fixed_delivery, write_fpha_deviation_points,
+    write_fpha_hyperplanes, write_generic_constraint_echo, write_hydro_model_summary,
+    write_provenance_report, write_results, write_row_selection_records, write_scaling_report,
+    write_simulation_metadata, write_simulation_results, write_simulation_solver_stats,
+    write_solver_stats, write_training_metadata, write_training_results,
 };
 pub use penalties::parse_penalties;
 pub use post_study_stages::parse_post_study_stages;
@@ -131,16 +125,16 @@ pub use resolution::{resolve_bounds, resolve_penalties};
 pub use scenarios::{
     BlockFactor, ExternalLoadRow, ExternalNcsRow, ExternalScenarioRow, InflowArCoefficientRow,
     InflowHistoryRow, InflowSeasonalStatsRow, LoadFactorEntry, LoadSeasonalStatsRow,
-    NoiseOpeningRow, ScenarioData, assemble_inflow_models, assemble_load_models, load_correlation,
+    NoiseOpeningRow, assemble_inflow_models, assemble_load_models, load_correlation,
     load_external_inflow_scenarios, load_external_load_scenarios, load_external_ncs_scenarios,
     load_inflow_ar_coefficients, load_inflow_history, load_inflow_seasonal_stats,
-    load_load_factors, load_load_seasonal_stats, load_noise_openings, load_scenarios,
-    parse_correlation, parse_external_inflow_scenarios, parse_external_load_scenarios,
-    parse_external_ncs_scenarios, parse_inflow_ar_coefficients, parse_inflow_history,
-    parse_inflow_seasonal_stats, parse_load_factors, parse_load_seasonal_stats,
+    load_load_factors, load_load_seasonal_stats, load_noise_openings, parse_correlation,
+    parse_external_inflow_scenarios, parse_external_load_scenarios, parse_external_ncs_scenarios,
+    parse_inflow_ar_coefficients, parse_inflow_history, parse_inflow_seasonal_stats,
+    parse_load_factors, parse_load_seasonal_stats,
 };
 pub use stage_resolve::StageIdResolver;
-pub use stages::{StagesData, build_season_stage_map, parse_stages};
+pub use stages::{StagesData, parse_stages};
 pub use system::{
     load_energy_contracts, load_non_controllable_sources, load_pumping_stations, parse_buses,
     parse_energy_contracts, parse_hydros, parse_lines, parse_non_controllable_sources,
@@ -148,7 +142,7 @@ pub use system::{
 };
 pub use validation::scalar_parameters::validate_scalar_parameters;
 pub use validation::semantic::seed_lag_state_depth;
-pub use validation::structural::{FileManifest, validate_structure};
+pub use validation::structural::{FileManifest, InputFile, validate_structure};
 pub use validation::{ErrorKind, Severity, ValidationContext, ValidationEntry};
 
 use cobre_core::{ScalarParameter, System};
@@ -160,8 +154,9 @@ use std::path::Path;
 /// parquet/JSON rows, so downstream solver crates do not re-open the same files
 /// from disk after [`load_case`] returns.
 ///
-/// Fields are owned `Vec`s in deterministic (canonical) order. Empty vectors
-/// indicate the optional file was absent on disk.
+/// Each field is a row table carrying its own key column (e.g. `hydro_id`),
+/// ordered per that row type's own parser, not by a shared entity index.
+/// Empty vectors indicate the optional file was absent on disk.
 #[derive(Debug, Clone, Default)]
 pub struct CaseArtifacts {
     /// File-presence manifest produced by Layer 1 (structural). Lets
@@ -232,7 +227,7 @@ pub struct LoadedCase {
 /// - [`LoadError::ConstraintError`] — one or more validation errors collected
 ///   across Layers 1-5, or `SystemBuilder` rejected the assembled data.
 pub fn load_case(path: &Path) -> Result<System, LoadError> {
-    pipeline::run_pipeline(path)
+    pipeline::run_pipeline_with_artifacts(path).map(|(loaded, _report)| loaded.system)
 }
 
 /// Load a case directory and return the validated [`System`] together with
@@ -263,7 +258,7 @@ pub fn load_case_with_artifacts(path: &Path) -> Result<LoadedCase, LoadError> {
 ///
 /// Same error conditions as [`load_case`].
 pub fn validate_case(path: &Path) -> Result<(System, ValidationReport), LoadError> {
-    pipeline::run_pipeline_with_report(path)
+    pipeline::run_pipeline_with_artifacts(path).map(|(loaded, report)| (loaded.system, report))
 }
 
 /// Load a case directory and return the validated [`LoadedCase`] together with a

@@ -173,6 +173,9 @@ pub(crate) fn validate_config(config: &Config, path: &Path) -> Result<(), LoadEr
         });
     }
 
+    config.training_scenario_source(path)?;
+    config.simulation_scenario_source(path)?;
+
     Ok(())
 }
 
@@ -315,6 +318,19 @@ fn validate_scenario_source_cfg(
     }
 
     Ok(())
+}
+
+/// Coerce `current` to a JSON object in place, reusing it when it already is
+/// one — an unconditional replace would clobber sibling keys, breaking
+/// `set_dotted`'s deep-merge contract.
+fn coerce_object(current: &mut Value) -> &mut Map<String, Value> {
+    if !current.is_object() {
+        *current = Value::Object(Map::new());
+    }
+    let Value::Object(map) = current else {
+        unreachable!("current was just coerced to an object")
+    };
+    map
 }
 
 impl Config {
@@ -493,29 +509,15 @@ impl Config {
 
         let mut current = target;
         for segment in &segments[..segments.len() - 1] {
-            // Reuse the existing intermediate object rather than replacing it; a
-            // replace clobbers sibling keys, breaking the deep-merge contract.
-            if !current.is_object() {
-                *current = serde_json::Value::Object(serde_json::Map::new());
-            }
-            let serde_json::Value::Object(map) = current else {
-                unreachable!("current was just coerced to an object")
-            };
-            current = map
+            current = coerce_object(current)
                 .entry((*segment).to_string())
-                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+                .or_insert_with(|| Value::Object(Map::new()));
         }
 
         // The empty-segment guard above rejects the only `dotted_key` that could
         // make `segments` empty, so this last index never panics.
         let last = segments[segments.len() - 1];
-        if !current.is_object() {
-            *current = serde_json::Value::Object(serde_json::Map::new());
-        }
-        let serde_json::Value::Object(map) = current else {
-            unreachable!("current was just coerced to an object")
-        };
-        map.insert(last.to_string(), value);
+        coerce_object(current).insert(last.to_string(), value);
 
         Ok(())
     }
@@ -1197,8 +1199,7 @@ mod tests {
         let f = write_config(&format!(
             r#"{{"training": {MINIMAL_TRAINING}, "simulation": {{"scenario_source": {{"seed": 1, "load": {{"scheme": "historical"}}}}}}}}"#
         ));
-        let cfg = parse_config(f.path()).unwrap();
-        let err = cfg.simulation_scenario_source(f.path()).unwrap_err();
+        let err = parse_config(f.path()).unwrap_err();
         match &err {
             LoadError::SchemaError { message, field, .. } => {
                 assert!(
@@ -1216,8 +1217,7 @@ mod tests {
     fn test_scenario_source_historical_ncs_rejected() {
         let f =
             write_with_training_scenario_source(r#"{"seed": 1, "ncs": {"scheme": "historical"}}"#);
-        let cfg = parse_config(f.path()).unwrap();
-        let err = cfg.training_scenario_source(f.path()).unwrap_err();
+        let err = parse_config(f.path()).unwrap_err();
         match &err {
             LoadError::SchemaError { message, field, .. } => {
                 assert!(
@@ -1286,8 +1286,7 @@ mod tests {
     #[test]
     fn test_scenario_source_seed_required_for_oos() {
         let f = write_with_training_scenario_source(r#"{"inflow": {"scheme": "out_of_sample"}}"#);
-        let cfg = parse_config(f.path()).unwrap();
-        let err = cfg.training_scenario_source(f.path()).unwrap_err();
+        let err = parse_config(f.path()).unwrap_err();
         match &err {
             LoadError::SchemaError { message, field, .. } => {
                 assert!(
@@ -1323,8 +1322,7 @@ mod tests {
         let f = write_with_training_scenario_source(
             r#"{"seed": 1, "inflow": {"scheme": "out_of_sample"}, "historical_years": [1990, 2000]}"#,
         );
-        let cfg = parse_config(f.path()).unwrap();
-        let err = cfg.training_scenario_source(f.path()).unwrap_err();
+        let err = parse_config(f.path()).unwrap_err();
         match &err {
             LoadError::SchemaError { message, .. } => {
                 assert!(
@@ -1332,6 +1330,28 @@ mod tests {
                         "historical_years is specified but no class uses the 'historical' scheme"
                     ),
                     "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    /// `historical_years` range with `from > to` → SchemaError.
+    #[test]
+    fn parse_config_rejects_historical_years_inverted_range() {
+        let f = write_with_training_scenario_source(
+            r#"{"seed": 1, "inflow": {"scheme": "historical"}, "historical_years": {"from": 2010, "to": 1990}}"#,
+        );
+        let err = parse_config(f.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { message, field, .. } => {
+                assert!(
+                    message.contains("must be <= 'to'"),
+                    "unexpected message: {message}"
+                );
+                assert!(
+                    field.contains("scenario_source.historical_years"),
+                    "unexpected field: {field}"
                 );
             }
             other => panic!("expected SchemaError, got: {other:?}"),
@@ -1404,8 +1424,7 @@ mod tests {
             r#"{"inflow": {"scheme": "in_sample"}}"#,
             r#"{"openings": {"source": "generated"}}"#,
         );
-        let cfg = parse_config(f.path()).unwrap();
-        let err = cfg.simulation_scenario_source(f.path()).unwrap_err();
+        let err = parse_config(f.path()).unwrap_err();
         match &err {
             LoadError::SchemaError { field, message, .. } => {
                 assert_eq!(field, "simulation.scenario_source.openings");
@@ -1494,36 +1513,10 @@ mod tests {
         );
     }
 
-    /// `policy.boundary` with `path` and `source_stage` deserializes
-    /// to `Some(BoundaryPolicy { .. })` with the correct field values.
+    /// `policy.boundary` with only `path` deserializes to
+    /// `Some(BoundaryPolicy { path })`.
     #[test]
     fn test_boundary_policy_present() {
-        let f = write_config(
-            r#"{
-            "training": {
-                "selection": {"method": "sampled", "forward_passes": 10},
-                "stopping_rules": [{"type": "iteration_limit", "limit": 5}]
-            },
-            "policy": {
-                "mode": "fresh",
-                "boundary": {
-                    "path": "../monthly/policy",
-                    "source_stage": 2
-                }
-            }
-        }"#,
-        );
-        let cfg = parse_config(f.path()).unwrap();
-        let boundary = cfg.policy.boundary.unwrap();
-        assert_eq!(boundary.path, "../monthly/policy");
-        assert_eq!(boundary.source_stage, Some(2));
-    }
-
-    /// `policy.boundary` with `path` but no `source_stage` deserializes to
-    /// `Some(BoundaryPolicy { source_stage: None, .. })`; an unknown key
-    /// under `boundary` is still rejected by `deny_unknown_fields`.
-    #[test]
-    fn test_boundary_policy_source_stage_absent_is_none() {
         let f = write_config(
             r#"{
             "training": {
@@ -1541,7 +1534,29 @@ mod tests {
         let cfg = parse_config(f.path()).unwrap();
         let boundary = cfg.policy.boundary.unwrap();
         assert_eq!(boundary.path, "../monthly/policy");
-        assert_eq!(boundary.source_stage, None);
+    }
+
+    /// A deck carrying the removed `source_stage` key under `policy.boundary`
+    /// fails to parse under `deny_unknown_fields`, naming the key; an unrelated
+    /// unknown key under `boundary` is rejected the same way.
+    #[test]
+    fn test_boundary_policy_rejects_removed_source_stage_key() {
+        let removed_key_json = r#"{
+            "training": {
+                "selection": {"method": "sampled", "forward_passes": 10},
+                "stopping_rules": [{"type": "iteration_limit", "limit": 5}]
+            },
+            "policy": {
+                "mode": "fresh",
+                "boundary": { "path": "../monthly/policy", "source_stage": 3 }
+            }
+        }"#;
+        let err = serde_json::from_str::<Config>(removed_key_json)
+            .expect_err("source_stage was removed from BoundaryPolicy and must be rejected");
+        assert!(
+            err.to_string().contains("source_stage"),
+            "rejection must name the removed key: {err}"
+        );
 
         let unknown_key_json = r#"{
             "training": {
@@ -1616,14 +1631,61 @@ mod tests {
             checkpointing: CheckpointingConfig::default(),
             boundary: Some(BoundaryPolicy {
                 path: "../monthly/policy".to_string(),
-                source_stage: Some(5),
+                strict: true,
             }),
         };
         let json = serde_json::to_string(&original).unwrap();
         let restored: PolicyConfig = serde_json::from_str(&json).unwrap();
         let boundary = restored.boundary.unwrap();
         assert_eq!(boundary.path, "../monthly/policy");
-        assert_eq!(boundary.source_stage, Some(5));
+        assert!(boundary.strict);
+    }
+
+    /// `policy.boundary` carrying only `path` deserializes with
+    /// `strict == false`.
+    #[test]
+    fn test_boundary_policy_strict_defaults_to_false() {
+        let f = write_config(
+            r#"{
+            "training": {
+                "selection": {"method": "sampled", "forward_passes": 10},
+                "stopping_rules": [{"type": "iteration_limit", "limit": 5}]
+            },
+            "policy": {
+                "mode": "fresh",
+                "boundary": {
+                    "path": "../monthly/policy"
+                }
+            }
+        }"#,
+        );
+        let cfg = parse_config(f.path()).unwrap();
+        let boundary = cfg.policy.boundary.unwrap();
+        assert!(!boundary.strict);
+    }
+
+    /// `policy.boundary` with an explicit `"strict": true` deserializes
+    /// to `true`.
+    #[test]
+    fn test_boundary_policy_strict_explicit_true() {
+        let f = write_config(
+            r#"{
+            "training": {
+                "selection": {"method": "sampled", "forward_passes": 10},
+                "stopping_rules": [{"type": "iteration_limit", "limit": 5}]
+            },
+            "policy": {
+                "mode": "fresh",
+                "boundary": {
+                    "path": "../monthly/policy",
+                    "strict": true
+                }
+            }
+        }"#,
+        );
+        let cfg = parse_config(f.path()).unwrap();
+        let boundary = cfg.policy.boundary.unwrap();
+        assert!(boundary.strict);
     }
 
     /// Stale `exports` keys (`training`, `cuts`, `vertices`, `simulation`,
@@ -1821,6 +1883,37 @@ mod tests {
         }
     }
 
+    /// An override that makes `simulation.scenario_source` violate an admission
+    /// rule fails post-merge validation, carrying the synthetic override path.
+    #[test]
+    fn with_overrides_rejects_invalid_simulation_scenario_source() {
+        let base = base_value(OVERRIDE_BASE_CONFIG);
+        let overrides = override_map(&[(
+            "simulation.scenario_source",
+            serde_json::json!({"seed": 1, "load": {"scheme": "historical"}}),
+        )]);
+
+        let err = Config::with_overrides(&base, &overrides).unwrap_err();
+        match &err {
+            LoadError::SchemaError {
+                field,
+                message,
+                path,
+            } => {
+                assert!(
+                    field.contains("simulation.scenario_source.load.scheme"),
+                    "unexpected field: {field}"
+                );
+                assert!(
+                    message.contains("historical scheme is only valid for the inflow class"),
+                    "unexpected message: {message}"
+                );
+                assert_eq!(path, std::path::Path::new("<config_overrides>"));
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
     /// Empty override map yields a Config equal to `from_value(base)`.
     #[test]
     fn with_overrides_empty_map_equals_direct_deserialize() {
@@ -1966,7 +2059,7 @@ mod tests {
                     "enabled": true, "initial_iteration": 1, "interval_iterations": 5,
                     "store_basis": true, "compress": false
                 },
-                "boundary": { "path": "./boundary", "source_stage": 3 }
+                "boundary": { "path": "./boundary", "strict": true }
             },
             "simulation": {
                 "enabled": true,

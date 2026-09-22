@@ -14,7 +14,6 @@
 //! setup amortised across the simulation's per-scenario LP solves.
 
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::mpsc::Sender;
 use std::time::Instant;
 
 use cobre_comm::Communicator;
@@ -25,7 +24,8 @@ use cobre_solver::freeze_rows_into_template;
 use cobre_solver::{RowBatch, SolverInterface, StageTemplate};
 use cobre_stochastic::context::ClassSchemes;
 use cobre_stochastic::{
-    ClassDimensions, ForwardSampler, ForwardSamplerConfig, build_forward_sampler,
+    ClassDimensions, ForwardNoiseTables, ForwardSampler, ForwardSamplerConfig,
+    build_forward_sampler,
 };
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 
@@ -42,8 +42,9 @@ use crate::{
         error::SimulationError,
         extraction::assign_scenarios,
         pipeline::{
-            ScenarioIds, SimLookups, SimulationOutputSpec, SimulationRunResult, WorkerCosts,
-            WorkerStats, dispatch_scenario_result, emit_sim_progress, process_scenario_stages,
+            SIMULATION_ITERATION, ScenarioIds, SimLookups, SimulationOutputSpec,
+            SimulationRunResult, WorkerCosts, WorkerStats, dispatch_scenario_result,
+            emit_sim_progress, process_scenario_stages,
         },
     },
     solve::partition,
@@ -83,39 +84,6 @@ pub(crate) struct SimulationInputs<'a, S: SolverInterface + Send, C> {
     pub traversal: &'a Traversal,
 }
 
-impl<'a, S: SolverInterface + Send, C> SimulationInputs<'a, S, C> {
-    /// Construct a `SimulationInputs` bundle from positional arguments.
-    // RATIONALE: a field-for-field bundle constructor; splitting would only
-    // relocate the parameter list, not reduce it — the struct already bundles
-    // what can be bundled.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
-        workspaces: &'a mut [SolverWorkspace<S>],
-        ctx: &'a StageContext<'a>,
-        fcf: &'a FutureCostFunction,
-        training_ctx: &'a TrainingContext<'a>,
-        config: &'a SimulationConfig,
-        output: SimulationOutputSpec<'a>,
-        frozen_templates: Option<&'a [StageTemplate]>,
-        node_bases: &'a [Option<CapturedBasis>],
-        comm: &'a C,
-        traversal: &'a Traversal,
-    ) -> Self {
-        Self {
-            workspaces,
-            ctx,
-            fcf,
-            training_ctx,
-            config,
-            output,
-            frozen_templates,
-            node_bases,
-            comm,
-            traversal,
-        }
-    }
-}
-
 /// Read-only captures shared by reference across all rayon workers; the mutable
 /// per-worker [`SolverWorkspace`] rides on a separate `ws` argument.
 ///
@@ -150,6 +118,8 @@ pub(crate) struct SimWorkerParams<'w> {
     scenario_start: usize,
     /// Forward sampler that drives per-scenario-per-stage noise generation.
     sampler: &'w ForwardSampler<'w>,
+    /// Per-run scenario-invariant tables backing `sampler`'s `OutOfSample` draws.
+    noise_tables: &'w ForwardNoiseTables,
     /// Number of stages in the study horizon.
     num_stages: usize,
     /// Number of MPI ranks, scaling rank-local progress to a global estimate.
@@ -176,6 +146,10 @@ pub(crate) struct SimulationState {
     /// Defaults to `Phase::Simulation.profile()`; override with
     /// [`Self::set_profile`] before the first `run()` call.
     profile: ActiveProfile,
+
+    /// Scenario-invariant per-class noise tables, rebuilt once per run in
+    /// [`Self::run`] and shared by reference across every worker's draws.
+    noise_tables: ForwardNoiseTables,
 }
 
 impl SimulationState {
@@ -194,6 +168,7 @@ impl SimulationState {
             },
             freeze_scratch: FreezeScratch::new(),
             profile: Simulation.profile(),
+            noise_tables: ForwardNoiseTables::default(),
         }
     }
 
@@ -288,6 +263,12 @@ impl SimulationState {
         }
 
         let sampler = build_sim_sampler(training_ctx)?;
+        sampler.rebuild_noise_tables(
+            SIMULATION_ITERATION,
+            inputs.config.n_scenarios,
+            inputs.ctx.noise_group_ids,
+            &mut self.noise_tables,
+        )?;
 
         // Apply the simulation solver profile before the parallel region. For CLP
         // this selects the primal simplex, which eliminates the dual simplex's
@@ -297,9 +278,15 @@ impl SimulationState {
         }
 
         let (all_costs, all_stats): (WorkerCosts, WorkerStats) = match inputs.traversal {
-            Traversal::Sampled { .. } => {
-                run_sampled_simulation(inputs, frozen_templates, &sampler, sim_start)?
-            }
+            Traversal::Sampled { .. } => run_sampled_simulation(
+                inputs,
+                frozen_templates,
+                &sampler,
+                &self.noise_tables,
+                sim_start,
+                n_workers,
+                world_size,
+            )?,
             Traversal::Enumerated(plan) => {
                 let k = plan.paths.leaf.len();
                 #[allow(clippy::cast_possible_truncation)]
@@ -310,7 +297,13 @@ impl SimulationState {
                         inputs.config.n_scenarios
                     )));
                 }
-                run_enumerated_simulation(plan, inputs, frozen_templates, &sampler)?
+                run_enumerated_simulation(
+                    plan,
+                    inputs,
+                    frozen_templates,
+                    &sampler,
+                    &self.noise_tables,
+                )?
             }
         };
 
@@ -373,13 +366,14 @@ fn run_sampled_simulation<S: SolverInterface + Send, C: Communicator>(
     inputs: &mut SimulationInputs<'_, S, C>,
     frozen_templates: &[StageTemplate],
     sampler: &ForwardSampler<'_>,
+    noise_tables: &ForwardNoiseTables,
     sim_start: Instant,
+    n_workers: usize,
+    world_size: u32,
 ) -> Result<(WorkerCosts, WorkerStats), SimulationError> {
     let training_ctx = inputs.training_ctx;
     let num_stages = training_ctx.horizon.num_stages();
     let rank = inputs.comm.rank();
-    let n_workers = inputs.workspaces.len().max(1);
-    let world_size = u32::try_from(inputs.comm.size()).unwrap_or(1).max(1);
     let scenarios_complete = AtomicU32::new(0);
 
     let scenario_range = assign_scenarios(inputs.config.n_scenarios, rank, inputs.comm.size());
@@ -412,6 +406,7 @@ fn run_sampled_simulation<S: SolverInterface + Send, C: Communicator>(
         n_workers,
         scenario_start,
         sampler,
+        noise_tables,
         num_stages,
         world_size,
         root_node,
@@ -454,17 +449,13 @@ fn run_worker_scenarios<S: SolverInterface + Send>(
     params: &SimWorkerParams<'_>,
 ) -> Result<(WorkerCosts, WorkerStats), SimulationError> {
     let (start_local, end_local) = partition(params.local_count, params.n_workers, w);
-    let worker_sender: Option<Sender<TrainingEvent>> = params.output.event_sender.clone();
     let n_scenarios = end_local - start_local;
     let mut worker_costs = Vec::with_capacity(n_scenarios);
     let mut worker_stats = Vec::with_capacity(n_scenarios);
     // Resize once per worker, reuse across scenarios: no per-scenario allocation.
     let noise_dim = params.training_ctx.stochastic.dim();
     ws.scratch.raw_noise_buf.resize(noise_dim, 0.0_f64);
-    #[allow(clippy::cast_possible_truncation)]
-    ws.scratch
-        .perm_scratch
-        .resize(params.config.n_scenarios.max(1) as usize, 0_usize);
+    ws.scratch.corr_scratch.resize(2 * noise_dim, 0.0_f64);
 
     // Build once per worker: eliminates the per-(scenario, stage) allocation that
     // would otherwise occur inside extract_thermals / extract_hydros.
@@ -479,7 +470,6 @@ fn run_worker_scenarios<S: SolverInterface + Send>(
     for local_idx in start_local..end_local {
         #[allow(clippy::cast_possible_truncation)]
         let scenario_id = (params.scenario_start + local_idx) as u32;
-        let global_scenario = scenario_id;
 
         let stats_before = ws.solver.statistics();
         let load_spec = SimScenarioLoadSpec {
@@ -489,7 +479,7 @@ fn run_worker_scenarios<S: SolverInterface + Send>(
         // mem::take (capacity retained) so the immutable ScenarioIds borrows of
         // these slices do not conflict with the `&mut ws` passed below.
         let mut raw_noise_buf = std::mem::take(&mut ws.scratch.raw_noise_buf);
-        let mut perm_scratch = std::mem::take(&mut ws.scratch.perm_scratch);
+        let mut corr_scratch = std::mem::take(&mut ws.scratch.corr_scratch);
         let result = process_scenario_stages(
             ws,
             params.ctx,
@@ -499,18 +489,19 @@ fn run_worker_scenarios<S: SolverInterface + Send>(
             params.output,
             &mut ScenarioIds {
                 scenario_id,
-                global_scenario,
+                global_scenario: scenario_id,
                 num_stages: params.num_stages,
                 total_scenarios: params.config.n_scenarios,
                 raw_noise_buf: &mut raw_noise_buf,
-                perm_scratch: &mut perm_scratch,
+                corr_scratch: &mut corr_scratch,
                 sampler: params.sampler,
+                noise_tables: params.noise_tables,
                 root_node: params.root_node,
             },
             &lookups,
         );
         ws.scratch.raw_noise_buf = raw_noise_buf;
-        ws.scratch.perm_scratch = perm_scratch;
+        ws.scratch.corr_scratch = corr_scratch;
         let (total_cost, stage_results) = result?;
         let stats_after = ws.solver.statistics();
         let scenario_delta = SolverStatsDelta::from_snapshots(&stats_before, &stats_after);
@@ -533,7 +524,7 @@ fn run_worker_scenarios<S: SolverInterface + Send>(
             .min(params.config.n_scenarios);
         #[allow(clippy::cast_possible_truncation)]
         emit_sim_progress(
-            worker_sender.as_ref(),
+            params.output.event_sender.as_ref(),
             total_cost,
             scenario_solve_time_ms,
             scenario_lp_solves,

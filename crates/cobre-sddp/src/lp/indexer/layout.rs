@@ -1,46 +1,31 @@
-//! Per-stage geometry satellite types: [`EvaporationIndices`] and
-//! [`FphaRowRange`].
+//! Per-stage geometry satellite type: [`EvaporationIndices`].
 //!
-//! Each locates a single hydro's evaporation columns/row or FPHA row block
-//! within one stage LP. They are produced by the per-stage
-//! [`StageLayout`](crate::lp_builder) and carried on its
-//! [`StageGeometry`](crate::lp_builder::StageGeometry) snapshot; the role-(a)
-//! state-vector concern lives on [`StateSpace`](super::StateSpace) and the
-//! non-state study shape on [`StudyDimensions`](super::StudyDimensions).
+//! [`EvaporationIndices`] locates a single hydro's evaporation columns and row
+//! within one stage LP; the per-stage [`StageLayout`](crate::lp::builder)
+//! produces it and carries it on its
+//! [`StageGeometry`](crate::lp::builder::StageGeometry) snapshot as
+//! `evap_indices`. The role-(a) state-vector concern lives on
+//! [`StateSpace`](super::StateSpace) and the non-state study shape on
+//! [`StudyDimensions`](super::StudyDimensions).
 
 /// Column and row indices for one evaporation constraint.
 ///
-/// Locates the three evaporation columns and one evaporation row of a single
-/// `(hydro, block)` pair within a stage LP. The producing layout holds one entry
-/// per `(evap hydro, block)`, block-major.
+/// Per-`(evap hydro, block)` pair within a stage LP, block-major.
 #[derive(Debug, Clone, Copy)]
 pub struct EvaporationIndices {
-    /// Column index of the stage-averaged evaporation-outflow variable (m³/s).
+    /// Stage-averaged evaporation-outflow variable (m³/s).
     pub evaporation_flow_col: usize,
-    /// Column index of the positive violation slack `f_evap_plus_h` (m³/s).
+    /// Positive violation slack `f_evap_plus_h` (m³/s).
     pub f_evap_plus_col: usize,
-    /// Column index of the negative violation slack `f_evap_minus_h` (m³/s).
+    /// Negative violation slack `f_evap_minus_h` (m³/s).
     pub f_evap_minus_col: usize,
-    /// Row index of the evaporation equality constraint.
+    /// Evaporation equality constraint.
     pub evap_row: usize,
-}
-
-/// FPHA constraint row range for one hydro at one stage.
-///
-/// Locates the block of FPHA hyperplane rows assigned to a single FPHA hydro
-/// within a stage LP. Rows for hydro `i` at block `k` and plane `p` are at:
-/// `start + k * planes_per_block + p`.
-#[derive(Debug, Clone, Copy)]
-pub struct FphaRowRange {
-    /// First row index of this hydro's FPHA constraints (for block 0, plane 0).
-    pub start: usize,
-    /// Number of hyperplanes per block.
-    pub planes_per_block: usize,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{EvaporationIndices, FphaRowRange};
+    use super::EvaporationIndices;
 
     #[test]
     fn evap_indices_debug_clone_copy() {
@@ -55,18 +40,5 @@ mod tests {
         assert_eq!(cloned.evap_row, 5);
         let debug_str = format!("{ei:?}");
         assert!(debug_str.contains("EvaporationIndices"));
-    }
-
-    #[test]
-    fn fpha_row_range_debug_clone_copy() {
-        let r = FphaRowRange {
-            start: 42,
-            planes_per_block: 5,
-        };
-        let cloned = r;
-        assert_eq!(cloned.start, 42);
-        assert_eq!(cloned.planes_per_block, 5);
-        let debug_str = format!("{r:?}");
-        assert!(debug_str.contains("FphaRowRange"));
     }
 }

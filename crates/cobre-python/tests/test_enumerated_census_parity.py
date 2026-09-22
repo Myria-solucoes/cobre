@@ -32,11 +32,12 @@ from __future__ import annotations
 import json
 import pathlib
 import shutil
-import subprocess
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+
+from _cobre_cli import run_cli
 
 _REPO_ROOT = pathlib.Path(__file__).parents[3]
 _D01_CASE = _REPO_ROOT / "examples" / "deterministic" / "d01-thermal-dispatch"
@@ -45,37 +46,6 @@ _D01_CASE = _REPO_ROOT / "examples" / "deterministic" / "d01-thermal-dispatch"
 # so a weight/mean mismatch has power to fail.
 _LEAF_0_PROBABILITY = 0.35
 _LEAF_1_PROBABILITY = 0.65
-
-
-def _cli_binary() -> pathlib.Path:
-    """Return the compiled `cobre` CLI binary path, skipping if absent."""
-    for profile in ("release", "debug"):
-        candidate = _REPO_ROOT / "target" / profile / "cobre"
-        if candidate.is_file():
-            return candidate
-    pytest.skip(
-        "No compiled `cobre` binary found in target/release or target/debug. "
-        "Run `cargo build -p cobre-cli` first."
-    )
-    raise RuntimeError("unreachable: pytest.skip raises Skipped")
-
-
-def _run_cli(case_dir: pathlib.Path, output_dir: pathlib.Path) -> None:
-    """Run the cobre CLI for `case_dir`, writing outputs to `output_dir`."""
-    binary = _cli_binary()
-    result = subprocess.run(
-        [str(binary), "run", str(case_dir), "--output", str(output_dir)],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=120,
-    )
-    if result.returncode != 0:
-        pytest.fail(
-            f"cobre CLI failed (exit {result.returncode}):\n"
-            f"stdout: {result.stdout}\n"
-            f"stderr: {result.stderr}"
-        )
 
 
 def _make_census_case(dest: pathlib.Path) -> None:
@@ -158,10 +128,11 @@ def census_case_dir(tmp_path_factory: pytest.TempPathFactory) -> pathlib.Path:
 def census_cli_output(
     census_case_dir: pathlib.Path,
     tmp_path_factory: pytest.TempPathFactory,
+    cli_binary: pathlib.Path,
 ) -> pathlib.Path:
     """Run the census case via the CLI and return the output directory."""
     output_dir = tmp_path_factory.mktemp("census_cli_out")
-    _run_cli(census_case_dir, output_dir)
+    run_cli(census_case_dir, output_dir, cli_binary)
     return output_dir
 
 

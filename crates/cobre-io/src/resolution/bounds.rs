@@ -21,8 +21,9 @@ use crate::constraints::{
     ContractBoundsRow, HydroBoundsRow, LineBoundsRow, PumpingBoundsRow, ThermalBoundsRow,
 };
 
-/// Entity slices for bounds resolution. Each must be sorted by ID — the slice
-/// position becomes the entity's `entity_index` (declaration-order invariance).
+/// Entity slices for bounds resolution. Each must be in the order
+/// [`SystemBuilder::build`](cobre_core::SystemBuilder::build) establishes;
+/// slice position becomes the entity index.
 pub struct BoundsEntitySlices<'a> {
     /// Hydro plants.
     pub hydros: &'a [Hydro],

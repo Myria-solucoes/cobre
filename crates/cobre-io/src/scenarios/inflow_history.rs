@@ -40,17 +40,16 @@
 //! - `hydro_id` existence in the hydro registry — Layer 3.
 //! - Season/coverage alignment checks — Layer 4/5.
 
-use std::fs::File;
 use std::path::Path;
 
 use arrow::temporal_conversions::date32_to_datetime;
 use chrono::NaiveDate;
 use cobre_core::EntityId;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use crate::LoadError;
 use crate::parquet_helpers::{
     extract_required_date32, extract_required_float64, extract_required_int32,
+    open_record_batch_reader,
 };
 use crate::windowed_history::{WindowedRecord, validate_windowed_records};
 
@@ -84,14 +83,7 @@ const LEGACY_LAYOUT_MESSAGE: &str = "scenarios/inflow_history.parquet uses the l
 /// println!("loaded {} inflow history rows", rows.len());
 /// ```
 pub fn parse_inflow_history(path: &Path) -> Result<Vec<InflowHistoryRow>, LoadError> {
-    let file = File::open(path).map_err(|e| LoadError::io(path, e))?;
-
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
-
-    let reader = builder
-        .build()
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
+    let reader = open_record_batch_reader(path)?;
 
     let mut rows: Vec<InflowHistoryRow> = Vec::new();
 
@@ -189,6 +181,7 @@ fn parse_date32(
 )]
 mod tests {
     use super::*;
+    use crate::test_support::write_parquet;
     use arrow::array::{Date32Array, Float64Array, Int32Array};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
@@ -196,9 +189,7 @@ mod tests {
         Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
         StageStateConfig,
     };
-    use parquet::arrow::ArrowWriter;
     use std::sync::Arc;
-    use tempfile::NamedTempFile;
 
     fn schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
@@ -215,15 +206,6 @@ mod tests {
             Field::new("date", DataType::Date32, false),
             Field::new("value_m3s", DataType::Float64, false),
         ]))
-    }
-
-    fn write_parquet(batch: &RecordBatch) -> NamedTempFile {
-        let tmp = NamedTempFile::new().expect("tempfile");
-        let mut writer = ArrowWriter::try_new(tmp.reopen().expect("reopen"), batch.schema(), None)
-            .expect("ArrowWriter");
-        writer.write(batch).expect("write batch");
-        writer.close().expect("close writer");
-        tmp
     }
 
     fn naive_date_to_date32(date: NaiveDate) -> i32 {

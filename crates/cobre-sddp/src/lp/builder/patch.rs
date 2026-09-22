@@ -1,5 +1,5 @@
-use super::commitment_reconcile::BoundRelaxations;
-use crate::indexer::{BlockGrid, BlockIdx, StateDim, StateSpace};
+use super::state_box::StateBox;
+use crate::lp::indexer::{BlockGrid, BlockIdx, StateDim, StateSpace};
 
 /// Pre-allocated row-bound and column-bound patch arrays for one SDDP stage LP solve.
 ///
@@ -39,12 +39,6 @@ pub struct PatchBuffer {
 
     /// New upper bounds for each patched column in the column-bound region.
     pub col_upper: Vec<f64>,
-
-    /// Delivery generation-column bound relaxations absorbing solver-tolerance
-    /// commitment drift; empty (no `set_col_bounds`) whenever every commitment is
-    /// in bounds, so parity is preserved. Filled by
-    /// `commitment_reconcile::fill_bound_relaxations`.
-    pub commitment_relax: BoundRelaxations,
 
     /// Number of operating hydro plants (N).
     hydro_count: usize,
@@ -94,7 +88,7 @@ impl PatchBuffer {
     /// # Examples
     ///
     /// ```
-    /// use cobre_sddp::lp_builder::PatchBuffer;
+    /// use cobre_sddp::lp::builder::PatchBuffer;
     ///
     /// // 3-hydro AR(2) system, no stochastic load, no buckets, no anticipated thermals
     /// // Row capacity = N + M*B + N = 3 + 0 + 3 = 6
@@ -151,7 +145,6 @@ impl PatchBuffer {
             col_indices: vec![0; col_capacity],
             col_lower: vec![0.0; col_capacity],
             col_upper: vec![0.0; col_capacity],
-            commitment_relax: BoundRelaxations::default(),
             hydro_count,
             max_par_order,
             load_bus_count: n_load_buses,
@@ -234,17 +227,27 @@ impl PatchBuffer {
     ///
     /// [`state_to_lp_incoming_column`]: StateSpace::state_to_lp_incoming_column
     ///
+    /// The pinned incoming state is whatever the caller supplies in `state`: at
+    /// every stage but the first, the previous stage's own seam-canonicalized
+    /// outgoing state, so it lies inside that PRODUCING stage's own admissible
+    /// box; `producer_box` is that box (`None` at the first stage, whose
+    /// incoming state is the study's initial condition, validated at its own
+    /// source with no producing seam). `Some` asserts every pinned dimension
+    /// lies inside it, catching an entry point that bypassed the seam.
+    ///
     /// # Panics
     ///
     /// Panics in debug builds if `state.len() != state_layout.n_state`, if the
-    /// emitted patch count does not equal [`Self::state_col_patch_count`], or if
+    /// emitted patch count does not equal [`Self::state_col_patch_count`], if
     /// any travel-time bucket state index fails to resolve into
-    /// `state_layout.transit_buckets_in`.
+    /// `state_layout.transit_buckets_in`, or if `producer_box` is `Some` and
+    /// any pinned dimension lies outside it.
     pub fn fill_col_state_patches(
         &mut self,
         state_layout: &StateSpace,
         state: &[f64],
         col_scale: &[f64],
+        producer_box: Option<&StateBox>,
     ) {
         debug_assert_eq!(
             state.len(),
@@ -255,6 +258,14 @@ impl PatchBuffer {
         );
 
         for (j, &sv) in state.iter().enumerate() {
+            if let Some(state_box) = producer_box {
+                debug_assert!(
+                    sv >= state_box.lower[j] && sv <= state_box.upper[j],
+                    "pinned incoming state[{j}] = {sv} outside admissible box [{lower}, {upper}]",
+                    lower = state_box.lower[j],
+                    upper = state_box.upper[j],
+                );
+            }
             let col = state_layout
                 .state_to_lp_incoming_column(StateDim::new(j))
                 .get();
@@ -419,13 +430,21 @@ impl PatchBuffer {
     clippy::cast_possible_truncation
 )]
 mod tests {
-    use super::PatchBuffer;
-    use crate::indexer::{BlockGrid, StateSpace};
+    use super::{PatchBuffer, StateBox};
+    use crate::lp::indexer::{BlockGrid, StateSpace};
     use crate::test_support::{state_layout, state_layout_full, state_layout_with_transit_buckets};
 
     /// Convenience: make a role-(a) state layout without repeating N/L everywhere.
     fn idx(n: usize, l: usize) -> StateSpace {
         state_layout(n, l)
+    }
+
+    /// Every dimension unbounded — the pin-time box-membership assert is vacuous.
+    fn unbounded_state_box(n_state: usize) -> StateBox {
+        StateBox {
+            lower: vec![f64::NEG_INFINITY; n_state],
+            upper: vec![f64::INFINITY; n_state],
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -802,7 +821,12 @@ mod tests {
         let state = [10.0_f64, 20.0, 30.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0, 0);
         let state_layout = state_layout(3, 2);
-        buf.fill_col_state_patches(&state_layout, &state, &[]);
+        buf.fill_col_state_patches(
+            &state_layout,
+            &state,
+            &[],
+            Some(&unbounded_state_box(state.len())),
+        );
 
         let s = state_layout.storage_in.start;
         assert_eq!(buf.col_indices[0], s);
@@ -816,7 +840,12 @@ mod tests {
         let state = [10.0_f64, 20.0, 30.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0, 0);
         let state_layout = state_layout(3, 2);
-        buf.fill_col_state_patches(&state_layout, &state, &[]);
+        buf.fill_col_state_patches(
+            &state_layout,
+            &state,
+            &[],
+            Some(&unbounded_state_box(state.len())),
+        );
 
         assert_eq!(buf.col_lower[0], 10.0);
         assert_eq!(buf.col_upper[0], 10.0);
@@ -838,7 +867,12 @@ mod tests {
         let state = [10.0_f64, 20.0, 30.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0, 0);
         let state_layout = state_layout(3, 2);
-        buf.fill_col_state_patches(&state_layout, &state, &[]);
+        buf.fill_col_state_patches(
+            &state_layout,
+            &state,
+            &[],
+            Some(&unbounded_state_box(state.len())),
+        );
 
         let il = state_layout.inflow_lags.start;
         // lag=0
@@ -877,7 +911,12 @@ mod tests {
         state[ant_state_vec_start + 1] = 11.0;
 
         let mut buf = PatchBuffer::new(0, 0, 0, 0, 0, 1, 2);
-        buf.fill_col_state_patches(&state_layout, &state, &[]);
+        buf.fill_col_state_patches(
+            &state_layout,
+            &state,
+            &[],
+            Some(&unbounded_state_box(state.len())),
+        );
 
         assert_eq!(buf.col_indices[0], ant_incoming_col_start);
         assert_eq!(buf.col_indices[1], ant_incoming_col_start + 1);
@@ -907,7 +946,12 @@ mod tests {
         col_scale[ant_incoming_col_start + 1] = 1.0;
 
         let mut buf = PatchBuffer::new(0, 0, 0, 0, 0, 1, 2);
-        buf.fill_col_state_patches(&state_layout, &state, &col_scale);
+        buf.fill_col_state_patches(
+            &state_layout,
+            &state,
+            &col_scale,
+            Some(&unbounded_state_box(state.len())),
+        );
 
         assert_eq!(buf.col_lower[0], 7.0);
         assert_eq!(buf.col_upper[0], 7.0);
@@ -921,7 +965,12 @@ mod tests {
         let state = [10.0_f64, 20.0, 30.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0, 0);
         let state_layout = state_layout(3, 2);
-        buf.fill_col_state_patches(&state_layout, &state, &[]);
+        buf.fill_col_state_patches(
+            &state_layout,
+            &state,
+            &[],
+            Some(&unbounded_state_box(state.len())),
+        );
 
         let count = buf.state_col_patch_count();
         for i in 0..count {
@@ -954,7 +1003,12 @@ mod tests {
         col_scale[s + 1] = 2.0;
         col_scale[s + 2] = 2.0;
 
-        buf.fill_col_state_patches(&state_layout, &state, &col_scale);
+        buf.fill_col_state_patches(
+            &state_layout,
+            &state,
+            &col_scale,
+            Some(&unbounded_state_box(state.len())),
+        );
 
         assert_eq!(buf.col_lower[0], 5.0);
         assert_eq!(buf.col_upper[0], 5.0);
@@ -970,7 +1024,12 @@ mod tests {
         let state = [10.0_f64, 20.0, 30.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0, 0);
         let state_layout = state_layout(3, 2);
-        buf.fill_col_state_patches(&state_layout, &state, &[]);
+        buf.fill_col_state_patches(
+            &state_layout,
+            &state,
+            &[],
+            Some(&unbounded_state_box(state.len())),
+        );
 
         // N*(1+L) + A*K = 3*3 + 0 = 9
         assert_eq!(buf.state_col_patch_count(), 9);
@@ -986,7 +1045,12 @@ mod tests {
         let state = [10.0_f64, 20.0, 30.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0, 0);
         let state_layout = state_layout(3, 2);
-        buf.fill_col_state_patches(&state_layout, &state, &[]);
+        buf.fill_col_state_patches(
+            &state_layout,
+            &state,
+            &[],
+            Some(&unbounded_state_box(state.len())),
+        );
 
         assert!(
             buf.indices.iter().all(|&v| v == 0),
@@ -1020,7 +1084,12 @@ mod tests {
         state[state_layout.transit_buckets_out.start + 1] = 200.0;
 
         let mut buf = PatchBuffer::new(3, 2, 0, 0, n_buckets, 0, 0);
-        buf.fill_col_state_patches(&state_layout, &state, &[]);
+        buf.fill_col_state_patches(
+            &state_layout,
+            &state,
+            &[],
+            Some(&unbounded_state_box(state.len())),
+        );
 
         let cp = buf.state_col_patch_count();
         assert_eq!(cp, state_layout.n_state);
@@ -1063,7 +1132,12 @@ mod tests {
         state[state_layout.commit_out.start + 1] = 11.0;
 
         let mut buf = PatchBuffer::new(n, l, 0, 0, n_buckets, 1, 2);
-        buf.fill_col_state_patches(&state_layout, &state, &[]);
+        buf.fill_col_state_patches(
+            &state_layout,
+            &state,
+            &[],
+            Some(&unbounded_state_box(state.len())),
+        );
 
         // Buckets occupy the unshifted slots; anticipated occupies the shifted ones.
         assert_eq!(buf.col_lower[unshifted_anticipated_start], 100.0);
@@ -1144,7 +1218,12 @@ mod tests {
         }
 
         let mut buf = PatchBuffer::new(n, l, 0, 0, 0, a, k);
-        buf.fill_col_state_patches(&state_layout, &state, &col_scale);
+        buf.fill_col_state_patches(
+            &state_layout,
+            &state,
+            &col_scale,
+            Some(&unbounded_state_box(state.len())),
+        );
 
         assert_eq!(buf.col_indices, legacy_indices);
         assert_eq!(buf.col_lower, legacy_lower);
@@ -1163,6 +1242,26 @@ mod tests {
             state_layout_with_transit_buckets(3, 2, 2, vec![(0, 0), (0, 1)], 0, 0, vec![]);
         let state = vec![0.0_f64; state_layout.n_state];
         let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0, 0);
-        buf.fill_col_state_patches(&state_layout, &state, &[]);
+        buf.fill_col_state_patches(
+            &state_layout,
+            &state,
+            &[],
+            Some(&unbounded_state_box(state.len())),
+        );
+    }
+
+    /// A pinned incoming state dimension outside its admissible box panics via
+    /// the pin-time debug_assert — read-back is the single canonicalization
+    /// point, so an out-of-box pin here means an entry point bypassed it.
+    #[test]
+    #[should_panic(expected = "outside admissible box")]
+    fn fill_col_state_patches_panics_on_out_of_box_pin() {
+        let state = [10.0_f64, 20.0, 30.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0, 0);
+        let state_layout = state_layout(3, 2);
+        let mut state_box = unbounded_state_box(state.len());
+        state_box.upper[0] = 5.0;
+
+        buf.fill_col_state_patches(&state_layout, &state, &[], Some(&state_box));
     }
 }

@@ -25,12 +25,12 @@ use cobre_core::EntityId;
 use cobre_core::HydroPastDefluence;
 
 use crate::energy_conversion::EnergyConversionSet;
-use crate::indexer::{
+use crate::lp::builder::{GenericConstraintRowEntry, StageGeometry};
+use crate::lp::indexer::{
     AnticipatedLocal, BlockGrid, BlockIdx, Boundary, EvapLocal, FillingTargetLocal, FloorLocal,
     FphaLocal, HydroCell, HydroCellIndex, HydroSys, StateSpace, StudyDimensions,
     anticipated_resolution_for, is_anticipated_decision_active_for_delivery,
 };
-use crate::lp_builder::{GenericConstraintRowEntry, StageGeometry};
 use crate::setup::NodeId;
 use crate::simulation::types::{
     ScenarioCategoryCosts, SimulationAnticipatedLaneResult, SimulationBusResult,
@@ -262,10 +262,10 @@ fn compute_anticipated_committed_mw(
     let local_idx = lookup.thermal_is_anticipated[thermal_local]?;
     // Ring buffer lives in the stage-invariant state region, so the base is the
     // role-(a) `StateSpace`, not the geometry indexer.
-    let slot_offset = spec
+    let col = spec
         .state
-        .commitment_hold_in_study_offset(local_idx.get(), spec.stage_index);
-    let col = spec.state.commit_in.start + slot_offset;
+        .commitment_hold_incoming_col(local_idx.get(), spec.stage_index)
+        .get();
     debug_assert!(
         col < view.primal.len(),
         "commitment-hold maturing-slot col {col} out of primal bounds {}",
@@ -282,7 +282,7 @@ fn compute_anticipated_committed_mw(
 /// empty at every non-decider stage. `deposited_decision_mw` reads the plant's
 /// ring decision column (`geometry.anticipated_decision.start + local`);
 /// `carried_committed_mw` reads the ring slot the target lands in
-/// (`commit_out.start + commitment_hold_in_study_offset(local, m)`) — the SAME
+/// ([`StateSpace::commitment_hold_outgoing_col`]) — the SAME
 /// slot the deposit latches (`fill_anticipated_state_out_def_entries`), so the
 /// deposit row pins the two equal at the decider stage. `delivery_dates` is the
 /// extended delivery-stage anchor array indexed by delivery target `m` (study
@@ -312,8 +312,7 @@ pub(crate) fn extract_anticipated_lanes(
                 continue;
             }
             let decision_col = spec.geometry.anticipated_decision.start + local;
-            let carried_col =
-                state.commit_out.start + state.commitment_hold_in_study_offset(local, m);
+            let carried_col = state.commitment_hold_outgoing_col(local, m).get();
             debug_assert!(
                 decision_col < view.primal.len() && carried_col < view.primal.len(),
                 "anticipated-lane ring cols {decision_col}/{carried_col} out of primal bounds {}",
@@ -614,6 +613,14 @@ pub struct SolutionView<'a> {
 /// Unit cancellation: `hm³ × 10⁶ m³/hm³ ÷ 3600 s/h × MW/(m³/s) = MWh`.
 pub const ENERGY_FACTOR_MWH_PER_HM3_PER_MW_PER_M3S: f64 = 1.0e6 / 3600.0;
 
+/// `(storage - v_min) * rho_acum * ENERGY_FACTOR` — stored energy above the
+/// minimum operable volume, shared by the no-turbine and per-block hydro
+/// extraction sites.
+#[inline]
+fn stored_energy_mwh(storage_hm3: f64, v_min_hm3: f64, rho_acum: f64) -> f64 {
+    (storage_hm3 - v_min_hm3) * rho_acum * ENERGY_FACTOR_MWH_PER_HM3_PER_MW_PER_M3S
+}
+
 /// Extraction parameters bundled for a single stage.
 ///
 /// **Per-stage geometry contract.** Every block-major equipment read must take its
@@ -699,7 +706,7 @@ pub struct StageExtractionSpec<'a> {
     /// `ρ_eq` and `ρ_acum` scalars per `(hydro, stage)` via [`EnergyConversionSet`].
     pub energy_conversion: &'a EnergyConversionSet,
     /// `V_min` per hydro (hm³), in `entity_counts.hydro_ids` order. Feeds
-    /// `stored_energy_mwh = (V - V_min) · ρ_acum · ENERGY_FACTOR`.
+    /// `stored_energy_mwh = (V - V_min) · ρ_acum_integrated · ENERGY_FACTOR`.
     pub hydro_min_storage_hm3: &'a [f64],
     /// Stage index within the planning horizon (0-based).
     pub stage_index: usize,
@@ -817,9 +824,8 @@ fn extract_hydro_no_turbine(
             let mut ob = 0.0_f64;
             let mut oa = 0.0_f64;
             let mut gb = 0.0_f64;
-            let total_hours: f64 = spec.block_hours.iter().sum();
             for blk in 0..n_blks {
-                let w = spec.block_hours[blk] / total_hours;
+                let w = spec.block_hours[blk] / ctx.stage_total_hours;
                 let (turb_slack, below_slack, above_slack, gen_slack) =
                     hydro_operational_slacks(view, spec, grid, h, blk);
                 tb += turb_slack * w;
@@ -831,6 +837,11 @@ fn extract_hydro_no_turbine(
         } else {
             (0.0, 0.0, 0.0, 0.0)
         };
+
+    let stored_energy_initial_mwh =
+        stored_energy_mwh(ctx.storage_initial, ctx.v_min, ctx.rho_acum_integrated);
+    let stored_energy_final_mwh =
+        stored_energy_mwh(ctx.storage_final, ctx.v_min, ctx.rho_acum_integrated);
 
     SimulationHydroResult {
         stage_id,
@@ -849,12 +860,8 @@ fn extract_hydro_no_turbine(
         equivalent_productivity_mw_per_m3s: ctx.equivalent_productivity_mw_per_m3s,
         accumulated_productivity_mw_per_m3s: ctx.accumulated_productivity_mw_per_m3s,
         incremental_inflow_energy_mw: ctx.incremental_inflow_energy_mw,
-        stored_energy_initial_mwh: (ctx.storage_initial - ctx.v_min)
-            * ctx.rho_acum
-            * ENERGY_FACTOR_MWH_PER_HM3_PER_MW_PER_M3S,
-        stored_energy_final_mwh: (ctx.storage_final - ctx.v_min)
-            * ctx.rho_acum
-            * ENERGY_FACTOR_MWH_PER_HM3_PER_MW_PER_M3S,
+        stored_energy_initial_mwh,
+        stored_energy_final_mwh,
         spillage_cost: 0.0,
         water_value_per_hm3: ctx.water_value,
         storage_binding_code: 0,
@@ -870,6 +877,12 @@ fn extract_hydro_no_turbine(
         inflow_nonnegativity_slack_m3s: ctx.inflow_slack,
         water_withdrawal_violation_pos_m3s: ctx.withdrawal_pos,
         water_withdrawal_violation_neg_m3s: ctx.withdrawal_neg,
+        integrated_equivalent_productivity_mw_per_m3s: ctx
+            .integrated_equivalent_productivity_mw_per_m3s,
+        integrated_accumulated_productivity_mw_per_m3s: ctx
+            .integrated_accumulated_productivity_mw_per_m3s,
+        stored_energy_initial_mw: stored_energy_initial_mwh / ctx.stage_total_hours,
+        stored_energy_final_mw: stored_energy_final_mwh / ctx.stage_total_hours,
     }
 }
 
@@ -892,11 +905,18 @@ struct HydroStageContext {
     evap_local: Option<EvapLocal>,
     equivalent_productivity_mw_per_m3s: f64,
     accumulated_productivity_mw_per_m3s: f64,
+    integrated_equivalent_productivity_mw_per_m3s: f64,
+    integrated_accumulated_productivity_mw_per_m3s: f64,
     incremental_inflow_energy_mw: f64,
-    /// `V_min` (hm³) and `ρ_acum`, both block-invariant, retained so the per-block
-    /// closure derives each boundary's stored energy without re-querying conversions.
+    /// `Σ block_hours` — the `stored_energy_*_mw` divisor; never a per-block hours.
+    stage_total_hours: f64,
+    /// `V_min` (hm³), block-invariant, retained so the per-block closure derives
+    /// each boundary's stored energy without re-querying conversions.
     v_min: f64,
-    rho_acum: f64,
+    /// Cascade mean-evaluator grid (`integrated_accumulated_productivity`) stored
+    /// energy rides — `incremental_inflow_energy_mw` stays on the reference-point
+    /// grid instead; repointing it here is the forbidden alternative.
+    rho_acum_integrated: f64,
     evaporation_m3s: Option<f64>,
     evaporation_violation_neg_m3s: f64,
     evaporation_violation_pos_m3s: f64,
@@ -974,7 +994,14 @@ impl HydroStageContext {
         let rho_acum = spec
             .energy_conversion
             .accumulated_productivity(h, spec.stage_index);
+        let integrated_equivalent = spec
+            .energy_conversion
+            .integrated_equivalent_productivity(h, spec.stage_index);
+        let integrated_accumulated = spec
+            .energy_conversion
+            .integrated_accumulated_productivity(h, spec.stage_index);
         let v_min = spec.hydro_min_storage_hm3.get(h).copied().unwrap_or(0.0);
+        let stage_total_hours: f64 = spec.block_hours.iter().sum();
         Self {
             storage_final,
             storage_initial,
@@ -987,9 +1014,12 @@ impl HydroStageContext {
             evap_local,
             equivalent_productivity_mw_per_m3s: conv.equivalent_productivity_mw_per_m3s,
             accumulated_productivity_mw_per_m3s: rho_acum,
+            integrated_equivalent_productivity_mw_per_m3s: integrated_equivalent,
+            integrated_accumulated_productivity_mw_per_m3s: integrated_accumulated,
             incremental_inflow_energy_mw: rho_acum * incremental_inflow,
+            stage_total_hours,
             v_min,
-            rho_acum,
+            rho_acum_integrated: integrated_accumulated,
             evaporation_m3s,
             evaporation_violation_neg_m3s,
             evaporation_violation_pos_m3s,
@@ -1093,9 +1123,11 @@ fn extract_hydro_per_block<'a>(
             BlockMode::Parallel => (ctx.storage_initial, ctx.storage_final),
         };
         let stored_energy_initial_mwh =
-            (storage_initial - ctx.v_min) * ctx.rho_acum * ENERGY_FACTOR_MWH_PER_HM3_PER_MW_PER_M3S;
+            stored_energy_mwh(storage_initial, ctx.v_min, ctx.rho_acum_integrated);
         let stored_energy_final_mwh =
-            (storage_final - ctx.v_min) * ctx.rho_acum * ENERGY_FACTOR_MWH_PER_HM3_PER_MW_PER_M3S;
+            stored_energy_mwh(storage_final, ctx.v_min, ctx.rho_acum_integrated);
+        let stored_energy_initial_mw = stored_energy_initial_mwh / ctx.stage_total_hours;
+        let stored_energy_final_mw = stored_energy_final_mwh / ctx.stage_total_hours;
 
         // Chronological block `b` reports its own block's evaporation triple
         // (`evap_indices[local * n_blks + b]`); parallel keeps the stage-level block-0
@@ -1160,6 +1192,12 @@ fn extract_hydro_per_block<'a>(
             inflow_nonnegativity_slack_m3s: ctx.inflow_slack,
             water_withdrawal_violation_pos_m3s: ctx.withdrawal_pos,
             water_withdrawal_violation_neg_m3s: ctx.withdrawal_neg,
+            integrated_equivalent_productivity_mw_per_m3s: ctx
+                .integrated_equivalent_productivity_mw_per_m3s,
+            integrated_accumulated_productivity_mw_per_m3s: ctx
+                .integrated_accumulated_productivity_mw_per_m3s,
+            stored_energy_initial_mw,
+            stored_energy_final_mw,
         }
     })
 }
@@ -1180,14 +1218,11 @@ fn extract_hydros(
             })
             .collect()
     } else {
-        spec.entity_counts
-            .hydro_ids
-            .iter()
-            .enumerate()
-            .flat_map(|(h, &hydro_id)| {
-                extract_hydro_per_block(view, spec, lookup, h, hydro_id, stage_id)
-            })
-            .collect()
+        let mut results = Vec::with_capacity(spec.entity_counts.hydro_ids.len() * spec.n_blks);
+        results.extend(spec.entity_counts.hydro_ids.iter().enumerate().flat_map(
+            |(h, &hydro_id)| extract_hydro_per_block(view, spec, lookup, h, hydro_id, stage_id),
+        ));
+        results
     }
 }
 
@@ -1333,11 +1368,9 @@ fn extract_exchanges(
             .collect()
     } else {
         let grid = spec.block_grid();
-        spec.entity_counts
-            .line_ids
-            .iter()
-            .enumerate()
-            .flat_map(move |(l, &line_id)| {
+        let mut results = Vec::with_capacity(spec.entity_counts.line_ids.len() * n_blks);
+        results.extend(spec.entity_counts.line_ids.iter().enumerate().flat_map(
+            move |(l, &line_id)| {
                 (0..n_blks).map(move |b| {
                     let fwd_col = grid.flat(spec.geometry.line_fwd.start, l, BlockIdx::new(b));
                     let rev_col = grid.flat(spec.geometry.line_rev.start, l, BlockIdx::new(b));
@@ -1358,8 +1391,9 @@ fn extract_exchanges(
                         operative_state_code: 2,
                     }
                 })
-            })
-            .collect()
+            },
+        ));
+        results
     }
 }
 
@@ -1387,11 +1421,9 @@ fn extract_buses(
     } else {
         let grid = spec.block_grid();
         let max_segs = spec.study_dims.max_deficit_segments;
-        spec.entity_counts
-            .bus_ids
-            .iter()
-            .enumerate()
-            .flat_map(move |(bus_idx, &bus_id)| {
+        let mut results = Vec::with_capacity(spec.entity_counts.bus_ids.len() * n_blks);
+        results.extend(spec.entity_counts.bus_ids.iter().enumerate().flat_map(
+            move |(bus_idx, &bus_id)| {
                 (0..n_blks).map(move |b| {
                     // Deficit is the 3-term bus-outer/segment-middle/block-inner
                     // shape, so address it with `deficit`, not `flat`.
@@ -1427,8 +1459,9 @@ fn extract_buses(
                         },
                     }
                 })
-            })
-            .collect()
+            },
+        ));
+        results
     }
 }
 
@@ -2050,12 +2083,10 @@ fn extract_stub_collections(
     Vec<SimulationContractResult>,
 ) {
     let state = spec.state;
-    let inflow_lags: Vec<SimulationInflowLagResult> = spec
-        .entity_counts
-        .hydro_ids
-        .iter()
-        .enumerate()
-        .flat_map(|(h, &hydro_id)| {
+    let mut inflow_lags =
+        Vec::with_capacity(spec.entity_counts.hydro_ids.len() * state.max_par_order);
+    inflow_lags.extend(spec.entity_counts.hydro_ids.iter().enumerate().flat_map(
+        |(h, &hydro_id)| {
             (0..state.max_par_order).map(move |l| {
                 #[allow(clippy::cast_possible_truncation)]
                 SimulationInflowLagResult {
@@ -2065,8 +2096,8 @@ fn extract_stub_collections(
                     inflow_m3s: view.primal[state.lag_incoming_col(l, h).get()],
                 }
             })
-        })
-        .collect();
+        },
+    ));
     let pumping_stations = extract_pumping_stations(view, spec, stage_id);
     let contracts = extract_contracts(view, spec, stage_id);
     (inflow_lags, pumping_stations, contracts)
@@ -2219,6 +2250,10 @@ mod transit_seed_tests {
             inflow_nonnegativity_slack_m3s: 0.0,
             water_withdrawal_violation_pos_m3s: 0.0,
             water_withdrawal_violation_neg_m3s: 0.0,
+            integrated_equivalent_productivity_mw_per_m3s: 0.0,
+            integrated_accumulated_productivity_mw_per_m3s: 0.0,
+            stored_energy_initial_mw: 0.0,
+            stored_energy_final_mw: 0.0,
         }
     }
 

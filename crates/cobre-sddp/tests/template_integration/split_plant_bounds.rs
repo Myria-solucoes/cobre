@@ -17,12 +17,7 @@ use cobre_sddp::{StageTemplates, StudyParams, prepare_stochastic};
 
 use super::*;
 
-/// Load `d51-split-plant-two-bus` through the same `load_case` ->
-/// `prepare_stochastic` -> `prepare_hydro_models` chain every other domain
-/// binary uses, then build its REAL stage templates via
-/// `build_stage_templates_resolving_layout` — the same public entry point
-/// this file's other sections already call for hand-built systems. No solve
-/// happens; this is a structural (Tier 3) read of `col_upper`.
+/// Structural (Tier 3) read of d51's `col_upper` — no solve.
 fn build_d51_templates() -> (cobre_core::System, StageTemplates) {
     let case_dir = Path::new("../../examples/deterministic/d51-split-plant-two-bus");
     let config_path = case_dir.join("config.json");
@@ -43,7 +38,8 @@ fn build_d51_templates() -> (cobre_core::System, StageTemplates) {
 
     let hydro_models = prepare_hydro_models(&system, case_dir, false)
         .expect("prepare_hydro_models must succeed for d51");
-    let params = StudyParams::from_config(&config).expect("StudyParams::from_config must succeed");
+    let params = StudyParams::from_config(&config, Vec::new())
+        .expect("StudyParams::from_config must succeed");
 
     let templates = build_stage_templates_resolving_layout(
         &system,
@@ -59,10 +55,8 @@ fn build_d51_templates() -> (cobre_core::System, StageTemplates) {
     (system, templates)
 }
 
-/// Resolves H0's two bus-partitioned cells and returns `(cell0_col_upper,
-/// cell1_col_upper)` of the FPHA generation column at `(stage_idx, blk)`,
-/// read straight off the built `StageTemplate.col_upper` — never
-/// re-derived by hand-recomputing `cell_max_generation`'s own formula.
+/// Reads `StageTemplate.col_upper` directly, never hand-recomputing
+/// `cell_max_generation`'s formula.
 fn cell_generation_bounds_at(
     system: &cobre_core::System,
     templates: &StageTemplates,
@@ -92,10 +86,8 @@ fn cell_generation_bounds_at(
     let geometry = &templates.geometry_per_stage[stage_idx];
     let n_blks = templates.block_hours_per_stage[stage_idx].len();
     let grid = BlockGrid::new(n_blks, 1);
-    // H0 is the only, and therefore the first, FPHA hydro: its cells occupy
-    // the FPHA-local generation offsets [0, 2) in the same ascending order
-    // `HydroCellIndex::cells_of` yields (`fill_fpha_generation_columns`'s
-    // `fpha_cell_base + offset`, `fpha_cell_base == 0` for local index 0).
+    // H0 is the only FPHA hydro, so its cells occupy FPHA-local generation
+    // offsets [0, 2) in the same ascending order `HydroCellIndex::cells_of` yields.
     let col0 = grid.flat(geometry.generation.start, 0, BlockIdx::new(blk));
     let col1 = grid.flat(geometry.generation.start, 1, BlockIdx::new(blk));
 

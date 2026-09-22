@@ -10,10 +10,8 @@ use crate::{
     context::{StageContext, TrainingContext},
     dcs::{DcsSolveContext, build_initial_resident_set, lazy_solve_preloaded},
     error::SddpError,
-    noise::{DownstreamAccumState, LagAccumState, accumulate_and_shift_lag_state},
-    stage_solve::{
-        StageInputs, debug_assert_bucket_copy_gap_intact, fill_unscaled, run_stage_solve,
-    },
+    noise::{DownstreamAccumState, LagAccumState},
+    stage_solve::{StageInputs, assemble_outgoing_state, fill_unscaled, run_stage_solve},
     training::stage_solve_prep::{
         InflowNoise, LoadNoise, StageSolvePrep, StageSolvePrepParams, StateSource,
     },
@@ -25,7 +23,7 @@ use super::{StageKey, write_capture_metadata};
 
 /// Execute the stage-level LP solve for one (scenario, stage) pair.
 ///
-/// Returns the stage cost on success, or propagates the solver error.
+/// Returns the stage cost on success.
 ///
 /// # Errors
 ///
@@ -87,7 +85,7 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         training_ctx,
         t,
         &prep_params,
-    )?;
+    );
     // Zero theta at the terminal stage (no successor to penalise), but NOT when
     // boundary cuts are loaded — those constrain theta from below and must stay
     // visible in the objective.
@@ -195,9 +193,6 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         .lag_matrix_buf
         .extend_from_slice(&ws.current_state[lag_start..lag_start + lag_len]);
 
-    ws.current_state.clear();
-    ws.current_state
-        .extend_from_slice(&unscaled_primal[..state.n_state]);
     let stage_lag = resolve_stage_lag_transition(ctx.stage_lag_transitions, t.0);
     let downstream_par_order = ws
         .scratch
@@ -205,12 +200,13 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         .len()
         .checked_div(ws.scratch.lag_accumulator.len())
         .unwrap_or(0);
-    accumulate_and_shift_lag_state(
+    assemble_outgoing_state(
         &mut ws.current_state,
-        &ws.scratch.lag_matrix_buf,
         &unscaled_primal,
+        &ws.scratch.lag_matrix_buf,
         state,
-        &stage_lag,
+        ctx.state_box(t),
+        stage_lag,
         &mut LagAccumState {
             accumulator: &mut ws.scratch.lag_accumulator,
             weight_accum: &mut ws.scratch.lag_weight_accum,
@@ -223,7 +219,6 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
             par_order: downstream_par_order,
         },
     );
-    debug_assert_bucket_copy_gap_intact(&ws.current_state, &unscaled_primal, state);
     // Last read of `unscaled_primal`; restore it so the next stage reuses the
     // warmed allocation.
     ws.scratch.unscaled_primal = unscaled_primal;

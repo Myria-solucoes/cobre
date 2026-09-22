@@ -20,7 +20,7 @@
 //! #     -> Result<(), cobre_sddp::SddpError> {
 //! let stochastic = build_stochastic_context(system, 42, None, &[], &[], OpeningTreeInputs::default(), ClassSchemes { inflow: None, load: None, ncs: None })?;
 //! let hydro_models = PrepareHydroModelsResult::default_from_system(system);
-//! let setup = StudySetup::new(system, config, stochastic, hydro_models)?;
+//! let setup = StudySetup::new(system, config, stochastic, hydro_models, Vec::new())?;
 //! assert!(!setup.stage_data.stage_templates.templates.is_empty());
 //! # Ok(())
 //! # }
@@ -36,6 +36,7 @@ use cobre_io::Config;
 use cobre_io::config::BackwardScheduler;
 use cobre_solver::ActiveProfile;
 use cobre_stochastic::DerivedInflowSeeds;
+use cobre_stochastic::DerivedSeed;
 use cobre_stochastic::derive_inflow_seeds;
 use cobre_stochastic::noise_entity_order;
 use cobre_stochastic::par::lag_transition::derive_downstream_par_order;
@@ -80,8 +81,9 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use cobre_core::{
-    AnticipatedConfig, EntityId, HorizonGraph, Hydro, HydroPastDefluence, PostStudyStages,
-    PostStudyThermalBound, Stage, StageId, System, Thermal,
+    AffineBound, AnticipatedConfig, CoefficientRef, EntityId, GenericConstraint, HorizonGraph,
+    Hydro, HydroPastDefluence, PostStudyStages, PostStudyThermalBound, ScalarParameter, Stage,
+    StageId, System, Thermal,
     scenario::{SamplingScheme, ScenarioSource},
 };
 use cobre_io::StageIdResolver;
@@ -89,20 +91,22 @@ use cobre_io::build_hydro_reference_volumes_resolved;
 use cobre_stochastic::par::precompute::PrecomputedPar;
 use cobre_stochastic::{
     ClassSchemes, ExternalScenarioLibrary, HistoricalScenarioLibrary, StochasticContext,
-    SweepDirection,
 };
 
 use crate::{
     config::{CutManagementConfig, EventParams},
     cut::FutureCostFunction,
+    cut_selection::CutSelectionStrategy,
     energy_conversion::{EnergyConversionSet, build_energy_conversion_set},
     error::SddpError,
     horizon_mode::HorizonMode,
     hydro_models::PrepareHydroModelsResult,
-    indexer::{AnticipatedLocal, CutStateProjection, HydroCellIndex, StateSpace, StudyDimensions},
     inflow_method::InflowNonNegativityMethod,
     lead_time::{AnticipatedResolution, DeliveryAxis, LeadTime, PointResolution, SpreadResolution},
-    lp_builder::{M3S_TO_HM3, build_stage_templates},
+    lp::builder::{M3S_TO_HM3, StateBox, build_stage_templates},
+    lp::indexer::{
+        AnticipatedLocal, CutStateProjection, HydroCellIndex, StateSpace, StudyDimensions,
+    },
     risk_measure::{RiskMeasure, uniform_effective_measure},
     simulation::EntityCounts,
     simulation::extraction::TransitSeedArc,
@@ -344,6 +348,7 @@ impl StudySetup {
         config: &Config,
         stochastic: StochasticContext,
         hydro_models: PrepareHydroModelsResult,
+        scalar_parameters: Vec<ScalarParameter>,
     ) -> Result<Self, SddpError> {
         // No case dir to read the source checkpoint, so the depth is unresolved
         // (None); presence still follows the config, matching the boundary-mask
@@ -353,7 +358,14 @@ impl StudySetup {
         } else {
             BoundaryStateRequirements::none()
         };
-        Self::new_with_boundary_requirements(system, config, stochastic, hydro_models, boundary)
+        Self::new_with_boundary_requirements(
+            system,
+            config,
+            stochastic,
+            hydro_models,
+            boundary,
+            scalar_parameters,
+        )
     }
 
     /// [`Self::new`] with the boundary-derived state requirements supplied
@@ -374,8 +386,9 @@ impl StudySetup {
         stochastic: StochasticContext,
         hydro_models: PrepareHydroModelsResult,
         boundary: BoundaryStateRequirements,
+        scalar_parameters: Vec<ScalarParameter>,
     ) -> Result<Self, SddpError> {
-        let mut params = StudyParams::from_config(config)?;
+        let mut params = StudyParams::from_config(config, scalar_parameters)?;
         params.boundary = boundary;
         // Sentinel: the scenario-source resolvers use the path only for error
         // messages and the historical-years look-up, neither exercised here with a
@@ -466,7 +479,7 @@ impl StudySetup {
         // thread/rank counts (canonical-ω aggregation is order-independent).
         let solve_order_keys = build_noise_key_table(system, &stochastic)?;
         stochastic
-            .set_solve_order(&solve_order_keys, SweepDirection::Descending)
+            .set_solve_order(&solve_order_keys)
             .map_err(|e| SddpError::Validation(e.to_string()))?;
 
         // Computed here (not inside `build_energy_and_templates`) so the one
@@ -567,6 +580,9 @@ impl StudySetup {
             system,
             &transit_bucket_topology,
         );
+        if let Some(stage0_box) = stage_templates.state_boxes.first() {
+            canonicalize_initial_state(&mut initial_state, &state_layout, stage0_box);
+        }
 
         let n_stages = stage_templates.templates.len();
         let max_iterations = max_iterations_from_rules(&stopping_rule_set);
@@ -600,10 +616,7 @@ impl StudySetup {
             simulation_source,
             forward_passes,
             downstream_par_order,
-            &derived_inflow_seeds.lag_values,
-            state_layout.max_par_order,
-            &derived_inflow_seeds.accum,
-            &derived_inflow_seeds.weight,
+            derived_inflow_seeds.as_seed(state_layout.max_par_order),
         )?;
 
         // G1: binds after `build_scenario_libraries` — an `External`-bound
@@ -620,15 +633,13 @@ impl StudySetup {
         )?;
 
         reject_scenario_id_under_sampled_selection(&node_graph, training_enumerated)?;
-        {
-            let prov = stochastic.provenance();
-            reject_insample_class_under_external_nodes(
-                &node_graph,
-                (prov.inflow_scheme, stochastic.n_hydros()),
-                (prov.load_scheme, stochastic.n_load_buses()),
-                (prov.ncs_scheme, stochastic.n_stochastic_ncs()),
-            )?;
-        }
+        let prov = stochastic.provenance();
+        reject_insample_class_under_external_nodes(
+            &node_graph,
+            (prov.inflow_scheme, stochastic.n_hydros()),
+            (prov.load_scheme, stochastic.n_load_buses()),
+            (prov.ncs_scheme, stochastic.n_stochastic_ncs()),
+        )?;
 
         // Resolves any `enumerated`-declared phase's actual count now that the
         // graph exists — config load could only signal the request, never the
@@ -731,7 +742,12 @@ impl StudySetup {
         let transit_seed_arcs = build_transit_seed_arcs(system);
         let past_defluences = system.initial_conditions().past_defluences.clone();
 
-        admission_gate(&risk_measures, &stopping_rule_set, training_enumerated)?;
+        admission_gate(
+            &risk_measures,
+            &stopping_rule_set,
+            training_enumerated,
+            cut_selection.as_ref(),
+        )?;
 
         let hydro_min_storage_hm3: Vec<f64> =
             system.hydros().iter().map(|h| h.min_storage_hm3).collect();
@@ -791,7 +807,6 @@ impl StudySetup {
                 cut_selection,
                 budget,
                 cut_activity_tolerance,
-                warm_start_cuts: 0,
                 risk_measures,
             },
             events: EventParams { export_states },
@@ -809,6 +824,60 @@ impl StudySetup {
             warm_start_basis_cache: None,
             boundary_requirements: boundary,
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RunPhasePlan
+// ---------------------------------------------------------------------------
+
+/// A run's top-level shape: whether training runs, and whether simulation
+/// runs from a stored policy instead. The single owner both L4 entry points
+/// (CLI, Python) match on instead of each re-deriving the same predicate
+/// pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunPhasePlan {
+    /// Training runs; whether simulation follows is a separate post-training
+    /// check the caller still makes.
+    TrainedThenSimulated,
+    /// Training is disabled; simulation runs from a stored policy.
+    SimulateFromPolicy,
+    /// Training is disabled and no simulation was requested.
+    Nothing,
+}
+
+impl RunPhasePlan {
+    /// Resolves the plan from `training_enabled` and whether simulation was
+    /// requested (`simulation_config.n_scenarios > 0`, already normalized).
+    #[must_use]
+    pub fn resolve(training_enabled: bool, simulate_requested: bool) -> Self {
+        match (training_enabled, simulate_requested) {
+            (true, _) => Self::TrainedThenSimulated,
+            (false, true) => Self::SimulateFromPolicy,
+            (false, false) => Self::Nothing,
+        }
+    }
+}
+
+#[cfg(test)]
+mod run_phase_plan_tests {
+    use super::RunPhasePlan;
+
+    #[test]
+    fn resolve_truth_table() {
+        assert_eq!(
+            RunPhasePlan::resolve(true, true),
+            RunPhasePlan::TrainedThenSimulated
+        );
+        assert_eq!(
+            RunPhasePlan::resolve(true, false),
+            RunPhasePlan::TrainedThenSimulated
+        );
+        assert_eq!(
+            RunPhasePlan::resolve(false, true),
+            RunPhasePlan::SimulateFromPolicy
+        );
+        assert_eq!(RunPhasePlan::resolve(false, false), RunPhasePlan::Nothing);
     }
 }
 
@@ -935,55 +1004,12 @@ fn build_energy_and_templates(
     arc_arrival_density: &HashMap<usize, Vec<Option<Vec<f64>>>>,
     hydro_cell_index: &HydroCellIndex,
 ) -> Result<EnergyAndTemplates, SddpError> {
-    let study_stage_ids: Vec<StageId> = system
-        .stages()
-        .iter()
-        .filter(|s| s.id >= 0)
-        .map(|s| StageId(s.id))
-        .collect();
-    let n_stages_pre = study_stage_ids.len();
-    let stage_to_season: Vec<i32> = system
-        .stages()
-        .iter()
-        .filter(|s| s.id >= 0)
-        .map(|s| i32::try_from(s.season_id.unwrap_or(0)).unwrap_or(0))
-        .collect();
-    // Single source of truth for `reference_volume_hm3`, identical to the source the
-    // FPHA backwater path uses, so the productivity reference and the backwater level
-    // never drift.
-    let reference_volume_fractions =
-        build_hydro_reference_volumes_resolved(&hydro_models.reference_volumes_hm3, 0.0);
-    let energy_conversion = build_energy_conversion_set(
-        system.hydros(),
-        &study_stage_ids,
-        system.cascade(),
-        &reference_volume_fractions,
-        // Feeds the FPHA ρ_eq derivation only for plants with no parquet override
-        // (the override still wins when present). Per-rank, never broadcast, so every
-        // rank sees the same map.
-        &hydro_models.vha_geometry_by_hydro,
-        Some(&hydro_models.productivity_override),
-        Some(&hydro_models.production),
-    )
-    .map_err(|e| SddpError::Validation(e.to_string()))?;
-    let stage_block_counts: Vec<usize> = system
-        .stages()
-        .iter()
-        .filter(|s| s.id >= 0)
-        .map(|s| s.blocks.len())
-        .collect();
-    let resolved_parameters = build_resolved_parameters(
+    let (energy_conversion, resolved_parameters) = build_energy_conversion_and_resolved_parameters(
+        system,
+        hydro_models,
         scalar_parameters,
-        &energy_conversion,
-        &hydro_models.productivity_override,
-        system.hydros(),
-        &stage_to_season,
-        &study_stage_ids,
-        &stage_block_counts,
-        n_stages_pre,
         cost_scale_factor,
-    )
-    .map_err(|e| SddpError::Validation(e.to_string()))?;
+    )?;
 
     let mut stage_templates = build_stage_templates(
         system,
@@ -1024,6 +1050,147 @@ fn build_energy_and_templates(
         scaling_report,
         resolved_parameters,
     })
+}
+
+/// Build the energy-conversion set and the resolved-parameter table, then fail
+/// loud on a generic constraint that references an unresolved scalar-parameter
+/// id — the shared prefix of [`build_energy_and_templates`] and the
+/// validate-time [`validate_generic_constraint_parameters`].
+///
+/// # Errors
+///
+/// [`SddpError::Validation`] on energy-conversion or resolved-parameter
+/// construction failure, or a generic constraint referencing an id the resolved
+/// table never held (via [`check_scalar_parameters_present`]).
+fn build_energy_conversion_and_resolved_parameters(
+    system: &System,
+    hydro_models: &PrepareHydroModelsResult,
+    scalar_parameters: &[ScalarParameter],
+    cost_scale_factor: f64,
+) -> Result<(EnergyConversionSet, ResolvedParameters), SddpError> {
+    let study_stage_ids: Vec<StageId> = system
+        .stages()
+        .iter()
+        .filter(|s| s.id >= 0)
+        .map(|s| StageId(s.id))
+        .collect();
+    let stage_to_season: Vec<i32> = system
+        .stages()
+        .iter()
+        .filter(|s| s.id >= 0)
+        .map(|s| i32::try_from(s.season_id.unwrap_or(0)).unwrap_or(0))
+        .collect();
+    // Single source of truth for `reference_volume_hm3`, identical to the source the
+    // FPHA backwater path uses, so the productivity reference and the backwater level
+    // never drift.
+    let reference_volume_fractions =
+        build_hydro_reference_volumes_resolved(&hydro_models.reference_volumes_hm3, 0.0);
+    let energy_conversion = build_energy_conversion_set(
+        system.hydros(),
+        &study_stage_ids,
+        system.cascade(),
+        &reference_volume_fractions,
+        // Feeds the FPHA ρ_eq derivation only for plants with no parquet override
+        // (the override still wins when present). Per-rank, never broadcast, so every
+        // rank sees the same map.
+        &hydro_models.vha_geometry_by_hydro,
+        Some(&hydro_models.productivity_override),
+        Some(&hydro_models.production),
+    )
+    .map_err(|e| SddpError::Validation(e.to_string()))?;
+    let stage_block_counts: Vec<usize> = system
+        .stages()
+        .iter()
+        .filter(|s| s.id >= 0)
+        .map(|s| s.blocks.len())
+        .collect();
+    let resolved_parameters = build_resolved_parameters(
+        scalar_parameters,
+        &energy_conversion,
+        &hydro_models.productivity_override,
+        system.hydros(),
+        &stage_to_season,
+        &study_stage_ids,
+        &stage_block_counts,
+        cost_scale_factor,
+    )
+    .map_err(|e| SddpError::Validation(e.to_string()))?;
+
+    check_scalar_parameters_present(system.generic_constraints(), &resolved_parameters)?;
+
+    Ok((energy_conversion, resolved_parameters))
+}
+
+/// Run study construction's scalar-parameter presence guard for `system`
+/// without building stage templates or a full [`StudySetup`], so a deck with no
+/// boundary policy still rejects an unresolved generic-constraint parameter at
+/// validate time (a boundary deck runs the same guard inside [`StudySetup::new`]).
+///
+/// # Errors
+///
+/// [`SddpError::Validation`] on a scalar parameter that fails to resolve, or a
+/// generic constraint referencing an id the resolved table never held.
+pub fn validate_generic_constraint_parameters(
+    system: &System,
+    hydro_models: &PrepareHydroModelsResult,
+    scalar_parameters: &[ScalarParameter],
+    cost_scale_factor: f64,
+) -> Result<(), SddpError> {
+    build_energy_conversion_and_resolved_parameters(
+        system,
+        hydro_models,
+        scalar_parameters,
+        cost_scale_factor,
+    )?;
+    Ok(())
+}
+
+/// Fails loud when a generic constraint references a scalar-parameter id
+/// `resolved_parameters` never resolved, instead of letting
+/// [`ResolvedParameters::get`] fall through to its `0.0` sentinel once the LP
+/// build starts reading rows.
+///
+/// # Errors
+///
+/// [`SddpError::Validation`] naming the constraint and the missing id.
+fn check_scalar_parameters_present(
+    generic_constraints: &[GenericConstraint],
+    resolved_parameters: &ResolvedParameters,
+) -> Result<(), SddpError> {
+    let is_resolved = |id: EntityId| {
+        resolved_parameters
+            .id_to_slot
+            .binary_search_by_key(&id.0, |(k, _)| *k)
+            .is_ok()
+    };
+    for constraint in generic_constraints {
+        let expression_ids =
+            constraint
+                .expression
+                .terms
+                .iter()
+                .filter_map(|term| match term.coefficient {
+                    CoefficientRef::Parameter(id) => Some(id),
+                    CoefficientRef::Literal(_) => None,
+                });
+        let bound_ids = [
+            &constraint.bound_lower_affine,
+            &constraint.bound_upper_affine,
+        ]
+        .into_iter()
+        .flatten()
+        .flat_map(AffineBound::params);
+        for id in expression_ids.chain(bound_ids) {
+            if !is_resolved(id) {
+                return Err(SddpError::Validation(format!(
+                    "generic constraint '{}' references scalar parameter id={} not \
+                     present in the resolved parameter table",
+                    constraint.name, id.0
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `L_state = max(computed_order, boundary_depth)` — the single widening
@@ -1163,14 +1330,10 @@ pub(crate) fn resolve_state_layout(
 /// Canonical absolute delivery/arrival calendar date of a stage `start_date`,
 /// encoded `year * 10000 + month * 100 + day` (`YYYYMMDD`). The day is pinned to
 /// `01` so the anchor stays month-granular — the same calendar month maps to the
-/// same date whether resolved from a weekly or a monthly stage.
-///
-/// This pin is load-bearing for the boundary reconciliation date join: the join
-/// compares anchors by **equality**, so passing the raw stage-start day instead
-/// of normalizing to `01` would force interval-containment logic in its place.
+/// same date whether resolved from a weekly or a monthly stage. This is the
+/// `anticipated_lanes` output column's month key, not a reconciliation input.
 /// Pinned by `year_month_day_anchor_same_month_dates_are_equal` and
-/// `year_month_day_anchor_always_normalizes_to_day_01`, and mirrored by the
-/// `delivery_date` field's day-01 promise in `policy.fbs`.
+/// `year_month_day_anchor_always_normalizes_to_day_01`.
 pub(crate) fn year_month_day_anchor(date: NaiveDate) -> i32 {
     use chrono::Datelike;
     // `month()` is 1..=12, so the conversion never fails.
@@ -1180,16 +1343,30 @@ pub(crate) fn year_month_day_anchor(date: NaiveDate) -> i32 {
 /// The study's post-study delivery calendar ([`post_study_calendar_stages`]),
 /// empty when none is declared. Appended after the study stages to extend the
 /// ring's dating calendar so a slot maturing past the horizon dates onto its
-/// real post-study stage. Shared by [`build_extended_delivery_anchors`] and the
-/// policy manifest builders (`build_stage_entity_manifest`,
-/// `build_stage_entity_delivery_intervals`), so every delivery-dating site
-/// derives one calendar. The synthetic `Stage::id` restarts at `0` and collides
-/// with study ids — only `start_date`/`end_date` are ever read.
+/// real post-study stage. Shared by [`build_extended_delivery_anchors`] and
+/// the policy manifest builder `build_stage_entity_manifest`, so every
+/// delivery-dating site derives one calendar. The synthetic `Stage::id`
+/// restarts at `0` and collides with study ids — only
+/// `start_date`/`end_date` are ever read.
 pub(crate) fn post_study_delivery_calendar(system: &System) -> Vec<Stage> {
     system
         .post_study_stages()
         .map(|post_study| post_study_calendar_stages(&post_study.stages))
         .unwrap_or_default()
+}
+
+/// The study's boundary date: the last study stage's (`id >= 0`, highest
+/// `id`) exclusive `end_date` — the instant a terminal boundary policy must
+/// price. The sole owner of the last-non-negative-stage lookup; every site
+/// deriving this date calls it rather than repeating the walk. `None` only
+/// when the system declares no study stages.
+#[must_use]
+pub fn study_horizon_end(system: &System) -> Option<NaiveDate> {
+    system
+        .stages()
+        .iter()
+        .rfind(|s| s.id >= 0)
+        .map(|s| s.end_date)
 }
 
 /// The extended dating calendar: the `study_stages` view chained with the
@@ -1364,7 +1541,7 @@ impl PostStudyResolved {
 /// `last_real_cumulative` and `last_real_per_stage` are the study's own last
 /// cumulative and per-stage discount factors — [`crate::StageTemplates::
 /// cumulative_discount_factors`]/[`crate::StageTemplates::discount_factors`]'s
-/// last entries, or (`crate::lp_builder::build_stage_templates`'s own
+/// last entries, or (`crate::lp::builder::build_stage_templates`'s own
 /// `TemplateBuildCtx` build) the identical values computed from the same
 /// `compute_per_stage_discount_factors`/`compute_cumulative_discount_factors`
 /// pair before those output slices exist. The first post-study cumulative
@@ -1503,11 +1680,12 @@ fn first_fanned_plant_id(
         })
 }
 
-/// Study stage durations ([`bucket_topology::study_stage_durations`]) followed
-/// by every declared post-study stage's own duration — the extended delivery
-/// axis [`DeliveryAxis::stage_lengths_hours`] must carry so `n_delivery` spans
-/// `n_stages + n_post`. No post-study stages leaves this byte-identical to the
-/// study-only vector.
+/// The study calendar followed by every declared post-study stage duration;
+/// byte-identical to the study-only vector when none is declared. Two
+/// consumers derive their own extended calendar from this one vector: the
+/// anticipated delivery axis ([`DeliveryAxis::stage_lengths_hours`], where it
+/// lets `n_delivery` span `n_stages + n_post`) and the water ring's arrival
+/// resolution ([`bucket_topology::extend_for_resolution`]'s base calendar).
 fn delivery_stage_durations(mut study_durations: Vec<f64>, system: &System) -> Vec<f64> {
     if let Some(post_study) = system.post_study_stages() {
         study_durations.extend(post_study.stages.iter().map(|s| s.duration_hours));
@@ -1520,7 +1698,7 @@ fn delivery_stage_durations(mut study_durations: Vec<f64>, system: &System) -> V
 ///
 /// The sole `resolve_point` consumer (via [`AnticipatedResolution::resolve`]).
 /// Warn-free: [`resolve_anticipated_commitments`] wraps this with the setup-time
-/// `K = 0` advisory; [`crate::lp_builder::build_stage_templates`] calls this core
+/// `K = 0` advisory; [`crate::lp::builder::build_stage_templates`] calls this core
 /// directly to attach an identical resolution onto its own `StateSpace` — the
 /// same accepted redundant-but-deterministic recompute this crate already
 /// applies to the bucket topology, not a second advisory emission. Returns the
@@ -1532,7 +1710,7 @@ fn delivery_stage_durations(mut study_durations: Vec<f64>, system: &System) -> V
 /// The delivery axis is EXTENDED: `n_delivery = n_stages + n_post` while
 /// `n_decision` stays `n_stages` (decisions are only ever made in-study), so a
 /// `LeadTime` plant's resolution can target a post-study delivery. Widening
-/// this site alone is a half-switch — [`crate::indexer::anticipated_gate::anticipated_resolution_for`]'s
+/// this site alone is a half-switch — [`crate::lp::indexer::anticipated_gate::anticipated_resolution_for`]'s
 /// fixture fallback must widen in lockstep or the two resolution paths desync
 /// the moment a study declares `post_study_stages`.
 pub(crate) fn resolve_anticipated_commitments_core(
@@ -1599,7 +1777,7 @@ pub(crate) fn resolve_anticipated_commitments_core(
 
 /// [`resolve_anticipated_commitments_core`] plus the setup-time `K = 0`
 /// advisory ([`warn_on_sub_stage_lead`]) — the single owner of that advisory.
-/// Every other caller (e.g. [`crate::lp_builder::build_stage_templates`]) uses
+/// Every other caller (e.g. [`crate::lp::builder::build_stage_templates`]) uses
 /// the core directly so the advisory never double-emits.
 pub(crate) fn resolve_anticipated_commitments(
     system: &System,
@@ -1662,11 +1840,7 @@ fn warn_on_boundary_absent_post_study_delivery(
     }
     let n_stages = bucket_topology::study_stage_durations(system).len();
     let thermals = system.thermals();
-    let horizon_end = system
-        .stages()
-        .iter()
-        .rfind(|s| s.id >= 0)
-        .map(|s| s.end_date);
+    let horizon_end = study_horizon_end(system);
     let past = &system.initial_conditions().past_anticipated_commitments;
     let has_nonzero_fixed = |thermal_id: i32| -> bool {
         horizon_end.is_some_and(|end| {
@@ -1835,10 +2009,7 @@ fn build_scenario_libraries(
     simulation_source: &ScenarioSource,
     forward_passes: u32,
     downstream_par_order: usize,
-    derived_lag_values: &[f64],
-    l_state: usize,
-    derived_accum: &[f64],
-    derived_weight: &[f64],
+    seed: DerivedSeed<'_>,
 ) -> Result<ScenarioLibraries, SddpError> {
     let inflow_scheme = training_source.inflow_scheme;
     let load_scheme = training_source.load_scheme;
@@ -1858,10 +2029,7 @@ fn build_scenario_libraries(
                 stages,
                 stochastic.par(),
                 system.policy_graph().season_map.as_ref(),
-                derived_lag_values,
-                l_state,
-                derived_accum,
-                derived_weight,
+                seed,
                 stage_lag_transitions,
                 training_source.historical_years.as_ref(),
                 forward_passes,
@@ -1878,10 +2046,7 @@ fn build_scenario_libraries(
                 hydro_ids,
                 stages,
                 stochastic.par(),
-                derived_lag_values,
-                l_state,
-                derived_accum,
-                derived_weight,
+                seed,
                 stage_lag_transitions,
                 forward_passes,
                 downstream_par_order,
@@ -1925,10 +2090,7 @@ fn build_scenario_libraries(
                 stages,
                 stochastic.par(),
                 system.policy_graph().season_map.as_ref(),
-                derived_lag_values,
-                l_state,
-                derived_accum,
-                derived_weight,
+                seed,
                 stage_lag_transitions,
                 simulation_source.historical_years.as_ref(),
                 forward_passes,
@@ -1945,10 +2107,7 @@ fn build_scenario_libraries(
                 hydro_ids,
                 stages,
                 stochastic.par(),
-                derived_lag_values,
-                l_state,
-                derived_accum,
-                derived_weight,
+                seed,
                 stage_lag_transitions,
                 forward_passes,
                 downstream_par_order,
@@ -2090,22 +2249,25 @@ fn build_risk_measures(system: &System) -> Vec<RiskMeasure> {
 /// The setup-time admission gate: the permanent arms that survive the
 /// node-native collapse, evaluated once from
 /// [`StudySetup::from_broadcast_params`]. Absent the gated features (no `gap`
-/// stopping rule, or enumerated forwards + an expectation measure at every
-/// stage) it returns `Ok(())` unconditionally, so a default study is
-/// byte-neutral.
+/// stopping rule, an expectation measure at every stage, and no dynamic cut
+/// selection under enumerated forwards) it returns `Ok(())` unconditionally, so
+/// a default study is byte-neutral.
 ///
 /// # Errors
 ///
 /// Returns [`SddpError::Validation`] when a `gap` stopping rule is present under
-/// any stage's effective non-expectation risk measure, or under sampled forward
-/// selection.
+/// any stage's effective non-expectation risk measure, under sampled forward
+/// selection, or when dynamic cut selection is paired with enumerated forward
+/// traversal.
 fn admission_gate(
     risk_measures: &[RiskMeasure],
     stopping_rules: &StoppingRuleSet,
     training_enumerated: bool,
+    cut_selection: Option<&CutSelectionStrategy>,
 ) -> Result<(), SddpError> {
     reject_gap_under_effective_risk_aversion(risk_measures, stopping_rules, training_enumerated)?;
-    reject_gap_under_sampled_selection(stopping_rules, training_enumerated)
+    reject_gap_under_sampled_selection(stopping_rules, training_enumerated)?;
+    reject_dynamic_cut_selection_under_enumerated(cut_selection, training_enumerated)
 }
 
 /// Reject a `gap` stopping rule that has no exact bound to compare against.
@@ -2200,6 +2362,36 @@ fn reject_gap_under_sampled_selection(
             "gap stopping rule is inadmissible under sampled forward selection; the upper \
              bound is then a statistical estimate, not the exact bound a gap rule requires — \
              a gap rule admits only enumerated forward selection"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Reject dynamic cut selection paired with enumerated forward traversal. The
+/// enumerated engine seeds each pool at its node-native cut stride, while
+/// dynamic cut selection assumes the sampled-selection eviction-key discipline
+/// its downstream budget-eviction reader depends on; the pairing would drive
+/// that reader down an untested eviction path. Any non-[`Dynamic`] strategy (or
+/// none) under enumerated forwards, and [`Dynamic`] under sampled forwards, are
+/// admitted.
+///
+/// [`Dynamic`]: CutSelectionStrategy::Dynamic
+///
+/// # Errors
+///
+/// Returns [`SddpError::Validation`] naming the pairing when `training_enumerated`
+/// and `cut_selection` is [`CutSelectionStrategy::Dynamic`].
+fn reject_dynamic_cut_selection_under_enumerated(
+    cut_selection: Option<&CutSelectionStrategy>,
+    training_enumerated: bool,
+) -> Result<(), SddpError> {
+    if training_enumerated && matches!(cut_selection, Some(CutSelectionStrategy::Dynamic { .. })) {
+        return Err(SddpError::Validation(
+            "dynamic cut selection is inadmissible under enumerated forward traversal; the \
+             enumerated engine seeds each cut pool at its node-native stride, whereas dynamic \
+             cut selection assumes the sampled-selection eviction-key discipline — pair \
+             enumerated forwards with a value-based cut selection strategy, or none"
                 .to_string(),
         ));
     }
@@ -2566,6 +2758,35 @@ fn id_to_position<T>(entities: &[T], id_of: impl Fn(&T) -> i32) -> HashMap<i32, 
         .collect()
 }
 
+/// The contiguous study-stage slice (`Stage::id >= 0`), found by position since
+/// study stages are a contiguous suffix of `System::stages()`. Empty when the
+/// system declares no study stages.
+fn study_stages_slice(system: &System) -> &[Stage] {
+    match system.stages().iter().position(|s| s.id >= 0) {
+        Some(idx) => &system.stages()[idx..],
+        None => &[],
+    }
+}
+
+/// Project the stage-0 initial (incoming) state onto the stage-0 admissible box
+/// for the box-stable families — storage (and its `PreFilling` seed) and
+/// travel-time buckets — the setup-time analog of the read-back seam's clamp on
+/// the OUTGOING state. Inflow lags are unbounded, so the box leaves them
+/// untouched. The commitment-hold ring is deliberately NOT clamped here: the
+/// stage-0 box is anchored on the ring's OUTGOING delivery window, so its
+/// residue-0 slot bounds a later delivery than the incoming seed carried there —
+/// that family is projected onto its own delivery-stage bound at seed time in
+/// [`build_initial_state`] instead.
+fn canonicalize_initial_state(state: &mut [f64], layout: &StateSpace, stage0_box: &StateBox) {
+    for j in layout
+        .storage
+        .clone()
+        .chain(layout.transit_buckets_out.clone())
+    {
+        state[j] = state[j].clamp(stage0_box.lower[j], stage0_box.upper[j]);
+    }
+}
+
 /// Build the initial state vector from the system's initial conditions.
 ///
 /// Layout `[storage(0..N), lags(N..N*(1+L))]` (N hydros, L = max PAR order),
@@ -2621,11 +2842,7 @@ fn build_initial_state(
         );
         let thermals = system.thermals();
         let thermal_positions = id_to_position(thermals, |t: &Thermal| t.id.0);
-        let study_stages: &[Stage] = match system.stages().iter().position(|s| s.id >= 0) {
-            Some(idx) => &system.stages()[idx..],
-            None => &[],
-        };
-        let calendar = StageCalendar::new(study_stages);
+        let calendar = StageCalendar::new(study_stages_slice(system));
         for history in &ic.past_anticipated_commitments {
             let Some(&global_idx) = thermal_positions.get(&history.thermal_id.0) else {
                 // Defense-in-depth — the cobre-io validator rejects an unknown ID in
@@ -2657,7 +2874,19 @@ fn build_initial_state(
                     if slot < k_i {
                         let off = layout.commit_out.start
                             + layout.commitment_hold_in_study_offset(local_idx, slot);
-                        state[off] = history.value_mw;
+                        // Project the seed onto its delivery stage's generation
+                        // bound — the setup-time analog of the read-back seam's
+                        // clamp — so a sub-tolerance input overshoot cannot drive
+                        // the no-slack fishing equality at stage `slot` infeasible.
+                        // The delivery-stage bound, NOT the stage-0 state box the
+                        // storage/bucket families clamp against: that box is
+                        // anchored on the ring's OUTGOING delivery window, so its
+                        // residue-0 slot bounds a later delivery than the seed held
+                        // here.
+                        let cap = system.bounds().thermal_block_base(global_idx, slot);
+                        state[off] = history
+                            .value_mw
+                            .clamp(cap.min_generation_mw, cap.max_generation_mw);
                     } else {
                         debug_assert!(
                             false,
@@ -2719,11 +2948,7 @@ fn build_initial_transit_bucket_state(
         );
         return seed;
     };
-    let study_stages: &[Stage] = match system.stages().iter().position(|s| s.id >= 0) {
-        Some(idx) => &system.stages()[idx..],
-        None => &[],
-    };
-    let calendar = StageCalendar::new(study_stages);
+    let calendar = StageCalendar::new(study_stages_slice(system));
     let ic = system.initial_conditions();
     let hydros = system.hydros();
 
@@ -3153,6 +3378,10 @@ mod transit_seed_round_trip_tests {
                 inflow_nonnegativity_slack_m3s: 0.0,
                 water_withdrawal_violation_pos_m3s: 0.0,
                 water_withdrawal_violation_neg_m3s: 0.0,
+                integrated_equivalent_productivity_mw_per_m3s: 0.0,
+                integrated_accumulated_productivity_mw_per_m3s: 0.0,
+                stored_energy_initial_mw: 0.0,
+                stored_energy_final_mw: 0.0,
             }],
             hydro_bus_generation: vec![],
             thermals: vec![],
@@ -3265,6 +3494,292 @@ mod transit_seed_round_trip_tests {
             seed_reference.iter().any(|&v| v.abs() > f64::EPSILON),
             "the reference seed must be non-degenerate (not all-zero) for this to be a \
              meaningful fidelity check"
+        );
+    }
+}
+
+/// The scalar-parameter table is now a `StudySetup` constructor input (never an
+/// empty placeholder — see [`StudyParams::from_config`]): each gap class
+/// `build_resolved_parameters` can raise surfaces through
+/// [`StudySetup::new_with_boundary_requirements`], and a generic constraint
+/// referencing an id the table never resolved fails loud via
+/// `check_scalar_parameters_present` instead of reaching
+/// [`ResolvedParameters::get`]'s `0.0` sentinel.
+#[cfg(test)]
+mod scalar_parameter_construction_tests {
+    use cobre_core::scenario::SamplingScheme;
+    use cobre_core::{
+        AffineBound, ComputedParameter, ConstraintExpression, EntityId, GenericConstraint,
+        ParameterKind, ScalarParameter, SlackConfig, SystemBuilder,
+    };
+    use cobre_io::Config;
+    use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
+
+    use super::{BoundaryStateRequirements, StudySetup};
+    use crate::SddpError;
+    use crate::hydro_models::PrepareHydroModelsResult;
+    use crate::test_support::{k_fan_config, k_fan_system};
+
+    fn build(
+        system: &cobre_core::System,
+        config: &Config,
+        scalar_parameters: Vec<ScalarParameter>,
+    ) -> Result<StudySetup, SddpError> {
+        let stochastic = build_stochastic_context(
+            system,
+            42,
+            None,
+            &[],
+            &[],
+            OpeningTreeInputs::default(),
+            ClassSchemes {
+                inflow: Some(SamplingScheme::InSample),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+        )
+        .expect("build_stochastic_context must succeed for a valid fixture system");
+        let hydro_models = PrepareHydroModelsResult::default_from_system(system);
+        StudySetup::new_with_boundary_requirements(
+            system,
+            config,
+            stochastic,
+            hydro_models,
+            BoundaryStateRequirements::present(0),
+            scalar_parameters,
+        )
+    }
+
+    fn scalar_param(kind: ParameterKind) -> ScalarParameter {
+        ScalarParameter {
+            id: EntityId(1),
+            name: "probe".to_string(),
+            kind,
+        }
+    }
+
+    #[test]
+    fn missing_season_rejects_at_construction() {
+        let system = k_fan_system(3, false);
+        let config = k_fan_config(1, 1);
+        // Every k_fan_system stage has `season_id: None`, resolving to season 0
+        // (`unwrap_or(0)`); a Seasonal table with no season-0 entry misses.
+        let table = vec![scalar_param(ParameterKind::Seasonal {
+            values: vec![(1, 100.0)],
+        })];
+        let err = build(&system, &config, table).expect_err("must reject the season gap");
+        assert!(
+            matches!(err, SddpError::Validation(ref msg) if msg.contains("season")),
+            "expected a MissingSeason message, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn per_stage_block_coverage_gap_rejects_at_construction() {
+        let system = k_fan_system(3, false);
+        let config = k_fan_config(1, 1);
+        // Every k_fan_system stage has exactly one block; an empty PerStageBlock
+        // table covers no (stage, block) cell.
+        let table = vec![scalar_param(ParameterKind::PerStageBlock {
+            values: vec![],
+        })];
+        let err = build(&system, &config, table).expect_err("must reject the coverage gap");
+        assert!(
+            matches!(err, SddpError::Validation(ref msg) if msg.contains("not covered")),
+            "expected a PerStageBlockCoverage message, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn missing_specific_productivity_rejects_at_construction() {
+        let base = k_fan_system(3, false);
+        let mut hydros = base.hydros().to_vec();
+        hydros[0].specific_productivity_mw_per_m3s_per_m = None;
+        let hydro_id = hydros[0].id;
+        let system = SystemBuilder::new()
+            .buses(base.buses().to_vec())
+            .hydros(hydros)
+            .stages(base.stages().to_vec())
+            .inflow_models(base.inflow_models().to_vec())
+            .load_models(base.load_models().to_vec())
+            .bounds(base.bounds().clone())
+            .penalties(base.penalties().clone())
+            .initial_conditions(base.initial_conditions().clone())
+            .policy_graph(base.policy_graph().clone())
+            .build()
+            .expect("clearing specific_productivity keeps the fixture valid");
+        let config = k_fan_config(1, 1);
+        let table = vec![scalar_param(ParameterKind::Computed {
+            computed_spec: ComputedParameter::SpecificProductivity { hydro_id },
+        })];
+        let err = build(&system, &config, table).expect_err("must reject the missing rho_esp");
+        assert!(
+            matches!(err, SddpError::Validation(ref msg) if msg.contains("specific productivity")),
+            "expected a MissingSpecificProductivity message, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn generic_constraint_unresolved_parameter_fails_loud_at_construction() {
+        let base = k_fan_system(3, false);
+        let constraint = GenericConstraint {
+            id: EntityId(500),
+            name: "probe_constraint".to_string(),
+            description: None,
+            expression: ConstraintExpression { terms: vec![] },
+            slack: SlackConfig {
+                enabled: false,
+                penalty: None,
+            },
+            bound_lower_affine: Some(AffineBound::single(EntityId(999))),
+            bound_upper_affine: None,
+        };
+        let system = SystemBuilder::new()
+            .buses(base.buses().to_vec())
+            .hydros(base.hydros().to_vec())
+            .stages(base.stages().to_vec())
+            .inflow_models(base.inflow_models().to_vec())
+            .load_models(base.load_models().to_vec())
+            .bounds(base.bounds().clone())
+            .penalties(base.penalties().clone())
+            .initial_conditions(base.initial_conditions().clone())
+            .policy_graph(base.policy_graph().clone())
+            .generic_constraints(vec![constraint])
+            .build()
+            .expect("adding a generic constraint keeps the fixture valid");
+        let config = k_fan_config(1, 1);
+        let err = build(&system, &config, Vec::new())
+            .expect_err("must reject the unresolved parameter reference before the LP builds");
+        assert!(
+            matches!(err, SddpError::Validation(ref msg) if msg.contains("probe_constraint") && msg.contains("999")),
+            "expected the fail-loud check naming the constraint and id=999, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_generic_constraint_parameters_rejects_unresolved_reference_without_a_setup() {
+        let base = k_fan_system(3, false);
+        let constraint = GenericConstraint {
+            id: EntityId(500),
+            name: "probe_constraint".to_string(),
+            description: None,
+            expression: ConstraintExpression { terms: vec![] },
+            slack: SlackConfig {
+                enabled: false,
+                penalty: None,
+            },
+            bound_lower_affine: Some(AffineBound::single(EntityId(999))),
+            bound_upper_affine: None,
+        };
+        let system = SystemBuilder::new()
+            .buses(base.buses().to_vec())
+            .hydros(base.hydros().to_vec())
+            .stages(base.stages().to_vec())
+            .inflow_models(base.inflow_models().to_vec())
+            .load_models(base.load_models().to_vec())
+            .bounds(base.bounds().clone())
+            .penalties(base.penalties().clone())
+            .initial_conditions(base.initial_conditions().clone())
+            .policy_graph(base.policy_graph().clone())
+            .generic_constraints(vec![constraint])
+            .build()
+            .expect("adding a generic constraint keeps the fixture valid");
+        let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
+        let err = super::validate_generic_constraint_parameters(
+            &system,
+            &hydro_models,
+            &[],
+            crate::DEFAULT_COST_SCALE_FACTOR,
+        )
+        .expect_err("the validate-time guard must reject the unresolved reference");
+        assert!(
+            matches!(err, SddpError::Validation(ref msg) if msg.contains("probe_constraint") && msg.contains("999")),
+            "expected the same fail-loud message the construction path emits, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_generic_constraint_parameters_accepts_a_gap_free_deck() {
+        let system = k_fan_system(3, false);
+        let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
+        super::validate_generic_constraint_parameters(
+            &system,
+            &hydro_models,
+            &[],
+            crate::DEFAULT_COST_SCALE_FACTOR,
+        )
+        .expect("a deck with no generic-constraint parameter gap must pass the guard");
+    }
+}
+
+#[cfg(test)]
+mod admission_gate_dcs_tests {
+    use super::{CutSelectionStrategy, SddpError, admission_gate};
+    use crate::risk_measure::RiskMeasure;
+    use crate::stopping_rule::{StoppingMode, StoppingRule, StoppingRuleSet};
+
+    fn no_gap_rules() -> StoppingRuleSet {
+        StoppingRuleSet {
+            rules: vec![StoppingRule::IterationLimit { limit: 100 }],
+            mode: StoppingMode::Any,
+        }
+    }
+
+    fn dynamic() -> CutSelectionStrategy {
+        CutSelectionStrategy::Dynamic {
+            k1: None,
+            k2: 1,
+            nadic: 1,
+            epsilon_viol: 1e-6,
+            start_iteration: 1,
+        }
+    }
+
+    fn level1() -> CutSelectionStrategy {
+        CutSelectionStrategy::Level1 {
+            check_frequency: 5,
+            tie_tolerance: 1e-10,
+        }
+    }
+
+    /// Enumerated forward traversal paired with dynamic cut selection is rejected
+    /// at the real admission gate, the message naming the pairing; either
+    /// configuration alone is admitted, and a value-based strategy under
+    /// enumerated forwards is admitted — so the rejection discriminates on the
+    /// `Dynamic` variant, not on any strategy being present. Every other arm of
+    /// the gate is neutralised here (expectation measures, no `gap` rule).
+    #[test]
+    fn admission_gate_rejects_dynamic_cut_selection_under_enumerated() {
+        let measures = vec![RiskMeasure::Expectation, RiskMeasure::Expectation];
+        let rules = no_gap_rules();
+        let dcs = dynamic();
+        let l1 = level1();
+
+        match admission_gate(&measures, &rules, true, Some(&dcs)) {
+            Err(SddpError::Validation(msg)) => {
+                assert!(
+                    msg.contains("dynamic cut selection"),
+                    "names dynamic cut selection: {msg}"
+                );
+                assert!(
+                    msg.contains("enumerated"),
+                    "names enumerated traversal: {msg}"
+                );
+            }
+            other => panic!("expected a Validation reject for enumerated + Dynamic, got {other:?}"),
+        }
+
+        assert!(
+            admission_gate(&measures, &rules, true, None).is_ok(),
+            "enumerated forwards without dynamic cut selection must be admitted"
+        );
+        assert!(
+            admission_gate(&measures, &rules, true, Some(&l1)).is_ok(),
+            "a value-based cut selection strategy under enumerated forwards must be admitted"
+        );
+        assert!(
+            admission_gate(&measures, &rules, false, Some(&dcs)).is_ok(),
+            "dynamic cut selection under sampled forwards must be admitted"
         );
     }
 }

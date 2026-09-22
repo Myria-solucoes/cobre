@@ -133,8 +133,8 @@ pub(crate) enum RawAnticipatedConfig {
 /// Load and validate `system/thermals.json` from `path`.
 ///
 /// The result is sorted by `id` ascending, so parser output is deterministic
-/// regardless of file row order (declaration-order invariance); the builder applies
-/// the same id as its `(operational_start_date, id)` canonical tiebreak.
+/// regardless of file row order (declaration-order invariance); canonical order is
+/// [`SystemBuilder::build`](cobre_core::SystemBuilder::build)'s to establish.
 ///
 /// Semantic validation (cross-field) is performed by
 /// `validation::semantic::thermal`; cross-reference validation (e.g., `bus_id`
@@ -324,15 +324,7 @@ fn convert_thermals(raw: RawThermalFile, path: &Path) -> Result<Vec<Thermal>, Lo
 #[allow(clippy::unwrap_used, clippy::panic, clippy::too_many_lines)]
 mod tests {
     use super::*;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-
-    /// Write a string to a temp file and return the file handle (keeps it alive).
-    fn write_json(content: &str) -> NamedTempFile {
-        let mut f = NamedTempFile::new().unwrap();
-        f.write_all(content.as_bytes()).unwrap();
-        f
-    }
+    use crate::test_support::write_json;
 
     /// Canonical valid `thermals.json` with 2 thermals: one with anticipated config
     /// (id=1), one without (id=0).

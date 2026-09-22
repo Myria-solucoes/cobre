@@ -7,7 +7,9 @@ Run with (from the repo root):
     pytest crates/cobre-python/tests/
 """
 
+import json
 import pathlib
+import shutil
 
 import pytest
 
@@ -54,6 +56,30 @@ def test_validate_valid_case() -> None:
     assert "warnings" in result
 
 
+def test_validate_invalid_simulation_scenario_source(tmp_path: pathlib.Path) -> None:
+    """validate returns valid=False when simulation.scenario_source violates an admission rule."""
+    import cobre.io  # noqa: PLC0415
+
+    case_dir = tmp_path / "case"
+    shutil.copytree(VALID_CASE, case_dir)
+
+    config_path = case_dir / "config.json"
+    config = json.loads(config_path.read_text())
+    config["simulation"]["scenario_source"] = {
+        "seed": 1,
+        "load": {"scheme": "historical"},
+    }
+    config_path.write_text(json.dumps(config))
+
+    result = cobre.io.validate(str(case_dir))
+    assert isinstance(result, dict)
+    assert result["valid"] is False
+    assert any(
+        "historical scheme is only valid for the inflow class" in error["message"]
+        for error in result["errors"]
+    )
+
+
 def test_validate_nonexistent_case() -> None:
     """validate returns valid=False with at least one error for a missing path."""
     import cobre.io  # noqa: PLC0415
@@ -65,3 +91,13 @@ def test_validate_nonexistent_case() -> None:
     error = result["errors"][0]
     assert "kind" in error
     assert "message" in error
+
+
+def test_validate_docstring_names_the_raising_path() -> None:
+    """validate.__doc__ names ValueError for malformed config_overrides, does not claim never raises."""
+    import cobre.io  # noqa: PLC0415
+
+    docstring = cobre.io.validate.__doc__
+    assert docstring is not None
+    assert "ValueError" in docstring
+    assert "never raise" not in docstring

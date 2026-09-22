@@ -114,7 +114,7 @@ plus a small number of bare residuals. Context constructors (`stage_ctx`,
 
 `StudySetup` exposes a small impl surface: context builders (`stage_ctx`,
 `training_ctx`, `simulation_ctx`) plus targeted mutation setters
-(`replace_fcf`, `set_start_iteration`, `set_export_states`, `set_budget`) and
+(`replace_fcf`, `set_start_iteration`, `set_export_states`) and
 one typed read accessor (`simulation_config`). Every other access uses direct
 field paths (`setup.sub_struct.field`). Do not add accessor methods for plain
 field reads — prefer the direct path.

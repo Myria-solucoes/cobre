@@ -1338,6 +1338,7 @@ mod by_node_scratch {
         forward::EnumeratedForwardScratch,
         horizon_mode::HorizonMode,
         inflow_method::InflowNonNegativityMethod,
+        lp::builder::StateBox,
         risk_measure::RiskMeasure,
         setup::Traversal,
         test_support::{
@@ -1469,6 +1470,16 @@ mod by_node_scratch {
             iterations: 0,
             solve_time_seconds: 0.0,
         }
+    }
+
+    fn permissive_state_boxes(n_state: usize, n_stages: usize) -> Vec<StateBox> {
+        vec![
+            StateBox {
+                lower: vec![f64::NEG_INFINITY; n_state],
+                upper: vec![f64::INFINITY; n_state],
+            };
+            n_stages
+        ]
     }
 
     fn empty_cut_batches(n_stages: usize) -> Vec<RowBatch> {
@@ -1683,7 +1694,9 @@ mod by_node_scratch {
         let mut basis_store = BasisStore::new(exchange.local_count(), n_stages);
         let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
         let mut cut_batches = empty_cut_batches(n_stages);
+        let state_boxes = permissive_state_boxes(n_state, n_stages);
         let ctx = StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -1824,7 +1837,9 @@ mod by_node_scratch {
         let mut basis_store = BasisStore::new(exchange.local_count(), n_stages);
         let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
         let mut cut_batches = empty_cut_batches(n_stages);
+        let state_boxes = permissive_state_boxes(n_state, n_stages);
         let ctx = StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
@@ -2771,9 +2786,9 @@ mod non_uniform_branching_projection {
     //! Four gates:
     //! - `non_uniform_branching_thread_shape_invariance_by_scenario` /
     //!   `_by_node`: `final_lb`/`final_ub`/`final_ub_std` bit-identical across
-    //!   `--threads 1/2/4`, under each scheduler in turn (R2).
+    //!   `--threads 1/2/4`, under each scheduler in turn.
     //! - `non_uniform_branching_declaration_order_invariance`: canonical vs.
-    //!   reversed node/transition declaration, bit-identical (R4).
+    //!   reversed node/transition declaration, bit-identical.
     //! - `non_uniform_branching_value_matches_extensive_form_by_scenario` /
     //!   `_by_node_matches_extensive_form`: `final_lb` closes to
     //!   [`extensive_form_optimum`] within LP tolerance under each scheduler, and
@@ -2796,11 +2811,11 @@ mod non_uniform_branching_projection {
     use crate::common::StubComm;
 
     const FORWARD_PASSES: u32 = 6;
-    /// Iteration budget for the invariance gates (R2/R4): enough for the
+    /// Iteration budget for the invariance gates: enough for the
     /// backward pass to genuinely exercise every pool at every thread shape, not
     /// enough to matter for convergence (no value assertion here).
     const MAX_ITERATIONS_INVARIANCE: u32 = 4;
-    /// Iteration budget for the oracle gates (R3): enough for `final_lb` to
+    /// Iteration budget for the oracle gates: enough for `final_lb` to
     /// actually converge to the extensive-form optimum, mirroring
     /// `interior_sibling_generated_fan_value_matches_oracle`'s `k_fan_setup(k, 6,
     /// 25)`.
@@ -2867,7 +2882,7 @@ mod non_uniform_branching_projection {
         )
     }
 
-    /// Build a fresh R1 fixture forced onto `scheduler`, then train it at
+    /// Build a fresh branching-tree fixture forced onto `scheduler`, then train it at
     /// `n_threads`.
     fn run_shape(
         scheduler: BackwardScheduler,
@@ -3007,8 +3022,8 @@ mod non_uniform_branching_projection {
 }
 
 mod branching_gate_roster {
-    //! The consolidated branching gate roster (R5) and the break-one-obligation
-    //! verification table (R6). No executable code — a module doc only, the
+    //! The consolidated branching gate roster and the break-one-obligation
+    //! verification table. No executable code — a module doc only, the
     //! auditable index every branching-graph correctness claim resolves to.
     //!
     //! # The roster — obligation → named gate → file
@@ -3036,7 +3051,7 @@ mod branching_gate_roster {
     //! | Rank-shape: by-node world-size (real MPI when launched under `mpiexec`, single-rank identity under plain `cargo test`) | `by_node_k_fan_final_lb_bitwise_invariant_across_world_size` | `mpi_wire.rs` |
     //! | DCS fallback under branching | `by_node_falls_back_to_by_scenario_under_active_dcs_on_fan` | `mpi_wire.rs` |
     //!
-    //! # R6 — break-one-obligation verification (real, observed results)
+    //! # Break-one-obligation verification (real, observed results)
     //!
     //! Each row's obligation was broken with a single scratch edit to production
     //! code, the full `mpi_wire.rs` + `branching_value_oracle.rs` suites (plus, for
@@ -3047,10 +3062,10 @@ mod branching_gate_roster {
     //!
     //! | # | Obligation | Scratch mutation | Observed result |
     //! |---|---|---|---|
-    //! | (a) | child-node-id→ω aggregation order | `training/backward_pass_state.rs`: the `SuccessorEntry`-building loop iterated `node_graph.successors[node_pos].iter().rev()` instead of forward order, while the earlier `assemble_successor_outcome_weights` call (which fills the canonical, non-reversed `probabilities_buf`) was left untouched — misaligning which child's outcome lands at which canonical `outcome_range` slot | **FAILS** `water_binding_external_fan_final_lb_matches_extensive_form` and `water_binding_external_fan_by_node_matches_extensive_form` (both `branching_value_oracle.rs`, value gates). The DECOMP K-fan / R1 gates stay green: their children are Generated and numerically interchangeable, so a weight↔outcome swap is invisible in VALUE on those fixtures (documented limitation, same as the Generated-fan cases in `branching_value_oracle.rs`'s own header) — only the genuinely non-interchangeable water-binding fixture has the power to catch this obligation. |
+    //! | (a) | child-node-id→ω aggregation order | `training/backward_pass_state.rs`: the `SuccessorEntry`-building loop iterated `node_graph.successors[node_pos].iter().rev()` instead of forward order, while the earlier `assemble_successor_outcome_weights` call (which fills the canonical, non-reversed `probabilities_buf`) was left untouched — misaligning which child's outcome lands at which canonical `outcome_range` slot | **FAILS** `water_binding_external_fan_final_lb_matches_extensive_form` and `water_binding_external_fan_by_node_matches_extensive_form` (both `branching_value_oracle.rs`, value gates). The DECOMP K-fan / branching-tree gates stay green: their children are Generated and numerically interchangeable, so a weight↔outcome swap is invisible in VALUE on those fixtures (documented limitation, same as the Generated-fan cases in `branching_value_oracle.rs`'s own header) — only the genuinely non-interchangeable water-binding fixture has the power to catch this obligation. |
     //! | (b) | ascending-node-id level exchange order | `training/backward_pass_state.rs`: `run_one_backward_level`'s per-node consumption loop (`nodes_out`/`level_pools` population) iterated `level.iter().enumerate().rev()` instead of forward order | **COVERAGE HOLE.** All 39 `mpi_wire.rs` tests and all 15 `branching_value_oracle.rs` tests stayed green, including under a real `mpiexec -n 2` run of `k_fan_branching_rank_invariance::k_fan_final_lb_bitwise_invariant_across_world_size`. Code inspection explains why: `BackwardPassState::compute_node_visit_offsets` (the cross-rank slot-collision-avoidance collective) and `build_trial_routing` both run BEFORE this loop, using the level's un-reversed order, and each node's own cut computation is self-contained (writes to its own pool/slot regardless of processing order) — so this specific loop's iteration order carries no observable effect at 1 or 2 ranks. Reordering `nodes_out` population is not, by itself, a live bug at the scale this suite tests; a genuine "ascending-node-id exchange order" violation would need to live further upstream (in whatever builds the `level` slice itself) or surface only at more than 2 ranks with asymmetric per-rank routing — neither reproducible in this environment. Reported, not papered over. |
     //! | (c) | canonical path-cost order | `training/forward/stats_aggregation.rs`: `weighted_cost_reduction`'s compensated-sum loop iterated `costs.iter().zip(weights.iter()).rev()` instead of forward order | **COVERAGE HOLE.** `enumerated_k_fan_thread_and_declaration_shapes_agree`, the three `weighted_cost_reduction_*` unit tests (`training/forward/tests.rs`), all 5 `parity_hash_d*` cases, and all of `branching_value_oracle.rs` stayed green. At the term counts and magnitudes these fixtures exercise (K-fan `K=6`, similar-magnitude Generated stage costs), Neumaier-compensated summation reorders to the same bit pattern — the suite's chosen literals are not rough enough to expose reduction-order sensitivity. A fixture with widely-disparate-magnitude path costs under `enumerated` mode would be needed to give this obligation power; none exists in the branching suite today. Reported, not papered over. |
-    //! | (d) | the `1.0/(n as f64)` uniform-weight left-to-right reduction | `simulation/aggregation.rs`: `aggregate_simulation`'s `mean_cost` replaced from `RiskMeasure::Expectation.evaluate_risk(&cost_recv, &weights)` (per-term `cᵢ·(1/n)`, left-to-right `.sum()`) with `cost_recv.iter().sum::<f64>() / n as f64` (sum-then-divide) | **COVERAGE HOLE.** `simulation_aggregation_determinism::mean_std_bit_identical_across_rank_shapes` stayed green (it compares rank shapes against EACH OTHER under the SAME mutated formula, not against a reference — invariance alone cannot catch a wrong-but-consistent formula). The one unit test built to catch exactly this, `aggregate_uniform_mean_matches_risk_measure_expectation` (`simulation/aggregation.rs`), also stayed green: for its literal costs `[100.0, 200.0, 150.0]` and `n = 3`, sum-then-divide and per-term-weighted-sum round to the identical `f64` bit pattern by coincidence. `branching_value_oracle.rs` never calls `aggregate_simulation` (training-only oracle, no simulation phase), so it cannot pin this obligation either. None of the R1 fixture's own openings are stochastic at the root (`branching_factor: 1` throughout every branching fixture in this suite), so the LB-root reading of this same `1.0/(n as f64)` contract (`training/lower_bound.rs`) is likewise structurally unreachable by the current suite. Reported, not papered over. |
+    //! | (d) | the `1.0/(n as f64)` uniform-weight left-to-right reduction | `simulation/aggregation.rs`: `aggregate_simulation`'s `mean_cost` replaced from `RiskMeasure::Expectation.evaluate_risk(&cost_recv, &weights)` (per-term `cᵢ·(1/n)`, left-to-right `.sum()`) with `cost_recv.iter().sum::<f64>() / n as f64` (sum-then-divide) | **COVERAGE HOLE.** `simulation_aggregation_determinism::mean_std_bit_identical_across_rank_shapes` stayed green (it compares rank shapes against EACH OTHER under the SAME mutated formula, not against a reference — invariance alone cannot catch a wrong-but-consistent formula). The one unit test built to catch exactly this, `aggregate_uniform_mean_matches_risk_measure_expectation` (`simulation/aggregation.rs`), also stayed green: for its literal costs `[100.0, 200.0, 150.0]` and `n = 3`, sum-then-divide and per-term-weighted-sum round to the identical `f64` bit pattern by coincidence. `branching_value_oracle.rs` never calls `aggregate_simulation` (training-only oracle, no simulation phase), so it cannot pin this obligation either. None of the branching-tree fixture's own openings are stochastic at the root (`branching_factor: 1` throughout every branching fixture in this suite), so the LB-root reading of this same `1.0/(n as f64)` contract (`training/lower_bound.rs`) is likewise structurally unreachable by the current suite. Reported, not papered over. |
     //! | (e) | the fan-out itself (re-introducing the child-0 collapse) | `training/backward/by_scenario.rs`: `process_by_scenario_backward`'s child loop narrowed from `for ci in 0..outcomes.n_children()` to `for ci in 0..1` | **FAILS value gates**, confirming the suite catches what it previously missed: `non_uniform_branching_value_matches_extensive_form_by_scenario` and `non_uniform_branching_by_node_matches_extensive_form` (`mpi_wire.rs`, the non-uniform branching value gates), plus `interior_sibling_generated_fan_value_matches_oracle`, `interior_sibling_generated_fan_by_node_matches_oracle`, and `dcs_arm_generated_fan_value_matches_oracle` (`branching_value_oracle.rs`) — the un-written outcome slots for children `1..n` read stale scratch-buffer data, corrupting the aggregate cut on every currently-value-gated branching fixture with `>= 2` cut-generating levels. `water_binding_external_fan_final_lb_matches_extensive_form` (2-stage, one branching level only) stayed green under this specific mutation. |
     //!
     //! Every mutation above was reverted immediately after being run; `git diff`

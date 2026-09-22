@@ -12,15 +12,19 @@
 //!   `<family>_block_base` for every `block_index`; the empty-overlay path is
 //!   never special-cased.
 //! - **Base** (`<family>_block_base`) — the block-eligible columns at
-//!   `(entity, stage)` granularity, ignoring the overlay. Reserved for exactly
-//!   two sanctioned callers: the dictionary report path
-//!   (`write_bounds_parquet`'s null-`block_id` base row, all five families)
-//!   and the anticipated-commitment decision column
-//!   (`fill_anticipated_columns`, thermal only). Any other caller is a design
-//!   question, not an implementation detail.
+//!   `(entity, stage)` granularity, ignoring the overlay. Reserved for four
+//!   sanctioned caller categories: the dictionary report path
+//!   (`write_bounds_parquet`'s null-`block_id` base row, all five families),
+//!   the anticipated-commitment decision column
+//!   (`fill_anticipated_columns`, thermal only), the admissible state-box
+//!   machinery (the box builder and the initial-seed canonicalization, thermal
+//!   only), and the load-time over-commitment validator
+//!   (`check_committed_value_bounds`, thermal only, reading the delivery
+//!   stage's commitment bound). Any other caller is a design question, not an
+//!   implementation detail.
 //!
-//! Most entity tables use the flat layout `data[entity_idx * n_stages + stage_idx]`;
-//! the thermal table's extended stride is documented on [`ResolvedBounds`].
+//! Most entity tables share a uniform flat entity/stage layout; [`ResolvedBounds`]
+//! documents the exact stride for each family, including thermal's extended one.
 //! Populated by `cobre-io` after base bounds are overlaid with stage-specific
 //! overrides; never modified after construction.
 
@@ -49,9 +53,9 @@ use super::{ResolvedBlockBounds, ResolvedHydroUnitGroupBounds};
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct HydroStageBounds {
-    /// Dead volume \[hm³\]. Soft lower bound; slack `storage_violation_below`.
+    /// Operative per-stage storage floor \[hm³\] (dead volume, per-stage modif) — not the entity's physical minimum. Soft lower bound; slack `storage_violation_below`.
     pub min_storage_hm3: f64,
-    /// Physical capacity \[hm³\]. Hard upper bound.
+    /// Operative per-stage storage ceiling \[hm³\] (flood control, RHV, per-stage modif) — not the entity's physical capacity. Hard upper bound.
     pub max_storage_hm3: f64,
     /// Minimum dead-volume filling rate \[m³/s\], anchoring a per-stage minimum
     /// target-storage trajectory on `min_storage_hm3`. Not an inflow and not a cap. Default `0.0`.
@@ -281,8 +285,9 @@ pub struct ContractBlockBounds {
 
 /// Pre-resolved bound table for all entities across all stages.
 ///
-/// Most tables index `data[entity_idx * n_stages + stage_idx]`; the `thermal`
-/// table uses an extended `n_stages + k_max` stride — see
+/// Most tables index `data[entity_idx * n_stages + stage_idx]`, computed by the
+/// private `cell_index` helper; the `thermal` table uses an extended
+/// `n_stages + k_max` stride computed by `thermal_cell_index` — see
 /// [`thermal_stage_axis_len`](Self::thermal_stage_axis_len).
 ///
 /// # Examples
@@ -327,7 +332,7 @@ pub struct ContractBlockBounds {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(try_from = "ResolvedBoundsWire"))]
 pub struct ResolvedBounds {
-    /// Stride for every entity table except `thermal`: `data[entity_idx * n_stages + stage_idx]`.
+    /// Stride for every entity table except `thermal` — see the layout note above.
     n_stages: usize,
     /// Stride for the `thermal` Vec; equals `n_stages + k_max`. Required on the
     /// wire and never defaulted: a missing or zero stride (with `thermal`
@@ -493,6 +498,20 @@ impl ResolvedBounds {
         }
     }
 
+    /// Return the flat index for `(entity_index, stage_index)` in the uniform
+    /// `n_stages`-strided tables (`hydro`, `line`, `pumping`, `contract`);
+    /// `thermal` uses its own extended stride — see
+    /// [`thermal_cell_index`](Self::thermal_cell_index).
+    #[inline]
+    fn cell_index(&self, entity_index: usize, stage_index: usize) -> usize {
+        debug_assert!(
+            stage_index < self.n_stages,
+            "stage_index out of bounds: {stage_index} >= n_stages {}",
+            self.n_stages
+        );
+        entity_index * self.n_stages + stage_index
+    }
+
     /// Return the resolved stage-level bounds for a hydro plant at a specific stage.
     ///
     /// Returns a reference rather than a copy to avoid copying the struct on hot paths.
@@ -551,7 +570,7 @@ impl ResolvedBounds {
     #[inline]
     #[must_use]
     pub fn hydro_bounds(&self, hydro_index: usize, stage_index: usize) -> &HydroStageBounds {
-        &self.hydro[hydro_index * self.n_stages + stage_index].stage
+        &self.hydro[self.cell_index(hydro_index, stage_index)].stage
     }
 
     /// Return the flat `self.thermal` index for `(thermal_index, stage_index)`,
@@ -638,7 +657,8 @@ impl ResolvedBounds {
         hydro_index: usize,
         stage_index: usize,
     ) -> &mut HydroStageBounds {
-        &mut self.hydro[hydro_index * self.n_stages + stage_index].stage
+        let idx = self.cell_index(hydro_index, stage_index);
+        &mut self.hydro[idx].stage
     }
 
     /// Return a mutable reference to the hydro block-base cell for in-place
@@ -650,7 +670,8 @@ impl ResolvedBounds {
         hydro_index: usize,
         stage_index: usize,
     ) -> &mut HydroBlockBounds {
-        &mut self.hydro[hydro_index * self.n_stages + stage_index].block
+        let idx = self.cell_index(hydro_index, stage_index);
+        &mut self.hydro[idx].block
     }
 
     /// Return a mutable reference to the thermal cost cell for in-place update.
@@ -690,7 +711,8 @@ impl ResolvedBounds {
         line_index: usize,
         stage_index: usize,
     ) -> &mut LineBlockBounds {
-        &mut self.line[line_index * self.n_stages + stage_index]
+        let idx = self.cell_index(line_index, stage_index);
+        &mut self.line[idx]
     }
 
     /// Return a mutable reference to the pumping bounds cell for in-place update.
@@ -700,7 +722,8 @@ impl ResolvedBounds {
         pumping_index: usize,
         stage_index: usize,
     ) -> &mut PumpingBlockBounds {
-        &mut self.pumping[pumping_index * self.n_stages + stage_index]
+        let idx = self.cell_index(pumping_index, stage_index);
+        &mut self.pumping[idx]
     }
 
     /// Return a mutable reference to the contract bounds cell for in-place update.
@@ -710,7 +733,8 @@ impl ResolvedBounds {
         contract_index: usize,
         stage_index: usize,
     ) -> &mut ContractBlockBounds {
-        &mut self.contract[contract_index * self.n_stages + stage_index]
+        let idx = self.cell_index(contract_index, stage_index);
+        &mut self.contract[idx]
     }
 
     /// Install the per-block override overlay (bound-precedence layer 1).
@@ -772,7 +796,7 @@ impl ResolvedBounds {
         stage_index: usize,
         block_index: usize,
     ) -> HydroBlockBounds {
-        let cell = self.hydro[hydro_index * self.n_stages + stage_index].block;
+        let cell = self.hydro[self.cell_index(hydro_index, stage_index)].block;
         let over = self
             .block
             .hydro_override(hydro_index, stage_index, block_index);
@@ -875,7 +899,7 @@ impl ResolvedBounds {
         stage_index: usize,
         block_index: usize,
     ) -> LineBlockBounds {
-        let cell = self.line[line_index * self.n_stages + stage_index];
+        let cell = self.line[self.cell_index(line_index, stage_index)];
         let over = self
             .block
             .line_override(line_index, stage_index, block_index);
@@ -948,7 +972,7 @@ impl ResolvedBounds {
         stage_index: usize,
         block_index: usize,
     ) -> PumpingBlockBounds {
-        let cell = self.pumping[pumping_index * self.n_stages + stage_index];
+        let cell = self.pumping[self.cell_index(pumping_index, stage_index)];
         let over = self
             .block
             .pumping_override(pumping_index, stage_index, block_index);
@@ -1024,7 +1048,7 @@ impl ResolvedBounds {
         stage_index: usize,
         block_index: usize,
     ) -> ContractBlockBounds {
-        let cell = self.contract[contract_index * self.n_stages + stage_index];
+        let cell = self.contract[self.cell_index(contract_index, stage_index)];
         let over = self
             .block
             .contract_override(contract_index, stage_index, block_index);
@@ -1044,20 +1068,24 @@ impl ResolvedBounds {
     #[inline]
     #[must_use]
     pub fn hydro_block_base(&self, hydro_index: usize, stage_index: usize) -> HydroBlockBounds {
-        self.hydro[hydro_index * self.n_stages + stage_index].block
+        self.hydro[self.cell_index(hydro_index, stage_index)].block
     }
 
     /// Return the block-eligible thermal columns at `(thermal_index,
     /// stage_index)`, ignoring the per-block overlay. This is **not** the value
     /// that applies at a block — see
     /// [`thermal_bounds_at_block`](Self::thermal_bounds_at_block) for the
-    /// block-resolved reader. `*_block_base` accessors exist for exactly two
+    /// block-resolved reader. `*_block_base` accessors exist for four
     /// sanctioned caller categories: the dictionary report path
-    /// (`write_bounds_parquet`'s null-`block_id` base row) and the
+    /// (`write_bounds_parquet`'s null-`block_id` base row), the
     /// anticipated-commitment decision column (`fill_anticipated_columns`,
-    /// reading the delivery stage's bounds); this accessor serves both. Any
-    /// other caller is a design question, not an implementation detail.
-    /// `stage_index` may land in the padded delivery-stage region.
+    /// reading the delivery stage's bounds), the admissible state-box
+    /// machinery (the box builder and the initial-seed canonicalization,
+    /// reading the delivery stage's commitment bound), and the
+    /// load-time over-commitment validator (`check_committed_value_bounds`,
+    /// reading the delivery stage's commitment bound); this accessor serves
+    /// them. Any other caller is a design question, not an implementation
+    /// detail. `stage_index` may land in the padded delivery-stage region.
     #[inline]
     #[must_use]
     pub fn thermal_block_base(
@@ -1077,7 +1105,7 @@ impl ResolvedBounds {
     #[inline]
     #[must_use]
     pub fn line_block_base(&self, line_index: usize, stage_index: usize) -> LineBlockBounds {
-        self.line[line_index * self.n_stages + stage_index]
+        self.line[self.cell_index(line_index, stage_index)]
     }
 
     /// Return the block-eligible pumping columns at `(pumping_index,
@@ -1094,7 +1122,7 @@ impl ResolvedBounds {
         pumping_index: usize,
         stage_index: usize,
     ) -> PumpingBlockBounds {
-        self.pumping[pumping_index * self.n_stages + stage_index]
+        self.pumping[self.cell_index(pumping_index, stage_index)]
     }
 
     /// Return the block-eligible contract columns at `(contract_index,
@@ -1111,7 +1139,7 @@ impl ResolvedBounds {
         contract_index: usize,
         stage_index: usize,
     ) -> ContractBlockBounds {
-        self.contract[contract_index * self.n_stages + stage_index]
+        self.contract[self.cell_index(contract_index, stage_index)]
     }
 
     /// Return the number of stages in this table.
@@ -1172,12 +1200,17 @@ impl ResolvedBounds {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{BlockBoundsCountsSpec, HydroUnitGroupBoundsCountsSpec};
+    use super::super::BlockBoundsCountsSpec;
+    #[cfg(feature = "serde")]
+    use super::super::HydroUnitGroupBoundsCountsSpec;
+    #[cfg(feature = "serde")]
+    use super::ResolvedHydroUnitGroupBounds;
     use super::{
         BoundsCountsSpec, BoundsDefaults, ContractBlockBounds, HydroBlockBounds, HydroStageBounds,
         LineBlockBounds, PumpingBlockBounds, ResolvedBlockBounds, ResolvedBounds,
-        ResolvedHydroUnitGroupBounds, ThermalBlockBounds, ThermalStageBounds,
+        ThermalBlockBounds, ThermalStageBounds,
     };
+    use crate::test_support::{f64_bits_eq, opt_f64_bits_eq};
 
     fn make_hydro_bounds() -> HydroStageBounds {
         HydroStageBounds {
@@ -1880,53 +1913,114 @@ mod tests {
 
     // ─── Block overlay tests (bound-precedence layer 1) ─────────────────────
 
-    fn opt_f64_bits_eq(a: Option<f64>, b: Option<f64>) -> bool {
-        match (a, b) {
-            (None, None) => true,
-            (Some(x), Some(y)) => x.to_bits() == y.to_bits(),
-            _ => false,
-        }
-    }
-
     fn hydro_stage_bounds_bits_eq(a: &HydroStageBounds, b: &HydroStageBounds) -> bool {
-        a.min_storage_hm3.to_bits() == b.min_storage_hm3.to_bits()
-            && a.max_storage_hm3.to_bits() == b.max_storage_hm3.to_bits()
-            && a.filling_min_rate_m3s.to_bits() == b.filling_min_rate_m3s.to_bits()
-            && a.water_withdrawal_m3s.to_bits() == b.water_withdrawal_m3s.to_bits()
+        let HydroStageBounds {
+            min_storage_hm3: a_min_storage_hm3,
+            max_storage_hm3: a_max_storage_hm3,
+            filling_min_rate_m3s: a_filling_min_rate_m3s,
+            water_withdrawal_m3s: a_water_withdrawal_m3s,
+        } = a;
+        let HydroStageBounds {
+            min_storage_hm3: b_min_storage_hm3,
+            max_storage_hm3: b_max_storage_hm3,
+            filling_min_rate_m3s: b_filling_min_rate_m3s,
+            water_withdrawal_m3s: b_water_withdrawal_m3s,
+        } = b;
+        f64_bits_eq(*a_min_storage_hm3, *b_min_storage_hm3)
+            && f64_bits_eq(*a_max_storage_hm3, *b_max_storage_hm3)
+            && f64_bits_eq(*a_filling_min_rate_m3s, *b_filling_min_rate_m3s)
+            && f64_bits_eq(*a_water_withdrawal_m3s, *b_water_withdrawal_m3s)
     }
 
     fn hydro_block_bounds_bits_eq(a: &HydroBlockBounds, b: &HydroBlockBounds) -> bool {
-        a.min_turbined_m3s.to_bits() == b.min_turbined_m3s.to_bits()
-            && a.max_turbined_m3s.to_bits() == b.max_turbined_m3s.to_bits()
-            && a.min_outflow_m3s.to_bits() == b.min_outflow_m3s.to_bits()
-            && opt_f64_bits_eq(a.max_outflow_m3s, b.max_outflow_m3s)
-            && a.min_generation_mw.to_bits() == b.min_generation_mw.to_bits()
-            && a.max_generation_mw.to_bits() == b.max_generation_mw.to_bits()
-            && opt_f64_bits_eq(a.min_diversion_m3s, b.min_diversion_m3s)
-            && opt_f64_bits_eq(a.max_diversion_m3s, b.max_diversion_m3s)
-            && opt_f64_bits_eq(a.min_spillage_m3s, b.min_spillage_m3s)
-            && opt_f64_bits_eq(a.max_spillage_m3s, b.max_spillage_m3s)
+        let HydroBlockBounds {
+            min_turbined_m3s: a_min_turbined_m3s,
+            max_turbined_m3s: a_max_turbined_m3s,
+            min_outflow_m3s: a_min_outflow_m3s,
+            max_outflow_m3s: a_max_outflow_m3s,
+            min_generation_mw: a_min_generation_mw,
+            max_generation_mw: a_max_generation_mw,
+            min_diversion_m3s: a_min_diversion_m3s,
+            max_diversion_m3s: a_max_diversion_m3s,
+            min_spillage_m3s: a_min_spillage_m3s,
+            max_spillage_m3s: a_max_spillage_m3s,
+        } = a;
+        let HydroBlockBounds {
+            min_turbined_m3s: b_min_turbined_m3s,
+            max_turbined_m3s: b_max_turbined_m3s,
+            min_outflow_m3s: b_min_outflow_m3s,
+            max_outflow_m3s: b_max_outflow_m3s,
+            min_generation_mw: b_min_generation_mw,
+            max_generation_mw: b_max_generation_mw,
+            min_diversion_m3s: b_min_diversion_m3s,
+            max_diversion_m3s: b_max_diversion_m3s,
+            min_spillage_m3s: b_min_spillage_m3s,
+            max_spillage_m3s: b_max_spillage_m3s,
+        } = b;
+        f64_bits_eq(*a_min_turbined_m3s, *b_min_turbined_m3s)
+            && f64_bits_eq(*a_max_turbined_m3s, *b_max_turbined_m3s)
+            && f64_bits_eq(*a_min_outflow_m3s, *b_min_outflow_m3s)
+            && opt_f64_bits_eq(*a_max_outflow_m3s, *b_max_outflow_m3s)
+            && f64_bits_eq(*a_min_generation_mw, *b_min_generation_mw)
+            && f64_bits_eq(*a_max_generation_mw, *b_max_generation_mw)
+            && opt_f64_bits_eq(*a_min_diversion_m3s, *b_min_diversion_m3s)
+            && opt_f64_bits_eq(*a_max_diversion_m3s, *b_max_diversion_m3s)
+            && opt_f64_bits_eq(*a_min_spillage_m3s, *b_min_spillage_m3s)
+            && opt_f64_bits_eq(*a_max_spillage_m3s, *b_max_spillage_m3s)
     }
 
     fn thermal_block_bounds_bits_eq(a: &ThermalBlockBounds, b: &ThermalBlockBounds) -> bool {
-        a.min_generation_mw.to_bits() == b.min_generation_mw.to_bits()
-            && a.max_generation_mw.to_bits() == b.max_generation_mw.to_bits()
+        let ThermalBlockBounds {
+            min_generation_mw: a_min_generation_mw,
+            max_generation_mw: a_max_generation_mw,
+        } = a;
+        let ThermalBlockBounds {
+            min_generation_mw: b_min_generation_mw,
+            max_generation_mw: b_max_generation_mw,
+        } = b;
+        f64_bits_eq(*a_min_generation_mw, *b_min_generation_mw)
+            && f64_bits_eq(*a_max_generation_mw, *b_max_generation_mw)
     }
 
     fn line_bounds_bits_eq(a: &LineBlockBounds, b: &LineBlockBounds) -> bool {
-        a.direct_mw.to_bits() == b.direct_mw.to_bits()
-            && a.reverse_mw.to_bits() == b.reverse_mw.to_bits()
+        let LineBlockBounds {
+            direct_mw: a_direct_mw,
+            reverse_mw: a_reverse_mw,
+        } = a;
+        let LineBlockBounds {
+            direct_mw: b_direct_mw,
+            reverse_mw: b_reverse_mw,
+        } = b;
+        f64_bits_eq(*a_direct_mw, *b_direct_mw) && f64_bits_eq(*a_reverse_mw, *b_reverse_mw)
     }
 
     fn pumping_bounds_bits_eq(a: &PumpingBlockBounds, b: &PumpingBlockBounds) -> bool {
-        a.min_flow_m3s.to_bits() == b.min_flow_m3s.to_bits()
-            && a.max_flow_m3s.to_bits() == b.max_flow_m3s.to_bits()
+        let PumpingBlockBounds {
+            min_flow_m3s: a_min_flow_m3s,
+            max_flow_m3s: a_max_flow_m3s,
+        } = a;
+        let PumpingBlockBounds {
+            min_flow_m3s: b_min_flow_m3s,
+            max_flow_m3s: b_max_flow_m3s,
+        } = b;
+        f64_bits_eq(*a_min_flow_m3s, *b_min_flow_m3s)
+            && f64_bits_eq(*a_max_flow_m3s, *b_max_flow_m3s)
     }
 
     fn contract_bounds_bits_eq(a: &ContractBlockBounds, b: &ContractBlockBounds) -> bool {
-        a.min_mw.to_bits() == b.min_mw.to_bits()
-            && a.max_mw.to_bits() == b.max_mw.to_bits()
-            && a.price_per_mwh.to_bits() == b.price_per_mwh.to_bits()
+        let ContractBlockBounds {
+            min_mw: a_min_mw,
+            max_mw: a_max_mw,
+            price_per_mwh: a_price_per_mwh,
+        } = a;
+        let ContractBlockBounds {
+            min_mw: b_min_mw,
+            max_mw: b_max_mw,
+            price_per_mwh: b_price_per_mwh,
+        } = b;
+        f64_bits_eq(*a_min_mw, *b_min_mw)
+            && f64_bits_eq(*a_max_mw, *b_max_mw)
+            && f64_bits_eq(*a_price_per_mwh, *b_price_per_mwh)
     }
 
     /// Builds a table with distinct per-(entity, stage) values for every family
@@ -2427,6 +2521,37 @@ mod tests {
         assert!(
             hydro_stage_bounds_bits_eq(&stage_before, &stage_after),
             "installing a block overlay must not perturb the stage cell"
+        );
+    }
+
+    #[test]
+    fn test_hydro_stage_bounds_bits_eq_distinguishes_signed_zero_and_equates_nan() {
+        let positive_zero = HydroStageBounds {
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 200.0,
+            filling_min_rate_m3s: 0.0,
+            water_withdrawal_m3s: 0.0,
+        };
+        let negative_zero = HydroStageBounds {
+            min_storage_hm3: -0.0,
+            ..positive_zero
+        };
+        assert!(
+            !hydro_stage_bounds_bits_eq(&positive_zero, &negative_zero),
+            "+0.0 and -0.0 carry different bit patterns and must compare unequal"
+        );
+
+        let nan_a = HydroStageBounds {
+            min_storage_hm3: f64::NAN,
+            ..positive_zero
+        };
+        let nan_b = HydroStageBounds {
+            min_storage_hm3: f64::NAN,
+            ..positive_zero
+        };
+        assert!(
+            hydro_stage_bounds_bits_eq(&nan_a, &nan_b),
+            "two NaN bit patterns must compare equal even though NaN != NaN under =="
         );
     }
 

@@ -8,5 +8,5 @@
 pub mod resolve;
 pub mod spectral;
 
-pub use resolve::{DecomposedCorrelation, GroupFactor};
+pub use resolve::{DecomposedCorrelation, EntityClass, GroupFactor};
 pub use spectral::SpectralFactor;

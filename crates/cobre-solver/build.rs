@@ -44,8 +44,7 @@ fn main() {
         eprintln!("cobre-solver: building HiGHS from {}", highs_src.display());
 
         // Always build HiGHS in Release mode regardless of the Rust profile.
-        // HiGHS is a solver library — an unoptimized build is ~10x slower and
-        // would produce misleading results even during development.
+        // An unoptimized solver is ~10x slower and misleads performance work.
         let mut cmake_config = cmake::Config::new(&highs_src);
         cmake_config
             .define("CMAKE_BUILD_TYPE", "Release")
@@ -53,14 +52,12 @@ fn main() {
             .define("HIGHS_NO_DEFAULT_THREADS", "ON")
             .define("BUILD_TESTING", "OFF")
             .define("BUILD_EXAMPLES", "OFF")
-            // Must stay 32-bit to match the i32 types in the FFI bindings;
-            // highs_wrapper.c's _Static_assert also catches a mismatch, but this
-            // flag prevents the cmake build from ever producing one.
+            // Must stay 32-bit to match the FFI i32 bindings;
+            // highs_wrapper.c's _Static_assert catches mismatches at compile time.
             .define("HIGHSINT64", "OFF")
-            // HiGHS uses zlib only for Highs_readModel() (.mps.gz/.lp.gz); Cobre
-            // builds every LP programmatically via the C API and never reads model
-            // files, so disabling it drops a system dependency that otherwise
-            // breaks cross-compilation in the Python wheel CI.
+            // HiGHS uses zlib only for compressed file I/O; Cobre builds LPs
+            // programmatically, so disabling it avoids a system dependency that breaks
+            // cross-compilation in the Python wheel CI.
             .define("CMAKE_DISABLE_FIND_PACKAGE_ZLIB", "ON");
 
         // On MSVC, use static CRT to avoid requiring vcruntime140.dll in the wheel.
@@ -121,18 +118,13 @@ fn main() {
             .warnings(true)
             .extra_warnings(true);
 
-        // Treat HiGHS headers as system includes so their warnings don't surface
-        // while we keep full warning coverage on our own wrappers. MSVC lacks
-        // -isystem; fall back to -I and accept the vendor noise there.
+        // Treat HiGHS headers as system includes to suppress third-party warnings
+        // while keeping full coverage on our own wrappers. MSVC lacks -isystem.
         add_system_or_include(&mut build, target_env == "msvc", &highs_include);
         add_system_or_include(&mut build, target_env == "msvc", &highs_include_highs);
 
-        // MSVC: link against static CRT (`/MT`) to match the static-CRT HiGHS
-        // build above — otherwise the cc-compiled wrappers default to dynamic
-        // CRT (`/MD`) and the linker rejects the mismatch (`LNK2038`).
-        // cargo-dist sets `+crt-static` via `RUSTFLAGS` (which `cc` honours),
-        // but the PyO3/maturin wheel build does not, so this override is
-        // required there.
+        // MSVC: static CRT (`/MT`) to match the HiGHS build above; otherwise
+        // cc defaults to dynamic CRT and the linker rejects the mismatch (LNK2038).
         if target_env == "msvc" {
             build.static_crt(true);
         }
@@ -143,12 +135,9 @@ fn main() {
 
         build.compile("highs_wrapper");
 
-        // C++ shim: implements cobre_highs_set_basis_non_alien which constructs a
-        // HighsBasis (C++ type) with alien = false and calls
-        // Highs::setBasis(const HighsBasis&) directly, bypassing the alien-path LU
-        // factorisation that the HiGHS C API always triggers.  Compiled as a
-        // separate object with C++17 so that the plain-C wrapper above is
-        // unaffected.
+        // C++ shim: implements cobre_highs_set_basis_non_alien to bypass the
+        // alien-path LU factorisation the C API always triggers. Compiled as
+        // a separate C++17 object so the plain-C wrapper above is unaffected.
         let mut build_cpp = cc::Build::new();
         build_cpp
             .file("csrc/highs_wrapper_cpp.cpp")
@@ -162,9 +151,7 @@ fn main() {
 
         build_cpp.flag_if_supported("-std=c++17");
 
-        // Mirror the MSVC CRT setting used for the HiGHS cmake build above:
-        // static CRT (`/MT`) so that the linker accepts the C++ wrapper
-        // alongside HiGHS's C++ objects (which were also compiled `/MT`).
+        // MSVC: static CRT to match the HiGHS cmake build above.
         if target_env == "msvc" {
             build_cpp.flag("/std:c++17");
             build_cpp.static_crt(true);
@@ -175,10 +162,8 @@ fn main() {
         build_cpp.compile("highs_wrapper_cpp");
     }
 
-    // Cargo exposes feature activation to build scripts via the
-    // CARGO_FEATURE_<NAME> environment variable, so this entire block is
-    // skipped — and the default build artifact stays byte-identical — unless
-    // `--features clp` is active.
+    // This block runs only when `--features clp` is active; otherwise the
+    // default build artifact is unaffected.
     if env::var("CARGO_FEATURE_CLP").is_ok() {
         println!("cargo:rerun-if-changed=csrc/clp_wrapper.c");
         println!("cargo:rerun-if-changed=csrc/clp_wrapper.h");
@@ -191,10 +176,8 @@ fn main() {
         println!("cargo:rerun-if-changed=vendor/coin-build/include/config_clp.h");
         println!("cargo:rerun-if-changed=vendor/coin-build/include/config_coinutils.h");
 
-        // The COIN-OR submodules use a nested directory layout, so the real
-        // source roots are one level deeper than the submodule root. Probe a
-        // representative header from each to confirm the submodules are
-        // initialized before handing off to cmake.
+        // COIN-OR submodules use a nested layout (source roots one level deeper).
+        // Probe representative headers to confirm submodules are initialized.
         let clp_header = manifest_dir.join("vendor/Clp/Clp/src/Clp_C_Interface.h");
         let coinutils_header =
             manifest_dir.join("vendor/CoinUtils/CoinUtils/src/CoinFactorization.hpp");
@@ -213,16 +196,14 @@ fn main() {
             coin_build_src.display()
         );
 
-        // Always build CLP in Release mode regardless of the Rust profile —
-        // same rationale as the HiGHS build: an unoptimized solver is far
-        // slower and would mislead even during development.
+        // Always build CLP in Release mode regardless of the Rust profile
+        // (same rationale as HiGHS above).
         let mut clp_config = cmake::Config::new(&coin_build_src);
         clp_config
             .define("CMAKE_BUILD_TYPE", "Release")
             .define("BUILD_SHARED_LIBS", "OFF");
 
-        // On MSVC, use static CRT to match the HiGHS build above and avoid
-        // requiring vcruntime140.dll in the wheel.
+        // MSVC: static CRT (same rationale as HiGHS above).
         if target_env == "msvc" {
             clp_config.define("CMAKE_MSVC_RUNTIME_LIBRARY", "MultiThreaded");
             clp_config.cflag("/MT");
@@ -264,13 +245,9 @@ fn main() {
             }
         }
 
-        // Compile the thin C wrapper (csrc/clp_wrapper.c). It includes
-        // <Clp_C_Interface.h>, which in turn includes "Coin_C_defines.h".
-        // The cmake superbuild installs only Clp_C_Interface.h into the
-        // out-dir include/, so the transitive Coin_C_defines.h is NOT present
-        // there. Point the compiler at the two nested COIN-OR source roots
-        // (where both headers live) so the include resolves. The out-dir
-        // include/ is added as well for completeness.
+        // CLP wrapper includes <Clp_C_Interface.h>, which transitively includes
+        // Coin_C_defines.h. The cmake superbuild installs only the former, so
+        // point the compiler at the nested source roots where both headers live.
         let clp_include = clp_dst.join("include");
         let clp_src_include = manifest_dir.join("vendor/Clp/Clp/src");
         let coinutils_src_include = manifest_dir.join("vendor/CoinUtils/CoinUtils/src");
@@ -289,32 +266,21 @@ fn main() {
             .warnings(true)
             .extra_warnings(true);
 
-        // Treat the COIN-OR headers as system includes (same rationale as the
-        // HiGHS wrappers): suppress third-party header warnings while keeping
-        // full warning coverage on our own wrapper. The nested source dirs
-        // supply Clp_C_Interface.h and its transitive Coin_C_defines.h.
+        // Treat COIN-OR headers as system includes (same rationale as HiGHS above).
         add_system_or_include(&mut clp_build, target_env == "msvc", &clp_src_include);
         add_system_or_include(&mut clp_build, target_env == "msvc", &coinutils_src_include);
         add_system_or_include(&mut clp_build, target_env == "msvc", &clp_include);
 
-        // MSVC: link against the static CRT (`/MT`) to match the static-CRT
-        // CLP cmake build above, mirroring the HiGHS wrapper handling.
+        // MSVC: static CRT to match the CLP cmake build above.
         if target_env == "msvc" {
             clp_build.static_crt(true);
         }
 
         clp_build.compile("clp_wrapper");
 
-        // C++ shim: implements the CLP class-only knobs (dual-steepest-edge
-        // pricing, factorization frequency, hot-start snapshot/restore) that
-        // live solely on the C++ ClpSimplex class and are absent from
-        // <Clp_C_Interface.h>. It casts the opaque model handle to `Clp_Simplex*`
-        // (the concrete C-interface wrapper struct) and reads `->model_` to reach
-        // the live C++ `ClpSimplex`, then calls the class API. Compiled as a
-        // separate C++17 object so the plain-C wrapper above is unaffected. The same
-        // -isystem set as the C wrapper supplies the vendored C++ class headers
-        // (ClpSimplex.hpp / ClpDualRowSteepest.hpp live in the vendored source
-        // dirs, NOT the cmake-installed include/).
+        // C++ shim: implements CLP class-only knobs (dual-steepest-edge pricing,
+        // factorization frequency) absent from the C API. Compiled as a separate
+        // C++17 object so the plain-C wrapper above is unaffected.
         let mut clp_build_cpp = cc::Build::new();
         clp_build_cpp
             .file("csrc/clp_wrapper_cpp.cpp")
@@ -333,9 +299,7 @@ fn main() {
 
         clp_build_cpp.flag_if_supported("-std=c++17");
 
-        // Mirror the MSVC CRT setting used for the CLP cmake build above:
-        // static CRT (`/MT`) so the linker accepts the C++ wrapper alongside
-        // CLP's C++ objects (which were also compiled `/MT`).
+        // MSVC: static CRT to match the CLP cmake build above.
         if target_env == "msvc" {
             clp_build_cpp.flag("/std:c++17");
             clp_build_cpp.static_crt(true);

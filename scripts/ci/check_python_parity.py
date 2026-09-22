@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """Check that CLI and Python bindings write the same output files.
 
-Parses both the CLI `run` module (`crates/cobre-cli/src/commands/run/`, a
-directory module whose write calls are spread across submodules) and
-`crates/cobre-python/src/run.rs` for calls to `cobre_io::write_*`,
-`write_results`, `write_checkpoint` / `write_policy_checkpoint`,
-`write_scaling_report`, and the stochastic export functions.
+Parses both the CLI `run` module (`crates/cobre-cli/src/`, a directory) and
+`crates/cobre-python/src/` for calls to writers from `cobre_io` and
+`cobre_sddp::policy::orchestration`. Resolves bare imported calls back to their
+canonical names through `use` statements, then compares the two sets.
 
 Usage:
-    python3 scripts/ci/check_python_parity.py              # default: --max 0
-    python3 scripts/ci/check_python_parity.py --max 0      # strict — zero mismatches allowed
+    python3 scripts/ci/check_python_parity.py              # default: --max 0, --min-shared 18
+    python3 scripts/ci/check_python_parity.py --max 0 --min-shared 18
+    python3 scripts/ci/check_python_parity.py --min-shared 19  # floor breach check
 
-Exit code 0 if parity holds (mismatches <= --max), 1 otherwise.
+Exit code 0 if parity holds (mismatches <= --max, shared >= --min-shared), 1 otherwise.
 """
 
 from __future__ import annotations
@@ -21,33 +21,6 @@ import re
 import sys
 from pathlib import Path
 
-# Patterns that capture write function calls in Rust source.
-# We look for: `cobre_io::write_<name>(`, `write_results(`, `write_checkpoint(`,
-# `write_policy_checkpoint(`, `io_write_policy_checkpoint(`,
-# and the stochastic output helpers imported from cobre_io::output.
-WRITE_CALL_RE = re.compile(
-    r"""
-    (?:
-        cobre_io::(?P<qual>write_\w+)           # qualified cobre_io::write_*
-        | (?<!\w)(?P<bare>                       # bare (imported) calls
-            write_results
-            | write_checkpoint
-            | write_policy_checkpoint
-            | io_write_policy_checkpoint
-            | write_scaling_report
-            | write_noise_openings
-            | write_inflow_annual_component
-            | write_inflow_ar_coefficients
-            | write_inflow_seasonal_stats
-            | write_correlation_json
-            | write_load_seasonal_stats
-            | write_fitting_report
-        )(?=\()                                  # followed by (
-    )
-    """,
-    re.VERBOSE,
-)
-
 # Normalisation map: different names that map to the same logical write.
 NORMALISE: dict[str, str] = {
     "write_checkpoint": "write_policy_checkpoint",
@@ -55,22 +28,118 @@ NORMALISE: dict[str, str] = {
 }
 
 
-def _extract_from_text(text: str, names: set[str]) -> None:
+def parse_imports(text: str) -> dict[str, str]:
+    """Parse `use` statements from cobre_io/cobre_sddp::policy::orchestration into a local_name -> canonical_name map.
+
+    Handles single-line, multi-line brace groups, nested {}, and `as` aliases.
+    """
+    import_map: dict[str, str] = {}
+
+    # Join continuation lines into whole statements by accumulating until `;`.
+    current = ""
+
+    for line in text.splitlines():
+        stripped = line.strip()
+        # Skip comments and attributes.
+        if stripped.startswith("//") or stripped.startswith("#["):
+            continue
+
+        current += " " + line
+        if ";" in current:
+            # Process complete statement.
+            statement = current[: current.index(";") + 1]
+            current = ""
+
+            # Check if it's a relevant import.
+            if not (
+                "use cobre_io::" in statement
+                or "use cobre_sddp::orchestration::" in statement
+                or "use cobre_sddp::policy::orchestration::" in statement
+            ):
+                continue
+
+            # Parse the import.
+            _parse_import_statement(statement, import_map)
+
+    return import_map
+
+
+def _parse_import_statement(statement: str, import_map: dict[str, str]) -> None:
+    """Parse a single import statement and update import_map."""
+    statement = statement.strip()
+
+    # Handle `as` aliases.
+    if " as " in statement:
+        # Extract the original name and the alias.
+        match = re.search(r"use\s+([\w:]+)\s+as\s+(\w+)\s*;", statement)
+        if match:
+            full_path = match.group(1)
+            alias = match.group(2)
+            canonical = full_path.split("::")[-1]
+            import_map[alias] = canonical
+            return
+
+    # Handle brace groups.
+    if "{" in statement:
+        # Extract base path and items.
+        match = re.match(r".*use\s+([\w:]+)::\{([^}]+)\}", statement)
+        if match:
+            items_str = match.group(2)
+
+            for item in items_str.split(","):
+                item = item.strip()
+                if not item:
+                    continue
+
+                # Handle nested paths.
+                if "::" in item:
+                    # Nested item like `output::write_foo`.
+                    parts = item.split("::")
+                    canonical = parts[-1]
+                    import_map[canonical] = canonical
+                else:
+                    # Simple item.
+                    import_map[item] = item
+    else:
+        # Single-item import.
+        match = re.match(r".*use\s+([\w:]+)::(\w+)\s*;", statement)
+        if match:
+            canonical = match.group(2)
+            import_map[canonical] = canonical
+
+
+def _extract_from_text(text: str, names: set[str], import_map: dict[str, str]) -> None:
     """Collect write function names from one Rust source body into ``names``."""
     for line in text.splitlines():
         stripped = line.strip()
-        # Skip comments and use/import lines (we want actual calls, not imports).
-        if stripped.startswith("//"):
-            continue
-        # Skip `use` imports — we only want call sites.
-        if stripped.startswith("use "):
+        # Skip comments, use/import lines, and attributes.
+        if (
+            stripped.startswith("//")
+            or stripped.startswith("use ")
+            or stripped.startswith("#[")
+        ):
             continue
 
-        for m in WRITE_CALL_RE.finditer(line):
-            name = m.group("qual") or m.group("bare")
+        # Match fully-qualified calls.
+        for match in re.finditer(
+            r"(?:cobre_io|cobre_sddp::(?:policy::)?orchestration)::([\w:]+::)*(write_\w+|export_\w+)\s*\(",
+            line,
+        ):
+            name = match.group(2)
             if name:
                 name = NORMALISE.get(name, name)
                 names.add(name)
+
+        # Match bare calls and resolve through import map.
+        # Matches write_foo(, export_foo(, FooWriter(, and FooWriter::
+        for match in re.finditer(
+            r"\b(write_\w+|export_\w+|\w+Writer)(?:\s*\(|::)", line
+        ):
+            name = match.group(1)
+            if name in import_map:
+                canonical = import_map[name]
+                canonical = NORMALISE.get(canonical, canonical)
+                names.add(canonical)
 
 
 def extract_write_functions(path: Path) -> set[str]:
@@ -85,14 +154,18 @@ def extract_write_functions(path: Path) -> set[str]:
 
     if path.is_dir():
         for rs_file in sorted(path.rglob("*.rs")):
-            _extract_from_text(rs_file.read_text(errors="replace"), names)
+            text = rs_file.read_text(errors="replace")
+            import_map = parse_imports(text)
+            _extract_from_text(text, names, import_map)
         return names
 
     if not path.exists():
         print(f"WARNING: {path} does not exist", file=sys.stderr)
         return set()
 
-    _extract_from_text(path.read_text(errors="replace"), names)
+    text = path.read_text(errors="replace")
+    import_map = parse_imports(text)
+    _extract_from_text(text, names, import_map)
     return names
 
 
@@ -107,6 +180,12 @@ def main() -> None:
         help="Maximum allowed mismatches (default: 0). Exit 1 if exceeded.",
     )
     parser.add_argument(
+        "--min-shared",
+        type=int,
+        default=18,
+        help="Minimum shared write functions (default: 18). Exit 1 if below this floor. The floor exists to catch a gate that stopped seeing call sites; raise it when writers are added, never lower it.",
+    )
+    parser.add_argument(
         "--root",
         type=Path,
         default=Path("."),
@@ -114,8 +193,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    cli_path = args.root / "crates" / "cobre-cli" / "src" / "commands" / "run"
-    python_path = args.root / "crates" / "cobre-python" / "src" / "run.rs"
+    cli_path = args.root / "crates" / "cobre-cli" / "src"
+    python_path = args.root / "crates" / "cobre-python" / "src"
 
     cli_writes = extract_write_functions(cli_path)
     python_writes = extract_write_functions(python_path)
@@ -123,6 +202,15 @@ def main() -> None:
     cli_only = sorted(cli_writes - python_writes)
     python_only = sorted(python_writes - cli_writes)
     mismatches = len(cli_only) + len(python_only)
+    shared = sorted(cli_writes & python_writes)
+
+    # Check floor before mismatch.
+    if len(shared) < args.min_shared:
+        print(
+            f"FAIL: {len(shared)} write functions in both paths (floor: {args.min_shared}). "
+            f"The gate stopped seeing call sites. Check that imports are resolved correctly."
+        )
+        sys.exit(1)
 
     if mismatches > args.max:
         print(f"FAIL: {mismatches} parity mismatch(es) (max allowed: {args.max})")
@@ -138,11 +226,10 @@ def main() -> None:
                 print(f"    - {name}")
         print()
         print("Fix: add the missing write call(s) to the other path.")
-        print("CLI path:    crates/cobre-cli/src/commands/run/")
-        print("Python path: crates/cobre-python/src/run.rs")
+        print("CLI path:    crates/cobre-cli/src/")
+        print("Python path: crates/cobre-python/src/")
         sys.exit(1)
     else:
-        shared = sorted(cli_writes & python_writes)
         print(
             f"OK: {mismatches} parity mismatch(es) (max allowed: {args.max}). "
             f"{len(shared)} write functions in both paths."

@@ -9,270 +9,20 @@
     clippy::cast_possible_truncation
 )]
 
-use std::collections::BTreeMap;
+use cobre_core::{NoiseMethod, SamplingScheme};
+use cobre_stochastic::{SampleRequest, StochasticError, build_forward_sampler, sample_forward};
 
-use chrono::NaiveDate;
-use cobre_core::{
-    Bus, DeficitSegment, EntityId, SystemBuilder,
-    entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties},
-    scenario::{
-        CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile, InflowModel,
-        SamplingScheme,
-    },
-    temporal::{
-        Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
-        StageStateConfig,
-    },
+mod common;
+use common::{
+    build_test_ctx, build_test_system, correlated_correlation_model, identity_correlation_model,
+    make_sampler_config, stages_from_system, tables_for,
 };
-use cobre_stochastic::{
-    StochasticError,
-    context::{ClassSchemes, OpeningTreeInputs, StochasticContext, build_stochastic_context},
-    sampling::insample::sample_forward,
-    sampling::{ForwardSamplerConfig, SampleRequest, build_forward_sampler},
-    tree::generate::ClassDimensions,
-};
-
-fn make_sampler_config<'a>(
-    scheme: SamplingScheme,
-    ctx: &'a StochasticContext,
-    stages: &'a [Stage],
-) -> ForwardSamplerConfig<'a> {
-    let dim = ctx.dim();
-    ForwardSamplerConfig {
-        class_schemes: ClassSchemes {
-            inflow: Some(scheme),
-            load: Some(scheme),
-            ncs: Some(scheme),
-        },
-        ctx,
-        stages,
-        dims: ClassDimensions {
-            n_hydros: dim,
-            n_load_buses: 0,
-            n_ncs: 0,
-        },
-        historical_library: None,
-        external_inflow_library: None,
-        external_load_library: None,
-        external_ncs_library: None,
-    }
-}
-
-fn make_bus(id: i32) -> Bus {
-    Bus {
-        id: EntityId(id),
-        name: format!("Bus{id}"),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: None,
-            cost_per_mwh: 1000.0,
-        }],
-        excess_cost: 0.0,
-    }
-}
-
-fn make_hydro(id: i32) -> Hydro {
-    let mut hydro = Hydro {
-        unit_groups: Vec::new(),
-        id: EntityId(id),
-        name: format!("H{id}"),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        downstream_id: None,
-        travel_time_hours: None,
-        entry_stage_id: None,
-        exit_stage_id: None,
-        min_storage_hm3: 0.0,
-        max_storage_hm3: 100.0,
-        min_outflow_m3s: 0.0,
-        max_outflow_m3s: None,
-        generation_model: HydroGenerationModel::ConstantProductivity,
-        min_turbined_m3s: 0.0,
-        max_turbined_m3s: 100.0,
-        specific_productivity_mw_per_m3s_per_m: None,
-        min_generation_mw: 0.0,
-        max_generation_mw: 100.0,
-        tailrace: None,
-        hydraulic_losses: None,
-        efficiency: None,
-        evaporation_coefficients_mm: None,
-        evaporation_reference_volumes_hm3: None,
-        diversion: None,
-        filling: None,
-        penalties: HydroPenalties {
-            spillage_cost: 0.0,
-            diversion_cost: 0.0,
-            turbined_cost: 0.0,
-            storage_violation_below_cost: 0.0,
-            filling_target_violation_cost: 0.0,
-            turbined_violation_below_cost: 0.0,
-            outflow_violation_below_cost: 0.0,
-            outflow_violation_above_cost: 0.0,
-            generation_violation_below_cost: 0.0,
-            evaporation_violation_cost: 0.0,
-            water_withdrawal_violation_cost: 0.0,
-            water_withdrawal_violation_pos_cost: 0.0,
-            water_withdrawal_violation_neg_cost: 0.0,
-            evaporation_violation_pos_cost: 0.0,
-            evaporation_violation_neg_cost: 0.0,
-            inflow_nonnegativity_cost: 1000.0,
-        },
-    };
-    hydro.declare_mirror_unit_group(EntityId(0));
-    hydro
-}
-
-fn make_stage(index: usize, id: i32, bf: usize, method: NoiseMethod) -> Stage {
-    Stage {
-        index,
-        id,
-        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
-        season_id: Some(0),
-        blocks: vec![Block {
-            index: 0,
-            name: "SINGLE".to_string(),
-            duration_hours: 744.0,
-        }],
-        block_mode: BlockMode::Parallel,
-        state_config: StageStateConfig {
-            storage: true,
-            inflow_lags: false,
-        },
-        risk_config: StageRiskConfig::Expectation,
-        scenario_config: ScenarioSourceConfig {
-            branching_factor: bf,
-            noise_method: method,
-        },
-    }
-}
-
-fn make_inflow_model(hydro_id: i32, stage_id: i32) -> InflowModel {
-    InflowModel {
-        hydro_id: EntityId(hydro_id),
-        stage_id,
-        mean_m3s: 100.0,
-        std_m3s: 30.0,
-        ar_coefficients: vec![],
-        residual_std_ratio: 1.0,
-        annual: None,
-    }
-}
-
-fn identity_correlation(ids: &[i32]) -> CorrelationModel {
-    let n = ids.len();
-    let matrix: Vec<Vec<f64>> = (0..n)
-        .map(|i| (0..n).map(|j| if i == j { 1.0 } else { 0.0 }).collect())
-        .collect();
-    let mut profiles = BTreeMap::new();
-    profiles.insert(
-        "default".to_string(),
-        CorrelationProfile {
-            groups: vec![CorrelationGroup {
-                name: "g1".to_string(),
-                entities: ids
-                    .iter()
-                    .map(|&id| CorrelationEntity {
-                        entity_type: "inflow".to_string(),
-                        id: EntityId(id),
-                    })
-                    .collect(),
-                matrix,
-            }],
-        },
-    );
-    CorrelationModel {
-        method: "spectral".to_string(),
-        profiles,
-        schedule: vec![],
-    }
-}
-
-fn correlated_correlation(ids: &[i32], rho: f64) -> CorrelationModel {
-    let n = ids.len();
-    let matrix: Vec<Vec<f64>> = (0..n)
-        .map(|i| (0..n).map(|j| if i == j { 1.0 } else { rho }).collect())
-        .collect();
-    let mut profiles = BTreeMap::new();
-    profiles.insert(
-        "default".to_string(),
-        CorrelationProfile {
-            groups: vec![CorrelationGroup {
-                name: "g1".to_string(),
-                entities: ids
-                    .iter()
-                    .map(|&id| CorrelationEntity {
-                        entity_type: "inflow".to_string(),
-                        id: EntityId(id),
-                    })
-                    .collect(),
-                matrix,
-            }],
-        },
-    );
-    CorrelationModel {
-        method: "spectral".to_string(),
-        profiles,
-        schedule: vec![],
-    }
-}
-
-fn build_test_system(methods: &[NoiseMethod], correlation: CorrelationModel) -> cobre_core::System {
-    assert_eq!(methods.len(), 3, "must supply exactly 3 per-stage methods");
-    let hydros = vec![make_hydro(1), make_hydro(2)];
-    let stages = vec![
-        make_stage(0, 0, 5, methods[0]),
-        make_stage(1, 1, 5, methods[1]),
-        make_stage(2, 2, 5, methods[2]),
-    ];
-    let inflow_models = vec![
-        make_inflow_model(1, 0),
-        make_inflow_model(1, 1),
-        make_inflow_model(1, 2),
-        make_inflow_model(2, 0),
-        make_inflow_model(2, 1),
-        make_inflow_model(2, 2),
-    ];
-    SystemBuilder::new()
-        .buses(vec![make_bus(0)])
-        .hydros(hydros)
-        .stages(stages)
-        .inflow_models(inflow_models)
-        .correlation(correlation)
-        .build()
-        .unwrap()
-}
-
-fn build_test_ctx(system: &cobre_core::System, forward_seed: Option<u64>) -> StochasticContext {
-    build_stochastic_context(
-        system,
-        42,
-        forward_seed,
-        &[],
-        &[],
-        OpeningTreeInputs::default(),
-        ClassSchemes {
-            inflow: Some(SamplingScheme::InSample),
-            load: Some(SamplingScheme::InSample),
-            ncs: Some(SamplingScheme::InSample),
-        },
-    )
-    .unwrap()
-}
-
-fn stages_from_system(system: &cobre_core::System) -> Vec<Stage> {
-    system
-        .stages()
-        .iter()
-        .filter(|s| s.id >= 0)
-        .cloned()
-        .collect()
-}
 
 #[test]
 fn insample_dispatch_returns_tree_slice_of_correct_dim() {
     let system = build_test_system(
         &[NoiseMethod::Saa, NoiseMethod::Saa, NoiseMethod::Saa],
-        identity_correlation(&[1, 2]),
+        identity_correlation_model(&[1, 2]),
     );
     let ctx = build_test_ctx(&system, None);
     let stages = stages_from_system(&system);
@@ -282,7 +32,8 @@ fn insample_dispatch_returns_tree_slice_of_correct_dim() {
     let dim = ctx.dim();
 
     let mut noise_buf = vec![0.0f64; dim];
-    let mut perm_scratch = vec![0usize; 5];
+    let mut corr_scratch = vec![0.0f64; 2 * dim];
+    let tables = tables_for(&sampler, 0, 5, &[]);
 
     let result = sampler
         .sample(SampleRequest {
@@ -291,12 +42,13 @@ fn insample_dispatch_returns_tree_slice_of_correct_dim() {
             stage: 0,
             stage_idx: 0,
             noise_buf: &mut noise_buf,
-            perm_scratch: &mut perm_scratch,
+            corr_scratch: &mut corr_scratch,
             total_scenarios: 5,
             noise_group_id: 0,
             node_opening_offset: 0,
             node_opening_len: ctx.tree_view().n_openings(0),
             pinned_scenario: None,
+            tables: &tables,
         })
         .unwrap();
 
@@ -314,7 +66,7 @@ fn insample_dispatch_returns_tree_slice_of_correct_dim() {
 fn insample_copy_equivalence_matches_direct_call() {
     let system = build_test_system(
         &[NoiseMethod::Saa, NoiseMethod::Saa, NoiseMethod::Saa],
-        identity_correlation(&[1, 2]),
+        identity_correlation_model(&[1, 2]),
     );
     let ctx = build_test_ctx(&system, None);
     let stages = stages_from_system(&system);
@@ -324,7 +76,8 @@ fn insample_copy_equivalence_matches_direct_call() {
     let dim = ctx.dim();
 
     let mut noise_buf = vec![0.0f64; dim];
-    let mut perm_scratch = vec![0usize; 5];
+    let mut corr_scratch = vec![0.0f64; 2 * dim];
+    let tables = tables_for(&sampler, 0, 5, &[]);
 
     let result = sampler
         .sample(SampleRequest {
@@ -333,12 +86,13 @@ fn insample_copy_equivalence_matches_direct_call() {
             stage: 0,
             stage_idx: 0,
             noise_buf: &mut noise_buf,
-            perm_scratch: &mut perm_scratch,
+            corr_scratch: &mut corr_scratch,
             total_scenarios: 5,
             noise_group_id: 0,
             node_opening_offset: 0,
             node_opening_len: ctx.tree_view().n_openings(0),
             pinned_scenario: None,
+            tables: &tables,
         })
         .unwrap();
 
@@ -365,7 +119,7 @@ fn insample_copy_equivalence_matches_direct_call() {
 fn out_of_sample_dispatch_returns_fresh_noise_of_correct_dim() {
     let system = build_test_system(
         &[NoiseMethod::Saa, NoiseMethod::Saa, NoiseMethod::Saa],
-        identity_correlation(&[1, 2]),
+        identity_correlation_model(&[1, 2]),
     );
     let ctx = build_test_ctx(&system, Some(99));
     let stages = stages_from_system(&system);
@@ -378,7 +132,8 @@ fn out_of_sample_dispatch_returns_fresh_noise_of_correct_dim() {
     let dim = ctx.dim();
 
     let mut noise_buf = vec![0.0f64; dim];
-    let mut perm_scratch = vec![0usize; 5];
+    let mut corr_scratch = vec![0.0f64; 2 * dim];
+    let tables = tables_for(&sampler, 0, 5, &[]);
 
     let result = sampler
         .sample(SampleRequest {
@@ -387,12 +142,13 @@ fn out_of_sample_dispatch_returns_fresh_noise_of_correct_dim() {
             stage: 0,
             stage_idx: 0,
             noise_buf: &mut noise_buf,
-            perm_scratch: &mut perm_scratch,
+            corr_scratch: &mut corr_scratch,
             total_scenarios: 5,
             noise_group_id: 0,
             node_opening_offset: 0,
             node_opening_len: 0,
             pinned_scenario: None,
+            tables: &tables,
         })
         .unwrap();
 
@@ -410,7 +166,7 @@ fn out_of_sample_dispatch_returns_fresh_noise_of_correct_dim() {
 fn out_of_sample_is_deterministic() {
     let system = build_test_system(
         &[NoiseMethod::Saa, NoiseMethod::Saa, NoiseMethod::Saa],
-        identity_correlation(&[1, 2]),
+        identity_correlation_model(&[1, 2]),
     );
     let ctx = build_test_ctx(&system, Some(99));
     let stages = stages_from_system(&system);
@@ -424,8 +180,9 @@ fn out_of_sample_is_deterministic() {
 
     let mut buf_a = vec![0.0f64; dim];
     let mut buf_b = vec![0.0f64; dim];
-    let mut perm_a = vec![0usize; 5];
-    let mut perm_b = vec![0usize; 5];
+    let mut corr_a = vec![0.0f64; 2 * dim];
+    let mut corr_b = vec![0.0f64; 2 * dim];
+    let tables = tables_for(&sampler, 0, 5, &[]);
 
     let a = sampler
         .sample(SampleRequest {
@@ -434,12 +191,13 @@ fn out_of_sample_is_deterministic() {
             stage: 0,
             stage_idx: 0,
             noise_buf: &mut buf_a,
-            perm_scratch: &mut perm_a,
+            corr_scratch: &mut corr_a,
             total_scenarios: 5,
             noise_group_id: 0,
             node_opening_offset: 0,
             node_opening_len: 0,
             pinned_scenario: None,
+            tables: &tables,
         })
         .unwrap();
 
@@ -450,12 +208,13 @@ fn out_of_sample_is_deterministic() {
             stage: 0,
             stage_idx: 0,
             noise_buf: &mut buf_b,
-            perm_scratch: &mut perm_b,
+            corr_scratch: &mut corr_b,
             total_scenarios: 5,
             noise_group_id: 0,
             node_opening_offset: 0,
             node_opening_len: 0,
             pinned_scenario: None,
+            tables: &tables,
         })
         .unwrap();
 
@@ -470,7 +229,7 @@ fn out_of_sample_is_deterministic() {
 fn out_of_sample_scenario_changes_noise() {
     let system = build_test_system(
         &[NoiseMethod::Saa, NoiseMethod::Saa, NoiseMethod::Saa],
-        identity_correlation(&[1, 2]),
+        identity_correlation_model(&[1, 2]),
     );
     let ctx = build_test_ctx(&system, Some(99));
     let stages = stages_from_system(&system);
@@ -484,8 +243,9 @@ fn out_of_sample_scenario_changes_noise() {
 
     let mut buf_0 = vec![0.0f64; dim];
     let mut buf_1 = vec![0.0f64; dim];
-    let mut perm_0 = vec![0usize; 5];
-    let mut perm_1 = vec![0usize; 5];
+    let mut corr_0 = vec![0.0f64; 2 * dim];
+    let mut corr_1 = vec![0.0f64; 2 * dim];
+    let tables = tables_for(&sampler, 0, 5, &[]);
 
     let result_0 = sampler
         .sample(SampleRequest {
@@ -494,12 +254,13 @@ fn out_of_sample_scenario_changes_noise() {
             stage: 0,
             stage_idx: 0,
             noise_buf: &mut buf_0,
-            perm_scratch: &mut perm_0,
+            corr_scratch: &mut corr_0,
             total_scenarios: 5,
             noise_group_id: 0,
             node_opening_offset: 0,
             node_opening_len: 0,
             pinned_scenario: None,
+            tables: &tables,
         })
         .unwrap();
 
@@ -510,12 +271,13 @@ fn out_of_sample_scenario_changes_noise() {
             stage: 0,
             stage_idx: 0,
             noise_buf: &mut buf_1,
-            perm_scratch: &mut perm_1,
+            corr_scratch: &mut corr_1,
             total_scenarios: 5,
             noise_group_id: 0,
             node_opening_offset: 0,
             node_opening_len: 0,
             pinned_scenario: None,
+            tables: &tables,
         })
         .unwrap();
 
@@ -535,7 +297,7 @@ fn out_of_sample_scenario_changes_noise() {
 fn out_of_sample_noise_is_finite() {
     let system = build_test_system(
         &[NoiseMethod::Saa, NoiseMethod::Saa, NoiseMethod::Saa],
-        identity_correlation(&[1, 2]),
+        identity_correlation_model(&[1, 2]),
     );
     let ctx = build_test_ctx(&system, Some(99));
     let stages = stages_from_system(&system);
@@ -549,7 +311,8 @@ fn out_of_sample_noise_is_finite() {
     let total_scenarios: u32 = 100;
 
     let mut noise_buf = vec![0.0f64; dim];
-    let mut perm_scratch = vec![0usize; total_scenarios as usize];
+    let mut corr_scratch = vec![0.0f64; 2 * dim];
+    let tables = tables_for(&sampler, 0, total_scenarios, &[]);
 
     for scenario in 0..total_scenarios {
         let result = sampler
@@ -559,12 +322,13 @@ fn out_of_sample_noise_is_finite() {
                 stage: 0,
                 stage_idx: 0,
                 noise_buf: &mut noise_buf,
-                perm_scratch: &mut perm_scratch,
+                corr_scratch: &mut corr_scratch,
                 total_scenarios,
                 noise_group_id: 0,
                 node_opening_offset: 0,
                 node_opening_len: 0,
                 pinned_scenario: None,
+                tables: &tables,
             })
             .unwrap();
 
@@ -582,7 +346,7 @@ fn out_of_sample_correlation_matches_target() {
     let rho = 0.8_f64;
     let system = build_test_system(
         &[NoiseMethod::Saa, NoiseMethod::Saa, NoiseMethod::Saa],
-        correlated_correlation(&[1, 2], rho),
+        correlated_correlation_model(&[1, 2], rho),
     );
     let ctx = build_test_ctx(&system, Some(99));
     let stages = stages_from_system(&system);
@@ -597,9 +361,10 @@ fn out_of_sample_correlation_matches_target() {
 
     let n_scenarios: u32 = 2000;
     let mut noise_buf = vec![0.0f64; dim];
-    let mut perm_scratch = vec![0usize; n_scenarios as usize];
+    let mut corr_scratch = vec![0.0f64; 2 * dim];
 
     let mut pairs: Vec<(f64, f64)> = Vec::with_capacity(n_scenarios as usize);
+    let tables = tables_for(&sampler, 0, n_scenarios, &[]);
 
     for scenario in 0..n_scenarios {
         let result = sampler
@@ -609,12 +374,13 @@ fn out_of_sample_correlation_matches_target() {
                 stage: 0,
                 stage_idx: 0,
                 noise_buf: &mut noise_buf,
-                perm_scratch: &mut perm_scratch,
+                corr_scratch: &mut corr_scratch,
                 total_scenarios: n_scenarios,
                 noise_group_id: 0,
                 node_opening_offset: 0,
                 node_opening_len: 0,
                 pinned_scenario: None,
+                tables: &tables,
             })
             .unwrap();
 
@@ -646,7 +412,7 @@ fn out_of_sample_correlation_matches_target() {
 fn out_of_sample_per_stage_method_mixing() {
     let system = build_test_system(
         &[NoiseMethod::Lhs, NoiseMethod::Saa, NoiseMethod::QmcHalton],
-        identity_correlation(&[1, 2]),
+        identity_correlation_model(&[1, 2]),
     );
     let ctx = build_test_ctx(&system, Some(99));
     let stages = stages_from_system(&system);
@@ -660,8 +426,8 @@ fn out_of_sample_per_stage_method_mixing() {
     let total_scenarios: u32 = 10;
 
     let mut noise_buf = vec![0.0f64; dim];
-    // LHS requires perm_scratch of length total_scenarios.
-    let mut perm_scratch = vec![0usize; total_scenarios as usize];
+    let mut corr_scratch = vec![0.0f64; 2 * dim];
+    let tables = tables_for(&sampler, 0, total_scenarios, &[]);
 
     for stage_idx in 0..3_usize {
         let stage_id = stage_idx as u32;
@@ -673,12 +439,13 @@ fn out_of_sample_per_stage_method_mixing() {
                     stage: stage_id,
                     stage_idx,
                     noise_buf: &mut noise_buf,
-                    perm_scratch: &mut perm_scratch,
+                    corr_scratch: &mut corr_scratch,
                     total_scenarios,
-                    noise_group_id: 0,
+                    noise_group_id: stage_id,
                     node_opening_offset: 0,
                     node_opening_len: 0,
                     pinned_scenario: None,
+                    tables: &tables,
                 })
                 .unwrap();
 
@@ -703,7 +470,7 @@ fn out_of_sample_per_stage_method_mixing() {
 fn factory_rejects_out_of_sample_without_seed() {
     let system = build_test_system(
         &[NoiseMethod::Saa, NoiseMethod::Saa, NoiseMethod::Saa],
-        identity_correlation(&[1, 2]),
+        identity_correlation_model(&[1, 2]),
     );
     let ctx = build_test_ctx(&system, None);
     let stages = stages_from_system(&system);
@@ -729,7 +496,7 @@ fn factory_rejects_out_of_sample_without_seed() {
 fn factory_rejects_historical() {
     let system = build_test_system(
         &[NoiseMethod::Saa, NoiseMethod::Saa, NoiseMethod::Saa],
-        identity_correlation(&[1, 2]),
+        identity_correlation_model(&[1, 2]),
     );
     let ctx = build_test_ctx(&system, None);
     let stages = stages_from_system(&system);
@@ -755,7 +522,7 @@ fn factory_rejects_historical() {
 fn factory_rejects_external() {
     let system = build_test_system(
         &[NoiseMethod::Saa, NoiseMethod::Saa, NoiseMethod::Saa],
-        identity_correlation(&[1, 2]),
+        identity_correlation_model(&[1, 2]),
     );
     let ctx = build_test_ctx(&system, None);
     let stages = stages_from_system(&system);
@@ -778,7 +545,7 @@ fn factory_rejects_external() {
 fn out_of_sample_resume_invariance() {
     let system = build_test_system(
         &[NoiseMethod::Saa, NoiseMethod::Saa, NoiseMethod::Saa],
-        identity_correlation(&[1, 2]),
+        identity_correlation_model(&[1, 2]),
     );
     let ctx = build_test_ctx(&system, Some(99));
     let stages = stages_from_system(&system);
@@ -792,8 +559,9 @@ fn out_of_sample_resume_invariance() {
 
     let mut buf_first = vec![0.0f64; dim];
     let mut buf_resume = vec![0.0f64; dim];
-    let mut perm_first = vec![0usize; 5];
-    let mut perm_resume = vec![0usize; 5];
+    let mut corr_first = vec![0.0f64; 2 * dim];
+    let mut corr_resume = vec![0.0f64; 2 * dim];
+    let tables = tables_for(&sampler, 5, 5, &[]);
 
     let first = sampler
         .sample(SampleRequest {
@@ -802,15 +570,15 @@ fn out_of_sample_resume_invariance() {
             stage: 0,
             stage_idx: 0,
             noise_buf: &mut buf_first,
-            perm_scratch: &mut perm_first,
+            corr_scratch: &mut corr_first,
             total_scenarios: 5,
             noise_group_id: 0,
             node_opening_offset: 0,
             node_opening_len: 0,
             pinned_scenario: None,
+            tables: &tables,
         })
         .unwrap();
-    let first_values: Vec<f64> = first.as_slice().to_vec();
 
     let resumed = sampler
         .sample(SampleRequest {
@@ -819,17 +587,18 @@ fn out_of_sample_resume_invariance() {
             stage: 0,
             stage_idx: 0,
             noise_buf: &mut buf_resume,
-            perm_scratch: &mut perm_resume,
+            corr_scratch: &mut corr_resume,
             total_scenarios: 5,
             noise_group_id: 0,
             node_opening_offset: 0,
             node_opening_len: 0,
             pinned_scenario: None,
+            tables: &tables,
         })
         .unwrap();
 
     assert_eq!(
-        first_values.as_slice(),
+        first.as_slice(),
         resumed.as_slice(),
         "OutOfSample noise must be identical for a resumed call with the same (iteration, scenario, stage)"
     );

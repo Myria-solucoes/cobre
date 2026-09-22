@@ -13,11 +13,9 @@ use std::sync::Arc;
 
 use arrow::array::{BooleanBuilder, Float64Builder, Int32Builder, RecordBatch, StringBuilder};
 
-use crate::output::atomic::write_parquet_atomic;
+use crate::output::atomic::write_batch_atomic;
 use crate::output::error::OutputError;
-use crate::output::parquet_config::ParquetWriterConfig;
 use crate::output::schemas::generic_constraint_echo_schema;
-use crate::output::stochastic::ensure_parent_dir;
 
 /// One row of the resolved generic-constraint echo.
 ///
@@ -101,10 +99,8 @@ pub fn write_generic_constraint_echo(
     path: &Path,
     rows: &[GenericConstraintEchoRow],
 ) -> Result<(), OutputError> {
-    ensure_parent_dir(path)?;
-    let config = ParquetWriterConfig::default();
     let batch = build_generic_constraint_echo_batch(rows)?;
-    write_parquet_atomic(path, &batch, &config)
+    write_batch_atomic(path, &batch)
 }
 
 fn build_generic_constraint_echo_batch(
@@ -167,6 +163,7 @@ fn build_generic_constraint_echo_batch(
 #[allow(clippy::expect_used, clippy::float_cmp, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::test_support::output::read_first_batch;
     use arrow::array::{Array, BooleanArray, Float64Array, Int32Array, StringArray};
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use tempfile::tempdir;
@@ -224,13 +221,6 @@ mod tests {
         ]
     }
 
-    fn read_batch(path: &Path) -> RecordBatch {
-        let file = std::fs::File::open(path).unwrap();
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
-        let mut reader = builder.build().unwrap();
-        reader.next().unwrap().unwrap()
-    }
-
     #[test]
     fn generic_constraint_echo_round_trip_band_cap_floor_rows() {
         let rows = sample_rows();
@@ -240,7 +230,7 @@ mod tests {
         write_generic_constraint_echo(&path, &rows).expect("write must succeed");
         assert!(path.exists(), "file must exist after write");
 
-        let batch = read_batch(&path);
+        let batch = read_first_batch(&path);
         assert_eq!(batch.num_columns(), 13, "must have 13 columns");
         assert_eq!(batch.num_rows(), 3, "must have 3 rows");
 

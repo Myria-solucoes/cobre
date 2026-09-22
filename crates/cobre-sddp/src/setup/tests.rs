@@ -1,11 +1,11 @@
 use super::{
     BoundaryStateRequirements, NodeId, NodePos, PhaseLibraries, ScenarioLibraries, StudySetup,
-    assert_external_library_widths, build_contract_prices_per_stage,
+    assert_external_library_widths, build_contract_prices_per_stage, study_horizon_end,
 };
 use crate::SddpError;
 use crate::hydro_models::{PrepareHydroModelsResult, ProductionModelSet, ResolvedProductionModel};
-use crate::indexer::StateSpace;
-use crate::lp_builder::M3S_TO_HM3;
+use crate::lp::builder::M3S_TO_HM3;
+use crate::lp::indexer::StateSpace;
 use crate::test_support;
 use cobre_stochastic::ExternalScenarioLibrary;
 use cobre_stochastic::season_cast::StageCalendar;
@@ -13,17 +13,17 @@ use cobre_stochastic::season_cast::StageCalendar;
 use chrono::{Duration, NaiveDate};
 use cobre_core::{
     BlockBoundsCountsSpec, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
-    ContractBlockBounds, ContractBlockOverride, HydroBlockBounds, HydroStageBounds,
-    HydroStagePenalties, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
-    PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBlockBounds,
-    ResolvedBounds, ResolvedPenalties, ThermalBlockBounds, ThermalStageBounds,
+    ContractBlockBounds, ContractBlockOverride, HydroBlockBounds, HydroPenalties, HydroStageBounds,
+    LineBlockBounds, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
+    PumpingBlockBounds, ResolvedBlockBounds, ResolvedBounds, ResolvedPenalties, ThermalBlockBounds,
+    ThermalStageBounds,
 };
 use cobre_core::{
     ContractType, EnergyContract, EntityId, HorizonGraph, HydroPastDefluence, InitialConditions,
     PostStudyStage, PostStudyStages, SystemBuilder,
     entities::{
         bus::{Bus, DeficitSegment},
-        hydro::{Hydro, HydroGenerationModel, HydroPenalties},
+        hydro::{Hydro, HydroGenerationModel},
         thermal::{AnticipatedConfig, Thermal},
     },
     scenario::{InflowHistoryRow, InflowModel, LoadModel, SamplingScheme},
@@ -197,8 +197,8 @@ fn minimal_system_with_policy_graph(
         }
     }
 
-    fn default_hydro_penalties() -> HydroStagePenalties {
-        HydroStagePenalties {
+    fn default_hydro_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.01,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -466,7 +466,7 @@ fn minimal_fpha_misconfigured_system(n_stages: usize) -> cobre_core::System {
             n_stages: n_st,
         },
         &PenaltiesDefaults {
-            hydro: HydroStagePenalties {
+            hydro: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,
@@ -585,6 +585,7 @@ fn new_minimal_valid_system_returns_ok() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     );
     assert!(result.is_ok(), "expected Ok, got {result:?}");
     let setup = result.unwrap();
@@ -615,6 +616,7 @@ fn new_zero_stages_returns_validation_error() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     );
     assert!(result.is_err(), "expected Err, got Ok");
     let err = result.unwrap_err();
@@ -650,6 +652,7 @@ fn accessor_methods_return_expected_values() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -699,6 +702,7 @@ fn fcf_mut_allows_cut_insertion() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -734,6 +738,7 @@ fn inflow_method_reflects_config() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -767,6 +772,7 @@ fn cut_selection_none_when_disabled() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -801,6 +807,7 @@ fn stage_ctx_fields_match_study_setup() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
     let ctx = setup.stage_ctx();
@@ -857,6 +864,7 @@ fn training_ctx_fields_match_study_setup() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
     let ctx = setup.training_ctx();
@@ -916,6 +924,7 @@ fn simulation_ctx_propagates_dynamic_dcs_from_setup() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
     let ctx = setup.simulation_ctx();
@@ -964,6 +973,7 @@ fn train_completes_within_iteration_limit() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
     let comm = LocalBackend;
@@ -1012,6 +1022,7 @@ fn train_generates_cuts_in_fcf() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
     let comm = LocalBackend;
@@ -1045,7 +1056,7 @@ fn train_generates_cuts_in_fcf() {
 #[test]
 fn node_native_binary_tree_loads_and_constructs_node_graph() {
     use cobre_core::temporal::{Node, Transition};
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     let policy_graph = HorizonGraph {
         graph_type: PolicyGraphType::FiniteHorizon,
@@ -1132,7 +1143,7 @@ fn node_native_binary_tree_loads_and_constructs_node_graph() {
                 annual_discount_rate_override: None,
             },
         ],
-        stage_discount_rate_overrides: HashMap::new(),
+        stage_discount_rate_overrides: BTreeMap::new(),
         season_map: None,
     };
 
@@ -1158,6 +1169,7 @@ fn node_native_binary_tree_loads_and_constructs_node_graph() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup: node-native binary tree must load end-to-end");
 
@@ -1227,6 +1239,7 @@ fn chain_fcf_pools_len_equals_num_stages_with_pool_id_identity() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup: chain must load end-to-end");
 
@@ -1273,6 +1286,7 @@ fn simulation_config_reflects_setup_fields() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -1311,6 +1325,7 @@ fn create_workspace_pool_returns_correct_size() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -1349,6 +1364,7 @@ fn build_training_output_non_empty() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
     let comm = LocalBackend;
@@ -1409,6 +1425,7 @@ fn simulate_after_train_returns_nonempty_costs() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -1476,7 +1493,7 @@ fn study_params_from_config_defaults() {
         estimation: EstimationConfig::default(),
     };
 
-    let params = StudyParams::from_config(&config).expect("from_config");
+    let params = StudyParams::from_config(&config, Vec::new()).expect("from_config");
 
     assert_eq!(
         params.seed, DEFAULT_SEED,
@@ -1553,7 +1570,7 @@ fn study_params_from_config_explicit() {
         estimation: EstimationConfig::default(),
     };
 
-    let params = StudyParams::from_config(&config).expect("from_config");
+    let params = StudyParams::from_config(&config, Vec::new()).expect("from_config");
 
     // Seed: i64::unsigned_abs(1234) == 1234
     assert_eq!(params.seed, 1234, "seed mismatch");
@@ -1934,7 +1951,7 @@ fn test_prepare_stochastic_historical_residuals_noise_method() {
             n_stages: n_st,
         },
         &PenaltiesDefaults {
-            hydro: HydroStagePenalties {
+            hydro: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,
@@ -2060,7 +2077,8 @@ fn hydro_models_accessor_returns_stored_result() {
     .expect("stochastic context");
     let hydro_result = PrepareHydroModelsResult::default_from_system(&system);
 
-    let setup = StudySetup::new(&system, &config, stochastic, hydro_result).expect("setup");
+    let setup =
+        StudySetup::new(&system, &config, stochastic, hydro_result, Vec::new()).expect("setup");
 
     let models = &setup.hydro_models;
     assert_eq!(
@@ -2115,7 +2133,14 @@ fn energy_conversion_accessor_returns_built_set() {
         result
     };
 
-    let setup = StudySetup::new(&system, &config, stochastic, hydro_models_result).expect("setup");
+    let setup = StudySetup::new(
+        &system,
+        &config,
+        stochastic,
+        hydro_models_result,
+        Vec::new(),
+    )
+    .expect("setup");
 
     let ec = setup.energy_conversion();
     assert_eq!(ec.n_hydros(), system.hydros().len());
@@ -2152,6 +2177,7 @@ fn study_setup_propagates_fpha_missing_equivalent_productivity() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect_err("setup must reject misconfigured FPHA hydro");
 
@@ -2285,9 +2311,10 @@ fn minimal_system_2_hydros_with_history(
         })
         .collect();
 
-    let inflow_models: Vec<InflowModel> = (0..n_stages)
-        .flat_map(|i| {
-            [1_i32, 2].map(|hid| InflowModel {
+    let inflow_models: Vec<InflowModel> = [1_i32, 2]
+        .into_iter()
+        .flat_map(|hid| {
+            (0..n_stages).map(move |i| InflowModel {
                 hydro_id: EntityId(hid),
                 stage_id: i as i32,
                 mean_m3s: 80.0,
@@ -2325,8 +2352,8 @@ fn minimal_system_2_hydros_with_history(
         }
     }
 
-    fn default_hydro_penalties() -> HydroStagePenalties {
-        HydroStagePenalties {
+    fn default_hydro_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.01,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -2409,7 +2436,7 @@ fn minimal_system_2_hydros_with_history(
         .bounds(bounds)
         .penalties(penalties)
         .policy_graph(HorizonGraph {
-            stage_discount_rate_overrides: std::collections::HashMap::new(),
+            stage_discount_rate_overrides: std::collections::BTreeMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,
             transitions: vec![],
@@ -2765,8 +2792,8 @@ fn staggered_dates_system_2_hydros(
         }
     }
 
-    fn default_hydro_penalties() -> HydroStagePenalties {
-        HydroStagePenalties {
+    fn default_hydro_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.01,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -3104,8 +3131,8 @@ fn filling_system_2_hydros(
         }
     }
 
-    fn default_hydro_penalties() -> HydroStagePenalties {
-        HydroStagePenalties {
+    fn default_hydro_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.01,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -3423,6 +3450,7 @@ fn study_setup_initial_state_has_nonzero_lags_from_derived_inflow_history() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup with inflow_history");
 
@@ -3547,7 +3575,7 @@ fn system_with_anticipated_thermals(
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             min_generation_mw: 0.0,
-            max_generation_mw: 100.0,
+            max_generation_mw: 500.0,
             cost_per_mwh: 50.0,
             anticipated_config: Some(AnticipatedConfig::LeadStages(k)),
             entry_stage_id: None,
@@ -3672,8 +3700,8 @@ fn system_with_anticipated_thermals(
         }
     }
 
-    fn default_hydro_penalties() -> HydroStagePenalties {
-        HydroStagePenalties {
+    fn default_hydro_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.01,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -3709,7 +3737,7 @@ fn system_with_anticipated_thermals(
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {
                 min_generation_mw: 0.0,
-                max_generation_mw: 100.0,
+                max_generation_mw: 500.0,
             },
             line_block: LineBlockBounds {
                 direct_mw: 0.0,
@@ -3804,7 +3832,7 @@ fn system_with_two_anticipated_thermals_staggered_dates(
             operational_start_date: later,
             bus_id: EntityId(1),
             min_generation_mw: 0.0,
-            max_generation_mw: 100.0,
+            max_generation_mw: 500.0,
             cost_per_mwh: 50.0,
             anticipated_config: Some(AnticipatedConfig::LeadStages(2)),
             entry_stage_id: None,
@@ -3816,7 +3844,7 @@ fn system_with_two_anticipated_thermals_staggered_dates(
             operational_start_date: earlier,
             bus_id: EntityId(1),
             min_generation_mw: 0.0,
-            max_generation_mw: 100.0,
+            max_generation_mw: 500.0,
             cost_per_mwh: 50.0,
             anticipated_config: Some(AnticipatedConfig::LeadStages(3)),
             entry_stage_id: None,
@@ -3938,8 +3966,8 @@ fn system_with_two_anticipated_thermals_staggered_dates(
         }
     }
 
-    fn default_hydro_penalties() -> HydroStagePenalties {
-        HydroStagePenalties {
+    fn default_hydro_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.01,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -3975,7 +4003,7 @@ fn system_with_two_anticipated_thermals_staggered_dates(
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {
                 min_generation_mw: 0.0,
-                max_generation_mw: 100.0,
+                max_generation_mw: 500.0,
             },
             line_block: LineBlockBounds {
                 direct_mw: 0.0,
@@ -4704,6 +4732,7 @@ fn historical_library_none_for_insample() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -4755,8 +4784,8 @@ fn system_with_historical_inflow(n_stages: usize) -> cobre_core::System {
         }
     }
 
-    fn default_hydro_penalties() -> HydroStagePenalties {
-        HydroStagePenalties {
+    fn default_hydro_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.01,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -4999,6 +5028,7 @@ fn historical_library_built_when_scheme_is_historical() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -5213,7 +5243,7 @@ fn external_inflow_library_built_when_scheme_is_external() {
             n_stages: 2,
         },
         &PenaltiesDefaults {
-            hydro: HydroStagePenalties {
+            hydro: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,
@@ -5273,6 +5303,7 @@ fn external_inflow_library_built_when_scheme_is_external() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -5482,7 +5513,7 @@ fn external_load_library_built_when_scheme_is_external() {
             n_stages: 2,
         },
         &PenaltiesDefaults {
-            hydro: HydroStagePenalties {
+            hydro: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,
@@ -5542,6 +5573,7 @@ fn external_load_library_built_when_scheme_is_external() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -5706,6 +5738,8 @@ fn external_load_library_includes_zero_sigma_bus_when_scheme_is_external() {
             mean_mw: 100.0,
             std_mw: 10.0,
         });
+    }
+    for i in 0i32..2 {
         load_models.push(LoadModel {
             bus_id: EntityId(4),
             stage_id: i,
@@ -5783,7 +5817,7 @@ fn external_load_library_includes_zero_sigma_bus_when_scheme_is_external() {
             n_stages: 2,
         },
         &PenaltiesDefaults {
-            hydro: HydroStagePenalties {
+            hydro: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,
@@ -5843,6 +5877,7 @@ fn external_load_library_includes_zero_sigma_bus_when_scheme_is_external() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup must accept a sigma=0 External-scheme load bus");
 
@@ -6087,7 +6122,7 @@ fn external_ncs_library_built_when_scheme_is_external() {
             n_stages: 2,
         },
         &PenaltiesDefaults {
-            hydro: HydroStagePenalties {
+            hydro: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,
@@ -6149,6 +6184,7 @@ fn external_ncs_library_built_when_scheme_is_external() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -6346,7 +6382,7 @@ fn historical_library_fails_when_no_valid_windows() {
             n_stages: 2,
         },
         &PenaltiesDefaults {
-            hydro: HydroStagePenalties {
+            hydro: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,
@@ -6405,6 +6441,7 @@ fn historical_library_fails_when_no_valid_windows() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     );
 
     assert!(result.is_err(), "expected Err when no historical data");
@@ -6451,6 +6488,7 @@ fn test_simulate_uses_simulation_scheme() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -6506,6 +6544,7 @@ fn test_sim_historical_library_built_when_sim_scheme_is_historical() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -6577,7 +6616,7 @@ fn minimal_system_with_anticipated_and_commitments(
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(1),
         min_generation_mw: 0.0,
-        max_generation_mw: 100.0,
+        max_generation_mw: 500.0,
         cost_per_mwh: 50.0,
         anticipated_config: Some(anticipated_config),
         entry_stage_id: None,
@@ -6708,8 +6747,8 @@ fn minimal_system_with_anticipated_and_commitments(
         }
     }
 
-    fn default_hydro_penalties() -> HydroStagePenalties {
-        HydroStagePenalties {
+    fn default_hydro_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.01,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -6745,7 +6784,7 @@ fn minimal_system_with_anticipated_and_commitments(
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {
                 min_generation_mw: 0.0,
-                max_generation_mw: 100.0,
+                max_generation_mw: 500.0,
             },
             line_block: LineBlockBounds {
                 direct_mw: 0.0,
@@ -6835,6 +6874,7 @@ fn setup_wires_anticipated_metadata_into_indexer() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -6890,6 +6930,7 @@ fn setup_leadstages_resolution_preserves_k_max_and_state_dimension() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -7125,6 +7166,7 @@ fn stage_data_state_matches_indexer_role_a_uniform() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -7165,6 +7207,7 @@ fn resolve_state_layout_widens_dense_stride_and_mask_to_declared_depth() {
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
         BoundaryStateRequirements::present(24),
+        Vec::new(),
     )
     .expect("setup with a boundary depth exceeding the AR order");
 
@@ -7216,6 +7259,7 @@ fn resolve_state_layout_floors_declared_depth_at_ar_order() {
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
         BoundaryStateRequirements::present(1),
+        Vec::new(),
     )
     .expect("setup with a boundary depth below the AR order");
 
@@ -7272,6 +7316,7 @@ fn cobre_io_seed_depth_matches_resolve_state_layout_depth() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -7311,6 +7356,7 @@ fn stage_id_resolver_agrees_with_study_stage_ids() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -7451,9 +7497,10 @@ fn system_with_travel_time_arc(n_stages: usize) -> cobre_core::System {
         })
         .collect();
 
-    let inflow_models: Vec<InflowModel> = (0..n_stages)
-        .flat_map(|i| {
-            [1_i32, 2].map(|hid| InflowModel {
+    let inflow_models: Vec<InflowModel> = [1_i32, 2]
+        .into_iter()
+        .flat_map(|hid| {
+            (0..n_stages).map(move |i| InflowModel {
                 hydro_id: EntityId(hid),
                 stage_id: i as i32,
                 mean_m3s: 80.0,
@@ -7493,8 +7540,8 @@ fn system_with_travel_time_arc(n_stages: usize) -> cobre_core::System {
         }
     }
 
-    fn default_hydro_penalties() -> HydroStagePenalties {
-        HydroStagePenalties {
+    fn default_hydro_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.01,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -7634,6 +7681,7 @@ fn stage_data_geometry_role_b_matches_reference_build() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -7730,6 +7778,7 @@ fn stage_data_state_matches_indexer_role_a_anticipated() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -7769,6 +7818,7 @@ fn cut_row_from_state_matches_reference_loop() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     )
     .expect("setup");
 
@@ -8046,7 +8096,7 @@ fn par2_system_with_state_configs(state_configs: &[StageStateConfig]) -> cobre_c
             n_stages: n_stages.max(1),
         },
         &PenaltiesDefaults {
-            hydro: HydroStagePenalties {
+            hydro: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,
@@ -8107,6 +8157,7 @@ fn setup_from_system(system: &cobre_core::System) -> StudySetup {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(system),
+        Vec::new(),
     )
     .expect("setup")
 }
@@ -8731,6 +8782,7 @@ fn lead_time_fanout_rejected_at_setup() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     );
 
     let err = result.expect_err("a fan-out LeadTime study must be rejected at setup, not panic");
@@ -8898,7 +8950,7 @@ fn system_with_two_thermals_one_fanning() -> cobre_core::System {
             n_stages,
         },
         &PenaltiesDefaults {
-            hydro: HydroStagePenalties {
+            hydro: HydroPenalties {
                 spillage_cost: 0.0,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,
@@ -8972,6 +9024,7 @@ fn lead_time_fanout_rejection_is_declaration_order_invariant() {
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Vec::new(),
     );
 
     let err = result.expect_err(
@@ -9367,7 +9420,7 @@ fn admission_gate_rejects_gap_under_nonuniform_risk_enumerated() {
             lambda: 0.5,
         },
     ];
-    match super::admission_gate(&measures, &rules_with_gap(), true) {
+    match super::admission_gate(&measures, &rules_with_gap(), true, None) {
         Err(SddpError::Validation(msg)) => {
             assert!(msg.contains("gap"), "names the rule: {msg}");
             assert!(msg.contains("CVaR"), "names the measure: {msg}");
@@ -9393,7 +9446,7 @@ fn admission_gate_accepts_gap_under_enumerated_uniform_cvar() {
     };
     let measures = vec![cvar, cvar, cvar];
     assert!(
-        super::admission_gate(&measures, &rules_with_gap(), true).is_ok(),
+        super::admission_gate(&measures, &rules_with_gap(), true, None).is_ok(),
         "a uniform CVaR under enumerated forwards must admit a gap rule"
     );
 }
@@ -9409,7 +9462,7 @@ fn admission_gate_rejects_gap_under_uniform_cvar_sampled() {
         lambda: 0.4,
     };
     let measures = vec![cvar, cvar];
-    match super::admission_gate(&measures, &rules_with_gap(), false) {
+    match super::admission_gate(&measures, &rules_with_gap(), false, None) {
         Err(SddpError::Validation(msg)) => {
             assert!(msg.contains("gap"), "names the rule: {msg}");
             assert!(
@@ -9431,7 +9484,7 @@ fn admission_gate_accepts_gap_under_cvar_lambda_zero() {
         lambda: 0.0,
     }];
     assert!(
-        super::admission_gate(&measures, &rules_with_gap(), true).is_ok(),
+        super::admission_gate(&measures, &rules_with_gap(), true, None).is_ok(),
         "CVaR with lambda == 0 is effectively expectation and must admit a gap rule"
     );
 }
@@ -9441,7 +9494,7 @@ fn admission_gate_accepts_gap_under_cvar_lambda_zero() {
 fn admission_gate_accepts_gap_under_all_expectation() {
     use crate::risk_measure::RiskMeasure;
     let measures = vec![RiskMeasure::Expectation, RiskMeasure::Expectation];
-    assert!(super::admission_gate(&measures, &rules_with_gap(), true).is_ok());
+    assert!(super::admission_gate(&measures, &rules_with_gap(), true, None).is_ok());
 }
 
 /// An effective `CVaR` measure with no `gap` rule present is admitted — the arm
@@ -9453,7 +9506,7 @@ fn admission_gate_accepts_cvar_without_gap() {
         alpha: 0.1,
         lambda: 0.9,
     }];
-    assert!(super::admission_gate(&measures, &rules_without_gap(), true).is_ok());
+    assert!(super::admission_gate(&measures, &rules_without_gap(), true, None).is_ok());
 }
 
 /// The default study shape (expectation everywhere, an iteration-limit rule)
@@ -9462,7 +9515,7 @@ fn admission_gate_accepts_cvar_without_gap() {
 fn admission_gate_accepts_default_shape() {
     use crate::risk_measure::RiskMeasure;
     let measures = vec![RiskMeasure::Expectation; 4];
-    assert!(super::admission_gate(&measures, &rules_without_gap(), true).is_ok());
+    assert!(super::admission_gate(&measures, &rules_without_gap(), true, None).is_ok());
 }
 
 /// A `gap` rule under sampled forward selection (`training_enumerated == false`)
@@ -9472,7 +9525,7 @@ fn admission_gate_accepts_default_shape() {
 fn admission_gate_rejects_gap_under_sampled_selection() {
     use crate::risk_measure::RiskMeasure;
     let measures = vec![RiskMeasure::Expectation, RiskMeasure::Expectation];
-    match super::admission_gate(&measures, &rules_with_gap(), false) {
+    match super::admission_gate(&measures, &rules_with_gap(), false, None) {
         Err(SddpError::Validation(msg)) => {
             assert!(msg.contains("gap"), "names the rule: {msg}");
             assert!(
@@ -9495,7 +9548,7 @@ fn admission_gate_rejects_gap_under_sampled_selection() {
 fn admission_gate_accepts_gap_under_enumerated_expectation() {
     use crate::risk_measure::RiskMeasure;
     let measures = vec![RiskMeasure::Expectation, RiskMeasure::Expectation];
-    assert!(super::admission_gate(&measures, &rules_with_gap(), true).is_ok());
+    assert!(super::admission_gate(&measures, &rules_with_gap(), true, None).is_ok());
 }
 
 /// `enumerated_scenario_count` returns Σ over root→leaf paths of Π |Ω|: for the
@@ -9610,7 +9663,7 @@ fn terminal_fan_tree_node_graph() -> super::NodeGraph {
 }
 
 /// A `K = 3` branching tree is admitted for TRAINING through the shared
-/// guard — unchanged behavior, pinning the R1/R2 refactor byte-neutral.
+/// guard — unchanged behavior, pinning the refactor byte-neutral.
 #[test]
 fn resolve_enumerated_training_count_admits_branching_tree() {
     let ng = terminal_fan_tree_node_graph();
@@ -10303,4 +10356,50 @@ fn test_gapped_windows_contribute_additively() {
             "bucket {idx}: gapped windows must contribute additively, got {got} vs expected {want}"
         );
     }
+}
+
+// ── study_horizon_end ───────────────────────────────────────────────────────
+
+/// Given a system whose stages are `[-2, -1, 0, 1, 2]` (pre-study stages carry
+/// negative ids) with stage `2` ending `2031-12-01`, `study_horizon_end`
+/// returns `Some(2031-12-01)`, ignoring the pre-study stages entirely.
+#[test]
+fn study_horizon_end_ignores_pre_study_stages() {
+    let day = |y: i32, m: u32, d: u32| NaiveDate::from_ymd_opt(y, m, d).unwrap();
+    let stage = |id: i32, start: NaiveDate, end: NaiveDate| Stage {
+        index: 0,
+        id,
+        start_date: start,
+        end_date: end,
+        season_id: None,
+        blocks: vec![Block {
+            index: 0,
+            name: "S".to_string(),
+            duration_hours: 744.0,
+        }],
+        block_mode: BlockMode::Parallel,
+        state_config: StageStateConfig {
+            storage: true,
+            inflow_lags: false,
+        },
+        risk_config: StageRiskConfig::Expectation,
+        scenario_config: ScenarioSourceConfig {
+            branching_factor: 1,
+            noise_method: NoiseMethod::Saa,
+        },
+    };
+    let stages = vec![
+        stage(-2, day(2030, 9, 1), day(2030, 10, 1)),
+        stage(-1, day(2030, 10, 1), day(2030, 11, 1)),
+        stage(0, day(2030, 11, 1), day(2030, 12, 1)),
+        stage(1, day(2030, 12, 1), day(2031, 1, 1)),
+        stage(2, day(2031, 11, 1), day(2031, 12, 1)),
+    ];
+
+    let system = SystemBuilder::new()
+        .stages(stages)
+        .build()
+        .expect("a stages-only system with no cross-referenced entities is valid");
+
+    assert_eq!(study_horizon_end(&system), Some(day(2031, 12, 1)));
 }

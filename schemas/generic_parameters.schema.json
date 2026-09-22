@@ -1,7 +1,7 @@
 {
   "$defs": {
     "ComputedParameter": {
-      "description": "A Cobre-computed quantity indexed by hydro plant.\n\nEach variant names one of the seven scalar quantities that the resolver\nderives from hydro geometry and operational data. All variants carry a\nsingle `hydro_id` field identifying the hydro plant.\n\n# Examples\n\n```\nuse cobre_core::{ComputedParameter, EntityId};\n\nlet param = ComputedParameter::EquivalentProductivity {\n    hydro_id: EntityId(1),\n};\n\n// ComputedParameter is Copy:\nlet copy = param;\nassert_eq!(param, copy);\n```",
+      "description": "A Cobre-computed quantity indexed by hydro plant.\n\nEach variant names a scalar quantity that the resolver derives from hydro\ngeometry and operational data. All variants carry a single `hydro_id` field\nidentifying the hydro plant.\n\n# Examples\n\n```\nuse cobre_core::{ComputedParameter, EntityId};\n\nlet param = ComputedParameter::EquivalentProductivity {\n    hydro_id: EntityId(1),\n};\n\n// ComputedParameter is Copy:\nlet copy = param;\nassert_eq!(param, copy);\n```",
       "oneOf": [
         {
           "description": "Equivalent productivity coefficient (`ρ_eq`).",
@@ -120,6 +120,60 @@
             },
             "tag": {
               "const": "specific_productivity",
+              "type": "string"
+            }
+          },
+          "required": [
+            "tag",
+            "hydro_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Equivalent productivity evaluated as the mean over the plant's storage\nrange rather than at the reference volume (own scope).",
+          "properties": {
+            "hydro_id": {
+              "$ref": "#/$defs/EntityId",
+              "description": "Hydro plant identifier."
+            },
+            "tag": {
+              "const": "integrated_equivalent_productivity",
+              "type": "string"
+            }
+          },
+          "required": [
+            "tag",
+            "hydro_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Accumulated productivity evaluated as the mean over the plant's storage\nrange rather than at the reference volume (cascade scope).",
+          "properties": {
+            "hydro_id": {
+              "$ref": "#/$defs/EntityId",
+              "description": "Hydro plant identifier."
+            },
+            "tag": {
+              "const": "integrated_accumulated_productivity",
+              "type": "string"
+            }
+          },
+          "required": [
+            "tag",
+            "hydro_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Maximum stored energy: `integrated_accumulated_productivity * (V_hi -\nV_lo)` over the hydro plant's physical storage range (stage-invariant).\nUnit is productivity `[MW/(m3/s)]` times volume `[hm3]` — the same unit\nas a productivity-times-storage-volume constraint term, not `MWh`.",
+          "properties": {
+            "hydro_id": {
+              "$ref": "#/$defs/EntityId",
+              "description": "Hydro plant identifier."
+            },
+            "tag": {
+              "const": "max_stored_energy",
               "type": "string"
             }
           },

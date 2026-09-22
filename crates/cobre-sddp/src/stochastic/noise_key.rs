@@ -137,9 +137,15 @@ fn tour_cost(tour: &[usize], distances: &[f64], n_o: usize) -> f64 {
 /// matrix, breaking ties by keeping the lowest already-found candidate index
 /// (`total_cmp`, never `partial_cmp`/`<`, to stay a deterministic function of
 /// `distances` alone).
-fn nearest_neighbor_tour(distances: &[f64], n_o: usize, start: usize) -> Vec<usize> {
-    let mut tour = Vec::with_capacity(n_o);
-    let mut visited = vec![false; n_o];
+fn nearest_neighbor_tour(
+    distances: &[f64],
+    n_o: usize,
+    start: usize,
+    tour: &mut Vec<usize>,
+    visited: &mut [bool],
+) {
+    tour.clear();
+    visited.fill(false);
     tour.push(start);
     visited[start] = true;
 
@@ -165,8 +171,6 @@ fn nearest_neighbor_tour(distances: &[f64], n_o: usize, start: usize) -> Vec<usi
             visited[next] = true;
         }
     }
-
-    tour
 }
 
 /// Improve `tour` in place with full 2-opt (every segment reversal), keeping a
@@ -205,13 +209,15 @@ fn shortest_chain_path(distances: &[f64], n_o: usize) -> Vec<usize> {
     let mut best: Vec<usize> = (0..n_o).collect();
     let mut best_cost = tour_cost(&best, distances, n_o);
 
+    let mut tour = Vec::with_capacity(n_o);
+    let mut visited = vec![false; n_o];
     for start in 0..n_o {
-        let mut tour = nearest_neighbor_tour(distances, n_o, start);
+        nearest_neighbor_tour(distances, n_o, start, &mut tour, &mut visited);
         let mut cost = tour_cost(&tour, distances, n_o);
         two_opt_improve(&mut tour, &mut cost, distances, n_o);
         if cost.total_cmp(&best_cost).is_lt() {
             best_cost = cost;
-            best = tour;
+            best.clone_from(&tour);
         }
     }
 
@@ -229,14 +235,16 @@ fn l2_distance_matrix(
     let mut distances = vec![0.0_f64; n_o * n_o];
     for i in 0..n_o {
         let opening_i = &tree.opening(stage, i)[..n_hydros];
-        for j in 0..n_o {
+        for j in (i + 1)..n_o {
             let opening_j = &tree.opening(stage, j)[..n_hydros];
-            distances[i * n_o + j] = opening_i
+            let d = opening_i
                 .iter()
                 .zip(opening_j)
                 .map(|(a, b)| (a - b) * (a - b))
                 .sum::<f64>()
                 .sqrt();
+            distances[i * n_o + j] = d;
+            distances[j * n_o + i] = d;
         }
     }
     distances
@@ -486,7 +494,7 @@ mod tests {
                 )
             })
             .collect();
-        let inflow_models: Vec<InflowModel> = hydro_order
+        let mut inflow_models: Vec<InflowModel> = hydro_order
             .iter()
             .flat_map(|&hydro_id| {
                 stages.iter().map(move |stage| {
@@ -494,6 +502,7 @@ mod tests {
                 })
             })
             .collect();
+        inflow_models.sort_by_key(|m| (m.hydro_id.0, m.stage_id));
 
         SystemBuilder::new()
             .buses(vec![bus])

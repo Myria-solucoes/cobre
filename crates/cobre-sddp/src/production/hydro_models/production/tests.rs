@@ -174,8 +174,6 @@ fn computed_fpha_config(hydro_id: i32) -> ProductionModelConfig {
 
 // ── resolve_production_models unit tests (in-memory, no disk I/O) ─────────
 
-/// The downstream sentinel behaviour is exercised by
-/// `test_resolve_stage_model_returns_sentinel_when_no_config_entry`.
 #[test]
 fn all_constant_no_config_returns_default_constant_provenance() {
     let hydro0 = make_hydro(0, HydroGenerationModel::ConstantProductivity);
@@ -187,8 +185,6 @@ fn all_constant_no_config_returns_default_constant_provenance() {
     assert_eq!(src1, ProductionModelSource::DefaultConstant);
 }
 
-/// The downstream sentinel behaviour is exercised by
-/// `test_resolve_stage_model_returns_sentinel_when_no_config_entry`.
 #[test]
 fn linearized_head_entity_resolves_to_constant_productivity() {
     let hydro = make_hydro(0, HydroGenerationModel::LinearizedHead);
@@ -221,7 +217,6 @@ fn computed_source_returns_computed_from_geometry() {
     );
 }
 
-/// A hydro with all computed-source prerequisites (tailrace, losses, efficiency).
 fn make_computed_hydro(id: i32) -> Hydro {
     let mut hydro = make_hydro(id, HydroGenerationModel::Fpha);
     hydro.tailrace = Some(TailraceModel::Polynomial {
@@ -1124,8 +1119,6 @@ fn precomputed_config_returns_precomputed_source() {
 
 // ── Computed-source integration tests ─────────────────────────────────────
 
-/// Sobradinho-style hydro with all computed prerequisites — the known-valid fit
-/// fixture (mirrors `fpha_fitting.rs`).
 fn make_sobradinho_computed_hydro(id: i32) -> Hydro {
     let mut hydro = make_hydro(id, HydroGenerationModel::Fpha);
     hydro.name = format!("Sobradinho{id}");
@@ -1140,7 +1133,6 @@ fn make_sobradinho_computed_hydro(id: i32) -> Hydro {
     hydro
 }
 
-/// Four-point VHA geometry rows (Sobradinho-style, mirrors `fpha_fitting.rs`).
 fn make_sobradinho_geometry_rows(hydro_id: i32) -> Vec<HydroGeometryRow> {
     vec![
         HydroGeometryRow {
@@ -1196,9 +1188,6 @@ fn computed_source_end_to_end_produces_valid_fpha_planes() {
     .expect("fit_planes_for_hydro must succeed for valid Sobradinho-style input");
     let planes = &fit_result.planes;
 
-    // The hull-based fitter emits one plane per distinct upper-envelope hull
-    // face, so the count is not fixed; assert only that at least one plane
-    // exists with valid coefficient signs.
     assert!(
         !planes.is_empty(),
         "expected at least one plane, got {}",
@@ -1899,7 +1888,8 @@ fn long_term_mean_inflow_is_per_hydro_canonical_mean() {
 
     // mean(100, 200, 300) = 200. This feeds S_max = 2·mean at the fit site
     // (resolve_s_max's contract, exercised in the fpha_fitting::secant tests).
-    let long_term_mean_inflow_m3s = super::long_term_mean_inflow(&system, EntityId::from(1));
+    let long_term_mean_inflow_m3s =
+        super::long_term_mean_inflow_reference(&system, EntityId::from(1));
     assert_eq!(
         long_term_mean_inflow_m3s, 200.0,
         "long-term mean inflow must be the per-hydro mean of its own series"
@@ -1909,7 +1899,8 @@ fn long_term_mean_inflow_is_per_hydro_canonical_mean() {
 #[test]
 fn long_term_mean_inflow_empty_history_is_zero() {
     let system = SystemBuilder::new().build().expect("empty system is valid");
-    let long_term_mean_inflow_m3s = super::long_term_mean_inflow(&system, EntityId::from(1));
+    let long_term_mean_inflow_m3s =
+        super::long_term_mean_inflow_reference(&system, EntityId::from(1));
     assert_eq!(
         long_term_mean_inflow_m3s, 0.0,
         "no inflow history must yield long-term mean inflow = 0"
@@ -1937,12 +1928,43 @@ fn long_term_mean_inflow_is_order_independent() {
         .build()
         .expect("valid");
 
-    let mlt_asc = super::long_term_mean_inflow(&sys_asc, EntityId::from(1));
-    let mlt_desc = super::long_term_mean_inflow(&sys_desc, EntityId::from(1));
+    let mlt_asc = super::long_term_mean_inflow_reference(&sys_asc, EntityId::from(1));
+    let mlt_desc = super::long_term_mean_inflow_reference(&sys_desc, EntityId::from(1));
     assert_eq!(
         mlt_asc, mlt_desc,
         "long-term mean inflow must be order-independent (declaration-order invariance)"
     );
+}
+
+/// The one-pass batch table's per-hydro mean must be bit-identical to
+/// [`super::long_term_mean_inflow_reference`]'s direct per-hydro filtered scan,
+/// for every hydro, including one with no history at all.
+#[test]
+fn build_long_term_mean_inflow_table_matches_per_hydro_reference() {
+    let rows = vec![
+        inflow_row(1, 1, 100.0),
+        inflow_row(2, 1, 9_999.0),
+        inflow_row(1, 2, 200.0),
+        inflow_row(3, 1, 5.0),
+        inflow_row(1, 3, 300.0),
+        inflow_row(2, 2, 1.0),
+    ];
+    let system = SystemBuilder::new()
+        .inflow_history(rows)
+        .build()
+        .expect("valid system");
+
+    let table = super::build_long_term_mean_inflow_table(&system);
+    for hydro_id in [1, 2, 3, 4] {
+        let hydro_id = EntityId::from(hydro_id);
+        let expected = super::long_term_mean_inflow_reference(&system, hydro_id);
+        let actual = table.get(&hydro_id).copied().unwrap_or(0.0);
+        assert_eq!(
+            actual.to_bits(),
+            expected.to_bits(),
+            "hydro {hydro_id:?}: batch table mean must be bit-identical to the per-hydro scan"
+        );
+    }
 }
 
 // ── resolve_downstream_level tests ───────────────────────────────────────

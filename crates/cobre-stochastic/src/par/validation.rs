@@ -1,8 +1,7 @@
 //! Validation of PAR model parameters.
 //!
-//! Fatal failures return [`StochasticError::InvalidParParameters`]; non-fatal
-//! issues accumulate as [`ParWarning`]s in a [`ParValidationReport`]. See
-//! [`validate_par_parameters`] for the checks performed.
+//! [`validate_par_parameters`] returns [`StochasticError::InvalidParParameters`]
+//! when a model requires nonzero variance to normalize its AR coefficients.
 //!
 //! [`StochasticError::InvalidParParameters`]: crate::StochasticError::InvalidParParameters
 
@@ -11,71 +10,11 @@ use cobre_core::InflowModel;
 use crate::StochasticError;
 
 // ---------------------------------------------------------------------------
-// ParValidationReport
-// ---------------------------------------------------------------------------
-
-/// Result of PAR parameter validation: the accumulated non-fatal warnings.
-///
-/// # Examples
-///
-/// ```
-/// use cobre_core::{EntityId, scenario::InflowModel};
-/// use cobre_stochastic::par::validation::validate_par_parameters;
-///
-/// let model = InflowModel {
-///     hydro_id: EntityId(1),
-///     stage_id: 3,
-///     mean_m3s: 100.0,
-///     std_m3s: 30.0,
-///     ar_coefficients: vec![0.3],
-///     residual_std_ratio: 0.954,
-///     annual: None,
-/// };
-///
-/// let report = validate_par_parameters(&[model]).unwrap();
-/// assert!(report.warnings.is_empty());
-/// ```
-#[derive(Debug)]
-pub struct ParValidationReport {
-    /// Non-fatal warnings (e.g., low residual variance).
-    pub warnings: Vec<ParWarning>,
-}
-
-// ---------------------------------------------------------------------------
-// ParWarning
-// ---------------------------------------------------------------------------
-
-/// A non-fatal PAR validation warning.
-///
-/// Warnings are accumulated in [`ParValidationReport`] and do not abort
-/// validation. The calling algorithm may inspect them to log diagnostics or
-/// apply additional checks.
-#[derive(Debug, Clone)]
-pub enum ParWarning {
-    /// Residual variance very small relative to sample variance, suggesting the
-    /// AR fit may be overfitted (see [`validate_par_parameters`] for the threshold).
-    LowResidualVariance {
-        /// Identifier of the hydro plant with low residual variance.
-        hydro_id: i32,
-        /// Stage index at which the low residual variance was detected.
-        stage_id: i32,
-        /// Explained variance `R² = 1 − residual_std_ratio²`: the AR fit's
-        /// coefficient of determination for this `(hydro, season)`.
-        explained_variance: f64,
-    },
-}
-
-// ---------------------------------------------------------------------------
 // validate_par_parameters
 // ---------------------------------------------------------------------------
 
-/// Validate PAR parameters for consistency and model quality:
-///
-/// 1. **Positive sample std** (fatal): a model with `ar_order() > 0` must have
-///    `std_m3s > 0` — zero std cannot normalize the AR coefficients.
-/// 2. **Low residual variance** (warning): explained variance `R² = 1 −
-///    residual_std_ratio² > 0.99` (the AR fit explains more than 99% of the
-///    seasonal variance) appends a [`ParWarning::LowResidualVariance`].
+/// Validates that every model with `ar_order() > 0` has `std_m3s > 0` — zero
+/// std cannot normalize the AR coefficients.
 ///
 /// # Errors
 ///
@@ -88,7 +27,6 @@ pub enum ParWarning {
 /// use cobre_core::{EntityId, scenario::InflowModel};
 /// use cobre_stochastic::par::validation::validate_par_parameters;
 ///
-/// // Valid AR(1) model: no warnings expected.
 /// let valid = InflowModel {
 ///     hydro_id: EntityId(1),
 ///     stage_id: 0,
@@ -98,8 +36,7 @@ pub enum ParWarning {
 ///     residual_std_ratio: 0.954,
 ///     annual: None,
 /// };
-/// let report = validate_par_parameters(&[valid]).unwrap();
-/// assert!(report.warnings.is_empty());
+/// assert!(validate_par_parameters(&[valid]).is_ok());
 ///
 /// // Invalid: zero std with nonzero AR order.
 /// let bad = InflowModel {
@@ -114,11 +51,7 @@ pub enum ParWarning {
 /// let result = validate_par_parameters(&[bad]);
 /// assert!(result.is_err());
 /// ```
-pub fn validate_par_parameters(
-    inflow_models: &[InflowModel],
-) -> Result<ParValidationReport, StochasticError> {
-    let mut warnings = Vec::new();
-
+pub fn validate_par_parameters(inflow_models: &[InflowModel]) -> Result<(), StochasticError> {
     for model in inflow_models {
         if model.ar_order() > 0 && model.std_m3s == 0.0 {
             return Err(StochasticError::InvalidParParameters {
@@ -131,19 +64,9 @@ pub fn validate_par_parameters(
                 ),
             });
         }
-
-        // explained_variance > 0.99 <=> residual_std_ratio^2 < 0.01: same trigger, inverted scale.
-        let explained_variance = 1.0 - model.residual_std_ratio * model.residual_std_ratio;
-        if explained_variance > 0.99 {
-            warnings.push(ParWarning::LowResidualVariance {
-                hydro_id: model.hydro_id.0,
-                stage_id: model.stage_id,
-                explained_variance,
-            });
-        }
     }
 
-    Ok(ParValidationReport { warnings })
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -152,10 +75,11 @@ pub fn validate_par_parameters(
 
 #[cfg(test)]
 mod tests {
-    use cobre_core::{EntityId, scenario::InflowModel};
+    use cobre_core::InflowModel;
 
-    use super::{ParWarning, validate_par_parameters};
+    use super::validate_par_parameters;
     use crate::StochasticError;
+    use crate::test_support::InflowModelSpec;
 
     fn make_model(
         hydro_id: i32,
@@ -164,15 +88,14 @@ mod tests {
         ar_coefficients: Vec<f64>,
         residual_std_ratio: f64,
     ) -> InflowModel {
-        InflowModel {
-            hydro_id: EntityId(hydro_id),
+        crate::test_support::make_inflow_model(InflowModelSpec {
+            hydro_id,
             stage_id,
-            mean_m3s: 100.0,
             std_m3s,
             ar_coefficients,
             residual_std_ratio,
-            annual: None,
-        }
+            ..Default::default()
+        })
     }
 
     fn make_model_with_annual(
@@ -183,10 +106,9 @@ mod tests {
         residual_std_ratio: f64,
     ) -> InflowModel {
         use cobre_core::scenario::AnnualComponent;
-        InflowModel {
-            hydro_id: EntityId(hydro_id),
+        crate::test_support::make_inflow_model(InflowModelSpec {
+            hydro_id,
             stage_id,
-            mean_m3s: 100.0,
             std_m3s,
             ar_coefficients,
             residual_std_ratio,
@@ -195,20 +117,19 @@ mod tests {
                 mean_m3s: 90.0,
                 std_m3s: 12.0,
             }),
-        }
+            ..Default::default()
+        })
     }
 
     #[test]
-    fn empty_input_returns_empty_report() {
-        let report = validate_par_parameters(&[]).unwrap();
-        assert!(report.warnings.is_empty());
+    fn empty_input_is_valid() {
+        assert!(validate_par_parameters(&[]).is_ok());
     }
 
     #[test]
-    fn ar_order_zero_produces_no_warnings() {
+    fn ar_order_zero_with_positive_std_is_valid() {
         let model = make_model(1, 5, 30.0, vec![], 1.0);
-        let report = validate_par_parameters(&[model]).unwrap();
-        assert!(report.warnings.is_empty());
+        assert!(validate_par_parameters(&[model]).is_ok());
     }
 
     #[test]
@@ -239,75 +160,23 @@ mod tests {
     }
 
     #[test]
-    fn valid_ar1_model_produces_no_warnings() {
+    fn ar_order_positive_with_positive_std_is_valid() {
         let model = make_model(1, 0, 30.0, vec![0.3], 0.954);
-        let report = validate_par_parameters(&[model]).unwrap();
-        assert!(report.warnings.is_empty());
-    }
-
-    #[test]
-    fn low_residual_variance_reports_explained_variance() {
-        let model = make_model(7, 12, 30.0, vec![0.4], 0.05);
-        let report = validate_par_parameters(&[model]).unwrap();
-
-        assert_eq!(report.warnings.len(), 1);
-
-        match &report.warnings[0] {
-            ParWarning::LowResidualVariance {
-                hydro_id,
-                stage_id,
-                explained_variance,
-            } => {
-                assert_eq!(*hydro_id, 7);
-                assert_eq!(*stage_id, 12);
-                assert!(
-                    (explained_variance - (1.0 - 0.05_f64 * 0.05_f64)).abs() < f64::EPSILON,
-                    "explained_variance must be 1 - residual_std_ratio^2"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn explained_variance_at_boundary_no_warning() {
-        let model = make_model(2, 3, 30.0, vec![0.3], 0.1);
-        let report = validate_par_parameters(&[model]).unwrap();
-        assert!(report.warnings.is_empty());
+        assert!(validate_par_parameters(&[model]).is_ok());
     }
 
     #[test]
     fn first_fatal_error_stops_iteration() {
         let bad = make_model(1, 0, 0.0, vec![0.3], 0.954);
-        let warn_model = make_model(2, 1, 30.0, vec![0.3], 0.05);
-        let result = validate_par_parameters(&[bad, warn_model]);
+        let valid_model = make_model(2, 1, 30.0, vec![0.3], 0.954);
+        let result = validate_par_parameters(&[bad, valid_model]);
+
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn multiple_warnings_accumulated() {
-        let m1 = make_model(1, 0, 30.0, vec![0.3], 0.05);
-        let m2 = make_model(2, 1, 25.0, vec![0.4], 0.09);
-        let report = validate_par_parameters(&[m1, m2]).unwrap();
-        assert_eq!(report.warnings.len(), 2);
-    }
-
-    #[test]
-    fn mixed_models_accumulate_only_applicable_warnings() {
-        let clean = make_model(1, 0, 30.0, vec![0.3], 0.954);
-        let warn_model = make_model(2, 1, 30.0, vec![0.4], 0.05);
-        let ar0 = make_model(3, 2, 20.0, vec![], 1.0);
-
-        let report = validate_par_parameters(&[clean, warn_model, ar0]).unwrap();
-
-        assert_eq!(
-            report.warnings.len(),
-            1,
-            "only the low-variance model should warn"
-        );
-        match &report.warnings[0] {
-            ParWarning::LowResidualVariance { hydro_id, .. } => {
-                assert_eq!(*hydro_id, 2);
+        match result.unwrap_err() {
+            StochasticError::InvalidParParameters { hydro_id, .. } => {
+                assert_eq!(hydro_id, 1);
             }
+            other => panic!("expected InvalidParParameters, got {other:?}"),
         }
     }
 
@@ -316,38 +185,9 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn validate_with_annual_some_no_warnings() {
+    fn validate_with_annual_some_is_valid() {
         let model = make_model_with_annual(1, 0, 30.0, vec![0.3], 0.954);
-        let report = validate_par_parameters(&[model]).unwrap();
-        assert!(
-            report.warnings.is_empty(),
-            "annual: Some(_) must not trigger spurious warnings"
-        );
-    }
-
-    #[test]
-    fn validate_with_annual_some_low_residual_warns() {
-        let model = make_model_with_annual(2, 3, 30.0, vec![0.4], 0.05);
-        let report = validate_par_parameters(&[model]).unwrap();
-        assert_eq!(
-            report.warnings.len(),
-            1,
-            "exactly one LowResidualVariance warning expected"
-        );
-        match &report.warnings[0] {
-            ParWarning::LowResidualVariance {
-                hydro_id,
-                stage_id,
-                explained_variance,
-            } => {
-                assert_eq!(*hydro_id, 2);
-                assert_eq!(*stage_id, 3);
-                assert!(
-                    (explained_variance - (1.0 - 0.05_f64 * 0.05_f64)).abs() < f64::EPSILON,
-                    "explained_variance must be 1 - residual_std_ratio^2"
-                );
-            }
-        }
+        assert!(validate_par_parameters(&[model]).is_ok());
     }
 
     #[test]

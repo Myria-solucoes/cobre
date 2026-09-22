@@ -6,11 +6,11 @@ use cobre_core::{
 use crate::hydro_models::{EvaporationModel, ResolvedProductionModel};
 use crate::indexer::{
     AnticipatedLocal, BlockIdx, Boundary, EvapLocal, FillingTargetLocal, FloorLocal, FphaCellLocal,
-    FphaLocal, HydroCell, HydroSys, LineSys, anticipated_resolution_for,
-    is_anticipated_decision_active_for_delivery,
+    FphaLocal, HydroCell, HydroSys, LineSys, is_anticipated_decision_active_for_delivery,
 };
 
 use super::EVAPORATION_FLOW_SAFETY_MARGIN;
+use super::delivery_ring::for_each_ring_residue;
 use super::layout::{StageLayout, TemplateBuildCtx};
 use crate::generic_constraints::contract_family_slot;
 
@@ -215,9 +215,10 @@ impl<'a> GroupBoundLookup<'a> {
     }
 }
 
+/// Methods return the resolved per-block value: the override when the study
+/// supplies one, the declaration otherwise.
 impl GroupBoundLookup<'_> {
-    /// Group `group_pos`'s resolved turbined-flow maximum — the override when
-    /// the study supplies one, `group.max_turbined_m3s` otherwise.
+    /// Group `group_pos`'s resolved turbined-flow maximum.
     fn max_turbined(&self, group_pos: usize, group: &HydroUnitGroup) -> f64 {
         self.table
             .override_at_block(self.hydro_idx, group_pos, self.stage_idx, self.block_idx)
@@ -225,8 +226,7 @@ impl GroupBoundLookup<'_> {
             .unwrap_or(group.max_turbined_m3s)
     }
 
-    /// Group `group_pos`'s resolved generation maximum — the override when the
-    /// study supplies one, `group.max_generation_mw` otherwise.
+    /// Group `group_pos`'s resolved generation maximum.
     fn max_generation(&self, group_pos: usize, group: &HydroUnitGroup) -> f64 {
         self.table
             .override_at_block(self.hydro_idx, group_pos, self.stage_idx, self.block_idx)
@@ -234,8 +234,7 @@ impl GroupBoundLookup<'_> {
             .unwrap_or(group.max_generation_mw)
     }
 
-    /// Group `group_pos`'s resolved turbined-flow minimum — the override when
-    /// the study supplies one, `group.min_turbined_m3s` otherwise.
+    /// Group `group_pos`'s resolved turbined-flow minimum.
     pub(super) fn min_turbined(&self, group_pos: usize, group: &HydroUnitGroup) -> f64 {
         self.table
             .override_at_block(self.hydro_idx, group_pos, self.stage_idx, self.block_idx)
@@ -243,8 +242,7 @@ impl GroupBoundLookup<'_> {
             .unwrap_or(group.min_turbined_m3s)
     }
 
-    /// Group `group_pos`'s resolved generation minimum — the override when the
-    /// study supplies one, `group.min_generation_mw` otherwise.
+    /// Group `group_pos`'s resolved generation minimum.
     pub(super) fn min_generation(&self, group_pos: usize, group: &HydroUnitGroup) -> f64 {
         self.table
             .override_at_block(self.hydro_idx, group_pos, self.stage_idx, self.block_idx)
@@ -569,10 +567,9 @@ pub(super) fn fill_thermal_columns(
 /// declaration, since `post_study_stages.json` is the sole post-horizon bound
 /// surface. Both branches read delivery
 /// hours/discount from the EXTENDED `ctx.delivery_total_hours`/
-/// `ctx.delivery_cumulative_discount_factors` vectors and deposit into ring
-/// slot `ring_index(delivery_stage) mod k_max`, the ring's modular delivery-target
-/// mapping [`crate::indexer::StateSpace::commitment_hold_in_study_offset`]
-/// addresses. A missing post-study cell — a deck error the loader rejects
+/// `ctx.delivery_cumulative_discount_factors` vectors and bound the ring slot
+/// [`for_each_ring_residue`] resolves for the decision's own delivery target
+/// (`ring_index(delivery_stage) mod k_max`). A missing post-study cell — a deck error the loader rejects
 /// upstream, never reported here — degrades to the same dormant `[0, 0]`
 /// treatment an inactive plant gets.
 ///
@@ -603,24 +600,26 @@ pub(super) fn fill_anticipated_columns(
     }
 
     let mut active_count = 0_usize;
-    for local_idx in 0..n_ant {
-        let point =
-            anticipated_resolution_for(layout.state, AnticipatedLocal::new(local_idx), n_stages);
+    for_each_ring_residue(layout.state, n_stages, stage_idx, |res, point| {
         let Some(delivery_stage) = point.genuine_decisions_at(stage_idx).next() else {
-            continue;
+            return;
         };
-        let decision_col = decision_start + local_idx;
+        // The walker visits every window residue for every plant; bound only at
+        // the residue this plant's own genuine decision matures into.
+        if delivery_stage != res.target {
+            return;
+        }
+        let decision_col = decision_start + res.plant;
         debug_assert!(
             delivery_stage > stage_idx,
             "a genuine decision's delivery stage must be strictly after the decision \
              stage (K=0 self-delivery must already be excluded)"
         );
-        let slot = delivery_stage % layout.k_max;
-        let state_out_col = ring.out_col(slot, local_idx);
+        let state_out_col = ring.out_col(res.slot, res.plant);
 
         if is_anticipated_decision_active_for_delivery(
             layout.state,
-            AnticipatedLocal::new(local_idx),
+            AnticipatedLocal::new(res.plant),
             delivery_stage,
             n_delivery,
             &ctx.anticipated_windows,
@@ -631,7 +630,7 @@ pub(super) fn fill_anticipated_columns(
             bufs.col_upper[state_out_col] = f64::INFINITY;
 
             let bound = if delivery_stage < n_stages {
-                let thermal_idx = ctx.anticipated_thermal_indices[local_idx];
+                let thermal_idx = ctx.anticipated_thermal_indices[res.plant];
                 // Safe only because cobre-io's load-time validation rejects a
                 // `block_id` bound row on an anticipated thermal, so the base is the
                 // value at every block — a guarantee this type cannot see.
@@ -647,7 +646,7 @@ pub(super) fn fill_anticipated_columns(
                 Some((cap.min_generation_mw, cap.max_generation_mw, cost))
             } else {
                 ctx.post_study_resolved
-                    .anticipated_bound(AnticipatedLocal::new(local_idx), delivery_stage - n_stages)
+                    .anticipated_bound(AnticipatedLocal::new(res.plant), delivery_stage - n_stages)
                     .map(|(cost, min_mw, max_mw)| (min_mw, max_mw, cost))
             };
 
@@ -663,7 +662,7 @@ pub(super) fn fill_anticipated_columns(
                 bufs.col_upper[decision_col] = 0.0;
             }
         }
-    }
+    });
     debug_assert_eq!(
         active_count, layout.anticipated.n_anticipated_state_out_def_rows,
         "active state_out column count must match def-row count at stage {stage_idx}"
@@ -1114,6 +1113,7 @@ fn fill_ncs_columns(
             .resolved
             .resolved_ncs_bounds
             .available_generation(ncs_sys_idx, stage_idx);
+        let np = ctx.resolved.penalties.ncs_penalties(ncs_sys_idx, stage_idx);
         for blk in 0..layout.n_blks {
             let col = layout.block_grid().flat(
                 layout.equipment.col_ncs_start,
@@ -1133,7 +1133,7 @@ fn fill_ncs_columns(
                 bufs.col_lower[col] = 0.0;
             }
             let block_hours = stage.blocks[blk].duration_hours;
-            bufs.objective[col] = -ncs.curtailment_cost * block_hours;
+            bufs.objective[col] = -np.curtailment_cost * block_hours;
         }
     }
 }
@@ -1315,12 +1315,12 @@ mod interior_storage_bound_tests {
     use cobre_core::entities::hydro::HydroGenerationModel;
     use cobre_core::{
         Block, BlockMode, BoundsCountsSpec, BoundsDefaults, BusStagePenalties, CascadeTopology,
-        ContractBlockBounds, EntityId, Hydro, HydroBlockBounds, HydroStageBounds,
-        HydroStagePenalties, LineBlockBounds, LineStagePenalties, NcsStagePenalties, NoiseMethod,
-        PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
-        ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds,
-        ResolvedNcsFactors, ResolvedPenalties, ScenarioSourceConfig, Stage, StageRiskConfig,
-        StageStateConfig, ThermalBlockBounds, ThermalStageBounds,
+        ContractBlockBounds, EntityId, Hydro, HydroBlockBounds, HydroPenalties, HydroStageBounds,
+        LineBlockBounds, LineStagePenalties, NcsStagePenalties, NoiseMethod, PenaltiesCountsSpec,
+        PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedGenericConstraintBounds,
+        ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties,
+        ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig, ThermalBlockBounds,
+        ThermalStageBounds,
     };
     use cobre_stochastic::par::precompute::PrecomputedPar;
 
@@ -1439,7 +1439,7 @@ mod interior_storage_bound_tests {
                 n_stages: N_STAGES,
             },
             &PenaltiesDefaults {
-                hydro: HydroStagePenalties {
+                hydro: HydroPenalties {
                     spillage_cost: 0.0,
                     diversion_cost: 0.0,
                     turbined_cost: 0.0,
@@ -1833,7 +1833,7 @@ mod diversion_bound_tests {
     use cobre_core::entities::hydro::{DiversionChannel, HydroGenerationModel};
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, CascadeTopology, ContractBlockBounds,
-        EntityId, Hydro, HydroBlockBounds, HydroStageBounds, HydroStagePenalties, LineBlockBounds,
+        EntityId, Hydro, HydroBlockBounds, HydroPenalties, HydroStageBounds, LineBlockBounds,
         LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
         PumpingBlockBounds, ResolvedBounds, ResolvedGenericConstraintBounds, ResolvedLoadFactors,
         ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, ThermalBlockBounds,
@@ -1956,7 +1956,7 @@ mod diversion_bound_tests {
                 n_stages: N_STAGES,
             },
             &PenaltiesDefaults {
-                hydro: HydroStagePenalties {
+                hydro: HydroPenalties {
                     spillage_cost: 0.0,
                     diversion_cost: 0.0,
                     turbined_cost: 0.0,
@@ -2241,8 +2241,8 @@ mod filling_phase_gating_tests {
     use cobre_core::entities::hydro::{FillingConfig, HydroGenerationModel};
     use cobre_core::{
         BlockBoundsCountsSpec, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
-        CascadeTopology, ContractBlockBounds, EntityId, Hydro, HydroBlockBounds, HydroStageBounds,
-        HydroStagePenalties, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
+        CascadeTopology, ContractBlockBounds, EntityId, Hydro, HydroBlockBounds, HydroPenalties,
+        HydroStageBounds, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
         PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBlockBounds,
         ResolvedBounds, ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds,
         ResolvedNcsFactors, ResolvedPenalties, Stage, ThermalBlockBounds, ThermalStageBounds,
@@ -2397,10 +2397,10 @@ mod filling_phase_gating_tests {
         )
     }
 
-    /// All-zero `HydroStagePenalties` — the per-stage resolved analogue of
+    /// All-zero `HydroPenalties` — the per-stage resolved analogue of
     /// `zero_hydro_penalties` (which produces a declaration-time `HydroPenalties`).
-    fn zero_hydro_stage_penalties() -> HydroStagePenalties {
-        HydroStagePenalties {
+    fn zero_hydro_stage_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.0,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -4333,7 +4333,7 @@ mod block_family_slack_tests {
     use cobre_core::entities::hydro::HydroGenerationModel;
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, CascadeTopology, ContractBlockBounds,
-        EntityId, Hydro, HydroBlockBounds, HydroStageBounds, HydroStagePenalties, LineBlockBounds,
+        EntityId, Hydro, HydroBlockBounds, HydroPenalties, HydroStageBounds, LineBlockBounds,
         LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
         PumpingBlockBounds, ResolvedBounds, ResolvedGenericConstraintBounds, ResolvedLoadFactors,
         ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, ThermalBlockBounds,
@@ -4496,8 +4496,8 @@ mod block_family_slack_tests {
         }
     }
 
-    fn zero_hydro_stage_penalties() -> HydroStagePenalties {
-        HydroStagePenalties {
+    fn zero_hydro_stage_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.0,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -4865,12 +4865,12 @@ mod evaporation_slack_objective_tests {
     use cobre_core::entities::hydro::HydroGenerationModel;
     use cobre_core::{
         Block, BlockMode, BoundsCountsSpec, BoundsDefaults, BusStagePenalties, CascadeTopology,
-        ContractBlockBounds, EntityId, Hydro, HydroBlockBounds, HydroStageBounds,
-        HydroStagePenalties, LineBlockBounds, LineStagePenalties, NcsStagePenalties, NoiseMethod,
-        PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
-        ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds,
-        ResolvedNcsFactors, ResolvedPenalties, ScenarioSourceConfig, Stage, StageRiskConfig,
-        StageStateConfig, ThermalBlockBounds, ThermalStageBounds,
+        ContractBlockBounds, EntityId, Hydro, HydroBlockBounds, HydroPenalties, HydroStageBounds,
+        LineBlockBounds, LineStagePenalties, NcsStagePenalties, NoiseMethod, PenaltiesCountsSpec,
+        PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedGenericConstraintBounds,
+        ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties,
+        ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig, ThermalBlockBounds,
+        ThermalStageBounds,
     };
     use cobre_stochastic::par::precompute::PrecomputedPar;
 
@@ -4983,7 +4983,7 @@ mod evaporation_slack_objective_tests {
                 n_stages: N_STAGES,
             },
             &PenaltiesDefaults {
-                hydro: HydroStagePenalties {
+                hydro: HydroPenalties {
                     spillage_cost: 0.0,
                     diversion_cost: 0.0,
                     turbined_cost: 0.0,
@@ -6032,7 +6032,7 @@ mod line_contract_pumping_block_bound_tests {
     use cobre_core::{
         BlockBoundsCountsSpec, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
         CascadeTopology, ContractBlockBounds, ContractBlockOverride, EntityId, HydroBlockBounds,
-        HydroStageBounds, HydroStagePenalties, Line, LineBlockBounds, LineBlockOverride,
+        HydroPenalties, HydroStageBounds, Line, LineBlockBounds, LineBlockOverride,
         LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
         PumpingBlockBounds, PumpingBlockOverride, PumpingStation, ResolvedBlockBounds,
         ResolvedBounds, ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds,
@@ -6159,7 +6159,7 @@ mod line_contract_pumping_block_bound_tests {
                 n_stages: N_STAGES,
             },
             &PenaltiesDefaults {
-                hydro: HydroStagePenalties {
+                hydro: HydroPenalties {
                     spillage_cost: 0.0,
                     diversion_cost: 0.0,
                     turbined_cost: 0.0,
@@ -6764,7 +6764,7 @@ mod hydro_block_bound_tests {
     use cobre_core::{
         BlockBoundsCountsSpec, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
         CascadeTopology, ContractBlockBounds, EntityId, Hydro, HydroBlockBounds,
-        HydroBlockOverride, HydroStageBounds, HydroStagePenalties, HydroUnitGroupBoundsCountsSpec,
+        HydroBlockOverride, HydroPenalties, HydroStageBounds, HydroUnitGroupBoundsCountsSpec,
         HydroUnitGroupOverride, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
         PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBlockBounds,
         ResolvedBounds, ResolvedGenericConstraintBounds, ResolvedHydroUnitGroupBounds,
@@ -6862,8 +6862,8 @@ mod hydro_block_bound_tests {
         outflow_violation_above_cost: f64,
         turbined_violation_below_cost: f64,
         generation_violation_below_cost: f64,
-    ) -> HydroStagePenalties {
-        HydroStagePenalties {
+    ) -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.0,
             diversion_cost,
             turbined_cost,
@@ -7023,7 +7023,7 @@ mod hydro_block_bound_tests {
             *self.bounds.hydro_block_base_mut(h_idx, stage_idx) = hb;
         }
 
-        fn set_hydro_penalties(&mut self, h_idx: usize, stage_idx: usize, hp: HydroStagePenalties) {
+        fn set_hydro_penalties(&mut self, h_idx: usize, stage_idx: usize, hp: HydroPenalties) {
             *self.penalties.hydro_penalties_mut(h_idx, stage_idx) = hp;
         }
 
@@ -7824,7 +7824,7 @@ mod cell_column_bound_tests {
     use cobre_core::{
         BlockBoundsCountsSpec, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
         CascadeTopology, ContractBlockBounds, EntityId, Hydro, HydroBlockBounds,
-        HydroBlockOverride, HydroStageBounds, HydroStagePenalties, HydroUnitGroup,
+        HydroBlockOverride, HydroPenalties, HydroStageBounds, HydroUnitGroup,
         HydroUnitGroupBoundsCountsSpec, HydroUnitGroupOverride, LineBlockBounds,
         LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
         PumpingBlockBounds, ResolvedBlockBounds, ResolvedBounds, ResolvedGenericConstraintBounds,
@@ -7993,8 +7993,8 @@ mod cell_column_bound_tests {
         }
     }
 
-    fn zero_hydro_stage_penalties() -> HydroStagePenalties {
-        HydroStagePenalties {
+    fn zero_hydro_stage_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.0,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -9022,5 +9022,297 @@ mod cell_column_bound_tests {
             "fold-then-sum on resolved values: min(100,50) + min(10,100) = 50 + 10 = 60, \
              not sum-then-fold's min(110,150) = 110"
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::float_cmp,
+    clippy::similar_names
+)]
+mod ncs_objective_tests {
+    use std::collections::{BTreeMap, HashMap};
+
+    use cobre_core::{
+        BusStagePenalties, EntityId, HydroPenalties, LineStagePenalties, NcsStagePenalties,
+        NonControllableSource, PenaltiesCountsSpec, PenaltiesDefaults, ResolvedBounds,
+        ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds,
+        ResolvedNcsFactors, ResolvedPenalties,
+    };
+    use cobre_stochastic::par::precompute::PrecomputedPar;
+
+    use crate::hydro_models::{EvaporationModelSet, ProductionModelSet};
+    use crate::indexer::HydroCellIndex;
+    use crate::lead_time::AnticipatedResolution;
+    use crate::resolved_parameters::ResolvedParameters;
+
+    use super::super::layout::ResolvedTables;
+    use super::super::test_support::{BLOCK_HOURS, N_BLKS, state_layout_for, three_block_stage};
+    use super::{ColumnBufs, StageLayout, TemplateBuildCtx, fill_ncs_columns};
+
+    const N_STAGES: usize = 1;
+    const STAGE_IDX: usize = 0;
+    const N_NCS: usize = 2;
+    const NCS0_ENTITY_COST: f64 = 5.0;
+    const NCS0_OVERRIDE_COST: f64 = 77.0;
+    const NCS1_ENTITY_COST: f64 = 9.0;
+
+    fn make_ncs(id: i32, curtailment_cost: f64) -> NonControllableSource {
+        NonControllableSource {
+            id: EntityId(id),
+            name: format!("W{id}"),
+            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            bus_id: EntityId(1),
+            entry_stage_id: None,
+            exit_stage_id: None,
+            max_generation_mw: 100.0,
+            allow_curtailment: true,
+            curtailment_cost,
+        }
+    }
+
+    fn penalties_with() -> ResolvedPenalties {
+        ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 0,
+                n_buses: 0,
+                n_lines: 0,
+                n_ncs: N_NCS,
+                n_stages: N_STAGES,
+            },
+            &PenaltiesDefaults {
+                hydro: HydroPenalties {
+                    spillage_cost: 0.0,
+                    diversion_cost: 0.0,
+                    turbined_cost: 0.0,
+                    storage_violation_below_cost: 0.0,
+                    filling_target_violation_cost: 0.0,
+                    turbined_violation_below_cost: 0.0,
+                    outflow_violation_below_cost: 0.0,
+                    outflow_violation_above_cost: 0.0,
+                    generation_violation_below_cost: 0.0,
+                    evaporation_violation_cost: 0.0,
+                    water_withdrawal_violation_cost: 0.0,
+                    water_withdrawal_violation_pos_cost: 0.0,
+                    water_withdrawal_violation_neg_cost: 0.0,
+                    evaporation_violation_pos_cost: 0.0,
+                    evaporation_violation_neg_cost: 0.0,
+                    inflow_nonnegativity_cost: 0.0,
+                },
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        )
+    }
+
+    /// Owns the borrow targets for an NCS-only `TemplateBuildCtx`. Seeds the
+    /// resolved penalty cell for each entity from its own `curtailment_cost`,
+    /// mirroring the entity-seeding step `resolve_penalties` performs before
+    /// any override row is applied.
+    struct NcsFixtures {
+        par_lp: PrecomputedPar,
+        hydro_cell_index: HydroCellIndex,
+        cascade: cobre_core::CascadeTopology,
+        bounds: ResolvedBounds,
+        penalties: ResolvedPenalties,
+        production_models: ProductionModelSet,
+        evaporation_models: EvaporationModelSet,
+        resolved_generic_bounds: ResolvedGenericConstraintBounds,
+        resolved_load_factors: ResolvedLoadFactors,
+        resolved_ncs_bounds: ResolvedNcsBounds,
+        resolved_ncs_factors: ResolvedNcsFactors,
+        resolved_parameters: ResolvedParameters,
+        non_controllable_sources: Vec<NonControllableSource>,
+    }
+
+    impl NcsFixtures {
+        fn new() -> Self {
+            let non_controllable_sources =
+                vec![make_ncs(1, NCS0_ENTITY_COST), make_ncs(2, NCS1_ENTITY_COST)];
+            let mut penalties = penalties_with();
+            for (ncs_sys_idx, ncs) in non_controllable_sources.iter().enumerate() {
+                penalties
+                    .ncs_penalties_mut(ncs_sys_idx, STAGE_IDX)
+                    .curtailment_cost = ncs.curtailment_cost;
+            }
+            Self {
+                par_lp: PrecomputedPar::default(),
+                hydro_cell_index: HydroCellIndex::build(&[]),
+                cascade: cobre_core::CascadeTopology::build(&[]),
+                bounds: ResolvedBounds::empty(),
+                penalties,
+                production_models: ProductionModelSet::new(vec![], 0, 1),
+                evaporation_models: EvaporationModelSet::new(vec![]),
+                resolved_generic_bounds: ResolvedGenericConstraintBounds::empty(),
+                resolved_load_factors: ResolvedLoadFactors::empty(),
+                resolved_ncs_bounds: ResolvedNcsBounds::new(N_NCS, N_STAGES, &[100.0, 100.0]),
+                resolved_ncs_factors: ResolvedNcsFactors::new(N_NCS, N_STAGES, N_BLKS),
+                resolved_parameters: ResolvedParameters {
+                    per_param: vec![],
+                    id_to_slot: vec![],
+                    cost_scale_factor: 1_000_000.0,
+                },
+                non_controllable_sources,
+            }
+        }
+
+        fn set_ncs_override(&mut self, ncs_sys_idx: usize, curtailment_cost: f64) {
+            *self.penalties.ncs_penalties_mut(ncs_sys_idx, STAGE_IDX) =
+                NcsStagePenalties { curtailment_cost };
+        }
+
+        fn make_ctx(&self) -> TemplateBuildCtx<'_> {
+            TemplateBuildCtx {
+                hydros: &[],
+                thermals: &[],
+                lines: &[],
+                buses: &[],
+                load_models: &[],
+                cascade: &self.cascade,
+                hydro_cell_index: &self.hydro_cell_index,
+                resolved: ResolvedTables {
+                    bounds: &self.bounds,
+                    penalties: &self.penalties,
+                    resolved_generic_bounds: &self.resolved_generic_bounds,
+                    resolved_load_factors: &self.resolved_load_factors,
+                    resolved_ncs_bounds: &self.resolved_ncs_bounds,
+                    resolved_ncs_factors: &self.resolved_ncs_factors,
+                    resolved_parameters: &self.resolved_parameters,
+                },
+                hydro_pos: BTreeMap::new(),
+                thermal_pos: BTreeMap::new(),
+                line_pos: BTreeMap::new(),
+                bus_pos: BTreeMap::new(),
+                par_lp: &self.par_lp,
+                production_models: &self.production_models,
+                evaporation_models: &self.evaporation_models,
+                generic_constraints: &[],
+                non_controllable_sources: &self.non_controllable_sources,
+                pumping_stations: &[],
+                pumping_pos: BTreeMap::new(),
+                n_pumping: 0,
+                contracts: &[],
+                contract_pos: BTreeMap::new(),
+                n_contract_import: 0,
+                n_contract_export: 0,
+                diversion_upstream: HashMap::new(),
+                arc_stage_weights: HashMap::new(),
+                arc_spread_chrono: HashMap::new(),
+                arc_arrival_density: HashMap::new(),
+                per_stage_mask: Vec::new(),
+                post_study_resolved: crate::setup::PostStudyResolved::default(),
+                n_hydros: 0,
+                n_thermals: 0,
+                n_lines: 0,
+                n_buses: 0,
+                max_par_order: 0,
+                n_anticipated: 0,
+                k_max: 0,
+                anticipated_lead_stages: vec![],
+                anticipated_thermal_indices: vec![],
+                anticipated_windows: vec![],
+                anticipated_resolution: AnticipatedResolution::default(),
+                study_stage_ids: (0..N_STAGES as i32).collect(),
+                delivery_stage_ids: (0..N_STAGES as i32).collect(),
+                has_penalty: false,
+                delivery_cumulative_discount_factors: vec![1.0; N_STAGES],
+                delivery_total_hours: vec![BLOCK_HOURS.iter().sum(); N_STAGES],
+                filling_v_target: BTreeMap::new(),
+            }
+        }
+    }
+
+    /// The `col_ncs_start` offset `run_fill` resolves while the `StageLayout` is
+    /// alive, plus `n_blks` — enough to reconstruct every block-major NCS
+    /// address (`col_ncs_start + ncs_sys_idx * n_blks + blk`, the same formula
+    /// [`BlockGrid::flat`](crate::indexer::BlockGrid::flat) applies) after the
+    /// layout itself is dropped.
+    struct FillOffsets {
+        col_ncs_start: usize,
+        n_blks: usize,
+    }
+
+    impl FillOffsets {
+        fn at(&self, ncs_sys_idx: usize, blk: usize) -> usize {
+            self.col_ncs_start + ncs_sys_idx * self.n_blks + blk
+        }
+    }
+
+    struct FillResult {
+        objective: Vec<f64>,
+        offsets: FillOffsets,
+    }
+
+    /// Run the NCS column fill against `fixtures` at `stage_idx`, over a
+    /// three-block stage.
+    fn run_fill(fixtures: &NcsFixtures, stage_idx: usize) -> FillResult {
+        let stage = three_block_stage(stage_idx);
+        let ctx = fixtures.make_ctx();
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, stage_idx);
+
+        let mut col_lower = vec![0.0_f64; layout.num_cols];
+        let mut col_upper = vec![f64::INFINITY; layout.num_cols];
+        let mut objective = vec![0.0_f64; layout.num_cols];
+        let mut bufs = ColumnBufs {
+            col_lower: &mut col_lower,
+            col_upper: &mut col_upper,
+            objective: &mut objective,
+        };
+        fill_ncs_columns(&ctx, &stage, stage_idx, &layout, &mut bufs);
+
+        let offsets = FillOffsets {
+            col_ncs_start: layout.equipment.col_ncs_start,
+            n_blks: layout.n_blks,
+        };
+
+        FillResult { objective, offsets }
+    }
+
+    /// Two NCS entities allowing curtailment: entity 0's resolved cell is
+    /// overridden to `NCS0_OVERRIDE_COST` while its entity constant stays
+    /// `NCS0_ENTITY_COST`. Every one of entity 0's three block columns must
+    /// price the objective from the override, not the entity constant.
+    #[test]
+    fn ncs_objective_reads_the_per_stage_override() {
+        let mut fixtures = NcsFixtures::new();
+        fixtures.set_ncs_override(0, NCS0_OVERRIDE_COST);
+
+        let result = run_fill(&fixtures, STAGE_IDX);
+        let off = &result.offsets;
+
+        for (blk, &hours) in BLOCK_HOURS.iter().enumerate() {
+            assert_eq!(
+                result.objective[off.at(0, blk)].to_bits(),
+                (-NCS0_OVERRIDE_COST * hours).to_bits(),
+                "ncs 0 objective must read the per-stage override, blk {blk}"
+            );
+        }
+    }
+
+    /// The same fixture as above: entity 1's resolved cell is left untouched
+    /// at the seeded default, which equals its own entity `curtailment_cost`
+    /// (`NCS1_ENTITY_COST`). Every one of entity 1's three block columns must
+    /// still price the objective from that entity constant.
+    #[test]
+    fn ncs_objective_falls_back_to_the_seeded_default() {
+        let mut fixtures = NcsFixtures::new();
+        fixtures.set_ncs_override(0, NCS0_OVERRIDE_COST);
+
+        let result = run_fill(&fixtures, STAGE_IDX);
+        let off = &result.offsets;
+
+        for (blk, &hours) in BLOCK_HOURS.iter().enumerate() {
+            assert_eq!(
+                result.objective[off.at(1, blk)].to_bits(),
+                (-NCS1_ENTITY_COST * hours).to_bits(),
+                "ncs 1 objective must fall back to the seeded entity default, blk {blk}"
+            );
+        }
     }
 }

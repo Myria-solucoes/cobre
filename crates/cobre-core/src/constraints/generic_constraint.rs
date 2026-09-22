@@ -10,7 +10,7 @@
 //!
 //! # Variable Reference Catalog
 //!
-//! [`VariableRef`] covers all 24 LP variable types defined in the spec (§15).
+//! [`VariableRef`] covers every LP variable type defined in the spec (§15).
 //! Each variant carries the entity ID and, for block-capable variables, an
 //! optional block ID. `Some(i)` references block `i`. `None` is not
 //! block-specific and resolves by the variable's nature: per-block flows (e.g.
@@ -293,6 +293,26 @@ pub enum VariableRef {
         /// Block selector; `None` = stage-final `Sᴷ`.
         block_id: Option<usize>,
     },
+    /// Start-of-block useful-volume boundary for a hydro reservoir (hm³):
+    /// `storage_initial - V_lo`, the `-V_lo` shift applied at bound-fold time.
+    ///
+    /// Appended at the END of the enum to keep its postcard discriminant stable.
+    HydroUsefulVolumeInitial {
+        /// Hydro plant identifier.
+        hydro_id: EntityId,
+        /// Block selector; `None` = stage-initial `S⁰`.
+        block_id: Option<usize>,
+    },
+    /// End-of-block useful-volume boundary for a hydro reservoir (hm³):
+    /// `storage_final - V_lo`, the `-V_lo` shift applied at bound-fold time.
+    ///
+    /// Appended at the END of the enum to keep its postcard discriminant stable.
+    HydroUsefulVolumeFinal {
+        /// Hydro plant identifier.
+        hydro_id: EntityId,
+        /// Block selector; `None` = stage-final `Sᴷ`.
+        block_id: Option<usize>,
+    },
 }
 
 /// One term in a linear constraint expression: `coefficient * scale * variable`.
@@ -447,6 +467,12 @@ fn canonical_variable_key(v: &VariableRef) -> (u8, i32, i64, i64) {
         }
         VariableRef::HydroStorageFinal { hydro_id, block_id } => {
             (23, hydro_id.0, block_sentinel(block_id), -1)
+        }
+        VariableRef::HydroUsefulVolumeInitial { hydro_id, block_id } => {
+            (24, hydro_id.0, block_sentinel(block_id), -1)
+        }
+        VariableRef::HydroUsefulVolumeFinal { hydro_id, block_id } => {
+            (25, hydro_id.0, block_sentinel(block_id), -1)
         }
     }
 }
@@ -729,12 +755,26 @@ mod tests {
                     block_id: None,
                 },
             ),
+            (
+                "HydroUsefulVolumeInitial",
+                VariableRef::HydroUsefulVolumeInitial {
+                    hydro_id: EntityId(0),
+                    block_id: None,
+                },
+            ),
+            (
+                "HydroUsefulVolumeFinal",
+                VariableRef::HydroUsefulVolumeFinal {
+                    hydro_id: EntityId(0),
+                    block_id: None,
+                },
+            ),
         ];
 
         assert_eq!(
             variants.len(),
-            24,
-            "VariableRef must have exactly 24 variants"
+            26,
+            "VariableRef must have exactly 26 variants"
         );
 
         for (name, variant) in variants {
@@ -750,9 +790,10 @@ mod tests {
     /// the variant index as a varint; for discriminants `< 0x80` the first byte
     /// equals the discriminant. `AnticipatedDecision` (index 20 = `0x14`),
     /// `HydroInflow` (index 21 = `0x15`), `HydroStorageInitial` (index 22 =
-    /// `0x16`), and `HydroStorageFinal` (index 23 = `0x17`) must keep their
-    /// indices — a mid-enum insertion would shift them and silently break
-    /// previously serialized policies.
+    /// `0x16`), `HydroStorageFinal` (index 23 = `0x17`), `HydroUsefulVolumeInitial`
+    /// (index 24 = `0x18`), and `HydroUsefulVolumeFinal` (index 25 = `0x19`) must
+    /// keep their indices — a mid-enum insertion would shift them and silently
+    /// break previously serialized policies.
     #[cfg(feature = "serde")]
     #[test]
     fn test_variable_ref_postcard_discriminant_pin() {
@@ -794,6 +835,72 @@ mod tests {
             storage_final[0], 0x17,
             "HydroStorageFinal must serialize to postcard discriminant 0x17"
         );
+
+        let useful_volume_initial = postcard::to_allocvec(&VariableRef::HydroUsefulVolumeInitial {
+            hydro_id: EntityId(0),
+            block_id: None,
+        })
+        .expect("HydroUsefulVolumeInitial serializes");
+        assert_eq!(
+            useful_volume_initial[0], 0x18,
+            "HydroUsefulVolumeInitial must serialize to postcard discriminant 0x18"
+        );
+
+        let useful_volume_final = postcard::to_allocvec(&VariableRef::HydroUsefulVolumeFinal {
+            hydro_id: EntityId(0),
+            block_id: None,
+        })
+        .expect("HydroUsefulVolumeFinal serializes");
+        assert_eq!(
+            useful_volume_final[0], 0x19,
+            "HydroUsefulVolumeFinal must serialize to postcard discriminant 0x19"
+        );
+    }
+
+    /// Full postcard round-trip for `HydroUsefulVolumeInitial` across both
+    /// block selectors; `test_variable_ref_postcard_discriminant_pin` owns the
+    /// discriminant byte.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn hydro_useful_volume_initial_postcard_roundtrip() {
+        let stage_initial = VariableRef::HydroUsefulVolumeInitial {
+            hydro_id: EntityId(7),
+            block_id: None,
+        };
+        let bytes = postcard::to_allocvec(&stage_initial).expect("serialize");
+        let recovered: VariableRef = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(stage_initial, recovered);
+
+        let block = VariableRef::HydroUsefulVolumeInitial {
+            hydro_id: EntityId(7),
+            block_id: Some(2),
+        };
+        let bytes = postcard::to_allocvec(&block).expect("serialize");
+        let recovered: VariableRef = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(block, recovered);
+    }
+
+    /// Full postcard round-trip for `HydroUsefulVolumeFinal` across both
+    /// block selectors; `test_variable_ref_postcard_discriminant_pin` owns the
+    /// discriminant byte.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn hydro_useful_volume_final_postcard_roundtrip() {
+        let stage_final = VariableRef::HydroUsefulVolumeFinal {
+            hydro_id: EntityId(7),
+            block_id: None,
+        };
+        let bytes = postcard::to_allocvec(&stage_final).expect("serialize");
+        let recovered: VariableRef = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(stage_final, recovered);
+
+        let block = VariableRef::HydroUsefulVolumeFinal {
+            hydro_id: EntityId(7),
+            block_id: Some(2),
+        };
+        let bytes = postcard::to_allocvec(&block).expect("serialize");
+        let recovered: VariableRef = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(block, recovered);
     }
 
     #[test]
@@ -967,6 +1074,18 @@ mod tests {
                 thermal_id: EntityId(0),
             },
             VariableRef::HydroStorageFinal {
+                hydro_id: EntityId(0),
+                block_id: None,
+            },
+            VariableRef::HydroStorageInitial {
+                hydro_id: EntityId(0),
+                block_id: None,
+            },
+            VariableRef::HydroUsefulVolumeInitial {
+                hydro_id: EntityId(0),
+                block_id: None,
+            },
+            VariableRef::HydroUsefulVolumeFinal {
                 hydro_id: EntityId(0),
                 block_id: None,
             },

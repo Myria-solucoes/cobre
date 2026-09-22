@@ -1,20 +1,20 @@
 //! JSON Schema export helper for the `cobre.schema` sub-module.
 //!
-//! [`export`] wraps the same [`cobre_io::schema::generate_schemas`] generator as
-//! the `cobre schema export` CLI, but returns the count of files written rather
-//! than printing a confirmation line.
+//! [`export`] delegates to the same `cobre-io` writer as the `cobre schema
+//! export` CLI, but returns the count of files written rather than printing a
+//! confirmation line.
 
 use std::path::PathBuf;
 
-use cobre_io::schema::generate_schemas;
+use cobre_io::schema::SchemaExportError;
 use pyo3::exceptions::{PyOSError, PyValueError};
 use pyo3::prelude::*;
 
 /// Generate JSON Schema files for all case-directory input types and write them
 /// to `output_dir` (a `str` or `pathlib.Path`), creating it if needed.
 ///
-/// Existing schema files are overwritten without prompting — schemas are
-/// generated, not hand-edited. Returns the number of files written.
+/// Existing schema files are overwritten without prompting. Returns the number
+/// of files written.
 ///
 /// # Raises
 ///
@@ -33,28 +33,17 @@ use pyo3::prelude::*;
 #[pyfunction]
 #[pyo3(signature = (output_dir=PathBuf::from(".")))]
 pub fn export(output_dir: PathBuf) -> PyResult<usize> {
-    std::fs::create_dir_all(&output_dir).map_err(|e| {
-        PyOSError::new_err(format!(
-            "creating output directory '{}': {e}",
-            output_dir.display()
-        ))
-    })?;
-
-    let schemas = generate_schemas()
-        .map_err(|e| PyValueError::new_err(format!("schema generation failed: {e}")))?;
-
-    let count = schemas.len();
-
-    for (filename, value) in schemas {
-        let dest = output_dir.join(&filename);
-        let content = serde_json::to_string_pretty(&value).map_err(|e| {
-            PyValueError::new_err(format!("failed to serialize schema '{filename}': {e}"))
-        })?;
-        std::fs::write(&dest, content)
-            .map_err(|e| PyOSError::new_err(format!("{}: {e}", dest.display())))?;
-    }
-
-    Ok(count)
+    cobre_io::schema::export_schemas(&output_dir).map_err(|err| match err {
+        SchemaExportError::Generation(e) => {
+            PyValueError::new_err(format!("schema generation failed: {e}"))
+        }
+        SchemaExportError::Serialization { filename, source } => PyValueError::new_err(format!(
+            "serialization error for schema {filename}: {source}"
+        )),
+        SchemaExportError::Io { path, source } => {
+            PyOSError::new_err(format!("{}: {source}", path.display()))
+        }
+    })
 }
 
 #[cfg(test)]

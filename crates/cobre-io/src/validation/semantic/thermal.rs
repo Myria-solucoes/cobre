@@ -11,14 +11,17 @@ use cobre_core::temporal::{
     Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig,
 };
 use cobre_core::{
-    AnticipatedCommitmentHistory, AnticipatedConfig, EntityId, PostStudyStages, Thermal,
-    VariableRef,
+    AnticipatedCommitmentHistory, AnticipatedConfig, EntityId, PostStudyStages, ResolvedBounds,
+    Thermal, VariableRef,
 };
 use cobre_stochastic::season_cast::{DatedWindow, StageCalendar};
 
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 use super::envelope_tolerance;
+use crate::StageIdResolver;
+use crate::resolution::{BoundsEntitySlices, BoundsOverrides, resolve_bounds};
 
+/// Rule 13: `min_generation_mw <= max_generation_mw` for a thermal.
 pub(super) fn check_thermal_generation_bounds(data: &ParsedData, ctx: &mut ValidationContext) {
     for thermal in &data.thermals {
         if thermal.min_generation_mw > thermal.max_generation_mw {
@@ -36,7 +39,7 @@ pub(super) fn check_thermal_generation_bounds(data: &ParsedData, ctx: &mut Valid
     }
 }
 
-/// Checks cross-field invariants for anticipated thermal plants.
+/// Rules 14-15: cross-field invariants for anticipated thermal plants.
 ///
 /// 1. **Per-plant lead horizon** — `LeadStages` rejects `K == 0` (defence in
 ///    depth; parse-time also rejects it). Both `LeadStages`'s `K > n_stages`
@@ -90,13 +93,13 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
     let extended_axis = build_extended_delivery_axis(data);
 
     for thermal in &data.thermals {
-        let Some(ref cfg) = thermal.anticipated_config else {
+        let Some(cfg) = thermal.anticipated_config else {
             continue;
         };
         let thermal_id = thermal.id.0;
 
         let classes = classify_deliveries(
-            *cfg,
+            cfg,
             extended_axis.as_ref(),
             &study_durations,
             n_stages,
@@ -111,7 +114,7 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
         let reaches_post_study =
             !classes.carried.is_empty() || !classes.fixed_post_study.is_empty();
 
-        if let AnticipatedConfig::LeadTime(delta_hours) = *cfg {
+        if let AnticipatedConfig::LeadTime(delta_hours) = cfg {
             let total_horizon_hours: f64 = study_durations.iter().sum();
             if delta_hours > total_horizon_hours && !reaches_post_study {
                 let entity_str = format!("thermals[id={thermal_id}].anticipated_config.lead_time");
@@ -167,15 +170,17 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
     // there are none to validate.
     let calendar = (!windows_by_id.is_empty()).then(|| StageCalendar::new(study_stages));
 
-    let anticipated_thermal_ids: HashSet<EntityId> = data
-        .thermals
-        .iter()
-        .filter(|t| t.anticipated_config.is_some())
-        .map(|t| t.id)
-        .collect();
+    // Thermal-only resolved bounds table, built once under the same guard as
+    // `calendar` so `check_committed_value_bounds` reads each covered
+    // delivery stage's box from the same source `fill_anticipated_columns`
+    // reads (`ResolvedBounds::thermal_block_base`), never a re-derived copy.
+    let bounds = (!windows_by_id.is_empty())
+        .then(|| build_thermal_delivery_bounds(data, study_stages, n_stages, &study_stage_ids));
 
-    for thermal in &data.thermals {
-        let Some(ref cfg) = thermal.anticipated_config else {
+    let anticipated_thermal_ids: HashSet<EntityId> = collect_anticipated_thermal_ids(data);
+
+    for (thermal_pos, thermal) in data.thermals.iter().enumerate() {
+        let Some(cfg) = thermal.anticipated_config else {
             continue;
         };
         let thermal_id = thermal.id;
@@ -202,7 +207,10 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
                 let Some(calendar) = calendar.as_ref() else {
                     continue;
                 };
-                let k_i = lead_delivery_stage_count(*cfg, &study_durations, n_stages);
+                let Some(bounds) = bounds.as_ref() else {
+                    continue;
+                };
+                let k_i = lead_delivery_stage_count(cfg, &study_durations, n_stages);
                 if check_commitment_coverage(
                     thermal_id,
                     records,
@@ -211,7 +219,13 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
                     &study_stage_ids,
                     ctx,
                 ) {
-                    check_committed_value_bounds(thermal, thermal_id, records, ctx);
+                    let delivery_box = DeliveryBoxContext {
+                        bounds,
+                        thermal_pos,
+                        calendar,
+                        study_stage_ids: &study_stage_ids,
+                    };
+                    check_committed_value_bounds(thermal, thermal_id, records, &delivery_box, ctx);
                     check_seed_within_window(
                         thermal,
                         thermal_id,
@@ -247,7 +261,48 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
     }
 }
 
-/// Advisory (`ModelQuality`): a `lead_stages`-configured thermal whose active
+/// The thermal-only resolved bounds table `check_committed_value_bounds` reads
+/// each covered delivery stage's box from, via `stage_resolver.index_map()`
+/// (`n_stages`, `k_max`, and `blocks_per_stage` mirror `pipeline.rs`'s own
+/// `resolve_bounds` call).
+fn build_thermal_delivery_bounds(
+    data: &ParsedData,
+    study_stages: &[Stage],
+    n_stages: usize,
+    study_stage_ids: &[i32],
+) -> ResolvedBounds {
+    let stage_resolver = StageIdResolver::from_study_stage_ids(study_stage_ids);
+    let k_max: usize = data
+        .thermals
+        .iter()
+        .filter_map(|t| t.anticipated_config.as_ref())
+        .map(|c| usize::try_from(c.lead_stages().unwrap_or(0)).unwrap_or(usize::MAX))
+        .max()
+        .unwrap_or(0);
+    let blocks_per_stage: Vec<usize> = study_stages.iter().map(|s| s.blocks.len()).collect();
+    resolve_bounds(
+        &BoundsEntitySlices {
+            hydros: &[],
+            thermals: &data.thermals,
+            lines: &[],
+            pumping_stations: &[],
+            contracts: &[],
+        },
+        n_stages,
+        k_max,
+        stage_resolver.index_map(),
+        &BoundsOverrides {
+            hydro: &[],
+            thermal: &data.thermal_bounds,
+            line: &[],
+            pumping: &[],
+            contract: &[],
+        },
+        &blocks_per_stage,
+    )
+}
+
+/// Rule 28. Advisory (`ModelQuality`): a `lead_stages`-configured thermal whose active
 /// window — decision stage `t` through delivery `t + lead_stages`, `t` ranging
 /// over the plant's commissioning window and the delivery side clamped to the
 /// study horizon — spans a pair of adjacent study stages with differing
@@ -327,6 +382,18 @@ fn group_commitments_by_thermal(
             .push(history);
     }
     windows_by_id
+}
+
+/// The set of thermal ids with `anticipated_config: Some(_)`. Shared by
+/// [`check_anticipated_thermals`], [`check_anticipated_decision_target_is_anticipated`],
+/// and [`warn_thermal_generation_on_anticipated_thermal`] so the three never
+/// drift on which thermals count as anticipated.
+fn collect_anticipated_thermal_ids(data: &ParsedData) -> HashSet<EntityId> {
+    data.thermals
+        .iter()
+        .filter(|t| t.anticipated_config.is_some())
+        .map(|t| t.id)
+        .collect()
 }
 
 /// Study-stage (`id >= 0`) durations in canonical (ascending `id`) order, each
@@ -706,47 +773,126 @@ fn check_commitment_coverage(
     valid
 }
 
-/// Every window's `value_mw` must lie within
-/// `[min_generation_mw, max_generation_mw]`, within a relative-with-floor
-/// tolerance at each boundary (a value set exactly at a bound may drift a hair
-/// outside it in whatever pipeline generated it). For a window delivering
-/// in-study, an out-of-tolerance value makes the LP infeasible at every
-/// covered stage's fishing equality; for a window delivering post-horizon,
-/// there is no LP to reject it — the value instead reaches the
+/// Read-only inputs shared by every record of one thermal's
+/// [`check_committed_value_bounds`] call: the thermal-only resolved bounds
+/// table, this thermal's position into it, and the calendar/stage-id axis
+/// used to resolve each window's covered study stages.
+struct DeliveryBoxContext<'a, 'b> {
+    bounds: &'a ResolvedBounds,
+    thermal_pos: usize,
+    calendar: &'a StageCalendar<'b>,
+    study_stage_ids: &'a [i32],
+}
+
+/// A window's `value_mw` must be deliverable at every study stage it covers,
+/// within a relative-with-floor tolerance at each boundary (a value set
+/// exactly at a bound may drift a hair outside it in whatever pipeline
+/// generated it). For a window with nonzero in-study coverage, each covered,
+/// commissioning-active study stage is checked against that stage's resolved
+/// generation box (`ResolvedBounds::thermal_block_base`) — the same source
+/// `fill_anticipated_columns` reads for the decision column, so a value
+/// accepted here is a value the runtime admissible box will not have to
+/// clamp as a genuine defect; a commissioning-dormant covered stage is
+/// skipped here, since a nonzero value maturing there is
+/// `check_seed_within_window`'s report, never double-reported. A window with
+/// zero in-study coverage is purely post-horizon (a straddling window is
+/// already rejected upstream by `check_no_straddling_commitment_window`);
+/// there is no resolved box to check it against, so it keeps the static
+/// `[min_generation_mw, max_generation_mw]` comparison — post-horizon there
+/// is no LP to reject an out-of-tolerance value, so it instead reaches the
 /// terminal-boundary valuation and the reported outputs as generation the
 /// plant cannot produce. `records` carries every window of the plant,
-/// in-study and post-horizon alike, and this check never filters by which —
-/// gated on the study-side coverage rule (`check_commitment_coverage`)
-/// passing, never on the post-study coverage rules. `value_mw` finiteness is
-/// the parse layer's contract (`initial_conditions.rs`'s call into
+/// in-study and post-horizon alike; this check is gated on the study-side
+/// coverage rule (`check_commitment_coverage`) passing, never on the
+/// post-study coverage rules. `value_mw` finiteness is the parse layer's
+/// contract (`initial_conditions.rs`'s call into
 /// `crate::windowed_history::validate_windowed_records`), not re-checked
 /// here.
+#[allow(clippy::float_cmp)] // day-aligned coverage is exactly 0 or nonzero per stage; the in-study/post-horizon split is a bit-exact test
 fn check_committed_value_bounds(
     thermal: &Thermal,
     thermal_id: EntityId,
     records: &[&AnticipatedCommitmentHistory],
+    delivery_box: &DeliveryBoxContext<'_, '_>,
     ctx: &mut ValidationContext,
 ) {
     let min_mw = thermal.min_generation_mw;
     let max_mw = thermal.max_generation_mw;
     let min_tolerance = envelope_tolerance(min_mw);
     let max_tolerance = envelope_tolerance(max_mw);
+    let entry = thermal.entry_stage_id;
+    let exit = thermal.exit_stage_id;
     let entity_str = format!("thermals[id={}].anticipated_config", thermal_id.0);
+
     for record in records {
         let v = record.value_mw;
-        if v < min_mw - min_tolerance || v > max_mw + max_tolerance {
-            ctx.add_error(
-                ErrorKind::BusinessRuleViolation,
-                "initial_conditions.json",
-                Some(&entity_str),
-                format!(
-                    "Thermal {}: past_anticipated_commitments window [{}, {}) value_mw = {v} \
-                     is outside the plant's generation bounds [{min_mw}, {max_mw}]; \
-                     the LP delivery equality on the covered stage(s) cannot be \
-                     satisfied and the LP will be infeasible",
-                    thermal_id.0, record.start_date, record.end_date
-                ),
-            );
+        let window = DatedWindow {
+            start_date: record.start_date,
+            end_date: record.end_date,
+        };
+        let coverage = delivery_box.calendar.coverage(&window);
+
+        if coverage.iter().all(|&fraction| fraction == 0.0) {
+            if v < min_mw - min_tolerance || v > max_mw + max_tolerance {
+                ctx.add_error(
+                    ErrorKind::BusinessRuleViolation,
+                    "initial_conditions.json",
+                    Some(&entity_str),
+                    format!(
+                        "Thermal {}: past_anticipated_commitments window [{}, {}) value_mw = {v} \
+                         is outside the plant's generation bounds [{min_mw}, {max_mw}]; \
+                         the LP delivery equality on the covered stage(s) cannot be \
+                         satisfied and the LP will be infeasible",
+                        thermal_id.0, record.start_date, record.end_date
+                    ),
+                );
+            }
+            continue;
+        }
+
+        for (i, &fraction) in coverage.iter().enumerate() {
+            if fraction == 0.0 {
+                continue;
+            }
+            let stage_id = delivery_box.study_stage_ids[i];
+            if !commissioning_active(entry, exit, stage_id) {
+                continue;
+            }
+            let bx = delivery_box
+                .bounds
+                .thermal_block_base(delivery_box.thermal_pos, i);
+            let lb = bx.min_generation_mw;
+            let ub = bx.max_generation_mw;
+            if lb > ub {
+                ctx.add_error(
+                    ErrorKind::BusinessRuleViolation,
+                    "initial_conditions.json",
+                    Some(&entity_str),
+                    format!(
+                        "Thermal {}: past_anticipated_commitments window [{}, {}) — \
+                         delivery stage id {stage_id} has an empty resolved generation box \
+                         [{lb}, {ub}] (lower > upper); the committed value cannot be delivered.",
+                        thermal_id.0, record.start_date, record.end_date
+                    ),
+                );
+                continue;
+            }
+            let lb_tolerance = envelope_tolerance(lb);
+            let ub_tolerance = envelope_tolerance(ub);
+            if v < lb - lb_tolerance || v > ub + ub_tolerance {
+                ctx.add_error(
+                    ErrorKind::BusinessRuleViolation,
+                    "initial_conditions.json",
+                    Some(&entity_str),
+                    format!(
+                        "Thermal {}: past_anticipated_commitments window [{}, {}) \
+                         value_mw = {v} is outside the resolved generation box [{lb}, {ub}] at \
+                         delivery stage id {stage_id}; the LP delivery equality on that stage \
+                         cannot be satisfied and the LP will be infeasible.",
+                        thermal_id.0, record.start_date, record.end_date
+                    ),
+                );
+            }
         }
     }
 }
@@ -873,7 +1019,7 @@ fn check_fixed_commitment_within_window(
     }
 }
 
-/// Layer 5a — rejects use of `anticipated_decision(N)` in a generic constraint
+/// Rule 17. Layer 5a — rejects use of `anticipated_decision(N)` in a generic constraint
 /// when thermal `N` does not have `anticipated_config: Some(_)`.
 ///
 /// `anticipated_decision` is an LP column that only exists for plants committed
@@ -885,12 +1031,7 @@ pub(super) fn check_anticipated_decision_target_is_anticipated(
     data: &ParsedData,
     ctx: &mut ValidationContext,
 ) {
-    let anticipated_ids: HashSet<EntityId> = data
-        .thermals
-        .iter()
-        .filter(|t| t.anticipated_config.is_some())
-        .map(|t| t.id)
-        .collect();
+    let anticipated_ids: HashSet<EntityId> = collect_anticipated_thermal_ids(data);
 
     for constraint in &data.generic_constraints {
         for term in &constraint.expression.terms {
@@ -915,7 +1056,7 @@ pub(super) fn check_anticipated_decision_target_is_anticipated(
     }
 }
 
-/// Layer 5a — warns when `thermal_generation(N)` is used in a generic
+/// Rule 18. Layer 5a — warns when `thermal_generation(N)` is used in a generic
 /// constraint and thermal `N` is anticipated.
 ///
 /// `thermal_generation` for an anticipated thermal references the per-block
@@ -926,12 +1067,7 @@ pub(super) fn warn_thermal_generation_on_anticipated_thermal(
     data: &ParsedData,
     ctx: &mut ValidationContext,
 ) {
-    let anticipated_ids: HashSet<EntityId> = data
-        .thermals
-        .iter()
-        .filter(|t| t.anticipated_config.is_some())
-        .map(|t| t.id)
-        .collect();
+    let anticipated_ids: HashSet<EntityId> = collect_anticipated_thermal_ids(data);
 
     if anticipated_ids.is_empty() {
         return;
@@ -962,42 +1098,7 @@ pub(super) fn warn_thermal_generation_on_anticipated_thermal(
     }
 }
 
-/// Layer 5a — rejects per-stage thermal bound overrides whose `stage_id` is
-/// outside the study horizon `[0, n_stages)`.
-///
-/// The thermal-bounds resolution table is padded with each plant's base entity
-/// values for stages `[n_stages, n_stages + K_max)` to support
-/// anticipated-delivery lookups. Overrides in that padded region would be
-/// silently dropped by `resolve_bounds` (the `stage_index` only covers study
-/// stages); this validator surfaces them as a user-visible error.
-pub(super) fn check_thermal_bounds_override_stage_range(
-    data: &ParsedData,
-    ctx: &mut ValidationContext,
-) {
-    // Study stages only (id >= 0), matching the resolver's `stage_index`; a
-    // mismatch here would reject overrides the resolver actually applies.
-    let n_stages = data.stages.stages.iter().filter(|s| s.id >= 0).count();
-    let n_stages_i = i64::try_from(n_stages).unwrap_or(i64::MAX);
-    for row in &data.thermal_bounds {
-        let s = i64::from(row.stage_id);
-        if s < 0 || s >= n_stages_i {
-            let entity_str = format!("thermal_id={}, stage_id={}", row.thermal_id.0, row.stage_id);
-            ctx.add_error(
-                ErrorKind::BusinessRuleViolation,
-                "constraints/thermal_bounds.parquet",
-                Some(&entity_str),
-                format!(
-                    "Thermal {}: thermal_bounds override at stage_id={} is \
-                     outside the study horizon [0, {}); per-stage thermal \
-                     overrides past the horizon are not allowed",
-                    row.thermal_id.0, row.stage_id, n_stages
-                ),
-            );
-        }
-    }
-}
-
-/// Layer 5a — validates the standalone `post_study_stages.json` boundary input,
+/// Rule 47. Layer 5a — validates the standalone `post_study_stages.json` boundary input,
 /// the sole post-horizon surface, against the study calendar.
 ///
 /// Rejects unless:
@@ -1404,13 +1505,14 @@ mod tests {
 
     use chrono::{NaiveDate, TimeDelta};
 
-    use super::super::test_support::*;
     use super::super::validate_semantic_hydro_thermal;
     use super::{
         ExtendedDeliveryAxis, build_extended_delivery_axis, check_anticipated_thermals,
         check_post_study_stages, classify_deliveries, extended_deciders, lead_delivery_stage_count,
     };
+    use crate::constraints::ThermalBoundsRow;
     use crate::stages::StagesData;
+    use crate::test_support::*;
     use crate::validation::schema::ParsedData;
     use crate::validation::{ErrorKind, ValidationContext};
 
@@ -1526,7 +1628,7 @@ mod tests {
             openings_declared: std::collections::HashSet::new(),
             stages: contiguous_stages(durations_hours),
             policy_graph: HorizonGraph {
-                stage_discount_rate_overrides: std::collections::HashMap::new(),
+                stage_discount_rate_overrides: std::collections::BTreeMap::new(),
                 graph_type: PolicyGraphType::FiniteHorizon,
                 annual_discount_rate: 0.06,
                 transitions: vec![],
@@ -3059,8 +3161,8 @@ mod tests {
     /// and passes silently.
     ///
     /// Expected: one BusinessRuleViolation whose message contains
-    /// "outside the plant's generation bounds", names "Thermal 3", and the
-    /// offending window.
+    /// "outside the resolved generation box" (the window is in-study), names
+    /// "Thermal 3", and the offending window.
     #[test]
     fn test_committed_value_out_of_bounds_error() {
         let thermal = make_anticipated_thermal(3, 2, None, None); // min=0.0, max=500.0
@@ -3073,7 +3175,7 @@ mod tests {
             .iter()
             .filter(|e| {
                 e.kind == ErrorKind::BusinessRuleViolation
-                    && e.message.contains("outside the plant's generation bounds")
+                    && e.message.contains("outside the resolved generation box")
             })
             .collect();
         assert_eq!(
@@ -3128,7 +3230,7 @@ mod tests {
             .iter()
             .filter(|e| {
                 e.kind == ErrorKind::BusinessRuleViolation
-                    && e.message.contains("outside the plant's generation bounds")
+                    && e.message.contains("outside the resolved generation box")
             })
             .collect();
         assert_eq!(
@@ -3207,7 +3309,7 @@ mod tests {
             .iter()
             .filter(|e| {
                 e.kind == ErrorKind::BusinessRuleViolation
-                    && e.message.contains("outside the plant's generation bounds")
+                    && e.message.contains("outside the resolved generation box")
             })
             .collect();
         assert_eq!(
@@ -3285,7 +3387,7 @@ mod tests {
             .into_iter()
             .filter(|e| {
                 e.kind == ErrorKind::BusinessRuleViolation
-                    && e.message.contains("outside the plant's generation bounds")
+                    && e.message.contains("outside the resolved generation box")
             })
             .collect();
         assert_eq!(
@@ -3399,6 +3501,173 @@ mod tests {
         );
     }
 
+    // ── delivery_box: in-study values validate against the resolved box ──────
+
+    /// A per-stage `thermal_bounds` override tightens `max_generation_mw` below
+    /// the static bound at the covered delivery stage: a value inside the
+    /// static bound but above the resolved box is rejected.
+    #[test]
+    fn delivery_box_override_tightens_max_rejects_over_commitment() {
+        let thermal = make_anticipated_thermal(31, 1, None, None); // min=0.0, max=500.0
+        let mut data = make_data_anticipated(vec![thermal], 5, commitments(31, &[450.0]));
+        data.thermal_bounds = vec![ThermalBoundsRow {
+            thermal_id: EntityId::from(31),
+            stage_id: 0,
+            min_generation_mw: None,
+            max_generation_mw: Some(400.0),
+            cost_per_mwh: None,
+            block_id: None,
+        }];
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        let errors = ctx.errors();
+        let relevant: Vec<_> = errors
+            .iter()
+            .filter(|e| {
+                e.kind == ErrorKind::BusinessRuleViolation
+                    && e.message.contains("outside the resolved generation box")
+            })
+            .collect();
+        assert_eq!(
+            relevant.len(),
+            1,
+            "expected exactly one resolved-box violation, got: {errors:?}"
+        );
+        let msg = &relevant[0].message;
+        assert!(
+            msg.contains("delivery stage id 0") && msg.contains("[0, 400]"),
+            "message should name delivery stage 0 and the tightened box [0, 400], got: {msg}"
+        );
+    }
+
+    /// A per-stage override makes the resolved box empty (`min > max`) at a
+    /// reachable, commissioning-active delivery stage: rejected regardless of
+    /// the committed value.
+    #[test]
+    fn delivery_box_empty_box_rejected() {
+        let thermal = make_anticipated_thermal(32, 1, None, None); // min=0.0, max=500.0
+        let mut data = make_data_anticipated(vec![thermal], 5, commitments(32, &[0.0]));
+        data.thermal_bounds = vec![ThermalBoundsRow {
+            thermal_id: EntityId::from(32),
+            stage_id: 0,
+            min_generation_mw: Some(600.0),
+            max_generation_mw: None,
+            cost_per_mwh: None,
+            block_id: None,
+        }];
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        let errors = ctx.errors();
+        let relevant: Vec<_> = errors
+            .iter()
+            .filter(|e| {
+                e.kind == ErrorKind::BusinessRuleViolation
+                    && e.message.contains("empty resolved generation box")
+            })
+            .collect();
+        assert_eq!(
+            relevant.len(),
+            1,
+            "expected exactly one empty-box violation, got: {errors:?}"
+        );
+        assert!(
+            relevant[0].message.contains("delivery stage id 0"),
+            "message should name delivery stage 0, got: {}",
+            relevant[0].message
+        );
+    }
+
+    /// A nonzero value maturing at a commissioning-dormant covered delivery
+    /// stage is reported exactly once — by `check_seed_within_window` — even
+    /// though it is also large enough to violate the resolved box; the box
+    /// check must skip a dormant stage, never double-report it.
+    #[test]
+    fn delivery_box_dormant_stage_reported_once_by_seed_window_check() {
+        let thermal = make_anticipated_thermal(33, 1, Some(2), None); // dormant at stage 0
+        let data = make_data_anticipated(vec![thermal], 5, commitments(33, &[600.0]));
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        let errors = ctx.errors();
+        let relevant: Vec<_> = errors
+            .iter()
+            .filter(|e| e.kind == ErrorKind::BusinessRuleViolation)
+            .collect();
+        assert_eq!(
+            relevant.len(),
+            1,
+            "a dormant covered stage must be reported exactly once, got: {errors:?}"
+        );
+        assert!(
+            relevant[0]
+                .message
+                .contains("outside the plant's commissioning window"),
+            "the single report must be check_seed_within_window's, got: {}",
+            relevant[0].message
+        );
+        assert!(
+            !relevant[0].message.contains("resolved generation box"),
+            "the box check must not also report the dormant stage, got: {}",
+            relevant[0].message
+        );
+    }
+
+    /// A value a hair outside a resolved-box boundary — within
+    /// `envelope_tolerance` — is accepted, the same as at the static bound.
+    #[test]
+    fn delivery_box_sub_tolerance_drift_accepted() {
+        let thermal = make_anticipated_thermal(34, 1, None, None); // min=0.0, max=500.0
+        // 1e-8 above the tightened max: an order of magnitude below the 3e-7 tolerance.
+        let mut data = make_data_anticipated(vec![thermal], 5, commitments(34, &[300.0 + 1e-8]));
+        data.thermal_bounds = vec![ThermalBoundsRow {
+            thermal_id: EntityId::from(34),
+            stage_id: 0,
+            min_generation_mw: None,
+            max_generation_mw: Some(300.0),
+            cost_per_mwh: None,
+            block_id: None,
+        }];
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        assert!(
+            !ctx.errors()
+                .iter()
+                .any(|e| e.message.contains("resolved generation box")),
+            "a sub-tolerance drift above the resolved box must not be rejected, got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// With no per-stage `thermal_bounds` override, the resolved box at every
+    /// in-study stage equals the plant's static bounds exactly: an
+    /// over-commitment message names the same numbers the static bound would
+    /// have, proving the rewrite is byte-identical to the static bound for an
+    /// unaffected study.
+    #[test]
+    fn delivery_box_no_override_matches_static_bounds() {
+        let thermal = make_anticipated_thermal(35, 1, None, None); // min=0.0, max=500.0
+        let data = make_data_anticipated(vec![thermal], 5, commitments(35, &[600.0]));
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        let errors = ctx.errors();
+        let relevant: Vec<_> = errors
+            .iter()
+            .filter(|e| {
+                e.kind == ErrorKind::BusinessRuleViolation
+                    && e.message.contains("outside the resolved generation box")
+            })
+            .collect();
+        assert_eq!(
+            relevant.len(),
+            1,
+            "expected exactly one resolved-box violation, got: {errors:?}"
+        );
+        assert!(
+            relevant[0].message.contains("[0, 500]"),
+            "with no override the resolved box must equal the static bounds [0, 500], got: {}",
+            relevant[0].message
+        );
+    }
+
     // ── AC-14: non-zero in-bounds window value K=1 — accepted ────────────────
 
     /// K=1 case: a single window value 204.5647 against `max_generation_mw =
@@ -3480,7 +3749,7 @@ mod tests {
             .iter()
             .filter(|e| {
                 e.kind == ErrorKind::BusinessRuleViolation
-                    && e.message.contains("outside the plant's generation bounds")
+                    && e.message.contains("outside the resolved generation box")
             })
             .collect();
         assert_eq!(
@@ -3540,272 +3809,6 @@ mod tests {
         let mut ctx = ValidationContext::new();
         validate_semantic_hydro_thermal(&data, &mut ctx);
         assert!(!ctx.has_errors());
-    }
-
-    // ── Layer 5a rule 16: thermal_bounds override stage_id within [0, n_stages)
-
-    /// Build a `ThermalBoundsRow` with the given thermal_id and stage_id and
-    /// no override values set.
-    fn make_thermal_bounds_row(thermal_id: i32, stage_id: i32) -> crate::ThermalBoundsRow {
-        crate::ThermalBoundsRow {
-            thermal_id: EntityId::from(thermal_id),
-            stage_id,
-            min_generation_mw: None,
-            max_generation_mw: None,
-            cost_per_mwh: None,
-            block_id: None,
-        }
-    }
-
-    /// Build a `ParsedData` with `n_stages` study stages, one thermal,
-    /// and the given `thermal_bounds` rows.
-    fn make_data_thermal_bounds(n_stages: usize, rows: Vec<crate::ThermalBoundsRow>) -> ParsedData {
-        let thermal = make_thermal(1, 0.0, 100.0);
-        let stage_ids: Vec<i32> = (0..n_stages as i32).collect();
-        let mut data = make_data(
-            vec![],
-            vec![thermal],
-            vec![],
-            make_stages(stage_ids),
-            vec![],
-            vec![],
-        );
-        data.thermal_bounds = rows;
-        data
-    }
-
-    /// `n_stages = 5`, row `stage_id = 4` is within `[0, 5)` — accepted.
-    #[test]
-    fn test_thermal_bounds_override_stage_within_horizon_accepted() {
-        let data = make_data_thermal_bounds(5, vec![make_thermal_bounds_row(1, 4)]);
-        let mut ctx = ValidationContext::new();
-        validate_semantic_hydro_thermal(&data, &mut ctx);
-        let errors = ctx.errors();
-        let relevant: Vec<_> = errors
-            .iter()
-            .filter(|e| {
-                e.file
-                    .to_string_lossy()
-                    .contains("constraints/thermal_bounds.parquet")
-            })
-            .collect();
-        assert!(
-            relevant.is_empty(),
-            "expected no thermal_bounds.parquet errors, got: {relevant:?}"
-        );
-    }
-
-    /// `n_stages = 5`, row `stage_id = 5` is the first invalid index — rejected.
-    #[test]
-    fn test_thermal_bounds_override_stage_equals_n_rejected() {
-        let data = make_data_thermal_bounds(5, vec![make_thermal_bounds_row(1, 5)]);
-        let mut ctx = ValidationContext::new();
-        validate_semantic_hydro_thermal(&data, &mut ctx);
-        let errors = ctx.errors();
-        let relevant: Vec<_> = errors
-            .iter()
-            .filter(|e| {
-                e.kind == ErrorKind::BusinessRuleViolation
-                    && e.file
-                        .to_string_lossy()
-                        .contains("constraints/thermal_bounds.parquet")
-            })
-            .collect();
-        assert_eq!(
-            relevant.len(),
-            1,
-            "expected exactly one BusinessRuleViolation, got: {relevant:?}"
-        );
-        let msg = &relevant[0].message;
-        assert!(
-            msg.contains("stage_id=5"),
-            "message should contain 'stage_id=5', got: {msg}"
-        );
-        assert!(
-            msg.contains("[0, 5)"),
-            "message should contain '[0, 5)', got: {msg}"
-        );
-        assert!(
-            msg.contains("not allowed"),
-            "message should contain 'not allowed', got: {msg}"
-        );
-    }
-
-    /// `stage_id = -1` (pre-study stage) — rejected.
-    #[test]
-    fn test_thermal_bounds_override_stage_negative_rejected() {
-        let data = make_data_thermal_bounds(5, vec![make_thermal_bounds_row(1, -1)]);
-        let mut ctx = ValidationContext::new();
-        validate_semantic_hydro_thermal(&data, &mut ctx);
-        let errors = ctx.errors();
-        let relevant: Vec<_> = errors
-            .iter()
-            .filter(|e| {
-                e.kind == ErrorKind::BusinessRuleViolation
-                    && e.file
-                        .to_string_lossy()
-                        .contains("constraints/thermal_bounds.parquet")
-            })
-            .collect();
-        assert_eq!(
-            relevant.len(),
-            1,
-            "expected exactly one BusinessRuleViolation for stage_id=-1, got: {relevant:?}"
-        );
-    }
-
-    /// Three rows, two offending (`stage_id == n_stages` and
-    /// `stage_id > n_stages`), one valid. Exactly two errors are emitted.
-    #[test]
-    fn test_thermal_bounds_override_multiple_offending_rows() {
-        let rows = vec![
-            make_thermal_bounds_row(1, 0), // valid
-            make_thermal_bounds_row(1, 5), // invalid: equals n_stages
-            make_thermal_bounds_row(1, 9), // invalid: past n_stages
-        ];
-        let data = make_data_thermal_bounds(5, rows);
-        let mut ctx = ValidationContext::new();
-        validate_semantic_hydro_thermal(&data, &mut ctx);
-        let errors = ctx.errors();
-        let relevant: Vec<_> = errors
-            .iter()
-            .filter(|e| {
-                e.kind == ErrorKind::BusinessRuleViolation
-                    && e.file
-                        .to_string_lossy()
-                        .contains("constraints/thermal_bounds.parquet")
-            })
-            .collect();
-        assert_eq!(
-            relevant.len(),
-            2,
-            "expected exactly two BusinessRuleViolations, got: {relevant:?}"
-        );
-    }
-
-    /// `n_stages = 0`: the half-open interval `[0, 0)` is empty, so any row
-    /// at any non-negative stage_id is rejected.
-    #[test]
-    fn test_thermal_bounds_override_zero_n_stages_all_rejected() {
-        let data = make_data_thermal_bounds(0, vec![make_thermal_bounds_row(1, 0)]);
-        let mut ctx = ValidationContext::new();
-        validate_semantic_hydro_thermal(&data, &mut ctx);
-        let errors = ctx.errors();
-        let relevant: Vec<_> = errors
-            .iter()
-            .filter(|e| {
-                e.kind == ErrorKind::BusinessRuleViolation
-                    && e.file
-                        .to_string_lossy()
-                        .contains("constraints/thermal_bounds.parquet")
-            })
-            .collect();
-        assert_eq!(
-            relevant.len(),
-            1,
-            "expected exactly one BusinessRuleViolation when n_stages=0, got: {relevant:?}"
-        );
-    }
-
-    // ── boundary_tests sub-module ─────────────────────────────────────────────
-    //
-    // These mirror the strict-inequality boundary tests above for the guard
-    // `stage_id < 0 || stage_id >= n_stages`; the originals above are intentional
-    // duplicate coverage — do not delete them.
-    mod boundary_tests {
-        use super::*;
-
-        /// `n_stages = 5`, `stage_id = 4` is within `[0, 5)` — accepted.
-        #[test]
-        fn override_at_t_minus_1_acceptance_boundary() {
-            let data = make_data_thermal_bounds(5, vec![make_thermal_bounds_row(1, 4)]);
-            let mut ctx = ValidationContext::new();
-            validate_semantic_hydro_thermal(&data, &mut ctx);
-            let errors = ctx.errors();
-            let relevant: Vec<_> = errors
-                .iter()
-                .filter(|e| {
-                    e.file
-                        .to_string_lossy()
-                        .contains("constraints/thermal_bounds.parquet")
-                })
-                .collect();
-            assert!(
-                relevant.is_empty(),
-                "stage_id=4 with n_stages=5 must be accepted, got: {relevant:?}"
-            );
-        }
-
-        /// `n_stages = 5`, `stage_id = 5` is the first invalid index — rejected.
-        #[test]
-        fn override_at_t_rejection_boundary() {
-            let data = make_data_thermal_bounds(5, vec![make_thermal_bounds_row(1, 5)]);
-            let mut ctx = ValidationContext::new();
-            validate_semantic_hydro_thermal(&data, &mut ctx);
-            let errors = ctx.errors();
-            let relevant: Vec<_> = errors
-                .iter()
-                .filter(|e| {
-                    e.kind == ErrorKind::BusinessRuleViolation
-                        && e.file
-                            .to_string_lossy()
-                            .contains("constraints/thermal_bounds.parquet")
-                })
-                .collect();
-            assert_eq!(
-                relevant.len(),
-                1,
-                "expected exactly one BusinessRuleViolation at stage_id=5, got: {relevant:?}"
-            );
-        }
-
-        /// `n_stages = 5`, `stage_id = 6` (one past the rejection boundary)
-        /// — rejected. Interior rejection to complement the boundary
-        /// rejection at `stage_id == n_stages`.
-        #[test]
-        fn override_at_t_plus_one_rejection() {
-            let data = make_data_thermal_bounds(5, vec![make_thermal_bounds_row(1, 6)]);
-            let mut ctx = ValidationContext::new();
-            validate_semantic_hydro_thermal(&data, &mut ctx);
-            let errors = ctx.errors();
-            let relevant: Vec<_> = errors
-                .iter()
-                .filter(|e| {
-                    e.kind == ErrorKind::BusinessRuleViolation
-                        && e.file
-                            .to_string_lossy()
-                            .contains("constraints/thermal_bounds.parquet")
-                })
-                .collect();
-            assert_eq!(
-                relevant.len(),
-                1,
-                "expected exactly one BusinessRuleViolation at stage_id=6, got: {relevant:?}"
-            );
-        }
-
-        /// `stage_id = -1` (pre-study) — rejected.
-        #[test]
-        fn override_negative_stage_rejection() {
-            let data = make_data_thermal_bounds(5, vec![make_thermal_bounds_row(1, -1)]);
-            let mut ctx = ValidationContext::new();
-            validate_semantic_hydro_thermal(&data, &mut ctx);
-            let errors = ctx.errors();
-            let relevant: Vec<_> = errors
-                .iter()
-                .filter(|e| {
-                    e.kind == ErrorKind::BusinessRuleViolation
-                        && e.file
-                            .to_string_lossy()
-                            .contains("constraints/thermal_bounds.parquet")
-                })
-                .collect();
-            assert_eq!(
-                relevant.len(),
-                1,
-                "expected exactly one BusinessRuleViolation at stage_id=-1, got: {relevant:?}"
-            );
-        }
     }
 
     // ── AD-1: anticipated_decision on non-anticipated thermal → hard error ─────

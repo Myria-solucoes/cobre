@@ -1,7 +1,8 @@
-//! Shared work-claim and scatter primitives for the crate's two dynamic
+//! Shared work-claim and scatter primitives for the crate's three dynamic
 //! parallel-region schedulers: the by-node backward pass
-//! (`training::backward::by_node`) and the enumerated forward engine
-//! (`training::forward::enumerated`). Both claim units from a shared atomic
+//! (`training::backward::by_node`), the enumerated forward engine
+//! (`training::forward::enumerated`), and the enumerated simulation engine
+//! (`simulation::enumerated`). All three claim units from a shared atomic
 //! counter in any order, then scatter each worker's captures into a shared
 //! arena in ascending `(worker, item)` order so the result is independent of
 //! claim order and worker count. Only these

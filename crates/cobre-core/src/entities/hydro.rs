@@ -60,7 +60,9 @@ pub struct HydroPenalties {
     pub spillage_cost: f64,
     /// Penalty per m³/s of water diverted beyond diversion channel limits \[$/m³/s\].
     pub diversion_cost: f64,
-    /// Penalty per `MWh` of turbined generation \[$/`MWh`\].
+    /// Penalty per `MWh` of turbined generation \[$/`MWh`\]. For FPHA hydros,
+    /// should exceed `spillage_cost` to avoid interior solutions; not enforced
+    /// by validation.
     pub turbined_cost: f64,
     /// Penalty per hm³ of storage below minimum bound \[$/hm³\].
     pub storage_violation_below_cost: f64,
@@ -89,6 +91,33 @@ pub struct HydroPenalties {
     /// Penalty per m³/s of inflow non-negativity slack activation \[$/m³/s\].
     /// Used by the LP builder when the inflow non-negativity method is `Penalty`.
     pub inflow_nonnegativity_cost: f64,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl HydroPenalties {
+    /// Every penalty field set to `v`; a fixture needing a different value for
+    /// one field overrides it with a functional update.
+    #[must_use]
+    pub fn uniform(v: f64) -> Self {
+        Self {
+            spillage_cost: v,
+            diversion_cost: v,
+            turbined_cost: v,
+            storage_violation_below_cost: v,
+            filling_target_violation_cost: v,
+            turbined_violation_below_cost: v,
+            outflow_violation_below_cost: v,
+            outflow_violation_above_cost: v,
+            generation_violation_below_cost: v,
+            evaporation_violation_cost: v,
+            water_withdrawal_violation_cost: v,
+            water_withdrawal_violation_pos_cost: v,
+            water_withdrawal_violation_neg_cost: v,
+            evaporation_violation_pos_cost: v,
+            evaporation_violation_neg_cost: v,
+            inflow_nonnegativity_cost: v,
+        }
+    }
 }
 
 /// Production function model selector for a hydro plant.
@@ -203,9 +232,9 @@ pub struct Hydro {
     pub entry_stage_id: Option<i32>,
     /// Stage index when the plant is decommissioned. None = never decommissioned.
     pub exit_stage_id: Option<i32>,
-    /// Minimum operational storage (dead volume) \[hm³\].
+    /// Physical (cadastro) minimum storage \[hm³\], stage-invariant — not the per-stage operative bound.
     pub min_storage_hm3: f64,
-    /// Maximum operational storage (flood control level) \[hm³\].
+    /// Physical (cadastro) maximum storage \[hm³\], stage-invariant — not the per-stage operative bound.
     pub max_storage_hm3: f64,
     /// Minimum outflow down the natural river reach (turbined + spilled)
     /// required at all times \[m³/s\]. Excludes any `diversion` flow, which
@@ -295,22 +324,8 @@ mod tests {
 
     fn penalties_all(v: f64) -> HydroPenalties {
         HydroPenalties {
-            spillage_cost: v,
-            diversion_cost: v,
-            turbined_cost: v,
-            storage_violation_below_cost: v,
-            filling_target_violation_cost: v,
-            turbined_violation_below_cost: v,
-            outflow_violation_below_cost: v,
-            outflow_violation_above_cost: v,
-            generation_violation_below_cost: v,
-            evaporation_violation_cost: v,
-            water_withdrawal_violation_cost: v,
-            water_withdrawal_violation_pos_cost: v,
-            water_withdrawal_violation_neg_cost: v,
-            evaporation_violation_pos_cost: v,
-            evaporation_violation_neg_cost: v,
             inflow_nonnegativity_cost: 1000.0,
+            ..HydroPenalties::uniform(v)
         }
     }
     fn minimal_hydro(model: HydroGenerationModel) -> Hydro {

@@ -38,7 +38,7 @@ use cobre_sddp::{
     horizon_mode::HorizonMode,
     indexer::{StateSpace, StudyDimensions},
     inflow_method::InflowNonNegativityMethod,
-    lp_builder::PatchBuffer,
+    lp::builder::{PatchBuffer, StateBox},
     setup::node_graph::{
         NodeGraph, NodeId, NodeOpenings, NodePos, NodeRuntime, NodeSuccessor, OpeningSource,
         StageIdx, Traversal,
@@ -501,6 +501,16 @@ fn single_workspace(solver: MockSolver) -> Vec<SolverWorkspace<MockSolver>> {
     )]
 }
 
+fn permissive_state_boxes(n_state: usize, n_stages: usize) -> Vec<StateBox> {
+    vec![
+        StateBox {
+            lower: vec![f64::NEG_INFINITY; n_state],
+            upper: vec![f64::INFINITY; n_state],
+        };
+        n_stages
+    ]
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────
 
 /// Acceptance criterion: `n_scenarios=4`, single rank → exactly 4 results in
@@ -534,6 +544,7 @@ fn simulate_single_rank_4_scenarios_produces_4_results() {
     let hprod = hydro_productivities_1hydro(n_stages);
     let ec = zero_energy_conversion(1, n_stages);
     let mut workspaces = single_workspace(solver);
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let result = cobre_sddp::simulate(
         &mut workspaces,
         &StageContext {
@@ -546,6 +557,7 @@ fn simulate_single_rank_4_scenarios_produces_4_results() {
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
+            state_boxes: &state_boxes,
             block_counts_per_stage: &[],
             ncs_col_starts: &[],
             n_ncs: 0,
@@ -671,6 +683,7 @@ fn simulate_infeasible_returns_lp_infeasible_error() {
     let hprod = hydro_productivities_1hydro(n_stages);
     let ec = zero_energy_conversion(1, n_stages);
     let mut workspaces = single_workspace(solver);
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let result = cobre_sddp::simulate(
         &mut workspaces,
         &StageContext {
@@ -683,6 +696,7 @@ fn simulate_infeasible_returns_lp_infeasible_error() {
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
+            state_boxes: &state_boxes,
             block_counts_per_stage: &[],
             ncs_col_starts: &[],
             n_ncs: 0,
@@ -799,6 +813,7 @@ fn simulate_infeasible_at_scenario2_stage3() {
     let hprod = hydro_productivities_1hydro(n_stages);
     let ec = zero_energy_conversion(1, n_stages);
     let mut workspaces = single_workspace(solver);
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let result = cobre_sddp::simulate(
         &mut workspaces,
         &StageContext {
@@ -811,6 +826,7 @@ fn simulate_infeasible_at_scenario2_stage3() {
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
+            state_boxes: &state_boxes,
             block_counts_per_stage: &[],
             ncs_col_starts: &[],
             n_ncs: 0,
@@ -926,6 +942,7 @@ fn simulate_channel_closed_returns_error() {
     let hprod = hydro_productivities_1hydro(n_stages);
     let ec = zero_energy_conversion(1, n_stages);
     let mut workspaces = single_workspace(solver);
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let result = cobre_sddp::simulate(
         &mut workspaces,
         &StageContext {
@@ -938,6 +955,7 @@ fn simulate_channel_closed_returns_error() {
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
+            state_boxes: &state_boxes,
             block_counts_per_stage: &[],
             ncs_col_starts: &[],
             n_ncs: 0,
@@ -1053,6 +1071,7 @@ fn simulate_total_cost_equals_sum_of_stage_costs() {
     let hprod = hydro_productivities_1hydro(n_stages);
     let ec = zero_energy_conversion(1, n_stages);
     let mut workspaces = single_workspace(solver);
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let run_result = cobre_sddp::simulate(
         &mut workspaces,
         &StageContext {
@@ -1065,6 +1084,7 @@ fn simulate_total_cost_equals_sum_of_stage_costs() {
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
+            state_boxes: &state_boxes,
             block_counts_per_stage: &[],
             ncs_col_starts: &[],
             n_ncs: 0,
@@ -1178,6 +1198,7 @@ fn simulate_cost_buffer_scenario_ids_match_assigned_range() {
     let hprod = hydro_productivities_1hydro(n_stages);
     let ec = zero_energy_conversion(1, n_stages);
     let mut workspaces = single_workspace(solver);
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let run_result = cobre_sddp::simulate(
         &mut workspaces,
         &StageContext {
@@ -1190,6 +1211,7 @@ fn simulate_cost_buffer_scenario_ids_match_assigned_range() {
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
+            state_boxes: &state_boxes,
             block_counts_per_stage: &[],
             ncs_col_starts: &[],
             n_ncs: 0,
@@ -1304,6 +1326,7 @@ fn simulate_channel_receives_results_in_scenario_order() {
     let hprod = hydro_productivities_1hydro(n_stages);
     let ec = zero_energy_conversion(1, n_stages);
     let mut workspaces = single_workspace(solver);
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     cobre_sddp::simulate(
         &mut workspaces,
         &StageContext {
@@ -1316,6 +1339,7 @@ fn simulate_channel_receives_results_in_scenario_order() {
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
+            state_boxes: &state_boxes,
             block_counts_per_stage: &[],
             ncs_col_starts: &[],
             n_ncs: 0,
@@ -1426,6 +1450,7 @@ fn test_simulation_parallel_cost_determinism() {
 
     let (tx1, _rx1) = mpsc::sync_channel(64);
     let mut workspaces_1 = single_workspace(MockSolver::always_ok(solution.clone()));
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let result_1 = cobre_sddp::simulate(
         &mut workspaces_1,
         &StageContext {
@@ -1438,6 +1463,7 @@ fn test_simulation_parallel_cost_determinism() {
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
+            state_boxes: &state_boxes,
             block_counts_per_stage: &[],
             ncs_col_starts: &[],
             n_ncs: 0,
@@ -1525,6 +1551,7 @@ fn test_simulation_parallel_cost_determinism() {
             )
         })
         .collect();
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let result_4 = cobre_sddp::simulate(
         &mut workspaces_4,
         &StageContext {
@@ -1537,6 +1564,7 @@ fn test_simulation_parallel_cost_determinism() {
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
+            state_boxes: &state_boxes,
             block_counts_per_stage: &[],
             ncs_col_starts: &[],
             n_ncs: 0,
@@ -1676,6 +1704,7 @@ fn simulate_emits_progress_events() {
     let hprod = hydro_productivities_1hydro(n_stages);
     let ec = zero_energy_conversion(1, n_stages);
     let mut workspaces = single_workspace(solver);
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let result = cobre_sddp::simulate(
         &mut workspaces,
         &StageContext {
@@ -1688,6 +1717,7 @@ fn simulate_emits_progress_events() {
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
+            state_boxes: &state_boxes,
             block_counts_per_stage: &[],
             ncs_col_starts: &[],
             n_ncs: 0,
@@ -1823,6 +1853,7 @@ fn simulate_no_events_when_sender_is_none() {
     let hprod = hydro_productivities_1hydro(n_stages);
     let ec = zero_energy_conversion(1, n_stages);
     let mut workspaces = single_workspace(solver);
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let result = cobre_sddp::simulate(
         &mut workspaces,
         &StageContext {
@@ -1835,6 +1866,7 @@ fn simulate_no_events_when_sender_is_none() {
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
+            state_boxes: &state_boxes,
             block_counts_per_stage: &[],
             ncs_col_starts: &[],
             n_ncs: 0,
@@ -1955,6 +1987,7 @@ fn simulate_progress_events_received_before_return() {
     let hprod = hydro_productivities_1hydro(n_stages);
     let ec = zero_energy_conversion(1, n_stages);
     let mut workspaces = single_workspace(solver);
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     cobre_sddp::simulate(
         &mut workspaces,
         &StageContext {
@@ -1967,6 +2000,7 @@ fn simulate_progress_events_received_before_return() {
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
+            state_boxes: &state_boxes,
             block_counts_per_stage: &[],
             ncs_col_starts: &[],
             n_ncs: 0,
@@ -2098,6 +2132,7 @@ fn simulate_progress_scenario_cost_equals_total_cost() {
     let hprod = hydro_productivities_1hydro(n_stages);
     let ec = zero_energy_conversion(1, n_stages);
     let mut workspaces = single_workspace(solver);
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     cobre_sddp::simulate(
         &mut workspaces,
         &StageContext {
@@ -2110,6 +2145,7 @@ fn simulate_progress_scenario_cost_equals_total_cost() {
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
+            state_boxes: &state_boxes,
             block_counts_per_stage: &[],
             ncs_col_starts: &[],
             n_ncs: 0,
@@ -2239,6 +2275,7 @@ fn simulate_emits_simulation_finished_as_last_event() {
     let hprod = hydro_productivities_1hydro(n_stages);
     let ec = zero_energy_conversion(1, n_stages);
     let mut workspaces = single_workspace(solver);
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     cobre_sddp::simulate(
         &mut workspaces,
         &StageContext {
@@ -2251,6 +2288,7 @@ fn simulate_emits_simulation_finished_as_last_event() {
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
+            state_boxes: &state_boxes,
             block_counts_per_stage: &[],
             ncs_col_starts: &[],
             n_ncs: 0,
@@ -2391,6 +2429,7 @@ fn simulate_progress_scenario_cost_is_finite() {
     let hprod = hydro_productivities_1hydro(n_stages);
     let ec = zero_energy_conversion(1, n_stages);
     let mut workspaces = single_workspace(solver);
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     cobre_sddp::simulate(
         &mut workspaces,
         &StageContext {
@@ -2403,6 +2442,7 @@ fn simulate_progress_scenario_cost_is_finite() {
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
+            state_boxes: &state_boxes,
             block_counts_per_stage: &[],
             ncs_col_starts: &[],
             n_ncs: 0,
@@ -2527,6 +2567,7 @@ fn simulate_frozen_path_issues_zero_add_rows() {
     let ec = zero_energy_conversion(1, n_stages);
 
     let mut workspaces = single_workspace(solver);
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let result = cobre_sddp::simulate(
         &mut workspaces,
         &StageContext {
@@ -2539,6 +2580,7 @@ fn simulate_frozen_path_issues_zero_add_rows() {
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
+            state_boxes: &state_boxes,
             block_counts_per_stage: &[],
             ncs_col_starts: &[],
             n_ncs: 0,
@@ -2656,6 +2698,7 @@ fn simulate_fallback_path_issues_expected_add_rows() {
     let ec = zero_energy_conversion(1, n_stages);
 
     let mut workspaces = single_workspace(solver);
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let result = cobre_sddp::simulate(
         &mut workspaces,
         &StageContext {
@@ -2668,6 +2711,7 @@ fn simulate_fallback_path_issues_expected_add_rows() {
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
+            state_boxes: &state_boxes,
             block_counts_per_stage: &[],
             ncs_col_starts: &[],
             n_ncs: 0,
@@ -2787,6 +2831,7 @@ fn simulate_frozen_length_mismatch_returns_error() {
         (0..n_stages - 1).map(|_| minimal_template_1_0()).collect();
 
     let mut workspaces = single_workspace(solver);
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let result = cobre_sddp::simulate(
         &mut workspaces,
         &StageContext {
@@ -2799,6 +2844,7 @@ fn simulate_frozen_length_mismatch_returns_error() {
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
+            state_boxes: &state_boxes,
             block_counts_per_stage: &[],
             ncs_col_starts: &[],
             n_ncs: 0,
@@ -2958,6 +3004,7 @@ fn simulate_with_captured_basis_preserves_row_statuses() {
     let ec = zero_energy_conversion(1, n_stages);
 
     let mut workspaces = single_workspace(solver);
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let result = cobre_sddp::simulate(
         &mut workspaces,
         &StageContext {
@@ -2970,6 +3017,7 @@ fn simulate_with_captured_basis_preserves_row_statuses() {
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
+            state_boxes: &state_boxes,
             block_counts_per_stage: &[],
             ncs_col_starts: &[],
             n_ncs: 0,
@@ -3128,6 +3176,7 @@ fn simulate_with_empty_stage_bases_cold_starts() {
     let ec = zero_energy_conversion(1, n_stages);
 
     let mut workspaces = single_workspace(solver);
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let result = cobre_sddp::simulate(
         &mut workspaces,
         &StageContext {
@@ -3140,6 +3189,7 @@ fn simulate_with_empty_stage_bases_cold_starts() {
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
+            state_boxes: &state_boxes,
             block_counts_per_stage: &[],
             ncs_col_starts: &[],
             n_ncs: 0,
@@ -3232,7 +3282,7 @@ fn simulate_with_empty_stage_bases_cold_starts() {
     );
 }
 
-// ── R7: node-keyed simulation warm-basis cache (branching K-fan) ───────────
+// ── Node-keyed simulation warm-basis cache (branching K-fan) ───────────
 
 /// A 2-stage K-fan: a stage-0 root (node 0) branching 50/50 into two stage-1
 /// leaves (node 1, node 2) — the minimal shape where node position and stage
@@ -3300,7 +3350,7 @@ fn warm_basis_for_node(node_id: NodeId) -> CapturedBasis {
     cb
 }
 
-/// R7 acceptance: a branching simulation warm-starts from the VISITED node's
+/// Acceptance: a branching simulation warm-starts from the VISITED node's
 /// own basis, not whichever node's basis happens to land at that stage index.
 /// The pre-fix, stage-keyed lookup (`stage_bases.get(t)`) would resolve node
 /// 2's stage-1 solve to `node_bases[1]` — leaf A's basis, whose `node_id`
@@ -3362,6 +3412,7 @@ fn simulate_branching_k_fan_warm_starts_from_visited_node_basis() {
     ];
 
     let mut workspaces = single_workspace(solver);
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let result = cobre_sddp::simulate(
         &mut workspaces,
         &StageContext {
@@ -3374,6 +3425,7 @@ fn simulate_branching_k_fan_warm_starts_from_visited_node_basis() {
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
+            state_boxes: &state_boxes,
             block_counts_per_stage: &[],
             ncs_col_starts: &[],
             n_ncs: 0,

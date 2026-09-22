@@ -180,6 +180,18 @@ pub struct SimulationHydroResult {
     /// Under-withdrawal violation in m³/s (withdrew less than target).
     /// Zero when no withdrawal is modeled or withdrawal is fully sustained.
     pub water_withdrawal_violation_neg_m3s: f64,
+    /// Storage-range mean equivalent productivity `ρ_eq` \[MW/(m³/s)\] for this
+    /// reservoir. Always populated.
+    pub integrated_equivalent_productivity_mw_per_m3s: f64,
+    /// Storage-range mean accumulated productivity `ρ_acum` \[MW/(m³/s)\] summed
+    /// along the downstream cascade. Always populated.
+    pub integrated_accumulated_productivity_mw_per_m3s: f64,
+    /// Stored energy at the start of the block, averaged over the STAGE's total
+    /// hours (`stored_energy_initial_mwh / Σ block_hours`) \[MW\].
+    pub stored_energy_initial_mw: f64,
+    /// Stored energy at the end of the block, averaged over the STAGE's total
+    /// hours (`stored_energy_final_mwh / Σ block_hours`) \[MW\].
+    pub stored_energy_final_mw: f64,
 }
 
 /// Per-cell hydro dispatch result for one (stage, block, hydro, bus) tuple —
@@ -692,6 +704,10 @@ mod tests {
             inflow_nonnegativity_slack_m3s: 0.0,
             water_withdrawal_violation_pos_m3s: 0.0,
             water_withdrawal_violation_neg_m3s: 0.0,
+            integrated_equivalent_productivity_mw_per_m3s: 0.7,
+            integrated_accumulated_productivity_mw_per_m3s: 0.9,
+            stored_energy_initial_mw: 25.0,
+            stored_energy_final_mw: 24.0,
         };
 
         assert_eq!(r.hydro_id, 5);
@@ -704,6 +720,10 @@ mod tests {
         assert_eq!(r.incremental_inflow_energy_mw, 100.0);
         assert_eq!(r.stored_energy_initial_mwh, 250.0);
         assert_eq!(r.stored_energy_final_mwh, 240.0);
+        assert_eq!(r.integrated_equivalent_productivity_mw_per_m3s, 0.7);
+        assert_eq!(r.integrated_accumulated_productivity_mw_per_m3s, 0.9);
+        assert_eq!(r.stored_energy_initial_mw, 25.0);
+        assert_eq!(r.stored_energy_final_mw, 24.0);
     }
 
     #[test]
@@ -742,6 +762,10 @@ mod tests {
             inflow_nonnegativity_slack_m3s: 0.0,
             water_withdrawal_violation_pos_m3s: 0.0,
             water_withdrawal_violation_neg_m3s: 0.0,
+            integrated_equivalent_productivity_mw_per_m3s: 7.0,
+            integrated_accumulated_productivity_mw_per_m3s: 9.0,
+            stored_energy_initial_mw: 0.4,
+            stored_energy_final_mw: 0.5,
         };
 
         let json = serde_json::to_string(&original).expect("serialize");
@@ -789,6 +813,30 @@ mod tests {
         assert_eq!(
             decoded.stored_energy_final_mwh.to_bits(),
             original.stored_energy_final_mwh.to_bits()
+        );
+        assert_eq!(
+            decoded
+                .integrated_equivalent_productivity_mw_per_m3s
+                .to_bits(),
+            original
+                .integrated_equivalent_productivity_mw_per_m3s
+                .to_bits()
+        );
+        assert_eq!(
+            decoded
+                .integrated_accumulated_productivity_mw_per_m3s
+                .to_bits(),
+            original
+                .integrated_accumulated_productivity_mw_per_m3s
+                .to_bits()
+        );
+        assert_eq!(
+            decoded.stored_energy_initial_mw.to_bits(),
+            original.stored_energy_initial_mw.to_bits()
+        );
+        assert_eq!(
+            decoded.stored_energy_final_mw.to_bits(),
+            original.stored_energy_final_mw.to_bits()
         );
     }
 

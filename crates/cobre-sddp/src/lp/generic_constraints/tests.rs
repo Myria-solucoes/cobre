@@ -17,10 +17,10 @@ use super::{
     contract_family_slot, resolve_variable_ref, variable_ref_is_block_independent,
 };
 use crate::hydro_models::{FphaPlane, ProductionModelSet, ResolvedProductionModel};
-use crate::indexer::{
+use crate::lp::builder::StageGeometry;
+use crate::lp::indexer::{
     Boundary, HydroCell, HydroCellIndex, HydroSys, StateSpace, StorageBoundaryGrid,
 };
-use crate::lp_builder::StageGeometry;
 use crate::test_support::{
     GeometryDims, geometry, geometry_hydro, geometry_hydro_with_groups, identity_hydro_cell_index,
     make_unit_group,
@@ -2948,4 +2948,141 @@ fn storage_boundary_variants_are_block_independent() {
             hydro_id: EntityId(10),
         }
     ));
+}
+
+/// `HydroUsefulVolumeInitial`/`HydroUsefulVolumeFinal` resolve to the SAME
+/// column as `HydroStorageInitial`/`HydroStorageFinal` (the `-V_lo` shift is a
+/// bound-fold concern, not a resolution-time offset), and are block-independent
+/// like their storage counterparts.
+#[test]
+fn hydro_useful_volume_boundary_matches_storage_boundary() {
+    let indexer = make_indexer();
+    let state = make_state();
+    let geom = make_chronological_geom(&indexer, &state);
+    let prod = make_production_models();
+    let hpos = make_hydro_pos();
+    let tpos = make_thermal_pos();
+    let bpos = make_bus_pos();
+    let lpos = make_line_pos();
+
+    for block_id in [None, Some(0), Some(1), Some(2)] {
+        let useful_initial = call(
+            VariableRef::HydroUsefulVolumeInitial {
+                hydro_id: EntityId(10),
+                block_id,
+            },
+            0,
+            &geom,
+            &prod,
+            &hpos,
+            &tpos,
+            &bpos,
+            &lpos,
+        );
+        let storage_initial = call(
+            VariableRef::HydroStorageInitial {
+                hydro_id: EntityId(10),
+                block_id,
+            },
+            0,
+            &geom,
+            &prod,
+            &hpos,
+            &tpos,
+            &bpos,
+            &lpos,
+        );
+        assert_eq!(useful_initial, storage_initial);
+
+        let useful_final = call(
+            VariableRef::HydroUsefulVolumeFinal {
+                hydro_id: EntityId(10),
+                block_id,
+            },
+            0,
+            &geom,
+            &prod,
+            &hpos,
+            &tpos,
+            &bpos,
+            &lpos,
+        );
+        let storage_final = call(
+            VariableRef::HydroStorageFinal {
+                hydro_id: EntityId(10),
+                block_id,
+            },
+            0,
+            &geom,
+            &prod,
+            &hpos,
+            &tpos,
+            &bpos,
+            &lpos,
+        );
+        assert_eq!(useful_final, storage_final);
+
+        assert!(variable_ref_is_block_independent(
+            &VariableRef::HydroUsefulVolumeInitial {
+                hydro_id: EntityId(10),
+                block_id,
+            }
+        ));
+        assert!(variable_ref_is_block_independent(
+            &VariableRef::HydroUsefulVolumeFinal {
+                hydro_id: EntityId(10),
+                block_id,
+            }
+        ));
+    }
+}
+
+/// `resolve_hydro_storage_boundary` resolves both useful-volume boundary
+/// variants at coefficient exactly `1.0` — the unit coefficient
+/// `useful_volume_bound_shift` relies on when it folds `V_lo` without a
+/// `* multiplier` factor.
+#[test]
+fn hydro_useful_volume_boundary_multiplier_is_exactly_one() {
+    let indexer = make_indexer();
+    let state = make_state();
+    let geom = make_chronological_geom(&indexer, &state);
+    let prod = make_production_models();
+    let hpos = make_hydro_pos();
+    let tpos = make_thermal_pos();
+    let bpos = make_bus_pos();
+    let lpos = make_line_pos();
+
+    let useful_initial = call(
+        VariableRef::HydroUsefulVolumeInitial {
+            hydro_id: EntityId(10),
+            block_id: Some(0),
+        },
+        0,
+        &geom,
+        &prod,
+        &hpos,
+        &tpos,
+        &bpos,
+        &lpos,
+    );
+    assert_eq!(useful_initial, vec![(8, 1.0)], "S⁰ = storage_in.start + 0");
+
+    let useful_final = call(
+        VariableRef::HydroUsefulVolumeFinal {
+            hydro_id: EntityId(10),
+            block_id: Some(2),
+        },
+        0,
+        &geom,
+        &prod,
+        &hpos,
+        &tpos,
+        &bpos,
+        &lpos,
+    );
+    assert_eq!(
+        useful_final,
+        vec![(0, 1.0)],
+        "S³ = Sᴷ = storage.start + 0 (K=3, last block)"
+    );
 }

@@ -235,7 +235,7 @@ impl ResolvedParameters {
 /// let stage_ids = [StageId(0), StageId(1), StageId(2), StageId(3)];
 ///
 /// let table = build_resolved_parameters(
-///     &params, &ec, &overrides, &[], &[0, 0, 1, 1], &stage_ids, &[1, 1, 1, 1], 4,
+///     &params, &ec, &overrides, &[], &[0, 0, 1, 1], &stage_ids, &[1, 1, 1, 1],
 ///     1_000_000.0,
 /// )
 ///     .unwrap();
@@ -244,12 +244,6 @@ impl ResolvedParameters {
 /// assert!((table.get(EntityId(1), 0, 0) - 3.6).abs() < 1e-12);
 /// assert!((table.get(EntityId(1), 3, 0) - 3.6).abs() < 1e-12);
 /// ```
-// Rationale (too_many_arguments): every parameter is a distinct study-resolved
-// input the resolver needs once (`stage_block_counts` carries the per-stage block
-// count the `PerStageBlock` coverage check requires); a wrapper struct would just
-// move the arity to the literal callers already build (`ResolvedTables`-style
-// bundling happens one layer up, at the LP builder context).
-#[allow(clippy::too_many_arguments)]
 pub fn build_resolved_parameters(
     parameters: &[ScalarParameter],
     energy_conversion: &EnergyConversionSet,
@@ -258,17 +252,11 @@ pub fn build_resolved_parameters(
     stage_to_season: &[i32],
     stage_ids: &[StageId],
     stage_block_counts: &[usize],
-    n_stages: usize,
     cost_scale_factor: f64,
 ) -> Result<ResolvedParameters, ResolvedParametersError> {
     debug_assert_eq!(
-        stage_ids.len(),
-        n_stages,
-        "stage_ids must carry one domain StageId per study stage"
-    );
-    debug_assert_eq!(
         stage_block_counts.len(),
-        n_stages,
+        stage_ids.len(),
         "stage_block_counts must carry one block count per study stage"
     );
     let hydro_index: HashMap<EntityId, usize> = hydros
@@ -276,6 +264,11 @@ pub fn build_resolved_parameters(
         .enumerate()
         .map(|(idx, h)| (h.id, idx))
         .collect();
+    let stage_axis = StageAxis {
+        ids: stage_ids,
+        to_season: stage_to_season,
+        block_counts: stage_block_counts,
+    };
 
     let mut per_param: Vec<Vec<Vec<f64>>> = Vec::with_capacity(parameters.len());
     let mut id_to_slot: Vec<(i32, usize)> = Vec::with_capacity(parameters.len());
@@ -284,10 +277,7 @@ pub fn build_resolved_parameters(
         let values = resolve_kind(
             &param.kind,
             &param.name,
-            n_stages,
-            stage_block_counts,
-            stage_to_season,
-            stage_ids,
+            &stage_axis,
             energy_conversion,
             override_table,
             hydros,
@@ -321,26 +311,31 @@ pub fn build_resolved_parameters(
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+/// Per-stage inputs shared by [`resolve_kind`]'s match arms: the domain
+/// `StageId`, season id, and block count for each study stage. `n_stages` is
+/// always `stage_ids.len()` — never stored separately, so it cannot drift
+/// from the slice it counts.
+struct StageAxis<'a> {
+    ids: &'a [StageId],
+    to_season: &'a [i32],
+    block_counts: &'a [usize],
+}
+
 /// Resolve a single [`ParameterKind`] into the jagged `stage → block` storage.
 ///
 /// The four stage-/block-invariant kinds each produce a length-1 inner block
 /// vector per stage (it broadcasts to every block in [`ResolvedParameters::get`]);
 /// `PerStageBlock` produces one entry per block of each stage.
-// Rationale: `resolve_computed` mirrors this arity so the two are interchangeable
-// at the dispatch site; a context struct would just move the arity to the literal.
-#[allow(clippy::too_many_arguments)]
 fn resolve_kind(
     kind: &ParameterKind,
     name: &str,
-    n_stages: usize,
-    stage_block_counts: &[usize],
-    stage_to_season: &[i32],
-    stage_ids: &[StageId],
+    stage_axis: &StageAxis<'_>,
     energy_conversion: &EnergyConversionSet,
     override_table: &HydroEnergyProductivityOverride,
     hydros: &[Hydro],
     hydro_index: &HashMap<EntityId, usize>,
 ) -> Result<Vec<Vec<f64>>, ResolvedParametersError> {
+    let n_stages = stage_axis.ids.len();
     match kind {
         ParameterKind::Constant { value: c } => Ok(vec![vec![*c]; n_stages]),
 
@@ -357,7 +352,7 @@ fn resolve_kind(
 
         ParameterKind::Seasonal { values: pairs } => {
             let mut values = Vec::with_capacity(n_stages);
-            for (t, &season_id) in stage_to_season.iter().enumerate() {
+            for (t, &season_id) in stage_axis.to_season.iter().enumerate() {
                 // `pairs` is sorted ascending by season_id (invariant from
                 // `ParameterKind::new_seasonal`).
                 match pairs.binary_search_by_key(&season_id, |(k, _)| *k) {
@@ -378,9 +373,7 @@ fn resolve_kind(
             let per_stage = resolve_computed(
                 *cp,
                 name,
-                n_stages,
-                stage_to_season,
-                stage_ids,
+                stage_axis.ids,
                 energy_conversion,
                 override_table,
                 hydros,
@@ -390,7 +383,7 @@ fn resolve_kind(
         }
 
         ParameterKind::PerStageBlock { values } => {
-            resolve_per_stage_block(values, name, n_stages, stage_block_counts)
+            resolve_per_stage_block(values, name, n_stages, stage_axis.block_counts)
         }
     }
 }
@@ -461,16 +454,10 @@ fn resolve_per_stage_block(
     Ok(resolved)
 }
 
-/// Resolve a [`ComputedParameter`] into a `Vec<f64>` of length `n_stages`.
-// Rationale: the signature mirrors `resolve_kind` so the two are interchangeable
-// at the `ParameterKind::Computed` dispatch site; a context struct would just move
-// the arity to the literal.
-#[allow(clippy::too_many_arguments)]
+/// Resolve a [`ComputedParameter`] into a `Vec<f64>` of length `stage_ids.len()`.
 fn resolve_computed(
     cp: ComputedParameter,
     name: &str,
-    n_stages: usize,
-    _stage_to_season: &[i32],
     stage_ids: &[StageId],
     energy_conversion: &EnergyConversionSet,
     override_table: &HydroEnergyProductivityOverride,
@@ -484,7 +471,10 @@ fn resolve_computed(
         | ComputedParameter::ReferenceTurbine { hydro_id }
         | ComputedParameter::MinStorage { hydro_id }
         | ComputedParameter::MaxStorage { hydro_id }
-        | ComputedParameter::SpecificProductivity { hydro_id } => hydro_id,
+        | ComputedParameter::SpecificProductivity { hydro_id }
+        | ComputedParameter::IntegratedEquivalentProductivity { hydro_id }
+        | ComputedParameter::IntegratedAccumulatedProductivity { hydro_id }
+        | ComputedParameter::MaxStoredEnergy { hydro_id } => hydro_id,
     };
 
     let hydro_idx = hydro_index.get(&hydro_id).copied().ok_or_else(|| {
@@ -500,17 +490,17 @@ fn resolve_computed(
     // carry stage-specific overrides.
     match cp {
         ComputedParameter::MinStorage { .. } => {
-            return Ok(vec![hydro.min_storage_hm3; n_stages]);
+            return Ok(vec![hydro.min_storage_hm3; stage_ids.len()]);
         }
         ComputedParameter::MaxStorage { .. } => {
-            return Ok(vec![hydro.max_storage_hm3; n_stages]);
+            return Ok(vec![hydro.max_storage_hm3; stage_ids.len()]);
         }
         _ => {}
     }
 
     // Stage-varying resolution for the remaining five variants.
-    let mut values = Vec::with_capacity(n_stages);
-    for (t, &stage_id) in stage_ids.iter().enumerate().take(n_stages) {
+    let mut values = Vec::with_capacity(stage_ids.len());
+    for (t, &stage_id) in stage_ids.iter().enumerate() {
         let value = match cp {
             ComputedParameter::EquivalentProductivity { .. } => {
                 energy_conversion
@@ -519,6 +509,12 @@ fn resolve_computed(
             }
             ComputedParameter::AccumulatedProductivity { .. } => {
                 energy_conversion.accumulated_productivity(hydro_idx, t)
+            }
+            ComputedParameter::IntegratedEquivalentProductivity { .. } => {
+                energy_conversion.integrated_equivalent_productivity(hydro_idx, t)
+            }
+            ComputedParameter::IntegratedAccumulatedProductivity { .. } => {
+                energy_conversion.integrated_accumulated_productivity(hydro_idx, t)
             }
             ComputedParameter::ReferenceVolume { .. } => {
                 // Intentionally NO parquet `v_ref` override tier — unlike the
@@ -550,12 +546,19 @@ fn resolve_computed(
                 hydro.max_storage_hm3
             }
             ComputedParameter::SpecificProductivity { .. } => override_table
-                .specific_productivity(hydro_id, stage_id)
-                .or(hydro.specific_productivity_mw_per_m3s_per_m)
+                .resolve_specific_productivity(
+                    hydro_id,
+                    stage_id,
+                    hydro.specific_productivity_mw_per_m3s_per_m,
+                )
                 .ok_or_else(|| ResolvedParametersError::MissingSpecificProductivity {
                     name: name.to_string(),
                     hydro_id,
                 })?,
+            ComputedParameter::MaxStoredEnergy { .. } => {
+                energy_conversion.integrated_accumulated_productivity(hydro_idx, t)
+                    * (hydro.max_storage_hm3 - hydro.min_storage_hm3)
+            }
         };
         values.push(value);
     }
@@ -570,16 +573,20 @@ fn resolve_computed(
 #[allow(clippy::cast_precision_loss)]
 mod tests {
     use cobre_core::{
-        ComputedParameter, EntityId, ParameterKind, ScalarParameter,
+        CascadeTopology, ComputedParameter, EntityId, ParameterKind, ScalarParameter, StudyPos,
         entities::hydro::{HydroGenerationModel, HydroPenalties},
     };
 
-    use cobre_io::HydroEnergyProductivityRow;
+    use cobre_io::{
+        HydroEnergyProductivityRow, HydroGeometryRow, build_hydro_reference_volumes_resolved,
+    };
 
     use super::*;
     use crate::energy_conversion::{
-        EnergyConversion, EnergyConversionSet, build_hydro_energy_productivity_override,
+        EnergyConversion, EnergyConversionSet, build_energy_conversion_set,
+        build_hydro_energy_productivity_override,
     };
+    use crate::fpha_fitting::ForebayTable;
 
     // -------------------------------------------------------------------------
     // Shared test helpers
@@ -738,7 +745,6 @@ mod tests {
             &stage_to_season,
             &stage_ids,
             &one_block_per_stage(4),
-            4,
             1_000_000.0,
         )
         .unwrap();
@@ -774,7 +780,6 @@ mod tests {
             &stage_to_season,
             &stage_ids,
             &one_block_per_stage(3),
-            3,
             1_000_000.0,
         );
 
@@ -813,7 +818,6 @@ mod tests {
             &stage_to_season,
             &stage_ids,
             &one_block_per_stage(3),
-            3,
             1_000_000.0,
         )
         .unwrap();
@@ -850,7 +854,6 @@ mod tests {
             &stage_to_season,
             &stage_ids,
             &one_block_per_stage(n_stages),
-            n_stages,
             1_000_000.0,
         )
         .unwrap();
@@ -870,6 +873,100 @@ mod tests {
                 table.get(EntityId(0), t, 0)
             );
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Integrated productivity reads the integrated grids, not the reference-point
+    // cells — installed distinct so a resolve arm that read `conversion` /
+    // `accumulated_productivity` instead would fail bit-for-bit.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn computed_integrated_productivity_reads_integrated_grids() {
+        let n_stages = 4;
+        let (hydros, base_ec, override_table, stage_to_season, stage_ids) =
+            make_setup_inputs(n_stages);
+
+        let integrated_equivalent: Vec<Vec<f64>> = (0..2usize)
+            .map(|h| {
+                (0..n_stages)
+                    .map(|t| 7.0 + h as f64 + t as f64 * 0.1)
+                    .collect()
+            })
+            .collect();
+        let integrated_accumulated: Vec<Vec<f64>> = (0..2usize)
+            .map(|h| {
+                (0..n_stages)
+                    .map(|t| 3.0 + h as f64 + t as f64 * 0.2)
+                    .collect()
+            })
+            .collect();
+        let energy_conversion =
+            base_ec.with_integrated(integrated_equivalent, integrated_accumulated);
+
+        let params = vec![
+            make_param(
+                0,
+                ParameterKind::Computed {
+                    computed_spec: ComputedParameter::IntegratedEquivalentProductivity {
+                        hydro_id: EntityId(0),
+                    },
+                },
+            ),
+            make_param(
+                1,
+                ParameterKind::Computed {
+                    computed_spec: ComputedParameter::IntegratedAccumulatedProductivity {
+                        hydro_id: EntityId(1),
+                    },
+                },
+            ),
+        ];
+
+        let table = build_resolved_parameters(
+            &params,
+            &energy_conversion,
+            &override_table,
+            &hydros,
+            &stage_to_season,
+            &stage_ids,
+            &one_block_per_stage(n_stages),
+            1_000_000.0,
+        )
+        .unwrap();
+
+        for t in 0..n_stages {
+            let exp_eq = energy_conversion.integrated_equivalent_productivity(0, t);
+            assert_eq!(
+                table.get(EntityId(0), t, 0).to_bits(),
+                exp_eq.to_bits(),
+                "stage {t}: IntegratedEquivalentProductivity must equal the integrated grid"
+            );
+            let exp_acum = energy_conversion.integrated_accumulated_productivity(1, t);
+            assert_eq!(
+                table.get(EntityId(1), t, 0).to_bits(),
+                exp_acum.to_bits(),
+                "stage {t}: IntegratedAccumulatedProductivity must equal the integrated grid"
+            );
+        }
+
+        // The installed integrated grids genuinely differ from the reference-point
+        // grids the non-integrated tags read, so the arms cannot pass by aliasing.
+        assert_ne!(
+            energy_conversion
+                .integrated_equivalent_productivity(0, 0)
+                .to_bits(),
+            energy_conversion
+                .conversion(0, 0)
+                .equivalent_productivity_mw_per_m3s
+                .to_bits(),
+        );
+        assert_ne!(
+            energy_conversion
+                .integrated_accumulated_productivity(1, 0)
+                .to_bits(),
+            energy_conversion.accumulated_productivity(1, 0).to_bits(),
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -900,7 +997,6 @@ mod tests {
             &stage_to_season,
             &stage_ids,
             &one_block_per_stage(n_stages),
-            n_stages,
             1_000_000.0,
         )
         .unwrap();
@@ -958,7 +1054,6 @@ mod tests {
             &stage_to_season,
             &stage_ids,
             &one_block_per_stage(n_stages),
-            n_stages,
             1_000_000.0,
         )
         .unwrap();
@@ -1023,7 +1118,6 @@ mod tests {
             &stage_to_season,
             &stage_ids,
             &one_block_per_stage(1),
-            1,
             1_000_000.0,
         )
         .unwrap();
@@ -1071,7 +1165,6 @@ mod tests {
             &stage_to_season,
             &stage_ids,
             &one_block_per_stage(n_stages),
-            n_stages,
             1_000_000.0,
         );
 
@@ -1082,6 +1175,94 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// The `SpecificProductivity` tag and the energy-conversion builder's mean
+    /// own term resolve the override table through the same
+    /// `resolve_specific_productivity` method: recomputing the mean own term as
+    /// `tag_value · mean_head` from an independently built `ForebayTable`
+    /// (identical VHA rows) recovers the builder's grid cell bit-for-bit.
+    #[test]
+    fn specific_productivity_tag_and_builder_resolve_the_same_rho_esp() {
+        let hydro = make_hydro(1, 100.0, 300.0, None);
+        let hydro_id = hydro.id;
+        let hydros = vec![hydro];
+        let cascade = CascadeTopology::build(&hydros);
+        let resolver =
+            build_hydro_reference_volumes_resolved(&[(hydro_id, StudyPos(0), 200.0)], 0.0);
+        let rows = vec![
+            HydroGeometryRow {
+                hydro_id,
+                volume_hm3: 0.0,
+                height_m: 100.0,
+                area_km2: 1.0,
+            },
+            HydroGeometryRow {
+                hydro_id,
+                volume_hm3: 1000.0,
+                height_m: 200.0,
+                area_km2: 1.0,
+            },
+        ];
+        let mut vha = HashMap::new();
+        vha.insert(hydro_id, rows.clone());
+        let override_esp = 0.0123;
+        let override_table =
+            build_hydro_energy_productivity_override(&[HydroEnergyProductivityRow {
+                hydro_id,
+                stage_id: None,
+                equivalent_productivity_mw_per_m3s: None,
+                reference_outflow_m3s: None,
+                specific_productivity_mw_per_m3s_per_m: Some(override_esp),
+            }])
+            .expect("override builds");
+        let stage_ids = stage_ids_0_based(1);
+
+        let energy_conversion = build_energy_conversion_set(
+            &hydros,
+            &stage_ids,
+            &cascade,
+            &resolver,
+            &vha,
+            Some(&override_table),
+            None,
+        )
+        .expect("builder succeeds");
+
+        let params = vec![make_param(
+            0,
+            ParameterKind::Computed {
+                computed_spec: ComputedParameter::SpecificProductivity { hydro_id },
+            },
+        )];
+        let table = build_resolved_parameters(
+            &params,
+            &energy_conversion,
+            &override_table,
+            &hydros,
+            &[0i32],
+            &stage_ids,
+            &one_block_per_stage(1),
+            1_000_000.0,
+        )
+        .expect("tag resolves");
+        let tag_value = table.get(EntityId(0), 0, 0);
+        assert_eq!(
+            tag_value.to_bits(),
+            override_esp.to_bits(),
+            "the tag resolves the same override the builder consults"
+        );
+
+        let recomputed_table = ForebayTable::new(&rows, "coherence").expect("table builds");
+        let mean_head = recomputed_table.mean_height(100.0, 300.0);
+        let expected_integrated = tag_value * mean_head;
+        assert_eq!(
+            expected_integrated.to_bits(),
+            energy_conversion
+                .integrated_equivalent_productivity(0, 0)
+                .to_bits(),
+            "the builder must apply the same resolved ρ_esp the tag resolves"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -1121,7 +1302,6 @@ mod tests {
             &stage_to_season,
             &stage_ids,
             &one_block_per_stage(n_stages),
-            n_stages,
             1_000_000.0,
         )
         .unwrap();
@@ -1133,7 +1313,6 @@ mod tests {
             &stage_to_season,
             &stage_ids,
             &one_block_per_stage(n_stages),
-            n_stages,
             1_000_000.0,
         )
         .unwrap();
@@ -1177,7 +1356,6 @@ mod tests {
             &stage_to_season,
             &stage_ids,
             &one_block_per_stage(n_stages),
-            n_stages,
             1_000_000.0,
         );
 
@@ -1227,7 +1405,6 @@ mod tests {
             &stage_to_season,
             &stage_ids,
             &one_block_per_stage(n_stages),
-            n_stages,
             1_000_000.0,
         )
         .unwrap();
@@ -1258,7 +1435,7 @@ mod tests {
         let overrides = HydroEnergyProductivityOverride::default();
 
         let table =
-            build_resolved_parameters(&[], &ec, &overrides, &[], &[], &[], &[], 0, 1_000_000.0)
+            build_resolved_parameters(&[], &ec, &overrides, &[], &[], &[], &[], 1_000_000.0)
                 .unwrap();
         // Nothing to query — just verify it doesn't panic.
         let _ = table;
@@ -1287,7 +1464,6 @@ mod tests {
             &stage_to_season,
             &stage_ids,
             block_counts,
-            n_stages,
             1_000_000.0,
         )
     }
@@ -1461,6 +1637,274 @@ mod tests {
         assert!(
             !table.is_block_varying(EntityId(99)),
             "an unknown id is not block-varying"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // MaxStoredEnergy: per-stage oracle on integrated_accumulated_productivity,
+    // physical-bounds source, and declaration-order invariance.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn max_stored_energy_matches_oracle_on_integrated_accumulated_grid() {
+        let n_stages = 4;
+        let (hydros, energy_conversion, override_table, stage_to_season, stage_ids) =
+            make_setup_inputs(n_stages);
+
+        let params = vec![make_param(
+            0,
+            ParameterKind::Computed {
+                computed_spec: ComputedParameter::MaxStoredEnergy {
+                    hydro_id: EntityId(1),
+                },
+            },
+        )];
+
+        let table = build_resolved_parameters(
+            &params,
+            &energy_conversion,
+            &override_table,
+            &hydros,
+            &stage_to_season,
+            &stage_ids,
+            &one_block_per_stage(n_stages),
+            1_000_000.0,
+        )
+        .unwrap();
+
+        let physical_range = hydros[1].max_storage_hm3 - hydros[1].min_storage_hm3;
+        for t in 0..n_stages {
+            let expected =
+                energy_conversion.integrated_accumulated_productivity(1, t) * physical_range;
+            assert_eq!(
+                table.get(EntityId(0), t, 0).to_bits(),
+                expected.to_bits(),
+                "stage {t}: MaxStoredEnergy must equal \
+                 integrated_accumulated_productivity * (V_hi - V_lo)"
+            );
+        }
+
+        // The resolved value still varies across stages here — driven entirely by
+        // the integrated_accumulated_productivity grid; the physical range factor
+        // (hydro.{min,max}_storage_hm3) is stage-invariant.
+        assert_ne!(
+            table.get(EntityId(0), 0, 0).to_bits(),
+            table.get(EntityId(0), n_stages - 1, 0).to_bits(),
+            "MaxStoredEnergy must vary across stages when the integrated productivity grid varies"
+        );
+    }
+
+    /// `MaxStoredEnergy` reads the hydro entity's own `[min, max]_storage_hm3` —
+    /// stage-invariant by construction. Pinning `integrated_accumulated_productivity`
+    /// stage-invariant too isolates the range factor: a stage-varying resolved value
+    /// here could only come from reading something other than the entity fields.
+    #[test]
+    fn max_stored_energy_reads_physical_bounds_not_operative_hydro_fields() {
+        let n_stages = 3;
+        let (hydros, base_ec, override_table, stage_to_season, stage_ids) =
+            make_setup_inputs(n_stages);
+
+        let integrated_accumulated: Vec<Vec<f64>> =
+            (0..hydros.len()).map(|_| vec![2.0; n_stages]).collect();
+        let integrated_equivalent = integrated_accumulated.clone();
+        let energy_conversion =
+            base_ec.with_integrated(integrated_equivalent, integrated_accumulated);
+
+        let params = vec![make_param(
+            0,
+            ParameterKind::Computed {
+                computed_spec: ComputedParameter::MaxStoredEnergy {
+                    hydro_id: EntityId(0),
+                },
+            },
+        )];
+
+        let table = build_resolved_parameters(
+            &params,
+            &energy_conversion,
+            &override_table,
+            &hydros,
+            &stage_to_season,
+            &stage_ids,
+            &one_block_per_stage(n_stages),
+            1_000_000.0,
+        )
+        .unwrap();
+
+        let expected = 2.0 * (hydros[0].max_storage_hm3 - hydros[0].min_storage_hm3);
+        for t in 0..n_stages {
+            assert_eq!(
+                table.get(EntityId(0), t, 0).to_bits(),
+                expected.to_bits(),
+                "stage {t}: MaxStoredEnergy must read hydro.{{min,max}}_storage_hm3"
+            );
+        }
+    }
+
+    #[test]
+    fn max_stored_energy_is_invariant_to_hydro_declaration_order() {
+        let n_stages = 3;
+        let stage_to_season = vec![0i32; n_stages];
+        let stage_ids = stage_ids_0_based(n_stages);
+        let override_table = HydroEnergyProductivityOverride::default();
+
+        // Every input is keyed by hydro ENTITY id, never by position: an
+        // indexing bug that conflates the two surfaces as a mismatch between
+        // the two orderings built below.
+        let integrated_for = |id: i32, t: usize| 10.0 + f64::from(id) + t as f64 * 0.3;
+        let min_storage_for = |id: i32| 5.0 * f64::from(id);
+        let max_storage_for = |id: i32| 100.0 * f64::from(id) + 50.0;
+
+        let build_for_order = |order: &[i32]| -> (Vec<Hydro>, EnergyConversionSet) {
+            let hydros: Vec<Hydro> = order
+                .iter()
+                .map(|&id| make_hydro(id, min_storage_for(id), max_storage_for(id), Some(0.0085)))
+                .collect();
+            let n_hydros = hydros.len();
+
+            let zero_conversion = EnergyConversion {
+                equivalent_productivity_mw_per_m3s: 0.0,
+                reference_volume_hm3: 0.0,
+                reference_outflow_m3s: 0.0,
+            };
+            let per_hydro_stage = vec![vec![zero_conversion; n_stages]; n_hydros];
+            let accumulated = vec![vec![0.0; n_stages]; n_hydros];
+            let integrated_equivalent = vec![vec![0.0; n_stages]; n_hydros];
+            let integrated_accumulated: Vec<Vec<f64>> = order
+                .iter()
+                .map(|&id| (0..n_stages).map(|t| integrated_for(id, t)).collect())
+                .collect();
+            let energy_conversion =
+                EnergyConversionSet::new(per_hydro_stage, accumulated, n_hydros, n_stages)
+                    .with_integrated(integrated_equivalent, integrated_accumulated);
+
+            (hydros, energy_conversion)
+        };
+
+        let order_abc = [1_i32, 2, 3];
+        let order_cab = [3_i32, 1, 2];
+
+        let (hydros_abc, ec_abc) = build_for_order(&order_abc);
+        let (hydros_cab, ec_cab) = build_for_order(&order_cab);
+
+        // Same parameters — referencing hydro identity, not position — resolved
+        // against each self-consistent (hydros, energy_conversion) pair.
+        let params: Vec<ScalarParameter> = order_abc
+            .iter()
+            .enumerate()
+            .map(|(slot, &id)| {
+                make_param(
+                    i32::try_from(slot).unwrap(),
+                    ParameterKind::Computed {
+                        computed_spec: ComputedParameter::MaxStoredEnergy {
+                            hydro_id: EntityId(id),
+                        },
+                    },
+                )
+            })
+            .collect();
+
+        let table_abc = build_resolved_parameters(
+            &params,
+            &ec_abc,
+            &override_table,
+            &hydros_abc,
+            &stage_to_season,
+            &stage_ids,
+            &one_block_per_stage(n_stages),
+            1_000_000.0,
+        )
+        .unwrap();
+        let table_cab = build_resolved_parameters(
+            &params,
+            &ec_cab,
+            &override_table,
+            &hydros_cab,
+            &stage_to_season,
+            &stage_ids,
+            &one_block_per_stage(n_stages),
+            1_000_000.0,
+        )
+        .unwrap();
+
+        for (slot, &id) in order_abc.iter().enumerate() {
+            let param_id = EntityId(i32::try_from(slot).unwrap());
+            for t in 0..n_stages {
+                let a = table_abc.get(param_id, t, 0);
+                let b = table_cab.get(param_id, t, 0);
+                assert_eq!(
+                    a.to_bits(),
+                    b.to_bits(),
+                    "hydro_id={id}, stage={t}: MaxStoredEnergy must not depend on hydro \
+                     declaration order"
+                );
+                let expected = integrated_for(id, t) * (max_storage_for(id) - min_storage_for(id));
+                assert_eq!(
+                    a.to_bits(),
+                    expected.to_bits(),
+                    "hydro_id={id}, stage={t}: resolved value must match the entity-keyed oracle"
+                );
+            }
+        }
+    }
+
+    /// On a hydro with a genuine `[V_lo, V_hi]` range whose integrated grid differs
+    /// from the reference-point grid, dividing `pct * MaxStoredEnergy` by that
+    /// hydro's integrated cascade productivity leaves `pct * (V_hi - V_lo)`, a pure
+    /// volume quantity.
+    #[test]
+    fn normalized_max_stored_energy_bound_cancels_the_grid_on_a_real_range() {
+        let n_stages = 1;
+        let t = 0;
+        let (hydros, base_ec, override_table, stage_to_season, stage_ids) =
+            make_setup_inputs(n_stages);
+
+        // Distinct from the reference-point grid, so the real-range precondition
+        // below is genuinely exercised, not a collapsed-range triviality.
+        let int_rho = 0.625_f64;
+        let integrated_equivalent = vec![vec![int_rho; n_stages]; hydros.len()];
+        let integrated_accumulated = integrated_equivalent.clone();
+        let energy_conversion =
+            base_ec.with_integrated(integrated_equivalent, integrated_accumulated);
+
+        let rho_acum = energy_conversion.accumulated_productivity(0, t);
+        assert_ne!(
+            int_rho.to_bits(),
+            rho_acum.to_bits(),
+            "fixture must exercise a real range, not the collapsed-range triviality"
+        );
+
+        let params = vec![make_param(
+            0,
+            ParameterKind::Computed {
+                computed_spec: ComputedParameter::MaxStoredEnergy {
+                    hydro_id: EntityId(0),
+                },
+            },
+        )];
+        let table = build_resolved_parameters(
+            &params,
+            &energy_conversion,
+            &override_table,
+            &hydros,
+            &stage_to_season,
+            &stage_ids,
+            &one_block_per_stage(n_stages),
+            1_000_000.0,
+        )
+        .unwrap();
+
+        let v_lo = hydros[0].min_storage_hm3;
+        let v_hi = hydros[0].max_storage_hm3;
+        let pct = 0.25_f64;
+        let expected = pct * (v_hi - v_lo);
+        let rel_tol = 1e-9 * expected.abs().max(1.0);
+
+        let max_stored_energy = table.get(EntityId(0), t, 0);
+        let normalized_integrated = pct * max_stored_energy / int_rho;
+        assert!(
+            (normalized_integrated - expected).abs() <= rel_tol,
+            "normalized bound on the integrated grid: got {normalized_integrated}, expected {expected}"
         );
     }
 }

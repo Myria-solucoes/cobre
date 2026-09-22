@@ -18,7 +18,9 @@
 //! | 13 | *(retired — number never reused)* | |
 
 use chrono::NaiveDate;
-use cobre_core::{BlockMode, EntityId, Hydro, window_period_overlaps};
+use cobre_core::{
+    BlockMode, EntityId, Hydro, window_period_reach_depth, window_reaches_any_period,
+};
 
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 
@@ -90,14 +92,12 @@ fn hydro_not_yet_entered(hydro: &Hydro, stage_id: i32) -> bool {
 }
 
 /// Deepest future stage a release anchored at `anchor` reaches on the study
-/// stage clock: the same [`window_period_overlaps`] overlap
+/// stage clock: the same [`window_period_reach_depth`] sweep
 /// [`check_horizon_inertness`] already reuses, restricted to `anchor`'s own
 /// remaining calendar so a horizon-truncated arrival never overstates depth.
 fn arrival_depth(t: f64, anchor: usize, study_durations: &[f64]) -> usize {
     let future = &study_durations[anchor..];
-    window_period_overlaps(t, future[0], future)
-        .len()
-        .saturating_sub(1)
+    window_period_reach_depth(t, future[0], future)
 }
 
 /// Row 12: rejects a declared arc that releases while its downstream has not
@@ -315,14 +315,14 @@ fn check_negligible_ratio(
     );
 }
 
-/// Row 3b: `t_v` exceeding the remaining study horizon at some stage — the
+/// Row 4: `t_v` exceeding the remaining study horizon at some stage — the
 /// arc's release never arrives before the horizon ends from that stage
-/// onward. Routed through [`window_period_overlaps`] (the one shared overlap
-/// engine every travel-time/lag computation in this feature reuses) rather
-/// than a hand-rolled remaining-hours sum, so a future change to the arrival
-/// window's definition cannot silently diverge this check from the rest of
-/// the feature. Sizing stays safe (depth is capped by `n_stages - t`), so
-/// this is an advisory, never an error.
+/// onward. Routed through [`window_reaches_any_period`] (sharing the same
+/// overlap sweep [`arrival_depth`] reuses via [`window_period_reach_depth`])
+/// rather than a hand-rolled remaining-hours sum, so a future change to the
+/// arrival window's definition cannot silently diverge this check from the
+/// rest of the feature. Sizing stays safe (depth is capped by `n_stages -
+/// t`), so this is an advisory, never an error.
 fn check_horizon_inertness(
     hydro_id: i32,
     t: f64,
@@ -331,7 +331,7 @@ fn check_horizon_inertness(
 ) {
     for stage_t in 0..study_durations.len() {
         let future = &study_durations[stage_t..];
-        if !window_period_overlaps(t, future[0], future).is_empty() {
+        if window_reaches_any_period(t, future[0], future) {
             continue;
         }
         ctx.add_warning(
@@ -449,9 +449,9 @@ fn check_defluence_coverage(
     clippy::cast_sign_loss
 )]
 mod tests {
-    use super::super::test_support::*;
     use super::*;
     use crate::stages::StagesData;
+    use crate::test_support::*;
     use cobre_core::entities::Hydro;
     use cobre_core::temporal::{Block, PolicyGraphType, Stage};
     use cobre_core::{EntityId, HorizonGraph, HydroPastDefluence};
@@ -497,7 +497,7 @@ mod tests {
             openings_declared: std::collections::HashSet::new(),
             stages,
             policy_graph: HorizonGraph {
-                stage_discount_rate_overrides: std::collections::HashMap::new(),
+                stage_discount_rate_overrides: std::collections::BTreeMap::new(),
                 graph_type: PolicyGraphType::FiniteHorizon,
                 annual_discount_rate: 0.06,
                 transitions: vec![],
@@ -674,7 +674,7 @@ mod tests {
         );
     }
 
-    // ── Row 3b: horizon-inertness advisory ────────────────────────────────────
+    // ── Row 4: horizon-inertness advisory ─────────────────────────────────────
 
     #[test]
     fn test_travel_time_exceeds_tail_horizon_emits_advisory() {

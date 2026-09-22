@@ -133,7 +133,6 @@ impl StudySetup {
                 cut_selection: self.cut_management.cut_selection.clone(),
                 budget: self.cut_management.budget,
                 cut_activity_tolerance: self.cut_management.cut_activity_tolerance,
-                warm_start_cuts: 0,
                 risk_measures: self.cut_management.risk_measures.clone(),
             },
             events: EventConfig {
@@ -146,6 +145,7 @@ impl StudySetup {
 
         let stage_ctx = StageContext {
             templates: &self.stage_data.stage_templates.templates,
+            state_boxes: &self.stage_data.stage_templates.state_boxes,
             base_rows: &self.stage_data.stage_templates.base_rows,
             geometry_per_stage: &self.stage_data.stage_templates.geometry_per_stage,
             noise_scale: &self.stage_data.stage_templates.noise_scale,
@@ -363,7 +363,6 @@ impl StudySetup {
                 n_state: self.stage_data.state.n_state,
                 // Simulation-only pool: forward-worker scratch fields unused.
                 max_local_fwd: 0,
-                total_forward_passes: 0,
                 noise_dim: 0,
                 n_anticipated: self.stage_data.state.n_anticipated,
                 k_max: self.stage_data.state.k_max,

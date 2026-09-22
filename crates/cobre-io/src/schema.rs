@@ -37,6 +37,9 @@ use crate::{
     },
 };
 
+use std::io;
+use std::path::{Path, PathBuf};
+
 use serde_json::{Error, Value};
 
 /// Generate JSON Schema documents for all user-facing case directory input files.
@@ -45,28 +48,9 @@ use serde_json::{Error, Value};
 /// conventional name of the generated schema file (e.g. `"config.schema.json"`)
 /// and `schema_value` is the JSON Schema as a [`serde_json::Value`].
 ///
-/// The returned `Vec` contains one entry per top-level input file:
-///
-/// | Filename                              | Describes                              |
-/// | ------------------------------------- | -------------------------------------- |
-/// | `config.schema.json`                  | `config.json`                          |
-/// | `buses.schema.json`                   | `system/buses.json`                    |
-/// | `hydros.schema.json`                  | `system/hydros.json`                   |
-/// | `thermals.schema.json`                | `system/thermals.json`                 |
-/// | `lines.schema.json`                   | `system/lines.json`                    |
-/// | `energy_contracts.schema.json`        | `system/energy_contracts.json`         |
-/// | `non_controllable_sources.schema.json`| `system/non_controllable_sources.json` |
-/// | `pumping_stations.schema.json`        | `system/pumping_stations.json`         |
-/// | `stages.schema.json`                  | `stages.json`                          |
-/// | `penalties.schema.json`               | `penalties.json`                       |
-/// | `generic_constraints.schema.json`     | `constraints/generic_constraints.json` |
-/// | `load_factors.schema.json`            | `scenarios/load_factors.json`          |
-/// | `non_controllable_factors.schema.json`| `scenarios/non_controllable_factors.json` |
-/// | `correlation.schema.json`             | `scenarios/correlation.json`           |
-/// | `initial_conditions.schema.json`      | `initial_conditions.json`              |
-/// | `post_study_stages.schema.json`       | `post_study_stages.json`               |
-/// | `production_models.schema.json`       | `system/hydro_production_models.json`  |
-/// | `generic_parameters.schema.json`      | `constraints/generic_parameters.json`  |
+/// Covers all user-facing case directory inputs: configuration, system entities,
+/// stages, penalties, constraints, scenarios, initial conditions, post-study
+/// stages, and extensions.
 ///
 /// # Errors
 ///
@@ -150,6 +134,73 @@ pub fn generate_schemas() -> Result<Vec<(String, Value)>, Error> {
             Ok((name.to_string(), value))
         })
         .collect()
+}
+
+/// Errors from [`export_schemas`], distinguishing a [`generate_schemas`] failure
+/// from a filesystem or per-file serialization failure on the write path, so a
+/// caller can route each to a different error class.
+#[derive(Debug, thiserror::Error)]
+pub enum SchemaExportError {
+    /// [`generate_schemas`] failed to produce a schema value.
+    #[error("schema generation failed: {0}")]
+    Generation(#[source] Error),
+
+    /// A generated schema value could not be serialized to JSON text.
+    #[error("serialization error for schema {filename}: {source}")]
+    Serialization {
+        /// Name of the schema file being serialized.
+        filename: String,
+        /// Underlying serialization error.
+        source: Error,
+    },
+
+    /// The output directory could not be created or a schema file could not be written.
+    #[error("I/O error exporting schema to {path}: {source}")]
+    Io {
+        /// Path to the directory or file involved in the failure.
+        path: PathBuf,
+        /// Underlying I/O error.
+        source: io::Error,
+    },
+}
+
+impl SchemaExportError {
+    /// Construct a [`SchemaExportError::Io`] with path context.
+    pub fn io(path: impl AsRef<Path>, source: io::Error) -> Self {
+        Self::Io {
+            path: path.as_ref().to_path_buf(),
+            source,
+        }
+    }
+}
+
+/// Generate JSON Schema documents and write them to `output_dir`, creating it
+/// if it does not exist. Returns the number of files written.
+///
+/// # Errors
+///
+/// Returns [`SchemaExportError::Generation`] if schema generation fails, or
+/// [`SchemaExportError::Io`] if the output directory cannot be created, a
+/// schema fails to serialize, or a file write fails.
+pub fn export_schemas(output_dir: &Path) -> Result<usize, SchemaExportError> {
+    std::fs::create_dir_all(output_dir)
+        .map_err(|source| SchemaExportError::io(output_dir, source))?;
+
+    let schemas = generate_schemas().map_err(SchemaExportError::Generation)?;
+    let count = schemas.len();
+
+    for (filename, value) in schemas {
+        let dest = output_dir.join(&filename);
+        let content = serde_json::to_string_pretty(&value).map_err(|source| {
+            SchemaExportError::Serialization {
+                filename: filename.clone(),
+                source,
+            }
+        })?;
+        std::fs::write(&dest, content).map_err(|source| SchemaExportError::io(&dest, source))?;
+    }
+
+    Ok(count)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -281,5 +332,37 @@ mod tests {
                 "expected schema '{name}' not found; got: {names:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_export_schemas_writes_all_files_as_valid_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let output_dir = dir.path();
+
+        let count = export_schemas(output_dir).unwrap();
+
+        let entries: Vec<_> = std::fs::read_dir(output_dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(count, entries.len());
+        assert_eq!(count, generate_schemas().unwrap().len());
+
+        for entry in &entries {
+            let content = std::fs::read_to_string(entry).unwrap();
+            let parsed: Value = serde_json::from_str(&content).unwrap();
+            assert!(parsed.is_object(), "schema for {entry:?} must be an object");
+        }
+    }
+
+    #[test]
+    fn test_export_schemas_creates_missing_nested_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("nested").join("schemas");
+
+        let count = export_schemas(&nested).unwrap();
+
+        assert!(nested.is_dir());
+        assert!(count > 0);
     }
 }

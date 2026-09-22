@@ -42,7 +42,6 @@ use cobre_sddp::{StudySetup, hydro_models::prepare_hydro_models, setup::prepare_
 #[cfg(feature = "highs")]
 use cobre_solver::highs::HighsSolver;
 
-/// Iteration cap for the probe.
 #[cfg(feature = "highs")]
 const PROBE_MAX_ITERATIONS: u32 = 1;
 
@@ -69,7 +68,6 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Drive the single-iteration probe.
 #[cfg(feature = "highs")]
 fn run_probe(config_path: &Path) -> Result<(), ExitCode> {
     let case_dir = match config_path.parent() {
@@ -96,8 +94,7 @@ fn run_probe(config_path: &Path) -> Result<(), ExitCode> {
         ExitCode::from(2)
     })?;
 
-    // Override the stopping rule (not `loop_params.max_iterations` post-construction)
-    // so the FCF cut pool is sized for one iteration's cuts, not the full budget.
+    // FCF pools size from stopping rules, so override here for one-iteration sizing.
     config.training.stopping_rules = Some(vec![StoppingRuleConfig::IterationLimit {
         limit: PROBE_MAX_ITERATIONS,
     }]);
@@ -127,13 +124,13 @@ fn run_probe(config_path: &Path) -> Result<(), ExitCode> {
         ExitCode::from(1)
     })?;
 
-    let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models).map_err(|e| {
-        eprintln!("error: StudySetup::new failed: {e}");
-        ExitCode::from(1)
-    })?;
+    let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
+        .map_err(|e| {
+            eprintln!("error: StudySetup::new failed: {e}");
+            ExitCode::from(1)
+        })?;
 
-    // Redundant with the stopping-rule cap above, guarding any path that reads
-    // max_iterations directly.
+    // Guards direct reads of max_iterations.
     setup.loop_params.max_iterations = u64::from(PROBE_MAX_ITERATIONS);
 
     let comm = LocalBackend;
@@ -189,12 +186,8 @@ fn print_pool_report(setup: &StudySetup) -> PoolReport {
         let k = pool.populated();
         let a = pool.active_count();
         println!("stage={t} populated_count={k} active_count={a}");
-        if k > max_k {
-            max_k = k;
-        }
-        if k < min_k {
-            min_k = k;
-        }
+        max_k = max_k.max(k);
+        min_k = min_k.min(k);
         total_k = total_k.saturating_add(k as u64);
     }
 
@@ -205,11 +198,10 @@ fn print_pool_report(setup: &StudySetup) -> PoolReport {
         return PoolReport::EmptyPools;
     }
 
-    // Non-zero divisor: the max_K == 0 branch above already returned if empty.
     let n_stages = pools.len() as u64;
     #[allow(clippy::cast_precision_loss)]
     let mean_k = total_k as f64 / n_stages as f64;
-    // Maps the unchanged usize::MAX sentinel to 0 (unreachable here, kept defensive).
+    // Defensive: maps the init sentinel to 0.
     let min_k_out = if min_k == usize::MAX { 0 } else { min_k };
 
     println!("summary D={d} M={m} max_K={max_k} mean_K={mean_k:.2} min_K={min_k_out}");

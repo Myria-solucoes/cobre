@@ -3,8 +3,8 @@
 //! Shared data model for the [Cobre](https://github.com/cobre-rs/cobre) power systems ecosystem.
 //!
 //! This crate defines the fundamental types used across all Cobre tools:
-//! buses, branches, generators (hydro, thermal, renewable), loads, network
-//! topology, and the top-level [`system`] struct. A power system defined with
+//! buses, branches, generators (hydro, thermal, renewable), loads, and the
+//! top-level [`system`] struct. A power system defined with
 //! `cobre-core` types can be used for power flow analysis, optimization, dynamic
 //! simulation, and any other analysis procedure in the ecosystem.
 //!
@@ -47,10 +47,10 @@ pub mod error;
 pub mod model;
 pub mod stats;
 pub mod system;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 pub mod topology;
 
-// Crate-root module aliases so `cobre_core::<module>::Symbol` paths resolve for
-// external consumers.
 pub use model::{parameters, penalty, resolved, scenario, temporal};
 
 pub use constraints::{generic_constraint, initial_conditions, training_event};
@@ -86,8 +86,8 @@ pub use model::post_study::{PostStudyStage, PostStudyStages, PostStudyThermalBou
 pub use model::resolved::{
     BlockBoundsCountsSpec, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
     ContractBlockBounds, ContractBlockOverride, HydroBlockBounds, HydroBlockOverride,
-    HydroStageBounds, HydroStagePenalties, HydroUnitGroupBoundsCountsSpec, HydroUnitGroupOverride,
-    LineBlockBounds, LineBlockOverride, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
+    HydroStageBounds, HydroUnitGroupBoundsCountsSpec, HydroUnitGroupOverride, LineBlockBounds,
+    LineBlockOverride, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
     PenaltiesDefaults, PumpingBlockBounds, PumpingBlockOverride, ResolvedBlockBounds,
     ResolvedBounds, ResolvedGenericConstraintBounds, ResolvedHydroUnitGroupBounds,
     ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties,
@@ -103,7 +103,8 @@ pub use model::temporal::{
     Block, BlockMode, CalendarMonth, Node, NoiseMethod, PolicyGraphType, ScenarioSourceConfig,
     SeasonCycleType, SeasonDefinition, SeasonMap, Stage, StageId, StageRiskConfig,
     StageStateConfig, StudyPos, Transition, month_of, window_period_overlaps,
+    window_period_reach_depth, window_reaches_any_period,
 };
 pub use stats::welford::WelfordAccumulator;
 pub use system::{System, SystemBuilder};
-pub use topology::{BusGenerators, BusLineConnection, BusLoads, CascadeTopology, NetworkTopology};
+pub use topology::CascadeTopology;

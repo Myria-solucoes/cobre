@@ -24,11 +24,23 @@ pub const CLP_STATUS_STOPPED: i32 = 3;
 /// `Clp_status` == 4 — stopped due to errors.
 pub const CLP_STATUS_ERRORS: i32 = 4;
 
-// Per-element basis status codes (`Clp_getColumnStatus` / `Clp_getRowStatus`,
-// per `ClpSimplex.hpp`): 0 free, 1 basic, 2 at-upper, 3 at-lower, 4 superbasic,
-// 5 fixed. These are round-tripped verbatim as raw `i32` (see `ClpSolver`'s
-// basis capture/install paths) and never compared against named constants, so
-// no symbolic definitions are kept here.
+// ============================================================
+// CLP per-element basis-status codes (`Clp_getColumnStatus` /
+// `Clp_getRowStatus`, per `ClpSimplex.hpp`)
+// ============================================================
+
+/// `ClpSimplex.hpp` status `0` — free (superbasic at value zero).
+pub const CLP_BASIS_FREE: i32 = 0;
+/// `ClpSimplex.hpp` status `1` — basic.
+pub const CLP_BASIS_BASIC: i32 = 1;
+/// `ClpSimplex.hpp` status `2` — at its upper bound (nonbasic).
+pub const CLP_BASIS_AT_UPPER: i32 = 2;
+/// `ClpSimplex.hpp` status `3` — at its lower bound (nonbasic).
+pub const CLP_BASIS_AT_LOWER: i32 = 3;
+/// `ClpSimplex.hpp` status `4` — superbasic (nonbasic, at neither bound).
+pub const CLP_BASIS_SUPERBASIC: i32 = 4;
+/// `ClpSimplex.hpp` status `5` — fixed (nonbasic, lower bound == upper bound).
+pub const CLP_BASIS_FIXED: i32 = 5;
 
 unsafe extern "C" {
     // ============================================================
@@ -44,8 +56,7 @@ unsafe extern "C" {
     pub fn cobre_clp_destroy(model: *mut c_void);
 
     /// Set the model's logging verbosity. Wraps `Clp_setLogLevel()`.
-    /// Level `0` is silent; cobre applies it at construction so CLP does not
-    /// print per-solve progress to stdout (mirrors `HiGHS` `output_flag=0`).
+    /// Level `0` is silent.
     pub fn cobre_clp_set_log_level(model: *mut c_void, value: int32_t);
 
     // ============================================================
@@ -70,12 +81,6 @@ unsafe extern "C" {
 
     // ============================================================
     // Incremental Mutation
-    //
-    // These mutate a loaded model in place (preserving CLP's factorization and
-    // basis across the change) instead of rebuilding it. The C wrapper owns the
-    // ±IEEE-infinity → ±COIN_DBL_MAX bound translation, so the bound slices are
-    // forwarded verbatim. `row_starts`/`columns` are `*const i32`, matching the
-    // `CoinBigIndex == int` build asserted at compile time in the C wrapper.
     // ============================================================
 
     /// Append `number` constraint rows from row-major (CSR) data.
@@ -219,12 +224,6 @@ unsafe extern "C" {
 
     // ============================================================
     // C++ class-only knobs (implemented in clp_wrapper_cpp.cpp)
-    //
-    // These reach methods that exist only on the C++ `ClpSimplex` class and are
-    // not in the CLP C interface: dual-steepest-edge pricing, factorization
-    // frequency, and the hot-start snapshot/restore trio. The `save_stuff` token
-    // is CLP-owned and kept opaque on the Rust side — never dereferenced, always
-    // paired (mark/unmark) on the same model instance.
     // ============================================================
 
     /// Select dual-steepest-edge pricing. Wraps
@@ -246,38 +245,6 @@ unsafe extern "C" {
     /// `cobre_clp_create`.
     pub fn cobre_clp_set_factorization_frequency(model: *mut c_void, value: int32_t);
 
-    /// Snapshot the model for hot-started re-solves. Wraps
-    /// `ClpSimplex::markHotStart` and returns the opaque CLP-allocated
-    /// `saveStuff` token.
-    ///
-    /// # Safety
-    ///
-    /// `model` must be a valid, non-null CLP model pointer with a model loaded.
-    /// The returned token is CLP-owned; keep it opaque and release it with
-    /// `cobre_clp_unmark_hot_start` on the same `model`.
-    pub fn cobre_clp_mark_hot_start(model: *mut c_void) -> *mut c_void;
-
-    /// Re-solve the model from the hot-start snapshot. Wraps
-    /// `ClpSimplex::solveFromHotStart` and returns the CLP solve status int
-    /// (0 = optimal; same space as `cobre_clp_status`).
-    ///
-    /// # Safety
-    ///
-    /// `model` must be a valid, non-null CLP model pointer. `save_stuff` must be
-    /// a non-null token from a prior `cobre_clp_mark_hot_start` on this same
-    /// `model`. It is forwarded to CLP unchanged and never dereferenced by Rust.
-    pub fn cobre_clp_solve_from_hot_start(model: *mut c_void, save_stuff: *mut c_void) -> int32_t;
-
-    /// Release a hot-start snapshot, freeing the `saveStuff` token. Wraps
-    /// `ClpSimplex::unmarkHotStart`.
-    ///
-    /// # Safety
-    ///
-    /// `model` must be a valid, non-null CLP model pointer. `save_stuff` must be
-    /// a non-null token from a prior `cobre_clp_mark_hot_start` on this same
-    /// `model`; after this call it is freed and must not be reused.
-    pub fn cobre_clp_unmark_hot_start(model: *mut c_void, save_stuff: *mut c_void);
-
     // ============================================================
     // Version query (no instance required)
     // ============================================================
@@ -292,7 +259,7 @@ unsafe extern "C" {
     pub fn cobre_clp_version_release() -> int32_t;
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "clp"))]
 mod tests {
     use super::{
         CLP_STATUS_OPTIMAL, cobre_clp_create, cobre_clp_destroy, cobre_clp_dual,

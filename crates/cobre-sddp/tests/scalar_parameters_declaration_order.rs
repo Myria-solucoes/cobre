@@ -80,7 +80,6 @@ fn scalar_parameters_resolution_is_declaration_order_invariant() {
         &stage_to_season,
         &stage_ids,
         &stage_block_counts,
-        n_stages,
         1_000_000.0,
     )
     .expect("ResolvedParameters builds for order_a");
@@ -92,7 +91,6 @@ fn scalar_parameters_resolution_is_declaration_order_invariant() {
         &stage_to_season,
         &stage_ids,
         &stage_block_counts,
-        n_stages,
         1_000_000.0,
     )
     .expect("ResolvedParameters builds for order_b");

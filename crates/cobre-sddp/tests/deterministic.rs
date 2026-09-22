@@ -21,7 +21,10 @@ use std::sync::mpsc;
 
 use cobre_core::scenario::ScenarioSource;
 use cobre_core::{BlockMode, EntityId};
-use cobre_io::{PolicyCutRecord, StageCutsPayload, write_policy_checkpoint};
+use cobre_io::{
+    PolicyCutRecord, STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, StageCutsPayload,
+    write_policy_checkpoint,
+};
 use cobre_sddp::{
     SimulationWeighting, StudySetup, aggregate_simulation, hydro_models::prepare_hydro_models,
     lead_time::resolve_spread, setup::prepare_stochastic,
@@ -177,10 +180,10 @@ fn run_with_simulation(
 }
 
 fn assert_cost(actual: f64, expected: f64, tolerance: f64, case_name: &str) {
-    let diff = (actual - expected).abs();
     assert!(
-        diff <= tolerance,
-        "{case_name}: expected cost {expected}, got {actual} (diff={diff} > tolerance={tolerance})"
+        (actual - expected).abs() <= tolerance,
+        "{case_name}: expected cost {expected}, got {actual} (diff={} > tolerance={tolerance})",
+        (actual - expected).abs()
     );
 }
 
@@ -706,7 +709,7 @@ fn d07_fpha_computed() {
 
 /// Conversion factor from hm³·MW/(m³/s) to MWh (= 10⁶ / 3600).
 ///
-/// `stored_energy_mwh = (volume_hm3 − V_min) × ρ_acum × ENERGY_FACTOR`
+/// `stored_energy_mwh = (volume_hm3 − V_min) × ρ_acum_integrated × ENERGY_FACTOR`
 const ENERGY_FACTOR: f64 = 1.0e6 / 3600.0;
 
 /// Expected `ρ_eq` and `ρ_acum` for D02 (single hydro, `constant_productivity = 1.0`,
@@ -753,7 +756,9 @@ const D03_H1_V_INIT: f64 = 50.0;
 /// Verify the natural-inflow-energy and stored-energy columns in
 /// `simulation/hydros` for D02 and D03. Both use `ConstantProductivity` hydros
 /// (bypassing the FPHA gate), so `ρ_eq` and `ρ_acum` are directly computable
-/// from `hydros.json` without running the LP.
+/// from `hydros.json` without running the LP. Neither deck declares VHA geometry,
+/// so the integrated cascade grid `stored_energy_*_mwh` reads is bit-identical to
+/// `ρ_acum` and the `*_RHO_ACUM` constants serve both.
 #[cfg_attr(
     not(feature = "slow-tests"),
     ignore = "slow: run with --features slow-tests"
@@ -804,7 +809,7 @@ fn d_case_energy_outputs() {
             );
 
             let expected_earm = (h.storage_initial_hm3 - V_MIN)
-                * h.accumulated_productivity_mw_per_m3s
+                * h.integrated_accumulated_productivity_mw_per_m3s
                 * ENERGY_FACTOR;
             let diff_earm = (h.stored_energy_initial_mwh - expected_earm).abs();
             assert!(
@@ -907,7 +912,7 @@ fn d_case_energy_outputs() {
                 );
 
                 let expected_earm = (h.storage_initial_hm3 - V_MIN)
-                    * h.accumulated_productivity_mw_per_m3s
+                    * h.integrated_accumulated_productivity_mw_per_m3s
                     * ENERGY_FACTOR;
                 let diff_earm = (h.stored_energy_initial_mwh - expected_earm).abs();
                 assert!(
@@ -1367,8 +1372,14 @@ fn d12_checkpoint_round_trip() {
     config_with_sim.simulation.enabled = true;
     config_with_sim.simulation.selection = Some(SimulationSelection::Sampled { num_scenarios: 1 });
 
-    let mut setup = StudySetup::new(&system, &config_with_sim, stochastic, hydro_models)
-        .expect("StudySetup must build");
+    let mut setup = StudySetup::new(
+        &system,
+        &config_with_sim,
+        stochastic,
+        hydro_models,
+        Vec::new(),
+    )
+    .expect("StudySetup must build");
 
     let comm = StubComm;
     let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
@@ -1442,6 +1453,7 @@ fn d12_checkpoint_round_trip() {
             cost_scale_factor: 1_000_000.0,
             node_id: i32::try_from(stage_idx).unwrap_or(-1),
             graph_stage_id: -1,
+            priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
         })
         .collect();
 
@@ -3494,8 +3506,8 @@ fn d29_weekly_par_noise_sharing() {
     let hydro_models =
         prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
 
-    let mut setup =
-        StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup must build");
+    let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
+        .expect("StudySetup must build");
 
     let groups = &setup.stage_data.noise_group_ids;
     assert_eq!(groups.len(), 4, "expected 4 study stages");
@@ -3601,8 +3613,8 @@ fn d30_multi_resolution_loads_and_trains() {
     let hydro_models =
         prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
 
-    let mut setup =
-        StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup must build");
+    let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
+        .expect("StudySetup must build");
 
     let comm = StubComm;
     let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
@@ -3660,8 +3672,14 @@ fn frozen_vs_fallback_simulation_costs_are_identical() {
     config_with_sim.simulation.enabled = true;
     config_with_sim.simulation.selection = Some(SimulationSelection::Sampled { num_scenarios: 4 });
 
-    let mut setup = StudySetup::new(&system, &config_with_sim, stochastic, hydro_models)
-        .expect("StudySetup must build");
+    let mut setup = StudySetup::new(
+        &system,
+        &config_with_sim,
+        stochastic,
+        hydro_models,
+        Vec::new(),
+    )
+    .expect("StudySetup must build");
 
     let comm = StubComm;
     let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
@@ -5934,9 +5952,9 @@ mod chronological_telescoping {
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, DeficitSegment,
         EntityId, HydroBlockBounds, HydroGenerationModel, HydroPenalties, HydroStageBounds,
-        HydroStagePenalties, HydroStorage, InitialConditions, LineBlockBounds, LineStagePenalties,
-        NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds,
-        ResolvedBounds, ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
+        HydroStorage, InitialConditions, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
+        PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
+        ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
     };
     use cobre_io::config::{
         Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
@@ -5948,7 +5966,7 @@ mod chronological_telescoping {
 
     use cobre_io::{PolicyCheckpoint, read_policy_checkpoint};
     use cobre_sddp::FutureCostFunction;
-    use cobre_sddp::orchestration::{CheckpointParams, write_checkpoint};
+    use cobre_sddp::policy::orchestration::{CheckpointParams, write_checkpoint};
     use cobre_sddp::policy_export::build_stage_cut_records;
     use tempfile::TempDir;
 
@@ -5961,8 +5979,8 @@ mod chronological_telescoping {
     const N_ITERATIONS: u32 = 12;
     const HYDRO_ID: i32 = 1;
 
-    fn zero_hydro_stage_penalties() -> HydroStagePenalties {
-        HydroStagePenalties {
+    fn zero_hydro_stage_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.0,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -6421,7 +6439,9 @@ mod chronological_telescoping {
     ///
     /// Returns the trained `StudySetup` (its `fcf` is the source of the written
     /// cut records), the read-back checkpoint, and the `TempDir` whose drop
-    /// deletes the on-disk policy — kept alive by returning it.
+    /// deletes the on-disk policy — kept alive by returning it. Also asserts the
+    /// season descriptor round-trips as the absent default: `build_system`
+    /// declares no `season_map`.
     fn train_and_checkpoint(
         train_mode: BlockMode,
     ) -> (cobre_sddp::StudySetup, PolicyCheckpoint, TempDir) {
@@ -6453,6 +6473,14 @@ mod chronological_telescoping {
             .expect("write_checkpoint must succeed");
         let checkpoint =
             read_policy_checkpoint(policy_dir.path()).expect("read_policy_checkpoint must succeed");
+
+        assert_eq!(
+            checkpoint.metadata.season_manifest.cycle_code,
+            cobre_io::SEASON_CYCLE_CODE_ABSENT,
+            "build_system declares no season map; the written descriptor must round-trip absent"
+        );
+        assert_eq!(checkpoint.metadata.season_manifest.n_seasons, 0);
+        assert!(checkpoint.metadata.season_manifest.hydro_orders.is_empty());
 
         (setup, checkpoint, policy_dir)
     }
@@ -6601,6 +6629,1141 @@ mod chronological_telescoping {
     }
 }
 
+/// A study whose `SeasonMap` and per-season-fitted `InflowModel`s are actually
+/// populated, checkpointed through the real producer path
+/// ([`orchestration::write_checkpoint`], never `write_policy_checkpoint`
+/// directly) and read back — the round trip `chronological_telescoping`'s
+/// `train_and_checkpoint` deliberately does not cover, since its fixture
+/// declares no season map and always round-trips the absent descriptor.
+mod season_descriptor_checkpoint_round_trip {
+    use cobre_core::scenario::{InflowModel, LoadModel};
+    use cobre_core::temporal::{
+        Block, BlockMode, NoiseMethod, ScenarioSourceConfig, SeasonCycleType, SeasonDefinition,
+        SeasonMap, Stage, StageRiskConfig, StageStateConfig,
+    };
+    use cobre_core::{
+        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, DeficitSegment,
+        EntityId, HorizonGraph, HydroBlockBounds, HydroGenerationModel, HydroPenalties,
+        HydroStageBounds, HydroStorage, InitialConditions, LineBlockBounds, LineStagePenalties,
+        NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds,
+        ResolvedBounds, ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
+    };
+    use cobre_io::config::{
+        Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
+        InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
+        RowSelectionConfig, SimulationConfig as IoSimulationConfig, StoppingRuleConfig,
+        TrainingConfig, TrainingSelection, TrainingSolverConfig, UpperBoundEvaluationConfig,
+    };
+    use cobre_solver::ActiveSolver;
+
+    use cobre_io::{SEASON_CYCLE_CODE_MONTHLY, read_policy_checkpoint};
+    use cobre_sddp::policy::orchestration::{CheckpointParams, write_checkpoint};
+    use tempfile::TempDir;
+
+    use super::common::builders::{
+        BusSpec, HydroSpec, StageSpec, make_bus, make_hydro, make_stage,
+    };
+    use super::common::{StubComm, build_setup_in_code};
+
+    const N_STAGES: usize = 3;
+    const N_ITERATIONS: u32 = 2;
+    const N_SEASONS: usize = 12;
+    const BUS_ID: i32 = 1;
+    const HYDRO_A_ID: i32 = 1;
+    const HYDRO_B_ID: i32 = 2;
+
+    // Dense season ordinals the three stages carry (sparse across the 12-month
+    // cycle, so most `orders` slots must round-trip as the missing-pair zero).
+    const STAGE_SEASON_IDS: [usize; N_STAGES] = [0, 5, 11];
+
+    fn hydro_penalties() -> HydroPenalties {
+        HydroPenalties {
+            spillage_cost: 0.01,
+            diversion_cost: 0.0,
+            turbined_cost: 0.0,
+            storage_violation_below_cost: 500.0,
+            filling_target_violation_cost: 0.0,
+            turbined_violation_below_cost: 0.0,
+            outflow_violation_below_cost: 0.0,
+            outflow_violation_above_cost: 0.0,
+            generation_violation_below_cost: 0.0,
+            evaporation_violation_cost: 0.0,
+            water_withdrawal_violation_cost: 0.0,
+            water_withdrawal_violation_pos_cost: 0.0,
+            water_withdrawal_violation_neg_cost: 0.0,
+            evaporation_violation_pos_cost: 0.0,
+            evaporation_violation_neg_cost: 0.0,
+            inflow_nonnegativity_cost: 1000.0,
+        }
+    }
+
+    fn monthly_season_map() -> SeasonMap {
+        let seasons = (0..N_SEASONS)
+            .map(|id| SeasonDefinition {
+                id,
+                label: format!("Month{}", id + 1),
+                month_start: u32::try_from(id + 1).expect("month fits u32"),
+                day_start: None,
+                month_end: None,
+                day_end: None,
+            })
+            .collect();
+        SeasonMap {
+            cycle_type: SeasonCycleType::Monthly,
+            seasons,
+        }
+    }
+
+    /// Per-`(hydro, stage)` AR-coefficient vectors whose lengths are the
+    /// per-season orders the round trip must recover: H1 is `[1, 1, 2]` and H2
+    /// is `[2, 1, 1]` at dense ordinals `[0, 5, 11]` (`STAGE_SEASON_IDS`), `0`
+    /// everywhere else.
+    fn ar_coefficients(hydro_id: i32, stage: usize) -> Vec<f64> {
+        match (hydro_id, stage) {
+            (HYDRO_A_ID, 0) => vec![0.3],
+            (HYDRO_A_ID, 1) => vec![0.25],
+            (HYDRO_A_ID, 2) => vec![0.2, 0.1],
+            (HYDRO_B_ID, 0) => vec![0.4, 0.05],
+            (HYDRO_B_ID, 1) => vec![0.35],
+            (HYDRO_B_ID, 2) => vec![0.15],
+            _ => unreachable!("only two hydros and three stages are fitted"),
+        }
+    }
+
+    fn build_system() -> cobre_core::System {
+        use chrono::NaiveDate;
+
+        let bus = make_bus(
+            EntityId(BUS_ID),
+            BusSpec {
+                name: "B1".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                deficit_segments: vec![DeficitSegment {
+                    depth_mw: None,
+                    cost_per_mwh: 500.0,
+                }],
+                excess_cost: 0.0,
+            },
+        );
+
+        let make_fitted_hydro = |id: i32, name: &str| {
+            make_hydro(
+                EntityId(id),
+                HydroSpec {
+                    name: name.to_string(),
+                    operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                    bus_id: EntityId(BUS_ID),
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 300.0,
+                    max_turbined_m3s: 100.0,
+                    generation_model: HydroGenerationModel::ConstantProductivity,
+                    specific_productivity_mw_per_m3s_per_m: Some(0.5),
+                    max_generation_mw: 250.0,
+                    penalties: hydro_penalties(),
+                    ..Default::default()
+                },
+            )
+        };
+
+        let stages: Vec<Stage> = (0..N_STAGES)
+            .map(|i| {
+                make_stage(
+                    i,
+                    StageSpec {
+                        start_date: NaiveDate::from_ymd_opt(2024, (i % 12 + 1) as u32, 1).unwrap(),
+                        end_date: NaiveDate::from_ymd_opt(2024, ((i % 12 + 1) % 12 + 1) as u32, 1)
+                            .unwrap(),
+                        season_id: Some(STAGE_SEASON_IDS[i]),
+                        blocks: vec![Block {
+                            index: 0,
+                            name: "S".to_string(),
+                            duration_hours: 744.0,
+                        }],
+                        block_mode: BlockMode::Parallel,
+                        state_config: StageStateConfig {
+                            storage: true,
+                            inflow_lags: true,
+                        },
+                        risk_config: StageRiskConfig::Expectation,
+                        scenario_config: ScenarioSourceConfig {
+                            branching_factor: 1,
+                            noise_method: NoiseMethod::Saa,
+                        },
+                    },
+                )
+            })
+            .collect();
+
+        let inflow_models: Vec<InflowModel> = [HYDRO_A_ID, HYDRO_B_ID]
+            .into_iter()
+            .flat_map(|hid| {
+                (0..N_STAGES).map(move |i| InflowModel {
+                    hydro_id: EntityId(hid),
+                    stage_id: i32::try_from(i).expect("stage index fits i32"),
+                    mean_m3s: 80.0,
+                    std_m3s: 20.0,
+                    ar_coefficients: ar_coefficients(hid, i),
+                    residual_std_ratio: 0.8,
+                    annual: None,
+                })
+            })
+            .collect();
+
+        let load_models: Vec<LoadModel> = (0..N_STAGES)
+            .map(|i| LoadModel {
+                bus_id: EntityId(BUS_ID),
+                stage_id: i32::try_from(i).expect("stage index fits i32"),
+                mean_mw: 50.0,
+                std_mw: 0.0,
+            })
+            .collect();
+
+        let default_hydro_bounds = || HydroStageBounds {
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 300.0,
+            filling_min_rate_m3s: 0.0,
+            water_withdrawal_m3s: 0.0,
+        };
+        let default_hydro_bounds_block = || HydroBlockBounds {
+            max_turbined_m3s: 100.0,
+            max_generation_mw: 250.0,
+            ..Default::default()
+        };
+
+        let bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 2,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: N_STAGES,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: default_hydro_bounds(),
+                hydro_block: default_hydro_bounds_block(),
+                thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+                thermal_block: ThermalBlockBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                },
+                line_block: LineBlockBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping_block: PumpingBlockBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract_block: ContractBlockBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 2,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages: N_STAGES,
+            },
+            &PenaltiesDefaults {
+                hydro: hydro_penalties(),
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        let initial_conditions = InitialConditions {
+            storage: vec![
+                HydroStorage {
+                    hydro_id: EntityId(HYDRO_A_ID),
+                    value_hm3: 100.0,
+                },
+                HydroStorage {
+                    hydro_id: EntityId(HYDRO_B_ID),
+                    value_hm3: 100.0,
+                },
+            ],
+            filling_storage: vec![],
+            past_anticipated_commitments: vec![],
+            recent_observations: vec![],
+            past_defluences: vec![],
+        };
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .hydros(vec![
+                make_fitted_hydro(HYDRO_A_ID, "H1"),
+                make_fitted_hydro(HYDRO_B_ID, "H2"),
+            ])
+            .stages(stages)
+            .inflow_models(inflow_models)
+            .load_models(load_models)
+            .bounds(bounds)
+            .penalties(penalties)
+            .initial_conditions(initial_conditions)
+            .policy_graph(HorizonGraph {
+                season_map: Some(monthly_season_map()),
+                ..HorizonGraph::default()
+            })
+            .build()
+            .expect("build_system: valid two-hydro season-fitted study")
+    }
+
+    fn build_config() -> Config {
+        Config {
+            schema: None,
+            modeling: ModelingConfig {
+                inflow_non_negativity: InflowNonNegativityConfig {
+                    method: CfgInflowMethod::None,
+                },
+                cost_scale_factor: None,
+            },
+            training: TrainingConfig {
+                enabled: true,
+                tree_seed: Some(42),
+                stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
+                    limit: N_ITERATIONS,
+                }]),
+                stopping_mode: cobre_io::config::StoppingMode::Any,
+                cut_selection: RowSelectionConfig::default(),
+                solver: TrainingSolverConfig::default(),
+                parallelism: cobre_io::config::ParallelismConfig::default(),
+                scenario_source: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
+            },
+            upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
+            policy: PolicyConfig::default(),
+            simulation: IoSimulationConfig::default(),
+            exports: ExportsConfig::default(),
+            estimation: EstimationConfig::default(),
+        }
+    }
+
+    /// A study with a monthly `SeasonMap` and hydros fitted at per-season
+    /// orders, checkpointed through the real producer path and read back,
+    /// carries `n_seasons == 12` and each hydro's `orders` vector at the
+    /// study's dense season ordinals.
+    #[test]
+    fn checkpoint_round_trip_carries_the_studys_populated_season_descriptor() {
+        let config = build_config();
+        let mut setup = build_setup_in_code(build_system(), &config);
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
+        let outcome = setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("train must not return Err");
+        assert!(
+            outcome.error.is_none(),
+            "training error: {:?}",
+            outcome.error
+        );
+        let result = outcome.result;
+
+        // System is not `Clone`; rebuild the identical study for the checkpoint
+        // writer (`build_system` is deterministic).
+        let system = build_system();
+        let policy_dir = TempDir::new().expect("TempDir::new");
+        let params = CheckpointParams {
+            max_iterations: setup.loop_params.max_iterations,
+            forward_passes: setup.loop_params.forward_passes,
+            seed: setup.loop_params.seed,
+            export_states: config.exports.states,
+        };
+        write_checkpoint(policy_dir.path(), &setup, &system, &result, &params)
+            .expect("write_checkpoint must succeed");
+        let checkpoint =
+            read_policy_checkpoint(policy_dir.path()).expect("read_policy_checkpoint must succeed");
+
+        let manifest = &checkpoint.metadata.season_manifest;
+        assert_eq!(
+            manifest.cycle_code, SEASON_CYCLE_CODE_MONTHLY,
+            "the study declares a monthly SeasonMap"
+        );
+        assert_eq!(manifest.n_seasons, N_SEASONS as u32);
+        assert_eq!(
+            manifest.hydro_orders.len(),
+            2,
+            "both fitted hydros must carry an orders vector"
+        );
+
+        assert_eq!(manifest.hydro_orders[0].hydro_id, HYDRO_A_ID);
+        assert_eq!(manifest.hydro_orders[1].hydro_id, HYDRO_B_ID);
+
+        let mut expected_a = vec![0_u32; N_SEASONS];
+        expected_a[STAGE_SEASON_IDS[0]] = 1;
+        expected_a[STAGE_SEASON_IDS[1]] = 1;
+        expected_a[STAGE_SEASON_IDS[2]] = 2;
+        assert_eq!(
+            manifest.hydro_orders[0].orders, expected_a,
+            "H1's orders must equal its ar_coefficients length at each dense season ordinal, 0 elsewhere"
+        );
+
+        let mut expected_b = vec![0_u32; N_SEASONS];
+        expected_b[STAGE_SEASON_IDS[0]] = 2;
+        expected_b[STAGE_SEASON_IDS[1]] = 1;
+        expected_b[STAGE_SEASON_IDS[2]] = 1;
+        assert_eq!(
+            manifest.hydro_orders[1].orders, expected_b,
+            "H2's orders must equal its ar_coefficients length at each dense season ordinal, 0 elsewhere"
+        );
+    }
+}
+
+/// A study with a monthly `SeasonMap` and inflow-lag state, checkpointed
+/// through the real producer path (`orchestration::write_checkpoint`) and
+/// read back through the real consumer path (`load_boundary_cuts` with
+/// `with_study_seasons`): the producer's own descriptor and the consumer's
+/// own gate must agree end to end, never merely on an in-memory
+/// `SeasonManifest` the test builds itself.
+mod boundary_season_gate_round_trip {
+    use cobre_core::scenario::{InflowModel, LoadModel};
+    use cobre_core::temporal::{
+        Block, BlockMode, NoiseMethod, ScenarioSourceConfig, SeasonCycleType, SeasonDefinition,
+        SeasonMap, Stage, StageRiskConfig, StageStateConfig,
+    };
+    use cobre_core::{
+        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, DeficitSegment,
+        EntityId, HorizonGraph, HydroBlockBounds, HydroGenerationModel, HydroPenalties,
+        HydroStageBounds, HydroStorage, InitialConditions, LineBlockBounds, LineStagePenalties,
+        NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds,
+        ResolvedBounds, ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
+    };
+    use cobre_io::config::{
+        Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
+        InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
+        RowSelectionConfig, SimulationConfig as IoSimulationConfig, StoppingRuleConfig,
+        TrainingConfig, TrainingSelection, TrainingSolverConfig, UpperBoundEvaluationConfig,
+    };
+    use cobre_solver::ActiveSolver;
+
+    use cobre_sddp::policy::orchestration::{
+        CheckpointParams, build_season_manifest, write_checkpoint,
+    };
+    use cobre_sddp::{BoundaryLoadRequest, load_boundary_cuts, study_horizon_end};
+    use tempfile::TempDir;
+
+    use super::common::builders::{
+        BusSpec, HydroSpec, StageSpec, make_bus, make_hydro, make_stage,
+    };
+    use super::common::{StubComm, build_setup_in_code};
+
+    const N_STAGES: usize = 3;
+    const N_ITERATIONS: u32 = 2;
+    const N_SEASONS: usize = 12;
+    const BUS_ID: i32 = 1;
+    const HYDRO_ID: i32 = 1;
+
+    // Dense season ordinals the three stages carry; the terminal stage (index
+    // 2) lands on season 11 and carries a fitted 2-lag AR model, so the
+    // terminal manifest's inflow-lag family is non-empty.
+    const STAGE_SEASON_IDS: [usize; N_STAGES] = [0, 5, 11];
+
+    fn hydro_penalties() -> HydroPenalties {
+        HydroPenalties {
+            spillage_cost: 0.01,
+            diversion_cost: 0.0,
+            turbined_cost: 0.0,
+            storage_violation_below_cost: 500.0,
+            filling_target_violation_cost: 0.0,
+            turbined_violation_below_cost: 0.0,
+            outflow_violation_below_cost: 0.0,
+            outflow_violation_above_cost: 0.0,
+            generation_violation_below_cost: 0.0,
+            evaporation_violation_cost: 0.0,
+            water_withdrawal_violation_cost: 0.0,
+            water_withdrawal_violation_pos_cost: 0.0,
+            water_withdrawal_violation_neg_cost: 0.0,
+            evaporation_violation_pos_cost: 0.0,
+            evaporation_violation_neg_cost: 0.0,
+            inflow_nonnegativity_cost: 1000.0,
+        }
+    }
+
+    fn monthly_season_map() -> SeasonMap {
+        let seasons = (0..N_SEASONS)
+            .map(|id| SeasonDefinition {
+                id,
+                label: format!("Month{}", id + 1),
+                month_start: u32::try_from(id + 1).expect("month fits u32"),
+                day_start: None,
+                month_end: None,
+                day_end: None,
+            })
+            .collect();
+        SeasonMap {
+            cycle_type: SeasonCycleType::Monthly,
+            seasons,
+        }
+    }
+
+    /// The fitted AR-coefficient vector at each stage: order 1 at the first
+    /// two stages, order 2 at the terminal stage (index 2, season 11).
+    fn ar_coefficients(stage: usize) -> Vec<f64> {
+        match stage {
+            0 => vec![0.3],
+            1 => vec![0.25],
+            2 => vec![0.2, 0.1],
+            _ => unreachable!("only three stages are fitted"),
+        }
+    }
+
+    fn build_system() -> cobre_core::System {
+        use chrono::NaiveDate;
+
+        let bus = make_bus(
+            EntityId(BUS_ID),
+            BusSpec {
+                name: "B1".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                deficit_segments: vec![DeficitSegment {
+                    depth_mw: None,
+                    cost_per_mwh: 500.0,
+                }],
+                excess_cost: 0.0,
+            },
+        );
+
+        let hydro = make_hydro(
+            EntityId(HYDRO_ID),
+            HydroSpec {
+                name: "H1".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                bus_id: EntityId(BUS_ID),
+                min_storage_hm3: 0.0,
+                max_storage_hm3: 300.0,
+                max_turbined_m3s: 100.0,
+                generation_model: HydroGenerationModel::ConstantProductivity,
+                specific_productivity_mw_per_m3s_per_m: Some(0.5),
+                max_generation_mw: 250.0,
+                penalties: hydro_penalties(),
+                ..Default::default()
+            },
+        );
+
+        let stages: Vec<Stage> = (0..N_STAGES)
+            .map(|i| {
+                make_stage(
+                    i,
+                    StageSpec {
+                        start_date: NaiveDate::from_ymd_opt(2024, (i % 12 + 1) as u32, 1).unwrap(),
+                        end_date: NaiveDate::from_ymd_opt(2024, ((i % 12 + 1) % 12 + 1) as u32, 1)
+                            .unwrap(),
+                        season_id: Some(STAGE_SEASON_IDS[i]),
+                        blocks: vec![Block {
+                            index: 0,
+                            name: "S".to_string(),
+                            duration_hours: 744.0,
+                        }],
+                        block_mode: BlockMode::Parallel,
+                        state_config: StageStateConfig {
+                            storage: true,
+                            inflow_lags: true,
+                        },
+                        risk_config: StageRiskConfig::Expectation,
+                        scenario_config: ScenarioSourceConfig {
+                            branching_factor: 1,
+                            noise_method: NoiseMethod::Saa,
+                        },
+                    },
+                )
+            })
+            .collect();
+
+        let inflow_models: Vec<InflowModel> = (0..N_STAGES)
+            .map(|i| InflowModel {
+                hydro_id: EntityId(HYDRO_ID),
+                stage_id: i32::try_from(i).expect("stage index fits i32"),
+                mean_m3s: 80.0,
+                std_m3s: 20.0,
+                ar_coefficients: ar_coefficients(i),
+                residual_std_ratio: 0.8,
+                annual: None,
+            })
+            .collect();
+
+        let load_models: Vec<LoadModel> = (0..N_STAGES)
+            .map(|i| LoadModel {
+                bus_id: EntityId(BUS_ID),
+                stage_id: i32::try_from(i).expect("stage index fits i32"),
+                mean_mw: 50.0,
+                std_mw: 0.0,
+            })
+            .collect();
+
+        let default_hydro_bounds = || HydroStageBounds {
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 300.0,
+            filling_min_rate_m3s: 0.0,
+            water_withdrawal_m3s: 0.0,
+        };
+        let default_hydro_bounds_block = || HydroBlockBounds {
+            max_turbined_m3s: 100.0,
+            max_generation_mw: 250.0,
+            ..Default::default()
+        };
+
+        let bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 1,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: N_STAGES,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: default_hydro_bounds(),
+                hydro_block: default_hydro_bounds_block(),
+                thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+                thermal_block: ThermalBlockBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                },
+                line_block: LineBlockBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping_block: PumpingBlockBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract_block: ContractBlockBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 1,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages: N_STAGES,
+            },
+            &PenaltiesDefaults {
+                hydro: hydro_penalties(),
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        let initial_conditions = InitialConditions {
+            storage: vec![HydroStorage {
+                hydro_id: EntityId(HYDRO_ID),
+                value_hm3: 100.0,
+            }],
+            filling_storage: vec![],
+            past_anticipated_commitments: vec![],
+            recent_observations: vec![],
+            past_defluences: vec![],
+        };
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .hydros(vec![hydro])
+            .stages(stages)
+            .inflow_models(inflow_models)
+            .load_models(load_models)
+            .bounds(bounds)
+            .penalties(penalties)
+            .initial_conditions(initial_conditions)
+            .policy_graph(HorizonGraph {
+                season_map: Some(monthly_season_map()),
+                ..HorizonGraph::default()
+            })
+            .build()
+            .expect("build_system: valid one-hydro season-fitted study")
+    }
+
+    fn build_config() -> Config {
+        Config {
+            schema: None,
+            modeling: ModelingConfig {
+                inflow_non_negativity: InflowNonNegativityConfig {
+                    method: CfgInflowMethod::None,
+                },
+                cost_scale_factor: None,
+            },
+            training: TrainingConfig {
+                enabled: true,
+                tree_seed: Some(42),
+                stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
+                    limit: N_ITERATIONS,
+                }]),
+                stopping_mode: cobre_io::config::StoppingMode::Any,
+                cut_selection: RowSelectionConfig::default(),
+                solver: TrainingSolverConfig::default(),
+                parallelism: cobre_io::config::ParallelismConfig::default(),
+                scenario_source: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
+            },
+            upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
+            policy: PolicyConfig::default(),
+            simulation: IoSimulationConfig::default(),
+            exports: ExportsConfig::default(),
+            estimation: EstimationConfig::default(),
+        }
+    }
+
+    /// Trains one study, writes its checkpoint through the real producer
+    /// (`orchestration::write_checkpoint`), then loads it back through the
+    /// real consumer (`load_boundary_cuts`) gated on
+    /// `with_study_seasons(&build_season_manifest(&system))`: the load
+    /// succeeds and the report's `inflow_lag.copy` tally is non-zero — the
+    /// producer's own descriptor and the consumer's own gate agree.
+    #[test]
+    fn boundary_load_accepts_the_studys_own_checkpoint_under_its_own_season_gate() {
+        let config = build_config();
+        let mut setup = build_setup_in_code(build_system(), &config);
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
+        let outcome = setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("train must not return Err");
+        assert!(
+            outcome.error.is_none(),
+            "training error: {:?}",
+            outcome.error
+        );
+        let result = outcome.result;
+
+        // System is not `Clone`; rebuild the identical study for the checkpoint
+        // writer and the boundary-load accessors below (`build_system` is
+        // deterministic).
+        let system = build_system();
+        let policy_dir = TempDir::new().expect("TempDir::new");
+        let params = CheckpointParams {
+            max_iterations: setup.loop_params.max_iterations,
+            forward_passes: setup.loop_params.forward_passes,
+            seed: setup.loop_params.seed,
+            export_states: config.exports.states,
+        };
+        write_checkpoint(policy_dir.path(), &setup, &system, &result, &params)
+            .expect("write_checkpoint must succeed");
+
+        let state_dim = setup.fcf.state_dimension as u32;
+        let current_manifest = setup.build_terminal_entity_manifest(&system);
+        let boundary_date =
+            study_horizon_end(&system).expect("a non-negative stage exists in this study");
+        let study_seasons = build_season_manifest(&system);
+
+        let validated = load_boundary_cuts(
+            &BoundaryLoadRequest::new(
+                policy_dir.path(),
+                boundary_date,
+                state_dim,
+                &current_manifest,
+                setup.stage_data.stage_templates.cost_scale_factor,
+            )
+            .with_study_seasons(&study_seasons),
+        )
+        .expect(
+            "the study's own checkpoint must reconcile against its own season descriptor and \
+             terminal manifest",
+        );
+
+        assert!(
+            validated.report().inflow_lag.copy > 0,
+            "the terminal inflow-lag slot must reconcile by identity Copy: {:?}",
+            validated.report()
+        );
+    }
+}
+
+/// A cascade whose upstream hydro declares a travel-time arc into its
+/// downstream hydro, checkpointed through the real producer path
+/// ([`orchestration::write_checkpoint`], never `write_policy_checkpoint`
+/// directly) and read back: the transit-bucket manifest slot's arrival
+/// interval must match on the checkpoint [`cobre_io::read_policy_checkpoint`]
+/// actually parses, not merely on the in-memory manifest
+/// `build_stage_entity_manifest` produces.
+mod transit_arrival_interval_checkpoint_round_trip {
+    use cobre_core::scenario::{InflowModel, LoadModel};
+    use cobre_core::temporal::{
+        Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
+        StageStateConfig,
+    };
+    use cobre_core::{
+        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, DeficitSegment,
+        EntityId, HydroBlockBounds, HydroGenerationModel, HydroPenalties, HydroStageBounds,
+        HydroStorage, InitialConditions, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
+        PenaltiesCountsSpec, PenaltiesDefaults, PostStudyStage, PostStudyStages,
+        PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder, ThermalBlockBounds,
+        ThermalStageBounds,
+    };
+    use cobre_io::config::{
+        Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
+        InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
+        RowSelectionConfig, SimulationConfig as IoSimulationConfig, StoppingRuleConfig,
+        TrainingConfig, TrainingSelection, TrainingSolverConfig, UpperBoundEvaluationConfig,
+    };
+    use cobre_solver::ActiveSolver;
+
+    use cobre_io::{StageCutsReadResult, StateFamily, read_policy_checkpoint};
+    use cobre_sddp::policy::orchestration::{CheckpointParams, write_checkpoint};
+    use tempfile::TempDir;
+
+    use super::common::builders::{
+        BusSpec, HydroSpec, StageSpec, make_bus, make_hydro, make_stage,
+    };
+    use super::common::{StubComm, build_setup_in_code};
+
+    const N_STAGES: usize = 3;
+    const N_ITERATIONS: u32 = 1;
+    const BUS_ID: i32 = 1;
+    const HYDRO_A_ID: i32 = 1;
+    const HYDRO_B_ID: i32 = 2;
+    const TRAVEL_TIME_HOURS: f64 = 744.0;
+
+    fn hydro_penalties() -> HydroPenalties {
+        HydroPenalties {
+            spillage_cost: 0.01,
+            diversion_cost: 0.0,
+            turbined_cost: 0.0,
+            storage_violation_below_cost: 500.0,
+            filling_target_violation_cost: 0.0,
+            turbined_violation_below_cost: 0.0,
+            outflow_violation_below_cost: 0.0,
+            outflow_violation_above_cost: 0.0,
+            generation_violation_below_cost: 0.0,
+            evaporation_violation_cost: 0.0,
+            water_withdrawal_violation_cost: 0.0,
+            water_withdrawal_violation_pos_cost: 0.0,
+            water_withdrawal_violation_neg_cost: 0.0,
+            evaporation_violation_pos_cost: 0.0,
+            evaporation_violation_neg_cost: 0.0,
+            inflow_nonnegativity_cost: 1000.0,
+        }
+    }
+
+    fn build_system() -> cobre_core::System {
+        use chrono::NaiveDate;
+
+        let bus = make_bus(
+            EntityId(BUS_ID),
+            BusSpec {
+                name: "B1".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                deficit_segments: vec![DeficitSegment {
+                    depth_mw: None,
+                    cost_per_mwh: 500.0,
+                }],
+                excess_cost: 0.0,
+            },
+        );
+
+        let make_cascade_hydro = |id: i32, name: &str, downstream_id: Option<EntityId>| {
+            make_hydro(
+                EntityId(id),
+                HydroSpec {
+                    name: name.to_string(),
+                    operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                    bus_id: EntityId(BUS_ID),
+                    downstream_id,
+                    travel_time_hours: downstream_id.map(|_| TRAVEL_TIME_HOURS),
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 300.0,
+                    max_turbined_m3s: 100.0,
+                    generation_model: HydroGenerationModel::ConstantProductivity,
+                    specific_productivity_mw_per_m3s_per_m: Some(0.5),
+                    max_generation_mw: 250.0,
+                    penalties: hydro_penalties(),
+                    ..Default::default()
+                },
+            )
+        };
+
+        let stages: Vec<Stage> = (0..N_STAGES)
+            .map(|i| {
+                make_stage(
+                    i,
+                    StageSpec {
+                        start_date: NaiveDate::from_ymd_opt(2024, (i % 12 + 1) as u32, 1).unwrap(),
+                        end_date: NaiveDate::from_ymd_opt(2024, ((i % 12 + 1) % 12 + 1) as u32, 1)
+                            .unwrap(),
+                        season_id: Some(0),
+                        blocks: vec![Block {
+                            index: 0,
+                            name: "S".to_string(),
+                            duration_hours: TRAVEL_TIME_HOURS,
+                        }],
+                        block_mode: BlockMode::Parallel,
+                        state_config: StageStateConfig {
+                            storage: true,
+                            inflow_lags: true,
+                        },
+                        risk_config: StageRiskConfig::Expectation,
+                        scenario_config: ScenarioSourceConfig {
+                            branching_factor: 1,
+                            noise_method: NoiseMethod::Saa,
+                        },
+                    },
+                )
+            })
+            .collect();
+
+        let inflow_models: Vec<InflowModel> = [HYDRO_A_ID, HYDRO_B_ID]
+            .into_iter()
+            .flat_map(|hid| {
+                (0..N_STAGES).map(move |i| InflowModel {
+                    hydro_id: EntityId(hid),
+                    stage_id: i32::try_from(i).expect("stage index fits i32"),
+                    mean_m3s: 80.0,
+                    std_m3s: 20.0,
+                    ar_coefficients: vec![0.2],
+                    residual_std_ratio: 0.8,
+                    annual: None,
+                })
+            })
+            .collect();
+
+        let load_models: Vec<LoadModel> = (0..N_STAGES)
+            .map(|i| LoadModel {
+                bus_id: EntityId(BUS_ID),
+                stage_id: i32::try_from(i).expect("stage index fits i32"),
+                mean_mw: 50.0,
+                std_mw: 0.0,
+            })
+            .collect();
+
+        let default_hydro_bounds = || HydroStageBounds {
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 300.0,
+            filling_min_rate_m3s: 0.0,
+            water_withdrawal_m3s: 0.0,
+        };
+        let default_hydro_bounds_block = || HydroBlockBounds {
+            max_turbined_m3s: 100.0,
+            max_generation_mw: 250.0,
+            ..Default::default()
+        };
+
+        let bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 2,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: N_STAGES,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: default_hydro_bounds(),
+                hydro_block: default_hydro_bounds_block(),
+                thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+                thermal_block: ThermalBlockBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                },
+                line_block: LineBlockBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping_block: PumpingBlockBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract_block: ContractBlockBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 2,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages: N_STAGES,
+            },
+            &PenaltiesDefaults {
+                hydro: hydro_penalties(),
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        let initial_conditions = InitialConditions {
+            storage: vec![
+                HydroStorage {
+                    hydro_id: EntityId(HYDRO_A_ID),
+                    value_hm3: 100.0,
+                },
+                HydroStorage {
+                    hydro_id: EntityId(HYDRO_B_ID),
+                    value_hm3: 100.0,
+                },
+            ],
+            filling_storage: vec![],
+            past_anticipated_commitments: vec![],
+            recent_observations: vec![],
+            past_defluences: vec![],
+        };
+
+        let post_study_stages = PostStudyStages {
+            stages: vec![PostStudyStage {
+                start_date: NaiveDate::from_ymd_opt(2024, 4, 1).unwrap(),
+                duration_hours: 720.0,
+            }],
+            thermal_bounds: Vec::new(),
+        };
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .hydros(vec![
+                make_cascade_hydro(HYDRO_A_ID, "H1", Some(EntityId(HYDRO_B_ID))),
+                make_cascade_hydro(HYDRO_B_ID, "H2", None),
+            ])
+            .stages(stages)
+            .inflow_models(inflow_models)
+            .load_models(load_models)
+            .bounds(bounds)
+            .penalties(penalties)
+            .initial_conditions(initial_conditions)
+            .post_study_stages(Some(post_study_stages))
+            .build()
+            .expect("build_system: valid two-hydro cascade with a declared post-study calendar")
+    }
+
+    fn build_config() -> Config {
+        Config {
+            schema: None,
+            modeling: ModelingConfig {
+                inflow_non_negativity: InflowNonNegativityConfig {
+                    method: CfgInflowMethod::None,
+                },
+                cost_scale_factor: None,
+            },
+            training: TrainingConfig {
+                enabled: true,
+                tree_seed: Some(42),
+                stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
+                    limit: N_ITERATIONS,
+                }]),
+                stopping_mode: cobre_io::config::StoppingMode::Any,
+                cut_selection: RowSelectionConfig::default(),
+                solver: TrainingSolverConfig::default(),
+                parallelism: cobre_io::config::ParallelismConfig::default(),
+                scenario_source: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
+            },
+            upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
+            policy: PolicyConfig::default(),
+            simulation: IoSimulationConfig::default(),
+            exports: ExportsConfig::default(),
+            estimation: EstimationConfig::default(),
+        }
+    }
+
+    /// The lag-1 transit-bucket slot on the pool named by `stage_id`, read
+    /// back from the checkpoint the real reader parses.
+    fn lag1_bucket_slot(pool: &StageCutsReadResult) -> &cobre_io::EntitySlot {
+        pool.entity_manifest
+            .iter()
+            .find(|slot| {
+                slot.entity_type == StateFamily::HydroTransitBucket.code() && slot.subindex == 1
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "pool {} must carry a lag-1 transit-bucket slot",
+                    pool.stage_id
+                )
+            })
+    }
+
+    /// End-to-end: the arrival-stage resolver (`delivery_stages[current_stage_idx
+    /// + lag]`) survives training, [`orchestration::write_checkpoint`], and
+    /// [`cobre_io::read_policy_checkpoint`] byte-for-byte. At the last study
+    /// stage (`t == 2`), lag 1 resolves to the declared post-study stage
+    /// (`2024-04-01`, `720.0` hours -> `[2024-04-01, 2024-05-01)`); at stage 0,
+    /// the same slot resolves to study stage 1's own `[2024-02-01, 2024-03-01)`.
+    #[test]
+    fn transit_arrival_interval_checkpoint_round_trip() {
+        let config = build_config();
+        let mut setup = build_setup_in_code(build_system(), &config);
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
+        let outcome = setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("train must not return Err");
+        assert!(
+            outcome.error.is_none(),
+            "training error: {:?}",
+            outcome.error
+        );
+        let result = outcome.result;
+
+        // System is not `Clone`; rebuild the identical study for the checkpoint
+        // writer (`build_system` is deterministic).
+        let system = build_system();
+        let policy_dir = TempDir::new().expect("TempDir::new");
+        let params = CheckpointParams {
+            max_iterations: setup.loop_params.max_iterations,
+            forward_passes: setup.loop_params.forward_passes,
+            seed: setup.loop_params.seed,
+            export_states: config.exports.states,
+        };
+        write_checkpoint(policy_dir.path(), &setup, &system, &result, &params)
+            .expect("write_checkpoint must succeed");
+        let checkpoint =
+            read_policy_checkpoint(policy_dir.path()).expect("read_policy_checkpoint must succeed");
+
+        assert_eq!(
+            checkpoint.stage_cuts.len(),
+            N_STAGES,
+            "one pool per stage on this non-branching chain"
+        );
+
+        let last_stage_pool = checkpoint
+            .stage_cuts
+            .iter()
+            .find(|pool| pool.stage_id == (N_STAGES - 1) as u32)
+            .expect("the last study stage must own a pool");
+        let last_stage_slot = lag1_bucket_slot(last_stage_pool);
+        assert_eq!(
+            last_stage_slot.interval_start, 20_240_401,
+            "lag 1 from the last study stage resolves to the declared post-study stage"
+        );
+        assert_eq!(last_stage_slot.interval_end, 20_240_501);
+
+        let stage0_pool = checkpoint
+            .stage_cuts
+            .iter()
+            .find(|pool| pool.stage_id == 0)
+            .expect("stage 0 must own a pool");
+        let stage0_slot = lag1_bucket_slot(stage0_pool);
+        assert_eq!(
+            stage0_slot.interval_start, 20_240_201,
+            "lag 1 from stage 0 resolves to study stage 1's own interval"
+        );
+        assert_eq!(stage0_slot.interval_end, 20_240_301);
+    }
+}
+
 /// Chronological block-resolved attribution for a declared travel-time arc: the
 /// resolver's block tables, the `K = 1` chronological-vs-parallel byte-identity
 /// anchor, and the parallel-vs-chronological state-dimension equality
@@ -6612,9 +7775,9 @@ mod chronological_attribution {
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, DeficitSegment,
         EntityId, HydroBlockBounds, HydroGenerationModel, HydroPenalties, HydroStageBounds,
-        HydroStagePenalties, HydroStorage, InitialConditions, LineBlockBounds, LineStagePenalties,
-        NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds,
-        ResolvedBounds, ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
+        HydroStorage, InitialConditions, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
+        PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
+        ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
     };
     use cobre_io::config::TrainingSelection;
     use cobre_io::config::{
@@ -6674,8 +7837,8 @@ mod chronological_attribution {
         }
     }
 
-    fn zero_hydro_stage_penalties() -> HydroStagePenalties {
-        HydroStagePenalties {
+    fn zero_hydro_stage_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.0,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -8074,7 +9237,7 @@ mod visit_bound_overflow_guard {
     const FORWARD_PASSES: u32 = 8;
     const MAX_ITERATIONS: u32 = 30;
 
-    /// R2: constructs a fixture whose capped stride sits strictly below a
+    /// Constructs a fixture whose capped stride sits strictly below a
     /// realizable routed count, drives training past it, and asserts the
     /// named rejection.
     #[test]
@@ -8133,7 +9296,7 @@ mod visit_bound_overflow_guard {
         }
     }
 
-    /// R3 (chain half): every shipped chain deterministic case already routes
+    /// Chain half: every shipped chain deterministic case already routes
     /// through the guard on every level; `run_deterministic_with_setup`
     /// asserts `outcome.error.is_none()` internally, so a misfiring guard
     /// would already fail this call. Additionally asserts the arithmetic
@@ -8157,7 +9320,7 @@ mod visit_bound_overflow_guard {
         }
     }
 
-    /// R3 (enumerated half): the K-fan trained fully enumerated
+    /// Enumerated half: the K-fan trained fully enumerated
     /// (`forward_passes` resolved to the graph's exact path count) must
     /// never trip the guard — every reachable pool's `pool_cut_stride`
     /// margin structurally upper-bounds its exact, deterministic enumerated
@@ -8184,7 +9347,7 @@ mod visit_bound_overflow_guard {
 }
 
 mod heterogeneous_visit_bound_resume {
-    //! R4/R5: `FutureCostFunction::new_with_warm_start` threads the study's
+    //! `FutureCostFunction::new_with_warm_start` threads the study's
     //! per-pool state-dimension and visit-bound arrays — the same per-pool
     //! contract `new_per_pool` takes — so a resumed run's pool geometry
     //! matches the cold-start run's. Exercised on the K-fan's HETEROGENEOUS
@@ -8192,7 +9355,9 @@ mod heterogeneous_visit_bound_resume {
     //! pre-fix scalar substitution (every resumed pool given `forward_passes`
     //! uniformly as its stride) silently broke.
 
-    use cobre_io::{STAGE_CUTS_NODE_ID_SENTINEL, StageCutsReadResult};
+    use cobre_io::{
+        STAGE_CUTS_NODE_ID_SENTINEL, STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, StageCutsReadResult,
+    };
     use cobre_sddp::FutureCostFunction;
     use cobre_sddp::setup::NodeId;
     use cobre_sddp::test_support::{k_fan_setup, trivial_full_fcf_proof};
@@ -8272,6 +9437,7 @@ mod heterogeneous_visit_bound_resume {
                 cost_scale_factor: None,
                 node_id: pool_owner_node_id(p),
                 graph_stage_id: -1,
+                priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
             })
             .collect();
         let visit_bounds: Vec<u64> = cold_strides.iter().map(|&s| u64::from(s)).collect();
@@ -8327,13 +9493,13 @@ mod heterogeneous_visit_bound_resume {
 mod enumerated_external {
     #![allow(clippy::cast_possible_wrap)]
 
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
     use std::sync::mpsc;
 
     use chrono::NaiveDate;
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, DeficitSegment,
-        EntityId, HorizonGraph, HydroBlockBounds, HydroStageBounds, HydroStagePenalties,
+        EntityId, HorizonGraph, HydroBlockBounds, HydroPenalties, HydroStageBounds,
         LineBlockBounds, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
         PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, System,
         SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
@@ -8503,7 +9669,7 @@ mod enumerated_external {
             annual_discount_rate: 0.0,
             transitions,
             nodes,
-            stage_discount_rate_overrides: HashMap::new(),
+            stage_discount_rate_overrides: BTreeMap::new(),
             season_map: None,
         };
 
@@ -8558,7 +9724,7 @@ mod enumerated_external {
                 n_stages: N_STAGES,
             },
             &PenaltiesDefaults {
-                hydro: HydroStagePenalties {
+                hydro: HydroPenalties {
                     spillage_cost: 0.01,
                     diversion_cost: 0.0,
                     turbined_cost: 0.0,
@@ -9052,7 +10218,7 @@ mod dual_folding_f34 {
             "folded and unfolded share one graph, so their trunk pools coincide"
         );
 
-        // ── R4: power preconditions — the agreement must not be vacuous ──
+        // ── Power preconditions — the agreement must not be vacuous ──
         assert!(
             fan_width(&folded.setup) >= 2,
             "terminal fan must carry >= 2 successors (got {})",
@@ -9091,7 +10257,7 @@ mod dual_folding_f34 {
             );
         }
 
-        // ── R3: trunk agreement ──
+        // ── Trunk agreement ──
         // (1) Trunk cut coefficients: the storage subgradient is bit-identical. The
         //     two builds solve one identical stage LP over one identical deterministic
         //     trajectory; only the cut projection differs, so the incoming-storage
@@ -9278,8 +10444,9 @@ mod enumerated_checkpoint {
     use std::collections::HashSet;
 
     use cobre_io::{
-        GraphManifest, ProducerBlock, STAGE_CUTS_NODE_ID_SENTINEL, StageCutsPayload,
-        read_policy_checkpoint, write_policy_checkpoint,
+        GraphManifest, ProducerBlock, STAGE_CUTS_NODE_ID_SENTINEL,
+        STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, StageCutsPayload, read_policy_checkpoint,
+        write_policy_checkpoint,
     };
     use cobre_sddp::policy_export::build_stage_cut_records;
     use cobre_sddp::setup::NodePos;
@@ -9332,7 +10499,7 @@ mod enumerated_checkpoint {
         );
 
         let fcf = &fixture.setup.fcf;
-        // R1: the stride that drives the enumerated cut_id numbering.
+        // The stride that drives the enumerated cut_id numbering.
         for &p in &nonleaf_pools {
             assert_eq!(
                 fcf.pools[p].visit_stride, 1,
@@ -9418,6 +10585,7 @@ mod enumerated_checkpoint {
                 cost_scale_factor: 1_000_000.0,
                 node_id: pool_owner_node_id(pool_idx),
                 graph_stage_id: -1,
+                priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
             })
             .collect();
 
@@ -9520,18 +10688,17 @@ mod enumerated_checkpoint {
 mod water_terminal_fcf_valuation {
     use std::path::Path;
 
+    use chrono::NaiveDate;
     use cobre_core::EntityId;
     use cobre_core::temporal::StageStateConfig;
-    use cobre_io::{
-        BoundaryPolicy, GraphManifest, ManifestNode, PolicyCutRecord, ProducerBlock,
-        StageCutsPayload, write_policy_checkpoint,
-    };
+    use cobre_io::BoundaryPolicy;
     use cobre_sddp::indexer::CutStateProjection;
     use cobre_sddp::setup::{NodeId, StageIdx};
     use cobre_sddp::test_support::{patch_backward_opening_for_probe, solve_stage_for_probe};
     use cobre_sddp::workspace::SolverWorkspace;
     use cobre_sddp::{
-        CutPool, StudySetup, build_cut_row_batch_into, inject_boundary_cuts, load_boundary_cuts,
+        BoundaryLoadRequest, CutPool, StudySetup, build_cut_row_batch_into, inject_boundary_cuts,
+        load_boundary_cuts,
     };
     use cobre_solver::{
         ActiveSolver, FreezeScratch, RowBatch, SolverInterface, StageTemplate,
@@ -9558,7 +10725,7 @@ mod water_terminal_fcf_valuation {
     fn boundary_policy() -> BoundaryPolicy {
         BoundaryPolicy {
             path: "unused".to_string(),
-            source_stage: None,
+            strict: false,
         }
     }
 
@@ -9613,65 +10780,13 @@ mod water_terminal_fcf_valuation {
         &template.row_indices[start..end]
     }
 
-    /// Write a synthetic single-cut boundary checkpoint carrying `intercept`
-    /// and the explicit per-slot `coefficients`, unscaled (`cost_scale_factor:
-    /// Some(1.0)`). No entity manifest: the loader's identity check
-    /// short-circuits with a warning (`right_boundary_pricing.rs`'s pattern).
-    fn write_synthetic_boundary(
-        dir: &Path,
-        state_dimension: u32,
-        intercept: f64,
-        coefficients: &[f64],
-    ) {
-        let cuts = vec![PolicyCutRecord {
-            cut_id: 0,
-            slot_index: 0,
-            iteration: 0,
-            forward_pass_index: 0,
-            intercept,
-            coefficients,
-            is_active: true,
-        }];
-        let payload = StageCutsPayload {
-            stage_id: 0,
-            state_dimension,
-            capacity: 1,
-            warm_start_count: 0,
-            cuts: &cuts,
-            active_cut_indices: &[0],
-            populated_count: 1,
-            entity_manifest: &[],
-            cost_scale_factor: 1_000_000.0,
-            node_id: 100,
-            graph_stage_id: -1,
-        };
-        let metadata = cobre_sddp::test_support::checkpoint_metadata(
-            1,
-            GraphManifest {
-                n_pools: 1,
-                nodes: vec![ManifestNode {
-                    id: 100,
-                    stage_id: 0,
-                    pool_id: 0,
-                }],
-                edges: vec![],
-            },
-            ProducerBlock {
-                completed_iterations: 0,
-                final_lower_bound: 0.0,
-                best_upper_bound: None,
-                max_iterations: 0,
-                forward_passes: 0,
-                warm_start_cuts: 0,
-                warm_start_counts: vec![],
-                rng_seed: 0,
-                total_visited_states: 0,
-                training_block_mode: "parallel".to_string(),
-                training_block_mode_per_stage: vec![],
-                cost_scale_factor: Some(1.0),
-            },
-        );
-        write_policy_checkpoint(dir, &[payload], &[], &metadata, &[]).expect("write checkpoint");
+    /// Pool `pool`'s fixture `priced_state_date`: `2030-01-01` plus `pool`
+    /// months.
+    fn fixture_priced_date(pool: u32) -> NaiveDate {
+        cobre_sddp::test_support::fixture_priced_date(
+            cobre_sddp::test_support::ymd(2030, 1, 1),
+            pool,
+        )
     }
 
     /// Load a bucket-only boundary (`BETA` on `bucket_col`, zero elsewhere,
@@ -9680,19 +10795,21 @@ mod water_terminal_fcf_valuation {
         let state_dimension = setup.fcf.state_dimension as u32;
         let mut coefficients = vec![0.0_f64; state_dimension as usize];
         coefficients[bucket_col] = BETA;
-        write_synthetic_boundary(dir, state_dimension, ALPHA, &coefficients);
-
-        let boundary_cuts = load_boundary_cuts(
+        cobre_sddp::test_support::write_synthetic_boundary(
             dir,
-            0,
+            state_dimension,
+            ALPHA,
+            &coefficients,
+            fixture_priced_date(0),
+        );
+
+        let boundary_cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+            dir,
+            fixture_priced_date(0),
             state_dimension,
             &[],
-            &[],
-            &[],
-            None,
             1.0,
-            &mut |_msg| {},
-        )
+        ))
         .expect("boundary cut must load");
         inject_boundary_cuts(setup, &boundary_cuts);
     }
@@ -9776,8 +10893,7 @@ mod water_terminal_fcf_valuation {
             StageIdx(terminal_stage),
             pinned_state,
             &raw_noise,
-        )
-        .expect("StageSolvePrep::run must not error on the d45 fixture");
+        );
 
         let view =
             solve_stage_for_probe(ws, &ctx, pool, None, StageIdx(terminal_stage), 0, node_id)
@@ -10031,7 +11147,7 @@ mod enumerated_cvar_gap {
     };
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, DeficitSegment,
-        EntityId, HydroBlockBounds, HydroStageBounds, HydroStagePenalties, HydroStorage,
+        EntityId, HydroBlockBounds, HydroPenalties, HydroStageBounds, HydroStorage,
         InitialConditions, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
         PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
         ResolvedPenalties, System, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
@@ -10057,8 +11173,8 @@ mod enumerated_cvar_gap {
         lambda: 0.4,
     };
 
-    fn zero_hydro_penalties() -> HydroStagePenalties {
-        HydroStagePenalties {
+    fn zero_hydro_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.0,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -10338,5 +11454,791 @@ mod enumerated_cvar_gap {
             }
             other => panic!("expected a uniformity Validation reject, got {other:?}"),
         }
+    }
+}
+
+/// JSON fixture text shared verbatim by
+/// [`security_curve_integrated_productivity_equivalence`] and
+/// [`stored_energy_columns_determinism`]: one bus, default penalties, and a
+/// 2-stage/730h-block calendar with hydro 0 seeded at 500 hm3 and hydro 1 at
+/// 100 hm3.
+mod stored_energy_fixture_json {
+    pub(super) const PENALTIES_JSON: &str = r#"{
+  "bus": { "deficit_segments": [ { "depth_mw": null, "cost": 1000.0 } ], "excess_cost": 0.01 },
+  "line": { "exchange_cost": 0.01 },
+  "hydro": {
+    "spillage_cost": 0.01, "turbined_cost": 0.01, "diversion_cost": 0.01,
+    "storage_violation_below_cost": 10000.0, "filling_target_violation_cost": 10000.0,
+    "turbined_violation_below_cost": 10000.0, "outflow_violation_below_cost": 10000.0,
+    "outflow_violation_above_cost": 10000.0, "generation_violation_below_cost": 10000.0,
+    "evaporation_violation_cost": 10000.0, "water_withdrawal_violation_cost": 10000.0
+  },
+  "non_controllable_source": { "curtailment_cost": 0.005 }
+}"#;
+
+    pub(super) const STAGES_JSON: &str = r#"{
+  "policy_graph": { "type": "finite_horizon", "annual_discount_rate": 0.0 },
+  "stages": [
+    { "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
+      "blocks": [ { "id": 0, "name": "SINGLE", "hours": 730 } ], "num_openings": 1 },
+    { "id": 1, "start_date": "2024-02-01", "end_date": "2024-03-01",
+      "blocks": [ { "id": 0, "name": "SINGLE", "hours": 730 } ], "num_openings": 1 }
+  ]
+}"#;
+
+    pub(super) const INITIAL_CONDITIONS_JSON: &str = r#"{
+  "storage": [
+    { "hydro_id": 0, "value_hm3": 500.0 },
+    { "hydro_id": 1, "value_hm3": 100.0 }
+  ],
+  "filling_storage": []
+}"#;
+
+    pub(super) const BUSES_JSON: &str = r#"{
+  "buses": [
+    { "id": 0, "name": "B0", "operational_start_date": "2020-01-01",
+      "deficit_segments": [ { "depth_mw": null, "cost": 1000.0 } ] }
+  ]
+}"#;
+
+    pub(super) const LINES_JSON: &str = r#"{ "lines": [] }"#;
+}
+
+/// In-code deck with real VHA geometry, an operative `hydro_bounds` ceiling
+/// below the entity's physical range, and both productivity override columns.
+mod security_curve_integrated_productivity_equivalence {
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use arrow::array::{Float64Array, Int32Array};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use parquet::arrow::ArrowWriter;
+
+    use cobre_sddp::{
+        build_generic_constraint_echo_rows, hydro_models::prepare_hydro_models,
+        setup::prepare_stochastic,
+    };
+
+    use crate::common::build_setup_for_case;
+    use crate::common::parquet_fixtures::{write_hydro_geometry, write_seasonal_stats};
+
+    use super::stored_energy_fixture_json::{
+        BUSES_JSON, INITIAL_CONDITIONS_JSON, LINES_JSON, PENALTIES_JSON, STAGES_JSON,
+    };
+
+    /// `(hydro_id, stage_id, equivalent_productivity_mw_per_m3s override,
+    /// specific_productivity_mw_per_m3s_per_m override)` — `reference_outflow_m3s`
+    /// stays `NULL` for every row (Q_ref override is out of this fixture's scope).
+    fn write_hydro_energy_productivity(dest: &Path, rows: &[(i32, i32, Option<f64>, Option<f64>)]) {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("hydro_id", DataType::Int32, false),
+            Field::new("stage_id", DataType::Int32, true),
+            Field::new(
+                "equivalent_productivity_mw_per_m3s",
+                DataType::Float64,
+                true,
+            ),
+            Field::new("reference_outflow_m3s", DataType::Float64, true),
+            Field::new(
+                "specific_productivity_mw_per_m3s_per_m",
+                DataType::Float64,
+                true,
+            ),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(
+                    rows.iter().map(|r| r.0).collect::<Vec<_>>(),
+                )),
+                Arc::new(Int32Array::from(
+                    rows.iter().map(|r| Some(r.1)).collect::<Vec<_>>(),
+                )),
+                Arc::new(Float64Array::from(
+                    rows.iter().map(|r| r.2).collect::<Vec<_>>(),
+                )),
+                Arc::new(Float64Array::from(vec![None::<f64>; rows.len()])),
+                Arc::new(Float64Array::from(
+                    rows.iter().map(|r| r.3).collect::<Vec<_>>(),
+                )),
+            ],
+        )
+        .expect("valid RecordBatch for hydro_energy_productivity");
+        let file = std::fs::File::create(dest).expect("create hydro_energy_productivity.parquet");
+        let mut writer = ArrowWriter::try_new(file, schema, None)
+            .expect("ArrowWriter for productivity override");
+        writer.write(&batch).expect("write productivity batch");
+        writer.close().expect("close productivity writer");
+    }
+
+    fn write_hydro_bounds_max_storage(
+        dest: &Path,
+        hydro_id: i32,
+        stage_id: i32,
+        max_storage_hm3: f64,
+    ) {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("hydro_id", DataType::Int32, false),
+            Field::new("stage_id", DataType::Int32, false),
+            Field::new("max_storage_hm3", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(vec![hydro_id])),
+                Arc::new(Int32Array::from(vec![stage_id])),
+                Arc::new(Float64Array::from(vec![max_storage_hm3])),
+            ],
+        )
+        .expect("valid RecordBatch for hydro_bounds");
+        let file = std::fs::File::create(dest).expect("create hydro_bounds.parquet");
+        let mut writer =
+            ArrowWriter::try_new(file, schema, None).expect("ArrowWriter for hydro bounds");
+        writer.write(&batch).expect("write hydro bounds batch");
+        writer.close().expect("close hydro bounds writer");
+    }
+
+    /// `(constraint_id, stage_id, bound_lower)` — `block_id` and `bound_upper`
+    /// stay `NULL` for every row; every constraint in this fixture is stage-level
+    /// and lower-bounded (or driven entirely by its own inline affine remainder).
+    fn write_generic_constraint_bounds(dest: &Path, rows: &[(i32, i32, Option<f64>)]) {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("constraint_id", DataType::Int32, false),
+            Field::new("stage_id", DataType::Int32, false),
+            Field::new("block_id", DataType::Int32, true),
+            Field::new("bound_lower", DataType::Float64, true),
+            Field::new("bound_upper", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(
+                    rows.iter().map(|r| r.0).collect::<Vec<_>>(),
+                )),
+                Arc::new(Int32Array::from(
+                    rows.iter().map(|r| r.1).collect::<Vec<_>>(),
+                )),
+                Arc::new(Int32Array::new_null(rows.len())),
+                Arc::new(Float64Array::from(
+                    rows.iter().map(|r| r.2).collect::<Vec<_>>(),
+                )),
+                Arc::new(Float64Array::new_null(rows.len())),
+            ],
+        )
+        .expect("valid RecordBatch for generic_constraint_bounds");
+        let file = std::fs::File::create(dest).expect("create generic_constraint_bounds.parquet");
+        let mut writer =
+            ArrowWriter::try_new(file, schema, None).expect("ArrowWriter for constraint bounds");
+        writer.write(&batch).expect("write constraint bounds batch");
+        writer.close().expect("close constraint bounds writer");
+    }
+
+    const CONFIG_JSON: &str = r#"{
+  "training": { "selection": { "method": "sampled", "forward_passes": 1 },
+    "stopping_rules": [ { "type": "iteration_limit", "limit": 1 } ] },
+  "simulation": { "enabled": false },
+  "modeling": { "inflow_non_negativity": { "method": "none" } }
+}"#;
+
+    const THERMALS_JSON: &str = r#"{
+  "thermals": [
+    { "id": 0, "name": "T0", "operational_start_date": "2020-01-01", "bus_id": 0,
+      "generation": { "min_mw": 0.0, "max_mw": 100.0 }, "cost_per_mwh": 50.0 }
+  ]
+}"#;
+
+    /// Hydro 0 carries the exactly-representable VHA range `[256, 1280]` (a
+    /// power-of-two multiple of 256, per the exact-geometry hand-oracle
+    /// convention) and the entity `ρ_esp = 0.125`; hydro 1 is a bare
+    /// non-FPHA plant whose `ρ_eq` is only ever supplied by the
+    /// `hydro_energy_productivity.parquet` override at stage 1.
+    const HYDROS_JSON: &str = r#"{
+  "hydros": [
+    { "id": 0, "name": "H0", "operational_start_date": "2020-01-01", "downstream_id": null,
+      "reservoir": { "min_storage_hm3": 256.0, "max_storage_hm3": 1280.0 },
+      "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": 50.0 },
+      "generation": { "model": "constant_productivity", "min_turbined_m3s": 0.0,
+        "max_turbined_m3s": 50.0, "min_generation_mw": 0.0, "max_generation_mw": 50.0 },
+      "unit_groups": [ { "id": 0, "name": "H0", "bus_id": 0, "min_generation_mw": 0.0,
+        "max_generation_mw": 50.0, "min_turbined_m3s": 0.0, "max_turbined_m3s": 50.0 } ],
+      "specific_productivity_mw_per_m3s_per_m": 0.125 },
+    { "id": 1, "name": "H1", "operational_start_date": "2020-01-01", "downstream_id": null,
+      "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 200.0 },
+      "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": 50.0 },
+      "generation": { "model": "constant_productivity", "min_turbined_m3s": 0.0,
+        "max_turbined_m3s": 50.0, "min_generation_mw": 0.0, "max_generation_mw": 50.0 },
+      "unit_groups": [ { "id": 0, "name": "H1", "bus_id": 0, "min_generation_mw": 0.0,
+        "max_generation_mw": 50.0, "min_turbined_m3s": 0.0, "max_turbined_m3s": 50.0 } ] }
+  ]
+}"#;
+
+    /// Hydro 1's `stage_ranges` covers ONLY stage 0, leaving stage 1 with no JSON
+    /// productivity source — the `equivalent_productivity_mw_per_m3s` override at
+    /// stage 1 is then the sole supplier there (the Layer-6 exactly-one-source rule).
+    const PRODUCTION_MODELS_JSON: &str = r#"{
+  "production_models": [
+    { "hydro_id": 0, "selection_mode": "stage_ranges", "stage_ranges": [
+      { "start_stage_id": 0, "end_stage_id": null, "model": "constant_productivity",
+        "productivity_mw_per_m3s": 1.0 } ] },
+    { "hydro_id": 1, "selection_mode": "stage_ranges", "stage_ranges": [
+      { "start_stage_id": 0, "end_stage_id": 0, "model": "constant_productivity",
+        "productivity_mw_per_m3s": 2.0 } ] }
+  ]
+}"#;
+
+    const GENERIC_PARAMETERS_JSON: &str = r#"{
+  "scalar_parameters": [
+    { "id": 1, "name": "int_rho", "kind": "computed",
+      "computed_spec": { "tag": "integrated_accumulated_productivity", "hydro_id": 0 } },
+    { "id": 2, "name": "max_energy", "kind": "computed",
+      "computed_spec": { "tag": "max_stored_energy", "hydro_id": 0 } },
+    { "id": 3, "name": "rho_point", "kind": "computed",
+      "computed_spec": { "tag": "accumulated_productivity", "hydro_id": 0 } },
+    { "id": 4, "name": "h1_ref", "kind": "computed",
+      "computed_spec": { "tag": "equivalent_productivity", "hydro_id": 1 } },
+    { "id": 5, "name": "h1_int", "kind": "computed",
+      "computed_spec": { "tag": "integrated_equivalent_productivity", "hydro_id": 1 } }
+  ]
+}"#;
+
+    /// Builds the fixture deck in a fresh `TempDir`. `int_rho_stage1` is baked in
+    /// as the "before" form's literal coefficient (`hydro_storage_final`, no
+    /// `@name` reference — the hand-folded form the bridge injects today);
+    /// `bound_stage1`/`max_storage_ceiling` similarly drive the "before" form's
+    /// literal RHS and the operative storage ceiling below the entity max.
+    fn build_fixture(int_rho_stage1: f64, bound_stage1: f64) -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tempdir must succeed");
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("system")).expect("create system dir");
+        std::fs::create_dir_all(root.join("constraints")).expect("create constraints dir");
+        std::fs::create_dir_all(root.join("scenarios")).expect("create scenarios dir");
+
+        std::fs::write(root.join("config.json"), CONFIG_JSON).expect("write config.json");
+        std::fs::write(root.join("penalties.json"), PENALTIES_JSON).expect("write penalties.json");
+        std::fs::write(root.join("stages.json"), STAGES_JSON).expect("write stages.json");
+        std::fs::write(
+            root.join("initial_conditions.json"),
+            INITIAL_CONDITIONS_JSON,
+        )
+        .expect("write initial_conditions.json");
+        std::fs::write(root.join("system/buses.json"), BUSES_JSON).expect("write buses.json");
+        std::fs::write(root.join("system/lines.json"), LINES_JSON).expect("write lines.json");
+        std::fs::write(root.join("system/thermals.json"), THERMALS_JSON)
+            .expect("write thermals.json");
+        std::fs::write(root.join("system/hydros.json"), HYDROS_JSON).expect("write hydros.json");
+        std::fs::write(
+            root.join("system/hydro_production_models.json"),
+            PRODUCTION_MODELS_JSON,
+        )
+        .expect("write hydro_production_models.json");
+        std::fs::write(
+            root.join("constraints/generic_parameters.json"),
+            GENERIC_PARAMETERS_JSON,
+        )
+        .expect("write generic_parameters.json");
+
+        let constraints_json = format!(
+            r#"{{
+  "constraints": [
+    {{ "id": 0, "name": "after_form", "slack": {{ "enabled": false }},
+       "expression": "@int_rho * hydro_useful_volume_final(0) >= 0.5 * @max_energy" }},
+    {{ "id": 1, "name": "before_form", "slack": {{ "enabled": false }},
+       "expression": "{int_rho_stage1} * hydro_storage_final(0)" }},
+    {{ "id": 2, "name": "hydro0_reference_point_probe", "slack": {{ "enabled": false }},
+       "expression": "@rho_point * hydro_storage(1)" }},
+    {{ "id": 3, "name": "hydro1_reference_point_override_probe", "slack": {{ "enabled": false }},
+       "expression": "@h1_ref * hydro_storage(1)" }},
+    {{ "id": 4, "name": "hydro1_integrated_override_probe", "slack": {{ "enabled": false }},
+       "expression": "@h1_int * hydro_storage(1)" }},
+    {{ "id": 5, "name": "hydro0_max_stored_energy_probe", "slack": {{ "enabled": false }},
+       "expression": "@max_energy * hydro_storage(1)" }}
+  ]
+}}"#
+        );
+        std::fs::write(
+            root.join("constraints/generic_constraints.json"),
+            constraints_json,
+        )
+        .expect("write generic_constraints.json");
+
+        write_hydro_geometry(
+            &root.join("system/hydro_geometry.parquet"),
+            &[
+                (0, 256.0, 300.0, 1.0),
+                (0, 768.0, 340.0, 1.0),
+                (0, 1280.0, 348.0, 1.0),
+            ],
+        );
+        write_hydro_energy_productivity(
+            &root.join("system/hydro_energy_productivity.parquet"),
+            &[
+                // Hydro 0: ρ_esp override at stage 1 only; stage 0 uses the entity value.
+                (0, 1, None, Some(0.375)),
+                // Hydro 1: ρ_eq override at stage 1, the sole productivity source there.
+                (1, 1, Some(0.75), None),
+            ],
+        );
+        write_hydro_bounds_max_storage(&root.join("constraints/hydro_bounds.parquet"), 0, 0, 700.0);
+        write_generic_constraint_bounds(
+            &root.join("constraints/generic_constraint_bounds.parquet"),
+            &[
+                (0, 0, None),
+                (0, 1, None),
+                (1, 1, Some(bound_stage1)),
+                (2, 0, Some(0.0)),
+                (3, 1, Some(0.0)),
+                (4, 1, Some(0.0)),
+                (5, 0, Some(0.0)),
+            ],
+        );
+
+        write_seasonal_stats(
+            &root.join("scenarios/inflow_seasonal_stats.parquet"),
+            "hydro_id",
+            "mean_m3s",
+            "std_m3s",
+            &[
+                (0, 0, 40.0, 0.0),
+                (0, 1, 10.0, 0.0),
+                (1, 0, 0.0, 0.0),
+                (1, 1, 0.0, 0.0),
+            ],
+        );
+        write_seasonal_stats(
+            &root.join("scenarios/load_seasonal_stats.parquet"),
+            "bus_id",
+            "mean_mw",
+            "std_mw",
+            &[(0, 0, 80.0, 0.0), (0, 1, 80.0, 0.0)],
+        );
+
+        tmp
+    }
+
+    /// The security curve `useful >= pct * useful_max` authored both as
+    /// primitives (`hydro_useful_volume_final`, coefficient `@int_rho`, bound
+    /// `pct * @max_energy`) and hand-folded (a literal `int_rho` on
+    /// `hydro_storage_final`, bound `pct*int_rho*(V_hi-V_lo) + int_rho*V_lo`)
+    /// resolve to the same coefficient and the same folded bound, at both an
+    /// unoverridden and a ρ_esp-overridden stage, unaffected by an operative
+    /// `hydro_bounds` ceiling below the entity range, and distinct from the
+    /// plant's reference-point productivity; a non-FPHA `ρ_eq` override
+    /// separately wins both evaluators for its own (hydro, stage).
+    #[test]
+    fn after_and_before_forms_match_the_hand_oracle() {
+        // VHA breakpoints spanning hydro 0's entity range exactly (no fractional
+        // interpolation in `ForebayTable::mean_height`): volumes at multiples of
+        // 256, heights non-uniform so the mean genuinely integrates the curve.
+        const V_LO: f64 = 256.0;
+        const V_MID: f64 = 768.0;
+        const V_HI: f64 = 1280.0;
+        const H_LO: f64 = 300.0;
+        const H_MID: f64 = 340.0;
+        const H_HI: f64 = 348.0;
+        const ENTITY_RHO_ESP: f64 = 0.125;
+        const OVERRIDE_RHO_ESP: f64 = 0.375;
+        const PCT: f64 = 0.5;
+        const HYDRO1_OVERRIDE_RHO_EQ: f64 = 0.75;
+
+        let mean_height = (0.5 * (H_LO + H_MID) * (V_MID - V_LO)
+            + 0.5 * (H_MID + H_HI) * (V_HI - V_MID))
+            / (V_HI - V_LO);
+
+        let int_rho_stage0 = ENTITY_RHO_ESP * mean_height;
+        let int_rho_stage1 = OVERRIDE_RHO_ESP * mean_height;
+        let max_energy_stage0 = int_rho_stage0 * (V_HI - V_LO);
+        let max_energy_stage1 = int_rho_stage1 * (V_HI - V_LO);
+        let bound_stage0 = PCT * max_energy_stage0 + int_rho_stage0 * V_LO;
+        let bound_stage1 = PCT * max_energy_stage1 + int_rho_stage1 * V_LO;
+
+        let tmp = build_fixture(int_rho_stage1, bound_stage1);
+        let case_dir = tmp.path();
+
+        let config_path = case_dir.join("config.json");
+        let config = cobre_io::parse_config(&config_path).expect("config must parse");
+        let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
+        let training_source = config
+            .training_scenario_source(&config_path)
+            .expect("training_scenario_source must parse");
+        let prepare_result =
+            prepare_stochastic(system, case_dir, &config, 42, &training_source, None)
+                .expect("prepare_stochastic must succeed");
+        let system = prepare_result.system;
+        let stochastic = prepare_result.stochastic;
+        let hydro_models = prepare_hydro_models(&system, case_dir, false)
+            .expect("prepare_hydro_models must succeed");
+        let setup = build_setup_for_case(case_dir, &config, &system, stochastic, hydro_models);
+
+        let echo_rows = build_generic_constraint_echo_rows(&setup, &system);
+        let find = |constraint_id: i32, stage_id: i32| {
+            echo_rows
+                .iter()
+                .find(|r| r.constraint_id == constraint_id && r.stage_id == stage_id)
+                .unwrap_or_else(|| {
+                    panic!("no echo row for constraint {constraint_id} at stage {stage_id}")
+                })
+        };
+        let close =
+            |value: f64, expected: f64| (value - expected).abs() <= 1e-9 * expected.abs().max(1.0);
+
+        // after == before == hand oracle at the overridden stage, to tolerance —
+        // never `==` on a trapezoid-derived value.
+        let after1 = find(0, 1);
+        let before1 = find(1, 1);
+        let after1_coef = after1.coefficient.expect("after1 coefficient");
+        let after1_bound = after1.bound_lower.expect("after1 bound_lower");
+        let before1_coef = before1.coefficient.expect("before1 coefficient");
+        let before1_bound = before1.bound_lower.expect("before1 bound_lower");
+        assert!(
+            close(after1_coef, int_rho_stage1),
+            "after-form coefficient {after1_coef} != hand oracle {int_rho_stage1}"
+        );
+        assert!(
+            close(after1_bound, bound_stage1),
+            "after-form bound_lower {after1_bound} != hand oracle {bound_stage1}"
+        );
+        assert!(
+            close(before1_coef, int_rho_stage1),
+            "before-form coefficient {before1_coef} != hand oracle {int_rho_stage1}"
+        );
+        assert!(
+            close(before1_bound, bound_stage1),
+            "before-form bound_lower {before1_bound} != hand oracle {bound_stage1}"
+        );
+        assert!(
+            close(after1_coef, before1_coef),
+            "after coefficient {after1_coef} != before coefficient {before1_coef}"
+        );
+        assert!(
+            close(after1_bound, before1_bound),
+            "after bound_lower {after1_bound} != before bound_lower {before1_bound}"
+        );
+        // `HydroStorageFinal` and `HydroUsefulVolumeFinal` both resolve through
+        // `resolve_hydro_storage_boundary` to the same fixed boundary column
+        // (crates/cobre-sddp/src/lp/generic_constraints.rs); the coefficient and
+        // bound_lower agreement above is that shared-column fact's only
+        // observable surface at this build-time, no-solve echo layer.
+        assert_eq!(
+            after1.variable_kind.as_deref(),
+            Some("hydro_useful_volume_final")
+        );
+        assert_eq!(
+            before1.variable_kind.as_deref(),
+            Some("hydro_storage_final")
+        );
+
+        // The after-form at stage 0 — under an operative `hydro_bounds` ceiling
+        // (700) below the entity max (1280) — still reflects the entity range,
+        // and so does `max_stored_energy` itself.
+        let after0 = find(0, 0);
+        let after0_coef = after0.coefficient.expect("after0 coefficient");
+        let after0_bound = after0.bound_lower.expect("after0 bound_lower");
+        assert!(
+            close(after0_bound, bound_stage0),
+            "hydro_bounds ceiling leaked into the folded bound: {after0_bound} != {bound_stage0}"
+        );
+        let max_energy0 = find(5, 0)
+            .coefficient
+            .expect("max_energy probe coefficient");
+        assert!(
+            close(max_energy0, max_energy_stage0),
+            "hydro_bounds ceiling leaked into max_stored_energy: {max_energy0} != {max_energy_stage0}"
+        );
+
+        // The integrated cascade productivity genuinely differs from the
+        // plant's reference-point `accumulated_productivity`.
+        let rho_point0 = find(2, 0).coefficient.expect("rho_point coefficient");
+        assert!(
+            (after0_coef - rho_point0).abs() > 1.0,
+            "integrated ({after0_coef}) must differ from reference-point ({rho_point0})"
+        );
+
+        // The ρ_esp override shifts int_rho only at its own stage;
+        // exactly-representable geometry makes `to_bits()` provable, not
+        // coincidental.
+        assert_eq!(after0_coef.to_bits(), int_rho_stage0.to_bits());
+        assert_eq!(after1_coef.to_bits(), int_rho_stage1.to_bits());
+
+        // A non-FPHA ρ_eq override wins both evaluators (the resolved
+        // reference-point and integrated own terms) for its own (hydro, stage).
+        let h1_ref = find(3, 1).coefficient.expect("h1_ref coefficient");
+        let h1_int = find(4, 1).coefficient.expect("h1_int coefficient");
+        assert_eq!(h1_ref.to_bits(), HYDRO1_OVERRIDE_RHO_EQ.to_bits());
+        assert_eq!(h1_int.to_bits(), HYDRO1_OVERRIDE_RHO_EQ.to_bits());
+    }
+}
+
+/// The six simulation-output hydro columns outside the parity hash's field
+/// whitelist (`tests/common/parity_hash.rs`'s module doc) — the four
+/// integrated-grid/stored-energy-power columns and the moved
+/// `stored_energy_{initial,final}_mwh` pair — must still be declaration-order
+/// invariant and run-to-run reproducible, exactly like every hashed column.
+/// The fixture's VHA-geometry hydro gives the gate power: its integrated
+/// productivity genuinely differs from its reference-point productivity, so a
+/// permutation that left the two coincidentally equal could not hide a bug.
+mod stored_energy_columns_determinism {
+    use std::path::Path;
+
+    use cobre_core::scenario::ScenarioSource;
+    use cobre_io::config::SimulationSelection;
+    use cobre_sddp::hydro_models::prepare_hydro_models;
+    use cobre_sddp::setup::prepare_stochastic;
+    use cobre_sddp::{SimulationHydroResult, SimulationScenarioResult};
+
+    use crate::common::parquet_fixtures::{write_hydro_geometry, write_seasonal_stats};
+    use crate::common::permute::permute_case;
+    use crate::common::{build_setup_for_case, run_simulation};
+
+    use super::stored_energy_fixture_json::{
+        BUSES_JSON, INITIAL_CONDITIONS_JSON, LINES_JSON, PENALTIES_JSON, STAGES_JSON,
+    };
+
+    /// Fixed seed for the declaration-order-invariance probe, matching the
+    /// sibling `nonzero_stage_fpha_override_regression` idiom.
+    const PERMUTATION_SEED: u64 = 20_260_922;
+
+    const CONFIG_JSON: &str = r#"{
+  "training": { "selection": { "method": "sampled", "forward_passes": 1 },
+    "stopping_rules": [ { "type": "iteration_limit", "limit": 10 } ] },
+  "simulation": { "enabled": false },
+  "modeling": { "inflow_non_negativity": { "method": "none" } }
+}"#;
+
+    const THERMALS_JSON: &str = r#"{
+  "thermals": [
+    { "id": 0, "name": "T0", "operational_start_date": "2020-01-01", "bus_id": 0,
+      "generation": { "min_mw": 0.0, "max_mw": 200.0 }, "cost_per_mwh": 50.0 }
+  ]
+}"#;
+
+    /// Hydro 0 carries the exactly-representable VHA range `[256, 1280]` and the
+    /// entity `ρ_esp = 0.125`, so its integrated equivalent productivity
+    /// (`ρ_esp * mean_height`) differs from its `ConstantProductivity`
+    /// reference-point value (`1.0`) — the fixture's "gate has power" property.
+    /// Hydro 1 carries no geometry (its two grids coincide); its only role is
+    /// giving the declaration-order permutation a second entity to reorder.
+    const HYDROS_JSON: &str = r#"{
+  "hydros": [
+    { "id": 0, "name": "H0", "operational_start_date": "2020-01-01", "downstream_id": null,
+      "reservoir": { "min_storage_hm3": 256.0, "max_storage_hm3": 1280.0 },
+      "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": 100.0 },
+      "generation": { "model": "constant_productivity", "min_turbined_m3s": 0.0,
+        "max_turbined_m3s": 100.0, "min_generation_mw": 0.0, "max_generation_mw": 100.0 },
+      "unit_groups": [ { "id": 0, "name": "H0", "bus_id": 0, "min_generation_mw": 0.0,
+        "max_generation_mw": 100.0, "min_turbined_m3s": 0.0, "max_turbined_m3s": 100.0 } ],
+      "specific_productivity_mw_per_m3s_per_m": 0.125 },
+    { "id": 1, "name": "H1", "operational_start_date": "2020-01-01", "downstream_id": null,
+      "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 500.0 },
+      "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": 80.0 },
+      "generation": { "model": "constant_productivity", "min_turbined_m3s": 0.0,
+        "max_turbined_m3s": 80.0, "min_generation_mw": 0.0, "max_generation_mw": 160.0 },
+      "unit_groups": [ { "id": 0, "name": "H1", "bus_id": 0, "min_generation_mw": 0.0,
+        "max_generation_mw": 160.0, "min_turbined_m3s": 0.0, "max_turbined_m3s": 80.0 } ] }
+  ]
+}"#;
+
+    const PRODUCTION_MODELS_JSON: &str = r#"{
+  "production_models": [
+    { "hydro_id": 0, "selection_mode": "stage_ranges", "stage_ranges": [
+      { "start_stage_id": 0, "end_stage_id": null, "model": "constant_productivity",
+        "productivity_mw_per_m3s": 1.0 } ] },
+    { "hydro_id": 1, "selection_mode": "stage_ranges", "stage_ranges": [
+      { "start_stage_id": 0, "end_stage_id": null, "model": "constant_productivity",
+        "productivity_mw_per_m3s": 2.0 } ] }
+  ]
+}"#;
+
+    /// Builds the fixture deck in a fresh `TempDir`: two `ConstantProductivity`
+    /// hydros on one bus, one carrying VHA geometry so its integrated grid
+    /// genuinely differs from its reference-point grid.
+    fn build_fixture() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tempdir must succeed");
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("system")).expect("create system dir");
+        std::fs::create_dir_all(root.join("scenarios")).expect("create scenarios dir");
+
+        std::fs::write(root.join("config.json"), CONFIG_JSON).expect("write config.json");
+        std::fs::write(root.join("penalties.json"), PENALTIES_JSON).expect("write penalties.json");
+        std::fs::write(root.join("stages.json"), STAGES_JSON).expect("write stages.json");
+        std::fs::write(
+            root.join("initial_conditions.json"),
+            INITIAL_CONDITIONS_JSON,
+        )
+        .expect("write initial_conditions.json");
+        std::fs::write(root.join("system/buses.json"), BUSES_JSON).expect("write buses.json");
+        std::fs::write(root.join("system/lines.json"), LINES_JSON).expect("write lines.json");
+        std::fs::write(root.join("system/thermals.json"), THERMALS_JSON)
+            .expect("write thermals.json");
+        std::fs::write(root.join("system/hydros.json"), HYDROS_JSON).expect("write hydros.json");
+        std::fs::write(
+            root.join("system/hydro_production_models.json"),
+            PRODUCTION_MODELS_JSON,
+        )
+        .expect("write hydro_production_models.json");
+
+        write_hydro_geometry(
+            &root.join("system/hydro_geometry.parquet"),
+            &[
+                (0, 256.0, 300.0, 1.0),
+                (0, 768.0, 340.0, 1.0),
+                (0, 1280.0, 348.0, 1.0),
+            ],
+        );
+
+        write_seasonal_stats(
+            &root.join("scenarios/inflow_seasonal_stats.parquet"),
+            "hydro_id",
+            "mean_m3s",
+            "std_m3s",
+            &[
+                (0, 0, 30.0, 0.0),
+                (0, 1, 20.0, 0.0),
+                (1, 0, 15.0, 0.0),
+                (1, 1, 10.0, 0.0),
+            ],
+        );
+        write_seasonal_stats(
+            &root.join("scenarios/load_seasonal_stats.parquet"),
+            "bus_id",
+            "mean_mw",
+            "std_mw",
+            &[(0, 0, 40.0, 0.0), (0, 1, 35.0, 0.0)],
+        );
+
+        tmp
+    }
+
+    /// Train + one-scenario-simulate `dir` and return the drained per-scenario
+    /// results — the same `build_setup_for_case`/`run_simulation` harness the
+    /// sibling permutation probe (`nonzero_stage_fpha_override_regression`) uses.
+    fn train_and_simulate(dir: &Path) -> Vec<SimulationScenarioResult> {
+        let config_path = dir.join("config.json");
+        let config = cobre_io::parse_config(&config_path).expect("config must parse");
+        let system = cobre_io::load_case(dir).expect("load_case must succeed");
+
+        let pr = prepare_stochastic(system, dir, &config, 42, &ScenarioSource::default(), None)
+            .expect("prepare_stochastic must succeed");
+        let system = pr.system;
+        let stochastic = pr.stochastic;
+
+        let hydro_models =
+            prepare_hydro_models(&system, dir, false).expect("prepare_hydro_models must succeed");
+
+        let mut config_with_sim = config.clone();
+        config_with_sim.simulation.enabled = true;
+        config_with_sim.simulation.selection =
+            Some(SimulationSelection::Sampled { num_scenarios: 1 });
+
+        let mut setup =
+            build_setup_for_case(dir, &config_with_sim, &system, stochastic, hydro_models);
+        run_simulation(&mut setup, 1)
+    }
+
+    /// Flattens every scenario's per-stage hydro rows (the stage aggregate row,
+    /// `block_id: None`, and each per-block row) into one canonically ordered
+    /// list — the comparison unit the assertions below key on.
+    fn sorted_hydro_rows(results: &[SimulationScenarioResult]) -> Vec<SimulationHydroResult> {
+        let mut rows: Vec<SimulationHydroResult> = results
+            .iter()
+            .flat_map(|s| &s.stages)
+            .flat_map(|stage| stage.hydros.iter().cloned())
+            .collect();
+        rows.sort_by_key(|h| (h.stage_id, h.block_id, h.hydro_id));
+        rows
+    }
+
+    /// Asserts `to_bits()` equality of the six parity-hash-excluded columns at
+    /// every `(hydro_id, stage_id, block_id)` key, between two comparably
+    /// ordered row lists.
+    fn assert_six_columns_bit_identical(
+        label: &str,
+        base: &[SimulationHydroResult],
+        other: &[SimulationHydroResult],
+    ) {
+        assert_eq!(base.len(), other.len(), "{label}: row count differs");
+        for (b, o) in base.iter().zip(other) {
+            assert_eq!(
+                (b.hydro_id, b.stage_id, b.block_id),
+                (o.hydro_id, o.stage_id, o.block_id),
+                "{label}: row key mismatch"
+            );
+            let key = format!(
+                "hydro {} stage {} block {:?}",
+                b.hydro_id, b.stage_id, b.block_id
+            );
+            assert_eq!(
+                b.integrated_equivalent_productivity_mw_per_m3s.to_bits(),
+                o.integrated_equivalent_productivity_mw_per_m3s.to_bits(),
+                "{label}: integrated_equivalent_productivity_mw_per_m3s differs at {key}"
+            );
+            assert_eq!(
+                b.integrated_accumulated_productivity_mw_per_m3s.to_bits(),
+                o.integrated_accumulated_productivity_mw_per_m3s.to_bits(),
+                "{label}: integrated_accumulated_productivity_mw_per_m3s differs at {key}"
+            );
+            assert_eq!(
+                b.stored_energy_initial_mw.to_bits(),
+                o.stored_energy_initial_mw.to_bits(),
+                "{label}: stored_energy_initial_mw differs at {key}"
+            );
+            assert_eq!(
+                b.stored_energy_final_mw.to_bits(),
+                o.stored_energy_final_mw.to_bits(),
+                "{label}: stored_energy_final_mw differs at {key}"
+            );
+            assert_eq!(
+                b.stored_energy_initial_mwh.to_bits(),
+                o.stored_energy_initial_mwh.to_bits(),
+                "{label}: stored_energy_initial_mwh differs at {key}"
+            );
+            assert_eq!(
+                b.stored_energy_final_mwh.to_bits(),
+                o.stored_energy_final_mwh.to_bits(),
+                "{label}: stored_energy_final_mwh differs at {key}"
+            );
+        }
+    }
+
+    /// Permuting hydro (and every other whitelisted registry's) declaration
+    /// order must not change the six parity-hash-excluded columns.
+    #[test]
+    fn declaration_order_is_invariant() {
+        let base_dir = build_fixture();
+        let permuted_dir = permute_case(base_dir.path(), PERMUTATION_SEED);
+
+        let base_rows = sorted_hydro_rows(&train_and_simulate(base_dir.path()));
+        let permuted_rows = sorted_hydro_rows(&train_and_simulate(permuted_dir.path()));
+
+        assert_six_columns_bit_identical(
+            "declaration-order permutation",
+            &base_rows,
+            &permuted_rows,
+        );
+
+        let h0_stage0 = base_rows
+            .iter()
+            .find(|h| h.hydro_id == 0 && h.stage_id == 0 && h.block_id == Some(0))
+            .expect("hydro 0 stage 0 block 0 present");
+        assert_ne!(
+            h0_stage0
+                .integrated_equivalent_productivity_mw_per_m3s
+                .to_bits(),
+            h0_stage0.equivalent_productivity_mw_per_m3s.to_bits(),
+            "fixture must exercise the integrated grid: hydro 0's integrated \
+             productivity must differ from its reference-point productivity"
+        );
+    }
+
+    /// Two fresh training + simulation runs over the SAME (unpermuted) deck must
+    /// produce `to_bits()`-identical values for the six columns — the
+    /// `clp_determinism.rs` fresh-instance idiom applied to the output layer.
+    #[test]
+    fn run_to_run_is_reproducible() {
+        let dir = build_fixture();
+        let run_a = sorted_hydro_rows(&train_and_simulate(dir.path()));
+        let run_b = sorted_hydro_rows(&train_and_simulate(dir.path()));
+
+        assert_six_columns_bit_identical("run-to-run reproducibility", &run_a, &run_b);
     }
 }

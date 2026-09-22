@@ -12,9 +12,13 @@
 //! exactly one source supplies the value for each non-FPHA `(hydro, stage)`
 //! pair — see [`crate::validation::productivity_resolution`].
 //!
-//! The other two override columns (`reference_outflow_m3s`,
-//! `specific_productivity_mw_per_m3s_per_m`) apply independently of the
-//! generation model.
+//! The `specific_productivity_mw_per_m3s_per_m` (`ρ_esp`) override feeds the
+//! head-derived productivity of both the reference-point and mean
+//! energy-conversion evaluators, and the `specific_productivity` computed tag
+//! — the same override-then-entity precedence in both. The
+//! `reference_outflow_m3s` (`Q_ref`) override reaches only the
+//! `reference_turbine` computed tag; the energy-conversion head evaluation
+//! always reads `max_turbined_m3s`, never this column.
 //!
 //! The reference operating volume is declared in `hydro_production_models.json`
 //! (`reference_volume`), the single source of truth, not here. A stale
@@ -42,14 +46,15 @@
 //! Duplicate `(hydro_id, stage_id)` detection is performed at build time by
 //! the consumer that assembles the loaded rows into the override table.
 
-use std::fs::File;
 use std::path::Path;
 
-use arrow::array::{Array, Float64Array, Int32Array};
+use arrow::array::{Array, Float64Array};
 use cobre_core::EntityId;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use crate::LoadError;
+use crate::parquet_helpers::{
+    extract_required_float64, extract_required_int32, open_record_batch_reader,
+};
 
 /// A single row of the `system/hydro_energy_productivity.parquet` override table.
 ///
@@ -80,13 +85,7 @@ pub struct HydroEnergyProductivityRow {
 pub fn parse_hydro_energy_productivity(
     path: &Path,
 ) -> Result<Vec<HydroEnergyProductivityRow>, LoadError> {
-    let file = File::open(path).map_err(|e| LoadError::io(path, e))?;
-
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
-    let reader = builder
-        .build()
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
+    let reader = open_record_batch_reader(path)?;
 
     let mut rows: Vec<HydroEnergyProductivityRow> = Vec::new();
 
@@ -95,13 +94,13 @@ pub fn parse_hydro_energy_productivity(
 
         warn_on_stale_reference_volume_column(&batch);
 
-        let hydro_id_col = extract_int32_column(&batch, "hydro_id", path)?;
-        let stage_id_col = extract_int32_column(&batch, "stage_id", path)?;
+        let hydro_id_col = extract_required_int32(&batch, "hydro_id", path)?;
+        let stage_id_col = extract_required_int32(&batch, "stage_id", path)?;
         let rho_eq_col =
-            extract_float64_column(&batch, "equivalent_productivity_mw_per_m3s", path)?;
-        let q_ref_col = extract_float64_column(&batch, "reference_outflow_m3s", path)?;
+            extract_required_float64(&batch, "equivalent_productivity_mw_per_m3s", path)?;
+        let q_ref_col = extract_required_float64(&batch, "reference_outflow_m3s", path)?;
         let rho_esp_col =
-            extract_float64_column(&batch, "specific_productivity_mw_per_m3s_per_m", path)?;
+            extract_required_float64(&batch, "specific_productivity_mw_per_m3s_per_m", path)?;
 
         let n = batch.num_rows();
         let base_idx = rows.len();
@@ -125,38 +124,24 @@ pub fn parse_hydro_energy_productivity(
                 Some(stage_id_col.value(i))
             };
 
-            let equivalent_productivity_mw_per_m3s = if rho_eq_col.is_null(i) {
-                None
-            } else {
-                Some(validate_nonnegative(
-                    rho_eq_col.value(i),
-                    row_idx,
-                    "equivalent_productivity_mw_per_m3s",
-                    path,
-                )?)
-            };
+            let equivalent_productivity_mw_per_m3s = extract_nonnegative_override(
+                rho_eq_col,
+                i,
+                row_idx,
+                "equivalent_productivity_mw_per_m3s",
+                path,
+            )?;
 
-            let reference_outflow_m3s = if q_ref_col.is_null(i) {
-                None
-            } else {
-                Some(validate_nonnegative(
-                    q_ref_col.value(i),
-                    row_idx,
-                    "reference_outflow_m3s",
-                    path,
-                )?)
-            };
+            let reference_outflow_m3s =
+                extract_nonnegative_override(q_ref_col, i, row_idx, "reference_outflow_m3s", path)?;
 
-            let specific_productivity_mw_per_m3s_per_m = if rho_esp_col.is_null(i) {
-                None
-            } else {
-                Some(validate_nonnegative(
-                    rho_esp_col.value(i),
-                    row_idx,
-                    "specific_productivity_mw_per_m3s_per_m",
-                    path,
-                )?)
-            };
+            let specific_productivity_mw_per_m3s_per_m = extract_nonnegative_override(
+                rho_esp_col,
+                i,
+                row_idx,
+                "specific_productivity_mw_per_m3s_per_m",
+                path,
+            )?;
 
             rows.push(HydroEnergyProductivityRow {
                 hydro_id,
@@ -172,68 +157,12 @@ pub fn parse_hydro_energy_productivity(
     Ok(rows)
 }
 
-// ── column extraction helpers ──────────────────────────────────────────────────
-
-fn extract_int32_column<'a>(
-    batch: &'a arrow::record_batch::RecordBatch,
-    name: &str,
-    path: &Path,
-) -> Result<&'a Int32Array, LoadError> {
-    let col = batch
-        .column_by_name(name)
-        .ok_or_else(|| LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: name.to_string(),
-            message: format!("missing column \"{name}\""),
-        })?;
-    col.as_any()
-        .downcast_ref::<Int32Array>()
-        .ok_or_else(|| LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: name.to_string(),
-            message: format!(
-                "column \"{name}\" has type {} but Int32 is required",
-                col.data_type()
-            ),
-        })
-}
-
-fn extract_float64_column<'a>(
-    batch: &'a arrow::record_batch::RecordBatch,
-    name: &str,
-    path: &Path,
-) -> Result<&'a Float64Array, LoadError> {
-    let col = batch
-        .column_by_name(name)
-        .ok_or_else(|| LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: name.to_string(),
-            message: format!("missing column \"{name}\""),
-        })?;
-    col.as_any()
-        .downcast_ref::<Float64Array>()
-        .ok_or_else(|| LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: name.to_string(),
-            message: format!(
-                "column \"{name}\" has type {} but Float64 is required",
-                col.data_type()
-            ),
-        })
-}
-
 // ── stale-column deprecation notice ─────────────────────────────────────────────
 
 /// Process-wide guard so the stale-column deprecation notice is emitted at most
 /// once, no matter how many files or batches carry the column.
 static STALE_REFERENCE_VOLUME_NOTICE: std::sync::Once = std::sync::Once::new();
 
-/// Emits a one-time deprecation notice when a batch still carries the retired
-/// `reference_volume_hm3` column, then returns so the caller ignores it.
-///
-/// Warn-and-ignore (not hard-error) keeps an older parquet loadable while
-/// surfacing the now-inert column; hard-erroring would break an old file over a
-/// purely structural removal.
 fn warn_on_stale_reference_volume_column(batch: &arrow::record_batch::RecordBatch) {
     if batch
         .schema()
@@ -251,7 +180,25 @@ fn warn_on_stale_reference_volume_column(batch: &arrow::record_batch::RecordBatc
 
 // ── per-value validation helpers ───────────────────────────────────────────────
 
-/// Validates that `value` is finite and non-negative (`>= 0.0`).
+fn extract_nonnegative_override(
+    col: &Float64Array,
+    i: usize,
+    row_idx: usize,
+    column: &str,
+    path: &Path,
+) -> Result<Option<f64>, LoadError> {
+    if col.is_null(i) {
+        Ok(None)
+    } else {
+        Ok(Some(validate_nonnegative(
+            col.value(i),
+            row_idx,
+            column,
+            path,
+        )?))
+    }
+}
+
 fn validate_nonnegative(
     value: f64,
     row_idx: usize,
@@ -287,6 +234,7 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
+    use crate::test_support::write_parquet;
 
     fn make_schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
@@ -325,15 +273,6 @@ mod tests {
             ],
         )
         .expect("valid batch construction")
-    }
-
-    fn write_parquet(batch: &RecordBatch) -> NamedTempFile {
-        let tmp = NamedTempFile::new().expect("tempfile");
-        let mut writer = ArrowWriter::try_new(tmp.reopen().expect("reopen"), batch.schema(), None)
-            .expect("ArrowWriter");
-        writer.write(batch).expect("write batch");
-        writer.close().expect("close writer");
-        tmp
     }
 
     /// Round-trip: three rows matching the acceptance criterion fixture.

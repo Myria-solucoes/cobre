@@ -38,10 +38,11 @@ import json
 import math
 import pathlib
 import shutil
-import subprocess
 
 import pyarrow.parquet as pq
 import pytest
+
+from _cobre_cli import run_cli
 
 # Resolved against the repo root so the tests are independent of pytest's
 # working directory (never a CWD-relative path).
@@ -97,37 +98,6 @@ def _make_case_with_simulation(src: pathlib.Path, dest: pathlib.Path) -> None:
     (dest / "config.json").write_text(json.dumps(config))
 
 
-def _cli_binary() -> pathlib.Path:
-    """Return the compiled ``cobre`` CLI binary path, skipping if absent."""
-    for profile in ("release", "debug"):
-        candidate = _REPO_ROOT / "target" / profile / "cobre"
-        if candidate.is_file():
-            return candidate
-    pytest.skip(
-        "No compiled `cobre` binary found in target/release or target/debug. "
-        "Run `cargo build -p cobre-cli` first."
-    )
-    raise RuntimeError("unreachable: pytest.skip raises Skipped")
-
-
-def _run_cli(case_dir: pathlib.Path, output_dir: pathlib.Path) -> None:
-    """Run the cobre CLI for ``case_dir``, writing outputs to ``output_dir``."""
-    binary = _cli_binary()
-    result = subprocess.run(
-        [str(binary), "run", str(case_dir), "--output", str(output_dir)],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=120,
-    )
-    if result.returncode != 0:
-        pytest.fail(
-            f"cobre CLI failed (exit {result.returncode}):\n"
-            f"stdout: {result.stdout}\n"
-            f"stderr: {result.stderr}"
-        )
-
-
 def _require_post_study_case() -> None:
     """Skip loudly when the named post-study case dependency is absent.
 
@@ -175,7 +145,9 @@ def _lane_values_equal(left: object, right: object) -> bool:
     return left == right
 
 
-def test_cli_python_anticipated_lanes_row_parity(tmp_path: pathlib.Path) -> None:
+def test_cli_python_anticipated_lanes_row_parity(
+    tmp_path: pathlib.Path, cli_binary: pathlib.Path
+) -> None:
     """The CLI and the Python surface emit identical anticipated_lanes rows.
 
     Runs the post-study case through both the compiled `cobre` CLI (`cobre run
@@ -194,7 +166,7 @@ def test_cli_python_anticipated_lanes_row_parity(tmp_path: pathlib.Path) -> None
     _make_case_with_simulation(POST_STUDY_CASE, case_dir)
 
     out_cli = tmp_path / "cli_out"
-    _run_cli(case_dir, out_cli)
+    run_cli(case_dir, out_cli, cli_binary)
 
     out_py = tmp_path / "py_out"
     cobre.run.run(str(case_dir), output_dir=str(out_py))
@@ -243,7 +215,7 @@ def test_cli_python_anticipated_lanes_row_parity(tmp_path: pathlib.Path) -> None
 
 
 def test_no_post_study_continuation_produces_no_anticipated_lanes_partition(
-    tmp_path: pathlib.Path,
+    tmp_path: pathlib.Path, cli_binary: pathlib.Path
 ) -> None:
     """A study with no post-study continuation writes no anticipated_lanes/ dir.
 
@@ -267,7 +239,7 @@ def test_no_post_study_continuation_produces_no_anticipated_lanes_partition(
     )
 
     out_cli = tmp_path / "cli_out"
-    _run_cli(NO_POST_STUDY_CASE, out_cli)
+    run_cli(NO_POST_STUDY_CASE, out_cli, cli_binary)
     assert _lanes_parquets(out_cli) == [], (
         "CLI must not emit an anticipated_lanes partition for a study with no "
         "post-study continuation"

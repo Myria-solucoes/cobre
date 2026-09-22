@@ -54,11 +54,11 @@
 //! threshold, then estimates coefficients at the selected order using the periodic
 //! YW system.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use chrono::{Months, NaiveDate};
-use cobre_core::{EntityId, SeasonMap, Stage, System};
+use cobre_core::{EntityId, SeasonMap, Stage, System, ValidationError};
 use cobre_stochastic::{
     StochasticError,
     par::aggregate::aggregate_observations_to_season,
@@ -74,11 +74,12 @@ use cobre_stochastic::{
 
 use crate::LoadError::ConstraintError;
 use crate::{
-    Config, FileManifest, LoadError, OrderSelectionMethod, ValidationContext,
+    Config, FileManifest, InputFile, LoadError, OrderSelectionMethod, ValidationContext,
     parse_inflow_ar_coefficients, parse_inflow_history,
     scenarios::{
         InflowAnnualComponentRow, InflowArCoefficientRow, InflowHistoryRow, InflowSeasonalStatsRow,
-        assemble_inflow_models, populate_derived_residual_ratios, resolve_stage_seasons,
+        assemble_inflow_models, populate_derived_residual_ratios,
+        residual_derivation::season_dense_index, resolve_stage_seasons,
     },
     validate_structure,
 };
@@ -113,17 +114,15 @@ pub enum EstimationPath {
 impl EstimationPath {
     /// Resolve the estimation path from the three boolean manifest flags.
     ///
-    /// This function is a total map over all 8 boolean combinations. Invalid
-    /// combinations (AR present without history or stats) fall back to
+    /// Invalid combinations (AR present without history or stats) fall back to
     /// `Deterministic` because AR coefficients alone cannot drive estimation.
     #[must_use]
     pub fn resolve(manifest: &FileManifest) -> Self {
         match (
-            manifest.scenarios_inflow_history_parquet,
-            manifest.scenarios_inflow_seasonal_stats_parquet,
-            manifest.scenarios_inflow_ar_coefficients_parquet,
+            manifest.present(InputFile::ScenariosInflowHistoryParquet),
+            manifest.present(InputFile::ScenariosInflowSeasonalStatsParquet),
+            manifest.present(InputFile::ScenariosInflowArCoefficientsParquet),
         ) {
-            // `_`: with no history, R is ignored — AR alone cannot drive estimation.
             (false, false, _) => Self::Deterministic,
             (false, true, false) => Self::UserStatsWhiteNoise,
             (false, true, true) => Self::UserProvidedNoHistory,
@@ -159,6 +158,11 @@ pub enum EstimationError {
     /// Estimation failed due to insufficient data.
     #[error("estimation failed: {0}")]
     Stochastic(#[from] StochasticError),
+
+    /// The replacement `inflow_models` table produced by estimation is not
+    /// canonically ordered.
+    #[error("scenario model validation error: {0}")]
+    Validation(#[from] ValidationError),
 }
 
 /// Estimate or load PAR(p) model parameters based on the input file manifest.
@@ -171,6 +175,8 @@ pub enum EstimationError {
 /// - [`EstimationError::Load`] -- file read, parse, or validation failure.
 /// - [`EstimationError::Stochastic`] -- insufficient observations for any
 ///   `(entity, season)` group during AR or stats estimation.
+/// - [`EstimationError::Validation`] -- the estimated `inflow_models` table is
+///   not canonically ordered.
 pub fn estimate_from_history(
     system: System,
     case_dir: &Path,
@@ -209,7 +215,6 @@ pub fn estimate_from_history(
     }
 }
 
-/// Inner function that runs the full estimation pipeline once path conditions are met.
 fn run_estimation(
     system: System,
     case_dir: &Path,
@@ -223,8 +228,6 @@ fn run_estimation(
     let season_map = system.policy_graph().season_map.as_ref();
     let max_order = config.estimation.max_order as usize;
 
-    // Empty for a full-year study, so `stages == study_stages` and the estimation
-    // is bit-identical to the no-prestudy path.
     let prestudy = synthesize_prestudy_stages(study_stages, max_order, season_map);
     let stages: Vec<Stage> = study_stages
         .iter()
@@ -254,7 +257,7 @@ fn run_estimation(
         },
     )?;
 
-    let correlation = if manifest.scenarios_correlation_json {
+    let correlation = if manifest.present(InputFile::ScenariosCorrelationJson) {
         system.correlation().clone()
     } else {
         estimate_correlation_with_season_map(
@@ -272,16 +275,12 @@ fn run_estimation(
     let annual_rows = ar_estimates_to_annual_rows(&ar_estimates, stages);
 
     let mut inflow_models = assemble_inflow_models(stats_rows, coeff_rows, annual_rows)?;
-    // `stages` (study + synthesized prestudy) matches `seasonal_stats_to_rows`'s own
-    // stage_to_season construction above: prestudy stage_ids appear in
-    // `inflow_models` too, so `system.stages()` alone would under-resolve them.
+    // `stages` includes prestudy (see synthesize_prestudy_stages doc).
     let (stage_to_season, n_seasons) = resolve_stage_seasons(stages, season_map);
     populate_derived_residual_ratios(&mut inflow_models, &stage_to_season, n_seasons)?;
 
-    Ok((
-        system.with_scenario_models(inflow_models, correlation),
-        estimation_report,
-    ))
+    let system = system.with_scenario_models(inflow_models, correlation)?;
+    Ok((system, estimation_report))
 }
 
 /// Partial estimation: history + user seasonal stats present, AR coefficients absent.
@@ -301,8 +300,6 @@ fn run_partial_estimation(
     let season_map = system.policy_graph().season_map.as_ref();
     let max_order = config.estimation.max_order as usize;
 
-    // Empty for a full-year study, so `stages == study_stages` and the partial
-    // estimation is bit-identical to the no-prestudy path.
     let prestudy = synthesize_prestudy_stages(study_stages, max_order, season_map);
     let stages_owned: Vec<Stage> = study_stages
         .iter()
@@ -347,7 +344,7 @@ fn run_partial_estimation(
     let (white_noise_fallbacks, std_ratio_warnings) =
         validate_partial_estimation_coverage(&system, &fitting_stats, study_stages)?;
 
-    let correlation = if manifest.scenarios_correlation_json {
+    let correlation = if manifest.present(InputFile::ScenariosCorrelationJson) {
         system.correlation().clone()
     } else {
         estimate_correlation_with_season_map(
@@ -367,21 +364,19 @@ fn run_partial_estimation(
     // stage_id rather than zeroing the lag. In-window wrap lags stay on the
     // Tier-2 → user-stat path. Empty for full-year.
     stats_rows.extend(prestudy_seasonal_rows(&fitting_stats, &prestudy));
+    stats_rows.sort_by_key(|r| (r.hydro_id.0, r.stage_id));
     let coeff_rows = ar_estimates_to_rows(&ar_estimates, stages);
     let annual_rows = ar_estimates_to_annual_rows(&ar_estimates, stages);
     let mut inflow_models = assemble_inflow_models(stats_rows, coeff_rows, annual_rows)?;
-    // `stages` (study + synthesized prestudy) — see `run_estimation`'s identical
-    // rationale: prestudy stage_ids appear in `inflow_models` too.
+    // `stages` includes prestudy (see synthesize_prestudy_stages doc).
     let (stage_to_season, n_seasons) = resolve_stage_seasons(stages, season_map);
     populate_derived_residual_ratios(&mut inflow_models, &stage_to_season, n_seasons)?;
 
     estimation_report.white_noise_fallbacks = white_noise_fallbacks;
     estimation_report.std_ratio_warnings = std_ratio_warnings;
 
-    Ok((
-        system.with_scenario_models(inflow_models, correlation),
-        estimation_report,
-    ))
+    let system = system.with_scenario_models(inflow_models, correlation)?;
+    Ok((system, estimation_report))
 }
 
 /// Load inflow history from the case directory, gate each hydro's season
@@ -461,22 +456,27 @@ fn resolve_coverage_gated_observations(
     let mut observations = Vec::new();
     let mut skipped_partial = BTreeMap::new();
 
+    // Cursor sweep requires ascending-by-start, disjoint windows; upstream guarantees:
+    // `parse_inflow_history` sorts by (hydro_id, start_date), `validate_windowed_records` rejects overlaps.
     for (&hydro_id, windows) in &windows_by_hydro {
+        debug_assert!(
+            windows.is_sorted_by(|a, b| a.end_date <= b.start_date),
+            "hydro {hydro_id}: windows must be ascending-by-start and disjoint for the cursor sweep"
+        );
         let occurrences = discover_hydro_occurrences(season_map, stage_template, windows);
         let mut skip_count = 0usize;
+        let mut lo = 0usize;
 
         for occurrence in &occurrences {
-            let overlapping: Vec<RealizedWindow> = windows
-                .iter()
-                .filter(|w| w.start_date < occurrence.end && w.end_date > occurrence.start)
-                .map(|w| RealizedWindow {
-                    start_date: w.start_date,
-                    end_date: w.end_date,
-                    value_m3s: w.value_m3s,
-                })
-                .collect();
+            while lo < windows.len() && windows[lo].end_date <= occurrence.start {
+                lo += 1;
+            }
+            let mut hi = lo;
+            while hi < windows.len() && windows[hi].start_date < occurrence.end {
+                hi += 1;
+            }
 
-            let projection = cast(&overlapping, occurrence);
+            let projection = cast(&windows[lo..hi], occurrence);
 
             if projection.coverage == 1.0 {
                 observations.push((hydro_id, occurrence.start, projection.value));
@@ -624,7 +624,6 @@ fn validate_partial_estimation_coverage(
         .collect();
     white_noise_fallbacks.sort();
 
-    // Cross-season std-ratio divergence check (advisory only).
     let std_ratio_warnings = check_std_ratio_divergence(system, fitting_stats, stages);
     for w in &std_ratio_warnings {
         tracing::warn!(
@@ -660,8 +659,6 @@ fn run_user_ar_estimation(
     let season_map = system.policy_graph().season_map.as_ref();
     let max_order = config.estimation.max_order as usize;
 
-    // Empty for a full-year study, so `extended == stages` and the estimation
-    // is bit-identical to the no-prestudy path.
     let prestudy = synthesize_prestudy_stages(stages, max_order, season_map);
     let extended: Vec<Stage> = stages
         .iter()
@@ -681,7 +678,7 @@ fn run_user_ar_estimation(
 
     let user_ar_estimates = ar_rows_to_estimates(&user_ar_rows, stages);
 
-    let correlation = if manifest.scenarios_correlation_json {
+    let correlation = if manifest.present(InputFile::ScenariosCorrelationJson) {
         system.correlation().clone()
     } else {
         estimate_correlation_with_season_map(
@@ -699,8 +696,7 @@ fn run_user_ar_estimation(
     let stats_rows = seasonal_stats_to_rows(&seasonal_stats, extended);
 
     let mut inflow_models = assemble_inflow_models(stats_rows, user_ar_rows, vec![])?;
-    // `extended` (study + synthesized prestudy) matches `seasonal_stats_to_rows`'s
-    // own coverage above — see `run_estimation`'s identical rationale.
+    // `extended` includes prestudy (see synthesize_prestudy_stages doc).
     let (stage_to_season, n_seasons) = resolve_stage_seasons(extended, season_map);
     populate_derived_residual_ratios(&mut inflow_models, &stage_to_season, n_seasons)?;
 
@@ -711,10 +707,8 @@ fn run_user_ar_estimation(
         std_ratio_warnings: Vec::new(),
     };
 
-    Ok((
-        system.with_scenario_models(inflow_models, correlation),
-        estimation_report,
-    ))
+    let system = system.with_scenario_models(inflow_models, correlation)?;
+    Ok((system, estimation_report))
 }
 
 /// Convert [`InflowArCoefficientRow`] entries to [`ArCoefficientEstimate`] values.
@@ -831,10 +825,8 @@ fn check_std_ratio_divergence(
         est_std.entry((s.entity_id, season_id)).or_insert(s.std);
     }
 
-    let user_hydros: std::collections::BTreeSet<EntityId> =
-        user_std.keys().map(|(h, _)| *h).collect();
-    let est_hydros: std::collections::BTreeSet<EntityId> =
-        est_std.keys().map(|(h, _)| *h).collect();
+    let user_hydros: BTreeSet<EntityId> = user_std.keys().map(|(h, _)| *h).collect();
+    let est_hydros: BTreeSet<EntityId> = est_std.keys().map(|(h, _)| *h).collect();
     let common_hydros: Vec<EntityId> = user_hydros.intersection(&est_hydros).copied().collect();
 
     let mut warnings: Vec<StdRatioDivergence> = Vec::new();
@@ -902,9 +894,19 @@ fn check_std_ratio_divergence(
         }
     }
 
-    // Sort by (hydro_id, season_a) for deterministic output.
     warnings.sort_by_key(|w| (w.hydro_id, w.season_a));
     warnings
+}
+
+/// The first (lowest-`id`) non-negative study stage carrying a `season_id`,
+/// paired with that season — the anchor [`synthesize_prestudy_stages`] and
+/// [`resolve_model_stage_seasons`] both back-walk pre-study season ids from.
+fn first_study_stage_with_season(stages: &[Stage]) -> Option<(&Stage, usize)> {
+    stages
+        .iter()
+        .filter(|s| s.id >= 0 && s.season_id.is_some())
+        .min_by_key(|s| s.id)
+        .and_then(|s| s.season_id.map(|season| (s, season)))
 }
 
 /// Synthesize pre-study stages covering the PAR(p) lag window for a
@@ -916,21 +918,11 @@ fn check_std_ratio_divergence(
 /// those seasons, the season-aware estimators have no place to attach the
 /// out-of-window lag statistics, and the precompute silently zeroes them.
 ///
-/// This helper emits, for each lag `k = 1..=min(max_order, cycle_len-1)`, a
-/// pre-study [`Stage`](cobre_core::temporal::Stage) with:
-/// - `id = first_study_stage.id - k` (negative, descending),
-/// - `season_id` = the season `k` calendar positions before the first study
-///   stage's season (modular on `cycle_len`),
-/// - `start_date`/`end_date` = the calendar month `k` positions before the
-///   first study stage's `start_date`.
-///
-/// A pre-study stage is emitted **only** when its `season_id` is not already
-/// among the study stages' seasons. A full-year study therefore synthesizes
-/// nothing (every season already has a study stage), making this a no-op for
-/// the existing in-horizon cases.
-///
-/// Returns an empty `Vec` when `season_map` is `None`, `max_order == 0`, or
-/// the study has no stage with a `season_id`.
+/// This helper emits one pre-study [`Stage`](cobre_core::temporal::Stage) per
+/// lag `k = 1..=min(max_order, cycle_len-1)`, at the descending negative id
+/// `first_study_stage.id - k` and the season [`prestudy_season_for_lag`]
+/// resolves, but **only** when that season is not already among the study
+/// stages' seasons. A full-year study therefore synthesizes nothing.
 fn synthesize_prestudy_stages(
     stages: &[Stage],
     max_order: usize,
@@ -944,14 +936,7 @@ fn synthesize_prestudy_stages(
         return Vec::new();
     }
 
-    let Some(first) = stages
-        .iter()
-        .filter(|s| s.id >= 0 && s.season_id.is_some())
-        .min_by_key(|s| s.id)
-    else {
-        return Vec::new();
-    };
-    let Some(first_season) = first.season_id else {
+    let Some((first, first_season)) = first_study_stage_with_season(stages) else {
         return Vec::new();
     };
 
@@ -961,8 +946,7 @@ fn synthesize_prestudy_stages(
     let mut synthetic = Vec::with_capacity(lag_window);
 
     for k in 1..=lag_window {
-        // The season k calendar positions before first_season (modular on cycle_len).
-        let season_k = (first_season + cycle_len - (k % cycle_len)) % cycle_len;
+        let season_k = prestudy_season_for_lag(first_season, k, cycle_len);
         if study_seasons.contains(&season_k) {
             // In-window wrap lags are served by the cycle-correct Tier-2 / user-stat path.
             continue;
@@ -983,8 +967,7 @@ fn synthesize_prestudy_stages(
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         let id = first.id - k as i32;
 
-        // Override only identity/dates/season; estimation keys off id + season_id,
-        // so the cloned block/state/risk/scenario config only keeps the stage valid.
+        // Override only identity/dates/season; estimation keys off id + season_id.
         let mut stage = first.clone();
         stage.index = 0;
         stage.id = id;
@@ -995,6 +978,55 @@ fn synthesize_prestudy_stages(
     }
 
     synthetic
+}
+
+/// The season `lag` calendar positions before `first_season`, modular on
+/// `cycle_len` — the back-walk convention [`synthesize_prestudy_stages`] and
+/// [`resolve_model_stage_seasons`] both stitch pre-study stage ids to.
+#[must_use]
+fn prestudy_season_for_lag(first_season: usize, lag: usize, cycle_len: usize) -> usize {
+    (first_season + cycle_len - (lag % cycle_len)) % cycle_len
+}
+
+/// Extends [`resolve_stage_seasons`]'s map with an entry for every id in
+/// `model_stage_ids` not already covered by `stages`, reproducing the
+/// estimation-time stitched map [`synthesize_prestudy_stages`] builds without
+/// re-running synthesis. An id that is neither a declared stage nor derivable
+/// (no non-negative study stage carries a season, or the id is not below that
+/// stage's) is left unmapped.
+#[must_use]
+pub fn resolve_model_stage_seasons(
+    stages: &[Stage],
+    model_stage_ids: impl Iterator<Item = i32>,
+    season_map: &SeasonMap,
+) -> (HashMap<i32, usize>, usize) {
+    let (mut stage_to_season, n_seasons) = resolve_stage_seasons(stages, Some(season_map));
+    let cycle_len = season_map.seasons.len();
+    if cycle_len == 0 {
+        return (stage_to_season, n_seasons);
+    }
+
+    let Some((first, first_season)) = first_study_stage_with_season(stages) else {
+        return (stage_to_season, n_seasons);
+    };
+    let first_id = first.id;
+
+    let (dense_index, _) = season_dense_index(stages, Some(season_map));
+
+    for model_stage_id in model_stage_ids {
+        if stage_to_season.contains_key(&model_stage_id) || model_stage_id >= first_id {
+            continue;
+        }
+        let Ok(lag) = usize::try_from(first_id - model_stage_id) else {
+            continue;
+        };
+        let raw_season = prestudy_season_for_lag(first_season, lag, cycle_len);
+        if let Some(&ordinal) = dense_index.get(&raw_season) {
+            stage_to_season.insert(model_stage_id, ordinal);
+        }
+    }
+
+    (stage_to_season, n_seasons)
 }
 
 /// Emit history-derived seasonal rows for the synthetic pre-study stages of a
@@ -1120,7 +1152,6 @@ fn ar_estimates_to_rows(
         }
     }
 
-    // Sort by (hydro_id, stage_id, lag) ascending — matches parser convention.
     rows.sort_by_key(|r| (r.hydro_id.0, r.stage_id, r.lag));
 
     rows
@@ -1158,7 +1189,6 @@ fn ar_estimates_to_annual_rows(
         }
     }
 
-    // Sort by (hydro_id, stage_id) ascending — matches parser convention.
     rows.sort_by_key(|r| (r.hydro_id.0, r.stage_id));
 
     rows

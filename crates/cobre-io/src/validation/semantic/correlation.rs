@@ -5,8 +5,8 @@ use super::CORR_TOLERANCE;
 
 // ── Rules 14-16: Correlation matrix validation ────────────────────────────────
 
-/// Validates correlation matrix symmetry, diagonal, and off-diagonal range for
-/// all groups in all profiles of the correlation model.
+/// Rules 14-16: validates correlation matrix symmetry, diagonal, and
+/// off-diagonal range for all groups in all profiles of the correlation model.
 ///
 /// Only runs when `data.correlation` is `Some`.
 pub(super) fn check_correlation_matrices(data: &ParsedData, ctx: &mut ValidationContext) {
@@ -82,7 +82,7 @@ pub(super) fn check_correlation_matrices(data: &ParsedData, ctx: &mut Validation
 
 // ── M4: Same-type enforcement within correlation groups ──────────────────────
 
-/// Validates that all entities within each correlation group share the same
+/// Rule 16a: validates that all entities within each correlation group share the same
 /// `entity_type` value. Mixed groups produce incorrect covariance matrices.
 pub(super) fn check_correlation_same_type(data: &ParsedData, ctx: &mut ValidationContext) {
     let Some(correlation) = &data.correlation else {
@@ -129,8 +129,8 @@ pub(super) fn check_correlation_same_type(data: &ParsedData, ctx: &mut Validatio
     clippy::cast_sign_loss
 )]
 mod tests {
-    use super::super::test_support::*;
     use super::super::validate_semantic_stages_penalties_scenarios;
+    use crate::test_support::*;
 
     use crate::validation::{ErrorKind, ValidationContext};
 

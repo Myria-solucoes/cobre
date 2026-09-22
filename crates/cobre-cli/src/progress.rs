@@ -13,7 +13,7 @@
 //! ```rust,no_run
 //! use std::sync::mpsc;
 //! use cobre_core::TrainingEvent;
-//! use cobre_cli::progress::{run_progress_thread, RenderMode};
+//! use crate::progress::{run_progress_thread, RenderMode};
 //!
 //! let (tx, rx) = mpsc::channel::<TrainingEvent>();
 //! let handle = run_progress_thread(rx, RenderMode::auto(), 100, 120);
@@ -88,9 +88,17 @@ fn fmt_time_cell(elapsed_ms: u64, eta_ms: Option<u64>) -> String {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
+/// Format the running average LP solve time, or an empty string before any
+/// LP has been recorded.
+// Rationale: LP counts stay far below 2^53, so the u64 -> f64 conversion is exact.
+#[allow(clippy::cast_precision_loss)]
+fn fmt_avg_lp_time(total_ms: f64, count: u64) -> String {
+    if count > 0 {
+        format!("LP: {:.1}ms avg", total_ms / count as f64)
+    } else {
+        String::new()
+    }
+}
 
 /// Rendering strategy for progress events.
 ///
@@ -172,10 +180,6 @@ pub fn resolve_term_width() -> u16 {
     120
 }
 
-// ---------------------------------------------------------------------------
-// Internal dispatcher
-// ---------------------------------------------------------------------------
-
 /// Enum-dispatched renderer. Keeps the event loop in [`run_progress_thread`]
 /// free of dynamic dispatch while still letting each mode own its state.
 enum ProgressRenderer {
@@ -204,15 +208,10 @@ impl ProgressRenderer {
     fn finish(&mut self) {
         match self {
             Self::Interactive(r) => r.finish(),
-            // Log mode keeps no transient state.
             Self::Log(_) => {}
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Bar renderer (TTY)
-// ---------------------------------------------------------------------------
 
 /// [`TermLike`] wrapper that overrides the width reported to `indicatif`.
 ///
@@ -288,7 +287,7 @@ impl BarRenderer {
         match *event {
             TrainingEvent::TrainingStarted { .. } => {
                 let bar = self.training_bar.get_or_insert_with(|| {
-                    create_training_bar(self.max_iterations, self.term_width)
+                    create_bar(self.max_iterations, self.term_width, TRAINING_TEMPLATE)
                 });
                 bar.set_position(0);
                 bar.set_message("starting...");
@@ -300,7 +299,7 @@ impl BarRenderer {
                 ..
             } => {
                 let bar = self.simulation_bar.get_or_insert_with(|| {
-                    create_simulation_bar(u64::from(n_scenarios), self.term_width)
+                    create_bar(u64::from(n_scenarios), self.term_width, SIMULATION_TEMPLATE)
                 });
                 bar.set_position(0);
                 bar.set_message(format!(
@@ -317,7 +316,7 @@ impl BarRenderer {
                 ..
             } => {
                 let bar = self.training_bar.get_or_insert_with(|| {
-                    create_training_bar(self.max_iterations, self.term_width)
+                    create_bar(self.max_iterations, self.term_width, TRAINING_TEMPLATE)
                 });
                 let gap_pct = gap * 100.0;
                 bar.set_position(iteration);
@@ -353,21 +352,16 @@ impl BarRenderer {
                 ..
             } => {
                 let bar = self.simulation_bar.get_or_insert_with(|| {
-                    create_simulation_bar(u64::from(scenarios_total), self.term_width)
+                    create_bar(
+                        u64::from(scenarios_total),
+                        self.term_width,
+                        SIMULATION_TEMPLATE,
+                    )
                 });
                 bar.set_position(u64::from(scenarios_complete));
                 self.sim_solve_time_ms += solve_time_ms;
                 self.sim_lp_count += lp_solves;
-                #[allow(clippy::cast_precision_loss)]
-                let msg = if self.sim_lp_count > 0 {
-                    format!(
-                        "LP: {:.1}ms avg",
-                        self.sim_solve_time_ms / self.sim_lp_count as f64
-                    )
-                } else {
-                    String::new()
-                };
-                bar.set_message(msg);
+                bar.set_message(fmt_avg_lp_time(self.sim_solve_time_ms, self.sim_lp_count));
             }
             TrainingEvent::SimulationFinished { scenarios, .. } => {
                 if let Some(bar) = self.simulation_bar.take() {
@@ -399,7 +393,7 @@ impl BarRenderer {
     }
 }
 
-fn create_training_bar(max_iterations: u64, term_width: u16) -> ProgressBar {
+fn create_bar(total: u64, term_width: u16, template: &str) -> ProgressBar {
     let target = ProgressDrawTarget::term_like_with_hz(
         Box::new(MpiTerm {
             inner: Term::stderr(),
@@ -407,31 +401,12 @@ fn create_training_bar(max_iterations: u64, term_width: u16) -> ProgressBar {
         }),
         8,
     );
-    let bar = ProgressBar::with_draw_target(Some(max_iterations), target);
-    let style = ProgressStyle::with_template(TRAINING_TEMPLATE)
-        .unwrap_or_else(|_| ProgressStyle::default_bar());
+    let bar = ProgressBar::with_draw_target(Some(total), target);
+    let style =
+        ProgressStyle::with_template(template).unwrap_or_else(|_| ProgressStyle::default_bar());
     bar.set_style(style);
     bar
 }
-
-fn create_simulation_bar(scenarios_total: u64, term_width: u16) -> ProgressBar {
-    let target = ProgressDrawTarget::term_like_with_hz(
-        Box::new(MpiTerm {
-            inner: Term::stderr(),
-            width: term_width,
-        }),
-        8,
-    );
-    let bar = ProgressBar::with_draw_target(Some(scenarios_total), target);
-    let style = ProgressStyle::with_template(SIMULATION_TEMPLATE)
-        .unwrap_or_else(|_| ProgressStyle::default_bar());
-    bar.set_style(style);
-    bar
-}
-
-// ---------------------------------------------------------------------------
-// Line renderer (non-TTY)
-// ---------------------------------------------------------------------------
 
 /// Emits one compact append-only line per training iteration and per
 /// simulation-progress event.
@@ -510,15 +485,7 @@ impl LineRenderer {
             } => {
                 self.sim_solve_time_ms += solve_time_ms;
                 self.sim_lp_count += lp_solves;
-                #[allow(clippy::cast_precision_loss)]
-                let avg_lp = if self.sim_lp_count > 0 {
-                    format!(
-                        "LP: {:.1}ms avg",
-                        self.sim_solve_time_ms / self.sim_lp_count as f64
-                    )
-                } else {
-                    String::new()
-                };
+                let avg_lp = fmt_avg_lp_time(self.sim_solve_time_ms, self.sim_lp_count);
                 let time_cell = fmt_time_cell(
                     elapsed_ms,
                     eta_millis(
@@ -1015,12 +982,12 @@ mod tests {
             + (300.0_f64 - 300.0_f64).powi(2)
             + (400.0_f64 - 300.0_f64).powi(2)
             + (500.0_f64 - 300.0_f64).powi(2))
-            / 5.0_f64)
+            / 4.0_f64)
             .sqrt();
         assert!(
-            (acc.std_dev() - expected_std).abs() < 1e-6,
-            "WelfordAccumulator std_dev must be ~{expected_std:.3}, got {}",
-            acc.std_dev()
+            (acc.sample_std_dev() - expected_std).abs() < 1e-6,
+            "WelfordAccumulator sample_std_dev must be ~{expected_std:.3}, got {}",
+            acc.sample_std_dev()
         );
     }
 

@@ -56,14 +56,13 @@ and calls `SystemBuilder::build()` to construct the immutable `System`.
 
 ## Error handling (`LoadError`)
 
-| Variant               | Fields                                                                              | Pipeline phase                                                                                                                                                                          |
-| --------------------- | ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `IoError`             | `path`, `source: std::io::Error`                                                    | Layer 1/2 — file exists in the manifest but cannot be read from disk                                                                                                                    |
-| `ParseError`          | `path`, `message`                                                                   | Layer 2 — file is readable but malformed (invalid JSON/Parquet)                                                                                                                         |
-| `SchemaError`         | `path`, `field` (dot-separated, e.g. `"hydros[3].bus_id"`), `message`               | Layer 2 — required field missing or a value violates a schema constraint; also returned by `parse_config` when `training.forward_passes` or `training.stopping_rules` is absent         |
-| `CrossReferenceError` | `source_file`, `source_entity`, `target_collection`, `target_entity`                | Layer 3 — a foreign-key field names an entity that does not exist                                                                                                                       |
-| `ConstraintError`     | `description` (all collected messages, newline-joined, each `[ErrorKind]`-prefixed) | Layers 4/5, or a final `SystemBuilder::build()` rejection (duplicate IDs, cascade cycle)                                                                                                |
-| `PolicyIncompatible`  | `check`, `policy_value`, `system_value`                                             | After all layers pass, when `policy.mode` is `warm_start`/`resume` and the stored policy fails a compatibility check (hydro count, stage count, cut dimension, or entity identity hash) |
+| Variant              | Fields                                                                              | Pipeline phase                                                                                                                                                                          |
+| -------------------- | ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `IoError`            | `path`, `source: std::io::Error`                                                    | Layer 1/2 — file exists in the manifest but cannot be read from disk                                                                                                                    |
+| `ParseError`         | `path`, `message`                                                                   | Layer 2 — file is readable but malformed (invalid JSON/Parquet)                                                                                                                         |
+| `SchemaError`        | `path`, `field` (dot-separated, e.g. `"hydros[3].bus_id"`), `message`               | Layer 2 — required field missing or a value violates a schema constraint; also returned by `parse_config` when `training.forward_passes` or `training.stopping_rules` is absent         |
+| `ConstraintError`    | `description` (all collected messages, newline-joined, each `[ErrorKind]`-prefixed) | Layers 4/5, or a final `SystemBuilder::build()` rejection (duplicate IDs, cascade cycle)                                                                                                |
+| `PolicyIncompatible` | `check`, `policy_value`, `system_value`                                             | After all layers pass, when `policy.mode` is `warm_start`/`resume` and the stored policy fails a compatibility check (hydro count, stage count, cut dimension, or entity identity hash) |
 
 `LoadError::io(path, source)` is the constructor to use instead of a `From<std::io::Error>`
 impl — the latter would lose the path context every diagnostic needs.
@@ -128,8 +127,8 @@ The estimation path additionally requires `season_definitions` in
 observation per hydro plant; groups below `min_observations_per_season`
 produce a `ModelQuality` warning rather than a hard failure. When explicit
 stats files are provided instead, `inflow_history.parquet` (if present) is
-still loaded and stored on `ScenarioData.inflow_history` but does not
-influence model assembly.
+still loaded and carried on the loaded system but does not influence model
+assembly.
 
 ## Links
 

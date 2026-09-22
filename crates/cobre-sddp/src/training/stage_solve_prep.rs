@@ -12,10 +12,8 @@ use cobre_solver::SolverInterface;
 
 use crate::{
     context::{StageContext, TrainingContext},
-    error::SddpError,
-    indexer::BlockGrid,
-    lp_builder::PatchBuffer,
-    lp_builder::commitment_reconcile::{DeliveryPins, fill_bound_relaxations},
+    lp::builder::{PatchBuffer, StateBox},
+    lp::indexer::BlockGrid,
     noise::{
         NcsNoiseOffsets, apply_ncs_col_bounds, transform_inflow_noise, transform_load_noise,
         transform_ncs_noise,
@@ -71,17 +69,8 @@ pub(crate) struct StageSolvePrepParams<'a> {
 pub(crate) struct StageSolvePrep;
 
 impl StageSolvePrep {
-    /// Executes `pin → row_patches → ncs_patch → commit → reconcile` over
-    /// caller-owned `&mut` scratch: allocates nothing.
-    ///
-    /// Commitment reconciliation is **not** a variation point and takes no hook: it
-    /// runs on every solve this pipeline prepares, gated only on facts `run` derives
-    /// itself. An opt-in hook is what let four call sites silently lose it.
-    ///
-    /// # Errors
-    ///
-    /// [`SddpError::AnticipatedCommitmentOutOfBounds`] when a pinned commitment lies
-    /// further outside its delivery generation bound than solver drift explains.
+    /// Executes `pin → row_patches → ncs_patch → commit` over caller-owned `&mut`
+    /// scratch: allocates nothing.
     pub(crate) fn run<S>(
         solver: &mut S,
         patch_buf: &mut PatchBuffer,
@@ -90,8 +79,69 @@ impl StageSolvePrep {
         training_ctx: &TrainingContext<'_>,
         stage: StageIdx,
         params: &StageSolvePrepParams<'_>,
-    ) -> Result<(), SddpError>
-    where
+    ) where
+        S: SolverInterface,
+    {
+        let producer_box = if stage.0 == 0 {
+            None
+        } else {
+            Some(ctx.state_box(StageIdx(stage.0 - 1)))
+        };
+        Self::run_with_producer_box(
+            solver,
+            patch_buf,
+            scratch,
+            ctx,
+            training_ctx,
+            stage,
+            params,
+            producer_box,
+        );
+    }
+
+    /// Test-support-only variant of [`run`](Self::run) for a deliberate
+    /// counterfactual pin that lies outside its producer's admissible box on
+    /// purpose (an LP-sensitivity probe): same pipeline, but never checks the
+    /// pinned state against a producer box.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn run_ignoring_producer_box<S>(
+        solver: &mut S,
+        patch_buf: &mut PatchBuffer,
+        scratch: &mut ScratchBuffers,
+        ctx: &StageContext<'_>,
+        training_ctx: &TrainingContext<'_>,
+        stage: StageIdx,
+        params: &StageSolvePrepParams<'_>,
+    ) where
+        S: SolverInterface,
+    {
+        Self::run_with_producer_box(
+            solver,
+            patch_buf,
+            scratch,
+            ctx,
+            training_ctx,
+            stage,
+            params,
+            None,
+        );
+    }
+
+    // Rationale (too_many_arguments): solver, patch_buf, and scratch are three
+    // disjoint mutable borrows of the workspace that must stay separate
+    // parameters — a bundling struct would reborrow the whole workspace and
+    // defeat the split; ctx/training_ctx/params are distinct immutable contexts.
+    #[allow(clippy::too_many_arguments)]
+    fn run_with_producer_box<S>(
+        solver: &mut S,
+        patch_buf: &mut PatchBuffer,
+        scratch: &mut ScratchBuffers,
+        ctx: &StageContext<'_>,
+        training_ctx: &TrainingContext<'_>,
+        stage: StageIdx,
+        params: &StageSolvePrepParams<'_>,
+        producer_box: Option<&StateBox>,
+    ) where
         S: SolverInterface,
     {
         let pinned_state = params.state_source.0;
@@ -128,6 +178,7 @@ impl StageSolvePrep {
             training_ctx.state,
             pinned_state,
             &ctx.template(stage).col_scale,
+            producer_box,
         );
         patch_buf.fill_forward_patches(
             training_ctx.state,
@@ -167,8 +218,7 @@ impl StageSolvePrep {
             &patch_buf.upper[..pc],
         );
 
-        let n_stochastic_ncs = training_ctx.stochastic.n_stochastic_ncs();
-        if n_stochastic_ncs > 0 {
+        if training_ctx.stochastic.n_stochastic_ncs() > 0 {
             transform_ncs_noise(
                 params.raw_noise,
                 &NcsNoiseOffsets {
@@ -202,50 +252,6 @@ impl StageSolvePrep {
                 );
             }
         }
-
-        Self::reconcile_commitments(solver, patch_buf, ctx, training_ctx, stage, pinned_state)
-    }
-
-    /// Relax the delivery generation bounds this stage's pinned commitments drifted
-    /// outside of. Runs last: the template reload and the bound patches above reset
-    /// the columns it relaxes, so an earlier call would be overwritten.
-    fn reconcile_commitments<S>(
-        solver: &mut S,
-        patch_buf: &mut PatchBuffer,
-        ctx: &StageContext<'_>,
-        training_ctx: &TrainingContext<'_>,
-        stage: StageIdx,
-        pinned_state: &[f64],
-    ) -> Result<(), SddpError>
-    where
-        S: SolverInterface,
-    {
-        if training_ctx.state.n_anticipated == 0 {
-            return Ok(());
-        }
-        let Some(geometry) = ctx.geometry(stage) else {
-            return Ok(());
-        };
-
-        fill_bound_relaxations(
-            &DeliveryPins {
-                state_layout: training_ctx.state,
-                pinned_state,
-                template: ctx.template(stage),
-                geometry,
-                anticipated_thermal_indices: &training_ctx.study_dims.anticipated_thermal_indices,
-                n_blks: ctx.block_count(stage),
-                stage_idx: stage.0,
-                n_stages: training_ctx.horizon.num_stages(),
-            },
-            &mut patch_buf.commitment_relax,
-        )?;
-
-        let relax = &patch_buf.commitment_relax;
-        if !relax.is_empty() {
-            solver.set_col_bounds(&relax.indices, &relax.lower, &relax.upper);
-        }
-        Ok(())
     }
 }
 

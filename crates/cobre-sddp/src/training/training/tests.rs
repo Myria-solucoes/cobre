@@ -45,7 +45,7 @@ use crate::{
     risk_measure::RiskMeasure,
     setup::NodeId,
     solver_stats::{SolverStatsDelta, SolverStatsLogEntry},
-    test_support,
+    test_support::{self, permissive_state_boxes},
 };
 
 /// Minimal LP for N=1 hydro, L=0 PAR order.
@@ -65,11 +65,6 @@ fn minimal_template(n_state: usize) -> StageTemplate {
         num_cols: 4,
         num_rows: 2,
         num_nz: 1,
-        // CSC col_starts: 4 cols + 1 sentinel = 5 entries.
-        // col 0 (storage_out): 0 NZ
-        // col 1 (z_inflow):    0 NZ
-        // col 2 (storage_in):  1 NZ at row 0
-        // col 3 (theta):       0 NZ
         col_starts: vec![0_i32, 0, 0, 1, 1],
         row_indices: vec![0_i32],
         values: vec![1.0],
@@ -140,9 +135,7 @@ impl SolverInterface for MockSolver {
             return Err(SolverError::Infeasible);
         }
         let obj = self.objectives[call % self.objectives.len()];
-        // Return a view with primal[3] = 0.0 (theta = 0, N=1 L=0 → theta at col 3)
-        // so that the forward pass computes stage_cost = objective - primal[theta]
-        // = obj - 0 = obj.
+        // Return primal[3] = 0.0 so forward computes stage_cost = objective - primal[theta] = obj.
         Ok(cobre_solver::SolutionView {
             objective: obj,
             primal: &[0.0, 0.0, 0.0, 0.0],
@@ -215,13 +208,7 @@ impl Communicator for StubComm {
     }
 }
 
-/// Build a minimal `StochasticContext` with `n_stages` stages and a single
-/// hydro entity.
-///
-/// Used to provide the `stochastic` argument to `train`. Follows the same
-/// [`SystemBuilder`] + `build_stochastic_context` pattern as the forward-pass
-/// integration tests.  The `n_openings` parameter controls the branching
-/// factor of the opening tree.
+/// Minimal `StochasticContext` for `train` with `n_stages` stages, one hydro, branching factor `n_openings`.
 fn make_stochastic_context(n_stages: usize, n_openings: usize) -> StochasticContext {
     use cobre_core::entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties};
     use cobre_core::scenario::InflowModel;
@@ -365,10 +352,7 @@ fn make_stochastic_context(n_stages: usize, n_openings: usize) -> StochasticCont
     .unwrap()
 }
 
-/// Build `n_stages` minimal [`Stage`] values with sequential `id`s (0..n_stages).
-///
-/// Used to populate [`TrainingContext::stages`] so that
-/// [`cobre_stochastic::build_forward_sampler`] can read per-stage noise methods.
+/// Minimal [`Stage`] values (sequential `id`s 0..n_stages) for [`TrainingContext::stages`].
 fn make_stages(n_stages: usize) -> Vec<Stage> {
     (0..n_stages)
         .map(|i| Stage {
@@ -446,7 +430,6 @@ fn ac_train_completes_with_iteration_limit() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation; n_stages],
         },
         events: EventConfig {
@@ -460,7 +443,9 @@ fn ac_train_completes_with_iteration_limit() {
     let mut solver = MockSolver::with_fixed(100.0);
     let comm = StubComm;
 
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let stage_ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -551,7 +536,6 @@ fn ac_train_returns_partial_on_infeasible() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation; n_stages],
         },
         events: EventConfig {
@@ -565,7 +549,9 @@ fn ac_train_returns_partial_on_infeasible() {
     let mut solver = MockSolver::infeasible();
     let comm = StubComm;
 
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let stage_ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -669,7 +655,6 @@ fn ac_train_emits_correct_event_sequence() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation; n_stages],
         },
         events: EventConfig {
@@ -683,7 +668,9 @@ fn ac_train_emits_correct_event_sequence() {
     let mut solver = MockSolver::with_fixed(100.0);
     let comm = StubComm;
 
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let stage_ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -873,7 +860,6 @@ fn ac_worker_timing_per_worker_event_count_and_setup_invariant() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation; n_stages],
         },
         events: EventConfig {
@@ -887,7 +873,9 @@ fn ac_worker_timing_per_worker_event_count_and_setup_invariant() {
     let mut solver = MockSolver::with_fixed(100.0);
     let comm = StubComm;
 
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let stage_ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -951,7 +939,6 @@ fn ac_worker_timing_per_worker_event_count_and_setup_invariant() {
         .iter()
         .filter(|e| matches!(e, TrainingEvent::WorkerTiming { .. }))
         .collect();
-    // Exactly 8 WorkerTiming events (4 workers × 2 phases × 1 iteration).
     assert_eq!(
         worker_events.len(),
         8,
@@ -1048,7 +1035,6 @@ fn ac_train_result_fields_populated() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation; n_stages],
         },
         events: EventConfig {
@@ -1062,7 +1048,9 @@ fn ac_train_result_fields_populated() {
     let mut solver = MockSolver::with_fixed(100.0);
     let comm = StubComm;
 
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let stage_ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -1153,7 +1141,6 @@ fn ac_train_with_no_event_sender() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation; n_stages],
         },
         events: EventConfig {
@@ -1167,7 +1154,9 @@ fn ac_train_with_no_event_sender() {
     let mut solver = MockSolver::with_fixed(100.0);
     let comm = StubComm;
 
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let stage_ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -1255,7 +1244,6 @@ fn ac_total_time_ms_is_non_negative() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation; n_stages],
         },
         events: EventConfig {
@@ -1269,7 +1257,9 @@ fn ac_total_time_ms_is_non_negative() {
     let mut solver = MockSolver::with_fixed(100.0);
     let comm = StubComm;
 
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let stage_ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -1365,7 +1355,6 @@ fn cut_selection_none_skips_step() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation; n_stages],
         },
         events: EventConfig {
@@ -1379,7 +1368,9 @@ fn cut_selection_none_skips_step() {
     let mut solver = MockSolver::with_fixed(100.0);
     let comm = StubComm;
 
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let stage_ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -1484,7 +1475,6 @@ fn cut_selection_level1_runs_at_frequency() {
             }),
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation; n_stages],
         },
         events: EventConfig {
@@ -1498,7 +1488,9 @@ fn cut_selection_level1_runs_at_frequency() {
     let mut solver = MockSolver::with_fixed(100.0);
     let comm = StubComm;
 
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let stage_ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -1612,7 +1604,6 @@ fn cut_selection_stage0_exempt_preserves_cuts() {
             }),
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation; n_stages],
         },
         events: EventConfig {
@@ -1626,7 +1617,9 @@ fn cut_selection_stage0_exempt_preserves_cuts() {
     let mut solver = MockSolver::with_fixed(100.0);
     let comm = StubComm;
 
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let stage_ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -1750,7 +1743,6 @@ fn existing_train_tests_pass_with_none() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation; n_stages],
         },
         events: EventConfig {
@@ -1764,7 +1756,9 @@ fn existing_train_tests_pass_with_none() {
     let mut solver = MockSolver::with_fixed(100.0);
     let comm = StubComm;
 
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let stage_ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -1857,7 +1851,6 @@ fn ac_train_partial_result_on_mid_iteration_failure() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation; n_stages],
         },
         events: EventConfig {
@@ -1875,7 +1868,9 @@ fn ac_train_partial_result_on_mid_iteration_failure() {
     let mut solver = MockSolver::infeasible();
     let comm = StubComm;
 
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let stage_ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -1985,7 +1980,6 @@ fn start_iteration_resumes_from_offset() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation; n_stages],
         },
         events: EventConfig {
@@ -1999,7 +1993,9 @@ fn start_iteration_resumes_from_offset() {
     let mut solver = MockSolver::with_fixed(100.0);
     let comm = StubComm;
 
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let stage_ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -2092,7 +2088,6 @@ fn start_iteration_at_or_beyond_max_runs_zero_iterations() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation; n_stages],
         },
         events: EventConfig {
@@ -2106,7 +2101,9 @@ fn start_iteration_at_or_beyond_max_runs_zero_iterations() {
     let mut solver = MockSolver::with_fixed(100.0);
     let comm = StubComm;
 
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let stage_ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -2853,7 +2850,6 @@ fn template_freeze_event_emitted() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation; n_stages],
         },
         events: EventConfig {
@@ -2867,7 +2863,9 @@ fn template_freeze_event_emitted() {
     let mut solver = MockSolver::with_fixed(100.0);
     let comm = StubComm;
 
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let stage_ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,

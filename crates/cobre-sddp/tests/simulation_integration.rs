@@ -22,6 +22,7 @@ use chrono::NaiveDate;
 use cobre_comm::Communicator;
 use cobre_core::{
     DeficitSegment, EntityId, SystemBuilder, TrainingEvent,
+    entities::bus::Bus,
     scenario::{
         CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile, LoadModel,
         SamplingScheme,
@@ -43,9 +44,9 @@ use cobre_io::output::simulation_writer::{
     ScenarioWritePayload, SimulationParquetWriter, write_scenario_summary,
 };
 use cobre_io::{
-    Config, EstimationConfig, MetadataSimulationSolveStats, ParquetWriterConfig, PolicyCutRecord,
-    PolicyMode, SimulationOutput, StageCutsPayload, read_policy_checkpoint,
-    write_policy_checkpoint, write_results,
+    Config, EstimationConfig, MetadataSimulationSolveStats, PolicyCutRecord, PolicyMode,
+    STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, SimulationOutput, StageCutsPayload,
+    read_policy_checkpoint, write_policy_checkpoint, write_results,
 };
 use cobre_sddp::{
     CapturedBasis, Phase, PrepareHydroModelsResult, ResolvedParameters, SimulationSummary,
@@ -58,7 +59,7 @@ use cobre_sddp::{
     horizon_mode::HorizonMode,
     indexer::{CutStateProjection, StateSpace, StudyDimensions},
     inflow_method::InflowNonNegativityMethod,
-    lp_builder::PatchBuffer,
+    lp::builder::{PatchBuffer, StateBox},
     risk_measure::RiskMeasure,
     setup::{
         SimulationEnumeratedRequest, StudySetup,
@@ -121,6 +122,44 @@ fn study_dims_for(
         has_operational_violations: hydro_count != 0,
         anticipated_thermal_indices: vec![],
         n_pumping: 0,
+    }
+}
+
+fn default_bus() -> Bus {
+    make_bus(
+        EntityId(0),
+        BusSpec {
+            name: "B0".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 1000.0,
+            }],
+            excess_cost: 0.0,
+            ..Default::default()
+        },
+    )
+}
+
+fn default_correlation_model() -> CorrelationModel {
+    let mut profiles = BTreeMap::new();
+    profiles.insert(
+        "default".to_string(),
+        CorrelationProfile {
+            groups: vec![CorrelationGroup {
+                name: "g1".to_string(),
+                entities: vec![CorrelationEntity {
+                    entity_type: "inflow".to_string(),
+                    id: EntityId(1),
+                }],
+                matrix: vec![vec![1.0]],
+            }],
+        },
+    );
+    CorrelationModel {
+        method: "spectral".to_string(),
+        profiles,
+        schedule: vec![],
     }
 }
 
@@ -189,19 +228,7 @@ fn make_stochastic_context(n_stages: usize, n_openings: usize) -> StochasticCont
     use cobre_core::entities::hydro::{HydroGenerationModel, HydroPenalties};
     use cobre_core::scenario::InflowModel;
 
-    let bus = make_bus(
-        EntityId(0),
-        BusSpec {
-            name: "B0".to_string(),
-            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            deficit_segments: vec![DeficitSegment {
-                depth_mw: None,
-                cost_per_mwh: 1000.0,
-            }],
-            excess_cost: 0.0,
-            ..Default::default()
-        },
-    );
+    let bus = default_bus();
     let hydro = make_hydro(
         EntityId(1),
         HydroSpec {
@@ -291,25 +318,7 @@ fn make_stochastic_context(n_stages: usize, n_openings: usize) -> StochasticCont
         })
         .collect();
 
-    let mut profiles = BTreeMap::new();
-    profiles.insert(
-        "default".to_string(),
-        CorrelationProfile {
-            groups: vec![CorrelationGroup {
-                name: "g1".to_string(),
-                entities: vec![CorrelationEntity {
-                    entity_type: "inflow".to_string(),
-                    id: EntityId(1),
-                }],
-                matrix: vec![vec![1.0]],
-            }],
-        },
-    );
-    let correlation = CorrelationModel {
-        method: "spectral".to_string(),
-        profiles,
-        schedule: vec![],
-    };
+    let correlation = default_correlation_model();
 
     let system = SystemBuilder::new()
         .buses(vec![bus])
@@ -370,6 +379,18 @@ fn iteration_limit(limit: u64) -> StoppingRuleSet {
         rules: vec![StoppingRule::IterationLimit { limit }],
         mode: StoppingMode::Any,
     }
+}
+
+/// A fully-permissive `(-inf, inf)` box per stage, for fixtures driving
+/// `train`/`simulate` through the seam without exercising the clamp.
+fn permissive_state_boxes(n_state: usize, n_stages: usize) -> Vec<StateBox> {
+    vec![
+        StateBox {
+            lower: vec![f64::NEG_INFINITY; n_state],
+            upper: vec![f64::INFINITY; n_state],
+        };
+        n_stages
+    ]
 }
 
 /// All training parameters for a 2-stage, N=1 toy system.
@@ -459,19 +480,7 @@ fn make_system() -> cobre_core::System {
     use cobre_core::entities::hydro::{HydroGenerationModel, HydroPenalties};
     use cobre_core::scenario::InflowModel;
 
-    let bus = make_bus(
-        EntityId(0),
-        BusSpec {
-            name: "B0".to_string(),
-            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            deficit_segments: vec![DeficitSegment {
-                depth_mw: None,
-                cost_per_mwh: 1000.0,
-            }],
-            excess_cost: 0.0,
-            ..Default::default()
-        },
-    );
+    let bus = default_bus();
     let hydro = make_hydro(
         EntityId(1),
         HydroSpec {
@@ -561,25 +570,7 @@ fn make_system() -> cobre_core::System {
         })
         .collect();
 
-    let mut profiles = BTreeMap::new();
-    profiles.insert(
-        "default".to_string(),
-        CorrelationProfile {
-            groups: vec![CorrelationGroup {
-                name: "g1".to_string(),
-                entities: vec![CorrelationEntity {
-                    entity_type: "inflow".to_string(),
-                    id: EntityId(1),
-                }],
-                matrix: vec![vec![1.0]],
-            }],
-        },
-    );
-    let correlation = CorrelationModel {
-        method: "spectral".to_string(),
-        profiles,
-        schedule: vec![],
-    };
+    let correlation = default_correlation_model();
 
     SystemBuilder::new()
         .buses(vec![bus])
@@ -613,7 +604,6 @@ fn train_simulate_write_cycle() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: fx.risk_measures.clone(),
         },
         events: EventConfig {
@@ -625,7 +615,9 @@ fn train_simulate_write_cycle() {
     };
 
     let block_counts_per_stage = vec![1usize; fx.n_stages];
+    let state_boxes = permissive_state_boxes(fx.state.n_state, fx.n_stages);
     let stage_ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &fx.templates,
         base_rows: &fx.base_rows,
@@ -745,6 +737,7 @@ fn train_simulate_write_cycle() {
             cost_scale_factor: 1_000_000.0,
             node_id: i32::try_from(stage_idx).unwrap_or(-1),
             graph_stage_id: -1,
+            priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
         })
         .collect();
 
@@ -829,9 +822,11 @@ fn train_simulate_write_cycle() {
         fx.n_stages,
     );
 
+    let state_boxes = permissive_state_boxes(fx.state.n_state, fx.n_stages);
     simulate(
         &mut sim_workspaces,
         &StageContext {
+            state_boxes: &state_boxes,
             geometry_per_stage: &[],
             templates: &fx.templates,
             base_rows: &fx.base_rows,
@@ -903,7 +898,6 @@ fn train_simulate_write_cycle() {
         completed: 2,
         failed: 0,
         total_time_ms: 0,
-        partitions_written: vec![],
         cost: None,
         solve_stats: MetadataSimulationSolveStats::default(),
     };
@@ -1080,28 +1074,16 @@ impl SolverInterface for SizedMockSolver {
 /// Build a 1-hydro, 1-bus system with `min_outflow_m3s` > 0 for integration testing.
 #[allow(clippy::cast_possible_wrap)]
 fn make_min_outflow_system() -> cobre_core::System {
-    use cobre_core::entities::hydro::{HydroGenerationModel, HydroPenalties};
+    use cobre_core::entities::hydro::HydroGenerationModel;
     use cobre_core::scenario::InflowModel;
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, HydroBlockBounds,
-        HydroStageBounds, HydroStagePenalties, LineBlockBounds, LineStagePenalties,
-        NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds,
-        ResolvedBounds, ResolvedPenalties, ThermalBlockBounds, ThermalStageBounds,
+        HydroPenalties, HydroStageBounds, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
+        PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
+        ResolvedPenalties, ThermalBlockBounds, ThermalStageBounds,
     };
 
-    let bus = make_bus(
-        EntityId(0),
-        BusSpec {
-            name: "B0".to_string(),
-            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            deficit_segments: vec![DeficitSegment {
-                depth_mw: None,
-                cost_per_mwh: 1000.0,
-            }],
-            excess_cost: 0.0,
-            ..Default::default()
-        },
-    );
+    let bus = default_bus();
 
     let hydro = make_hydro(
         EntityId(1),
@@ -1254,7 +1236,7 @@ fn make_min_outflow_system() -> cobre_core::System {
             n_stages,
         },
         &PenaltiesDefaults {
-            hydro: HydroStagePenalties {
+            hydro: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,
@@ -1280,25 +1262,7 @@ fn make_min_outflow_system() -> cobre_core::System {
         },
     );
 
-    let mut profiles = BTreeMap::new();
-    profiles.insert(
-        "default".to_string(),
-        CorrelationProfile {
-            groups: vec![CorrelationGroup {
-                name: "g1".to_string(),
-                entities: vec![CorrelationEntity {
-                    entity_type: "inflow".to_string(),
-                    id: EntityId(1),
-                }],
-                matrix: vec![vec![1.0]],
-            }],
-        },
-    );
-    let correlation = CorrelationModel {
-        method: "spectral".to_string(),
-        profiles,
-        schedule: vec![],
-    };
+    let correlation = default_correlation_model();
 
     SystemBuilder::new()
         .buses(vec![bus])
@@ -1386,7 +1350,9 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
     let mut fcf = make_fcf(n_stages);
 
     let block_counts = vec![1usize; n_stages];
+    let state_boxes = permissive_state_boxes(state.n_state, n_stages);
     let stage_ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
@@ -1426,7 +1392,6 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation; n_stages],
         },
         events: EventConfig {
@@ -1596,8 +1561,6 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
 /// coincide exactly.
 #[test]
 fn enumerated_census_k1_matches_sampled_single_scenario() {
-    use cobre_sddp::setup::node_graph::Traversal;
-
     let fx = Fixture::new(2);
     let mut fcf = make_fcf(fx.n_stages);
     let mut solver = MockSolver::with_fixed(100.0);
@@ -1617,7 +1580,6 @@ fn enumerated_census_k1_matches_sampled_single_scenario() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            warm_start_cuts: 0,
             risk_measures: fx.risk_measures.clone(),
         },
         events: EventConfig {
@@ -1629,7 +1591,9 @@ fn enumerated_census_k1_matches_sampled_single_scenario() {
     };
 
     let block_counts_per_stage = vec![1usize; fx.n_stages];
+    let state_boxes = permissive_state_boxes(fx.state.n_state, fx.n_stages);
     let stage_ctx = StageContext {
+        state_boxes: &state_boxes,
         geometry_per_stage: &[],
         templates: &fx.templates,
         base_rows: &fx.base_rows,
@@ -1726,6 +1690,7 @@ fn enumerated_census_k1_matches_sampled_single_scenario() {
     };
     let hydro_cell_index = cobre_sddp::test_support::identity_hydro_cell_index(256);
     let hydro_productivities_per_stage = vec![vec![1.0]; fx.n_stages];
+    let block_hours_per_stage = vec![vec![1.0]; fx.n_stages];
 
     let run_sim =
         |traversal: &Traversal| -> cobre_sddp::simulation::types::SimulationScenarioResult {
@@ -1756,7 +1721,7 @@ fn enumerated_census_k1_matches_sampled_single_scenario() {
                     result_tx: &result_tx,
                     zeta_per_stage: &[],
                     hydro_cell_index: &hydro_cell_index,
-                    block_hours_per_stage: &[],
+                    block_hours_per_stage: &block_hours_per_stage,
                     entity_counts: &entity_counts,
                     generic_constraint_row_entries: &[],
                     ncs_col_starts: &[],
@@ -1869,7 +1834,7 @@ fn as_enumerated_census(mut setup: StudySetup) -> StudySetup {
 /// results (canonical `scenario_id` order), the aggregated summary and
 /// gathered `(scenario_id, cost, probability)` rows, and the total realized
 /// LP-solve count across every workspace this run used (the dedup-scale
-/// invariant R3 checks) — measured via the solver-statistics delta around
+/// invariant checks) — measured via the solver-statistics delta around
 /// `simulate()`, the same source `run_worker_scenarios` uses, since
 /// `SimulationRunResult::solver_stats` is per-LEAF (a shared node's stats are
 /// replicated into every leaf that visits it) and cannot answer "how many
@@ -2062,7 +2027,7 @@ fn enumerated_census_pool_fill_warms_previously_cold_leaves() {
     );
 }
 
-/// R1 — value oracle. `branching_tree_setup_enumerated` branches at BOTH
+/// Value oracle. `branching_tree_setup_enumerated` branches at BOTH
 /// interior stages under non-uniform weights (the shape a shape-based
 /// admission clause would have rejected — see `extensive_form_oracle.rs`);
 /// trained to convergence, its census `mean_cost` must close to the
@@ -2084,7 +2049,7 @@ fn census_mean_cost_closes_to_extensive_form_value() {
     );
 }
 
-/// R2 — exact mean + variance on the DECOMP K-fan's known per-leaf weights.
+/// Exact mean + variance on the DECOMP K-fan's known per-leaf weights.
 /// `k_fan_policy_graph`'s leaf `i` (`1..=k`) carries the declared, non-uniform
 /// edge probability `i / Σj` — hand-derived here from the fixture's own
 /// documented construction, independent of the engine's plan weights — and
@@ -2235,7 +2200,7 @@ fn census_distinct_cost_mean_and_variance_match_hand_computed_weighted_formula()
     );
 }
 
-/// R3 — dedup correctness + solve count, on a trunk-then-fan graph whose
+/// Dedup correctness + solve count, on a trunk-then-fan graph whose
 /// `t_trunk` trunk nodes are shared by every one of the `k` leaves.
 ///
 /// (a) Extract-once identity: every leaf's stage-`t` per-entity row for a
@@ -2288,7 +2253,7 @@ fn census_shared_trunk_rows_extract_once_and_solve_count_matches_dedup() {
 }
 
 /// A [`cobre_core::System`] whose only purpose is driving
-/// [`SimulationParquetWriter::new`]'s directory/block-hours setup for R4's
+/// [`SimulationParquetWriter::new`]'s directory/block-hours setup for the
 /// byte-comparison — the writer reads only `system.stages()` (block hours)
 /// and entity counts, never the policy graph, so this need not reproduce a
 /// census fixture's branching structure. Mirrors the single-hydro/single-bus,
@@ -2339,8 +2304,7 @@ fn write_census_parquet_outputs(
 ) -> (Vec<u8>, Vec<u8>) {
     let tmp = tempfile::TempDir::new().expect("tempdir must succeed");
     let system = writer_shape_system(n_stages);
-    let config = ParquetWriterConfig::default();
-    let mut writer = SimulationParquetWriter::new(tmp.path(), &system, &config)
+    let mut writer = SimulationParquetWriter::new(tmp.path(), &system)
         .expect("SimulationParquetWriter::new must succeed");
     for scenario in results {
         writer
@@ -2387,7 +2351,7 @@ fn write_census_parquet_outputs(
     (summary_bytes, hydro_bytes)
 }
 
-/// R4 — thread bit-invariance. For a fixed `K >= 2` census, `mean_cost`/
+/// Thread bit-invariance. For a fixed `K >= 2` census, `mean_cost`/
 /// `std_cost` (`to_bits()`), the `scenario_summary.parquet` bytes (including
 /// the `probability` column), and a per-entity (hydros) Parquet file must be
 /// bit-identical across `--threads 1`, `2`, and `4` — the replicate model's

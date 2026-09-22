@@ -16,10 +16,8 @@ mod seasonal_stats;
 mod yw_matrices;
 
 pub use annual::{AnnualSeasonalStats, estimate_annual_seasonal_stats};
-pub use ar_coefficients::{
-    ArCoefficientEstimate, estimate_ar_coefficients, estimate_ar_coefficients_with_season_map,
-};
-pub use correlation::{estimate_correlation, estimate_correlation_with_season_map};
+pub use ar_coefficients::{ArCoefficientEstimate, estimate_ar_coefficients_with_season_map};
+pub use correlation::estimate_correlation_with_season_map;
 pub use estimation::{
     ArEstimationConfig, ContributionReduction, ContributionValidationResult, EstimationReport,
     HydroEstimationEntry, ReductionReason, StdRatioDivergence, build_estimation_report,
@@ -35,8 +33,8 @@ pub use periodic_ar::{
     estimate_periodic_ar_coefficients,
 };
 pub use seasonal_stats::{
-    HistoryClass, SeasonalStats, classify_history, estimate_seasonal_stats,
-    estimate_seasonal_stats_with_season_map, find_season_for_date,
+    HistoryClass, SeasonalStats, classify_history, estimate_seasonal_stats_with_season_map,
+    find_season_for_date,
 };
 pub use yw_matrices::{
     build_extended_periodic_yw_matrix, build_periodic_yw_matrix, build_periodic_yw_matrix_into,

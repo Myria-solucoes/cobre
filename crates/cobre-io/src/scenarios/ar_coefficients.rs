@@ -46,12 +46,12 @@
 //! - Lag contiguity (1, 2, …, p for each (hydro, stage)) — Layer 3/5.
 
 use cobre_core::EntityId;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use std::fs::File;
 use std::path::Path;
 
 use crate::LoadError;
-use crate::parquet_helpers::{extract_required_float64, extract_required_int32};
+use crate::parquet_helpers::{
+    extract_required_float64, extract_required_int32, open_record_batch_reader,
+};
 
 /// A single row from `scenarios/inflow_ar_coefficients.parquet`.
 ///
@@ -109,14 +109,7 @@ pub struct InflowArCoefficientRow {
 /// println!("loaded {} AR coefficient rows", rows.len());
 /// ```
 pub fn parse_inflow_ar_coefficients(path: &Path) -> Result<Vec<InflowArCoefficientRow>, LoadError> {
-    let file = File::open(path).map_err(|e| LoadError::io(path, e))?;
-
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
-
-    let reader = builder
-        .build()
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
+    let reader = open_record_batch_reader(path)?;
 
     let mut rows: Vec<InflowArCoefficientRow> = Vec::new();
 
@@ -178,12 +171,11 @@ pub fn parse_inflow_ar_coefficients(path: &Path) -> Result<Vec<InflowArCoefficie
 )]
 mod tests {
     use super::*;
+    use crate::test_support::write_parquet;
     use arrow::array::{Float64Array, Int32Array};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
-    use parquet::arrow::ArrowWriter;
     use std::sync::Arc;
-    use tempfile::NamedTempFile;
 
     fn schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
@@ -202,15 +194,6 @@ mod tests {
             Field::new("coefficient", DataType::Float64, false),
             Field::new("extra", DataType::Float64, false),
         ]))
-    }
-
-    fn write_parquet(batch: &RecordBatch) -> NamedTempFile {
-        let tmp = NamedTempFile::new().expect("tempfile");
-        let mut writer = ArrowWriter::try_new(tmp.reopen().expect("reopen"), batch.schema(), None)
-            .expect("ArrowWriter");
-        writer.write(batch).expect("write batch");
-        writer.close().expect("close writer");
-        tmp
     }
 
     fn make_batch(
@@ -354,8 +337,6 @@ mod tests {
         assert!((row.coefficient - 0.12345).abs() < 1e-10);
     }
 
-    /// Columns beyond the four-column schema are ignored: the file parses and
-    /// the extra values never reach the row table.
     #[test]
     fn extra_columns_are_ignored() {
         let batch = make_batch_with_extra(

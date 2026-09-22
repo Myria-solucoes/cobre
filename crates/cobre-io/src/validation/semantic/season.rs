@@ -9,20 +9,7 @@ use cobre_core::SeasonMap;
 
 // ── Rules 27+29: Season ID range coverage and resolution consistency ──────────
 
-/// Validates that every stage `season_id` references a season defined in
-/// `season_definitions` (Rule 27), and that all stages sharing a `season_id`
-/// have compatible temporal durations (Rule 29).
-///
-/// Skips the check entirely when `season_map` is `None` — Rule 19 already
-/// handles the missing `season_definitions` case.
-///
-/// Rule 27: Each stage with a `season_id` must reference a season ID that
-/// exists in `season_definitions.seasons[].id`.
-///
-/// Rule 29: All stages in the same `season_id` group must have durations
-/// within [`crate::stages::SUB_PERIOD_TOLERANCE_DAYS`] of each other. A wider
-/// spread indicates mixed temporal resolutions (e.g., monthly 30d alongside
-/// quarterly 91d) which leads to conflicting PAR model parameterisations.
+/// Validates stage `season_id` references and duration consistency (Rules 27, 29).
 pub(super) fn check_season_id_consistency(data: &ParsedData, ctx: &mut ValidationContext) {
     let Some(season_map) = &data.stages.policy_graph.season_map else {
         return;
@@ -101,35 +88,55 @@ pub(super) fn check_season_id_consistency(data: &ParsedData, ctx: &mut Validatio
     check_season_contiguity(data, season_map, ctx);
 }
 
+// ── Shared stage-index lookup (Rules 28, 31) ──────────────────────────────────
+
+/// Stages sorted by id (matches date order; `partition_point` relies on it).
+pub(super) fn build_stage_index(
+    data: &ParsedData,
+) -> Vec<(chrono::NaiveDate, chrono::NaiveDate, usize)> {
+    data.stages
+        .stages
+        .iter()
+        .filter_map(|s| s.season_id.map(|sid| (s.start_date, s.end_date, sid)))
+        .collect()
+}
+
+/// Resolves the stage-index position containing `date`, or `None` if outside every window.
+pub(super) fn resolve_stage_position(
+    stage_index: &[(chrono::NaiveDate, chrono::NaiveDate, usize)],
+    date: chrono::NaiveDate,
+) -> Option<usize> {
+    let pos = stage_index.partition_point(|(start, _, _)| *start <= date);
+    if pos == 0 {
+        return None;
+    }
+    let (_, end_date, _) = stage_index[pos - 1];
+    (date < end_date).then_some(pos - 1)
+}
+
+/// Looks up the season whose stage window contains `date`.
+fn season_id_for_date(
+    stage_index: &[(chrono::NaiveDate, chrono::NaiveDate, usize)],
+    date: chrono::NaiveDate,
+) -> Option<usize> {
+    resolve_stage_position(stage_index, date).map(|p| stage_index[p].2)
+}
+
+/// Whether PAR estimation runs (must agree with [`crate::scenarios::estimation::EstimationPath::resolve`]).
+pub(super) fn estimation_active(data: &ParsedData) -> bool {
+    let has_history = !data.inflow_history.is_empty();
+    let has_stats = !data.inflow_seasonal_stats.is_empty();
+    let has_ar = !data.inflow_ar_coefficients.is_empty();
+    has_history && !(has_stats && has_ar)
+}
+
 // ── Rule 31: Observation-to-season alignment ──────────────────────────────────
 
-/// Rule 31: Observation-to-season alignment check.
-///
-/// Detects two cases:
-///
-/// **Finer-than-season (warning)**: If any `(hydro_id, season_id, year)` triple
-/// has more than one observation, the observation data has finer temporal
-/// resolution than the season definitions (e.g., monthly observations with
-/// quarterly seasons). The PAR estimation pipeline will automatically aggregate
-/// these observations using duration-weighted averaging. A warning is emitted.
-///
-/// **Coarser-than-season (error)**: If a hydro has at least one observation in
-/// a given year but has no observation for some `(season_id, year)` group that
-/// the season map covers, the observation data is coarser than the season
-/// resolution (e.g., quarterly observations with monthly seasons). Aggregation
-/// cannot disaggregate observations, so this is an unrecoverable data error.
-///
-/// Only runs when estimation is active (history present, not both stats and AR
-/// coefficients pre-computed) and `season_map` is `Some`.
+/// Rule 31: warns on finer-than-season observations (auto-aggregated), errors on coarser-than-season (cannot disaggregate).
 pub(super) fn check_observation_season_alignment(data: &ParsedData, ctx: &mut ValidationContext) {
     use chrono::Datelike;
 
-    let has_history = !data.inflow_history.is_empty();
-    let has_stats = !data.inflow_seasonal_stats.is_empty();
-    let has_ar_coefficients = !data.inflow_ar_coefficients.is_empty();
-    let estimation_active = has_history && !(has_stats && has_ar_coefficients);
-
-    if !estimation_active {
+    if !estimation_active(data) {
         return;
     }
 
@@ -137,28 +144,12 @@ pub(super) fn check_observation_season_alignment(data: &ParsedData, ctx: &mut Va
         return;
     };
 
-    // Stages are sorted by id, which matches date order — partition_point relies on it.
-    let stage_index: Vec<(chrono::NaiveDate, chrono::NaiveDate, usize)> = data
-        .stages
-        .stages
-        .iter()
-        .filter_map(|s| s.season_id.map(|sid| (s.start_date, s.end_date, sid)))
-        .collect();
+    let stage_index = build_stage_index(data);
 
     let mut counts: HashMap<(i32, usize, i32), usize> = HashMap::new();
     for row in &data.inflow_history {
-        let pos = stage_index.partition_point(|(start, _, _)| *start <= row.start_date);
-        let season_id = if pos > 0 {
-            let (_, end_date, sid) = stage_index[pos - 1];
-            if row.start_date < end_date {
-                Some(sid)
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-        .or_else(|| season_map.season_for_date(row.start_date));
+        let season_id = season_id_for_date(&stage_index, row.start_date)
+            .or_else(|| season_map.season_for_date(row.start_date));
 
         if let Some(sid) = season_id {
             let year = row.start_date.year();
@@ -227,14 +218,7 @@ pub(super) fn check_observation_season_alignment(data: &ParsedData, ctx: &mut Va
     }
 }
 
-/// V4.2 — Observation coverage (Rule 28).
-///
-/// Warns when a season has zero inflow observations across all hydros and
-/// the training inflow scheme is not External (External scenarios do not need
-/// PAR fitting so missing observations are expected).
-///
-/// Only runs when estimation is active (history present, not both stats and AR
-/// coefficients pre-computed).
+/// Rule 28: warns when a season has zero observations and inflow scheme is not External.
 pub(super) fn check_season_observation_coverage(
     data: &ParsedData,
     season_map: &SeasonMap,
@@ -243,10 +227,7 @@ pub(super) fn check_season_observation_coverage(
     use cobre_core::scenario::SamplingScheme;
     use std::path::Path;
 
-    let has_history = !data.inflow_history.is_empty();
-    let has_stats = !data.inflow_seasonal_stats.is_empty();
-    let has_ar = !data.inflow_ar_coefficients.is_empty();
-    if !has_history || (has_stats && has_ar) {
+    if !estimation_active(data) {
         return;
     }
 
@@ -260,28 +241,11 @@ pub(super) fn check_season_observation_coverage(
         return;
     }
 
-    // Stages are sorted by id, which matches date order — partition_point relies on it.
-    let stage_index: Vec<(chrono::NaiveDate, chrono::NaiveDate, usize)> = data
-        .stages
-        .stages
-        .iter()
-        .filter_map(|s| s.season_id.map(|sid| (s.start_date, s.end_date, sid)))
-        .collect();
+    let stage_index = build_stage_index(data);
 
     let mut season_obs_count: HashMap<usize, usize> = HashMap::new();
     for row in &data.inflow_history {
-        let pos = stage_index.partition_point(|(start, _, _)| *start <= row.start_date);
-        let season_id = if pos > 0 {
-            let (_, end_date, sid) = stage_index[pos - 1];
-            if row.start_date < end_date {
-                Some(sid)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        if let Some(sid) = season_id {
+        if let Some(sid) = season_id_for_date(&stage_index, row.start_date) {
             *season_obs_count.entry(sid).or_insert(0) += 1;
         }
     }
@@ -305,10 +269,7 @@ pub(super) fn check_season_observation_coverage(
     }
 }
 
-/// V4.4 — Contiguity within resolution bands (Rule 30).
-///
-/// Warns when seasons defined in `season_definitions` are not referenced by
-/// any stage, helping users detect accidental gaps.
+/// Rule 30: warns when a defined season is unreferenced by any stage.
 pub(super) fn check_season_contiguity(
     data: &ParsedData,
     season_map: &SeasonMap,
@@ -347,9 +308,9 @@ pub(super) fn check_season_contiguity(
     clippy::cast_sign_loss
 )]
 mod tests {
-    use super::super::test_support::*;
     use super::super::validate_semantic_stages_penalties_scenarios;
     use super::*;
+    use crate::test_support::*;
     use crate::{
         scenarios::{InflowArCoefficientRow, InflowHistoryRow, InflowSeasonalStatsRow},
         stages::StagesData,
@@ -365,9 +326,20 @@ mod tests {
 
     // ── Local helpers ─────────────────────────────────────────────────────────
 
+    /// Independent oracle for [`resolve_stage_position`]; kept duplicate so a regression cannot corrupt the reference.
+    fn resolve_stage_position_reference(
+        stage_index: &[(chrono::NaiveDate, chrono::NaiveDate, usize)],
+        date: chrono::NaiveDate,
+    ) -> Option<usize> {
+        let pos = stage_index.partition_point(|(start, _, _)| *start <= date);
+        if pos == 0 {
+            return None;
+        }
+        let (_, end_date, _) = stage_index[pos - 1];
+        (date < end_date).then_some(pos - 1)
+    }
+
     /// Build a windowed `InflowHistoryRow` covering `[date, date + 1 day)`.
-    /// These fixtures bucket by `start_date` alone, so the window width itself
-    /// is arbitrary; a one-day window keeps the shape minimal.
     fn history_row(
         hydro_id: EntityId,
         date: chrono::NaiveDate,
@@ -381,9 +353,7 @@ mod tests {
         }
     }
 
-    /// Build a `StagesData` for Rule 29 tests.  Each `Stage` is given an
-    /// explicit `start_date`, `end_date`, and `season_id`.  The `SeasonMap`
-    /// is constructed from the union of all supplied `season_id` values.
+    /// Build a `StagesData` for Rule 29 tests.
     fn make_stages_for_resolution_check(
         stage_specs: Vec<(i32, chrono::NaiveDate, chrono::NaiveDate, usize)>,
     ) -> StagesData {
@@ -431,7 +401,7 @@ mod tests {
             openings_declared: std::collections::HashSet::new(),
             stages,
             policy_graph: HorizonGraph {
-                stage_discount_rate_overrides: std::collections::HashMap::new(),
+                stage_discount_rate_overrides: std::collections::BTreeMap::new(),
                 graph_type: PolicyGraphType::FiniteHorizon,
                 annual_discount_rate: 0.06,
                 transitions: vec![],
@@ -482,7 +452,7 @@ mod tests {
             openings_declared: std::collections::HashSet::new(),
             stages,
             policy_graph: HorizonGraph {
-                stage_discount_rate_overrides: std::collections::HashMap::new(),
+                stage_discount_rate_overrides: std::collections::BTreeMap::new(),
                 graph_type: PolicyGraphType::FiniteHorizon,
                 annual_discount_rate: 0.06,
                 transitions: vec![],
@@ -1079,7 +1049,7 @@ mod tests {
             openings_declared: std::collections::HashSet::new(),
             stages,
             policy_graph: HorizonGraph {
-                stage_discount_rate_overrides: std::collections::HashMap::new(),
+                stage_discount_rate_overrides: std::collections::BTreeMap::new(),
                 graph_type: PolicyGraphType::FiniteHorizon,
                 annual_discount_rate: 0.06,
                 transitions: vec![],
@@ -1318,7 +1288,7 @@ mod tests {
             openings_declared: std::collections::HashSet::new(),
             stages: stages_vec,
             policy_graph: HorizonGraph {
-                stage_discount_rate_overrides: std::collections::HashMap::new(),
+                stage_discount_rate_overrides: std::collections::BTreeMap::new(),
                 graph_type: PolicyGraphType::FiniteHorizon,
                 annual_discount_rate: 0.06,
                 transitions: vec![],
@@ -1622,6 +1592,48 @@ mod tests {
             "rule 31 must be skipped when estimation is inactive; got errors: {:?}",
             ctx.errors()
         );
+    }
+
+    /// `resolve_stage_position` (the shared helper behind `season_id_for_date`,
+    /// `check_season_observation_coverage`, and
+    /// `scenarios::check_estimation_prerequisites`) must resolve every history
+    /// row's stage position identically to the independent
+    /// `resolve_stage_position_reference` oracle; `estimation_active` must
+    /// match the inline `has_history && !(has_stats && has_ar)` predicate.
+    #[test]
+    fn shared_stage_index_helper_matches_pre_share_inline_builds() {
+        let stages = make_stages_with_seasons(12, /*with_season_map=*/ true);
+        let history = make_history_rows(1, 12);
+        let data = make_data_estimation(vec![make_hydro(1, None)], stages, history);
+
+        let has_history = !data.inflow_history.is_empty();
+        let has_stats = !data.inflow_seasonal_stats.is_empty();
+        let has_ar = !data.inflow_ar_coefficients.is_empty();
+        assert_eq!(
+            estimation_active(&data),
+            has_history && !(has_stats && has_ar),
+            "estimation_active must match the inline predicate all three sites computed"
+        );
+        assert!(
+            estimation_active(&data),
+            "fixture must have estimation active"
+        );
+
+        let stage_index = build_stage_index(&data);
+        for row in &data.inflow_history {
+            let resolved = resolve_stage_position(&stage_index, row.start_date);
+            assert_eq!(
+                resolved,
+                resolve_stage_position_reference(&stage_index, row.start_date),
+                "resolved stage position for {:?} must match the pre-share inline build",
+                row.start_date
+            );
+            assert_eq!(
+                season_id_for_date(&stage_index, row.start_date),
+                resolved.map(|p| stage_index[p].2),
+                "season_id_for_date must derive its result from the shared position"
+            );
+        }
     }
 
     /// Given a monthly study where inflow history runs from April 1990 through

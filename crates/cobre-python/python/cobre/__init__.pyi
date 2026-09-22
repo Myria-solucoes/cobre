@@ -7,6 +7,7 @@ from . import model as model
 from . import results as results
 from . import run as run
 from . import schema as schema
+from ._types import HydroModelsSummary, ProvenanceReport, StochasticSummary
 from .model import System
 
 __version__: str
@@ -19,7 +20,17 @@ def write_policy_checkpoint(
     stage_bases: Optional[Sequence[Mapping[str, Any]]] = None,
     stage_states: Optional[Sequence[Mapping[str, Any]]] = None,
     inflow_lag_depth: Optional[int] = None,
-) -> None: ...
+) -> None:
+    """Write a policy checkpoint from plain Python dicts.
+
+    metadata may include an optional "season_manifest" dict with keys:
+    - "cycle_code": int (0 monthly / 1 weekly / 2 custom / 255 absent)
+    - "n_seasons": int
+    - "hydro_orders": list of {"hydro_id": int, "orders": list[int]} dicts
+
+    Omitted, the checkpoint carries the absent descriptor (cycle_code=255).
+    """
+    ...
 
 class Study:
     def __init__(
@@ -33,6 +44,12 @@ class Study:
     def output_dir(self) -> str: ...
     @property
     def system(self) -> System: ...
+    @property
+    def stochastic(self) -> StochasticSummary: ...
+    @property
+    def hydro_models(self) -> HydroModelsSummary: ...
+    @property
+    def provenance(self) -> ProvenanceReport: ...
     def validate(self) -> dict[str, Any]: ...
     def train(
         self,

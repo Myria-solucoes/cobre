@@ -4,7 +4,7 @@
 //! Relocated out of [`super::temporal`], which keeps the stage/block/season
 //! types the transitions and nodes below reference.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use crate::{Node, PolicyGraphType, SeasonMap, Transition};
 
@@ -40,7 +40,7 @@ pub struct HorizonGraph {
     /// absent from the map uses `annual_discount_rate`. The declared home of the
     /// override (`stages[].annual_discount_rate_override`); the chain dialect folds
     /// its departing-edge `Transition::annual_discount_rate_override` in here at load.
-    pub stage_discount_rate_overrides: HashMap<i32, f64>,
+    pub stage_discount_rate_overrides: BTreeMap<i32, f64>,
 
     /// Season definitions; `None` when none are provided or required.
     pub season_map: Option<SeasonMap>,
@@ -55,7 +55,7 @@ impl Default for HorizonGraph {
             annual_discount_rate: 0.0,
             transitions: Vec::new(),
             nodes: Vec::new(),
-            stage_discount_rate_overrides: HashMap::new(),
+            stage_discount_rate_overrides: BTreeMap::new(),
             season_map: None,
         }
     }
@@ -89,7 +89,7 @@ mod tests {
         ];
 
         let graph = HorizonGraph {
-            stage_discount_rate_overrides: std::collections::HashMap::new(),
+            stage_discount_rate_overrides: std::collections::BTreeMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.06,
             transitions,
@@ -111,7 +111,7 @@ mod tests {
     #[test]
     fn test_horizon_graph_carries_nodes() {
         let graph = HorizonGraph {
-            stage_discount_rate_overrides: std::collections::HashMap::new(),
+            stage_discount_rate_overrides: std::collections::BTreeMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,
             transitions: vec![Transition {
@@ -147,7 +147,7 @@ mod tests {
     #[test]
     fn test_horizon_graph_serde_roundtrip() {
         let graph = HorizonGraph {
-            stage_discount_rate_overrides: std::collections::HashMap::new(),
+            stage_discount_rate_overrides: std::collections::BTreeMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.06,
             transitions: vec![

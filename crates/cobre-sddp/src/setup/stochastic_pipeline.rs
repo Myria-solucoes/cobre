@@ -52,6 +52,14 @@ pub struct PrepareStochasticResult {
     pub estimation_path: EstimationPath,
 }
 
+fn class_schemes_for(training_source: &ScenarioSource) -> ClassSchemes {
+    ClassSchemes {
+        inflow: Some(training_source.inflow_scheme),
+        load: Some(training_source.load_scheme),
+        ncs: Some(training_source.ncs_scheme),
+    }
+}
+
 /// Load and validate a user-supplied opening tree when
 /// `training.scenario_source.openings` declares `{source: file}`, reading the
 /// convention-located `scenarios/noise_openings.parquet` — consumed by
@@ -88,11 +96,7 @@ fn load_user_opening_tree_inner(
 
             let rows = load_noise_openings(Some(&path))?;
 
-            let schemes = ClassSchemes {
-                inflow: Some(training_source.inflow_scheme),
-                load: Some(training_source.load_scheme),
-                ncs: Some(training_source.ncs_scheme),
-            };
+            let schemes = class_schemes_for(training_source);
             let expected_dim = noise_entity_order(system, &schemes).dim();
 
             let (study_stage_ids, expected_openings_per_stage): (Vec<i32>, Vec<usize>) = system
@@ -211,11 +215,8 @@ fn build_opening_tree_library(
         .cloned()
         .collect();
     let hydro_ids: Vec<EntityId> = system.hydros().iter().map(|h| h.id).collect();
-    let cycle_len = system
-        .policy_graph()
-        .season_map
-        .as_ref()
-        .map(|sm| sm.seasons.len());
+    let season_map_ref = system.policy_graph().season_map.as_ref();
+    let cycle_len = season_map_ref.map(|sm| sm.seasons.len());
     let par = PrecomputedPar::build(system.inflow_models(), &study_stages, &hydro_ids, cycle_len)?;
     let max_order = widen_lag_state_depth(par.max_order(), declared_lag_depth);
     let user_pool = training_source.historical_years.as_ref();
@@ -225,7 +226,7 @@ fn build_opening_tree_library(
         &study_stages,
         max_order,
         user_pool,
-        system.policy_graph().season_map.as_ref(),
+        season_map_ref,
         1,
     )?;
     let mut lib = HistoricalScenarioLibrary::new(
@@ -237,7 +238,6 @@ fn build_opening_tree_library(
     );
     // η-inversion rolling chain must match the forward-pass lag accumulator;
     // `max_order` width covers all AR lags.
-    let season_map_ref = system.policy_graph().season_map.as_ref();
     // `precompute_stage_lag_transitions` requires a non-optional &SeasonMap.
     let noop_season_map = SeasonMap {
         cycle_type: Monthly,
@@ -267,10 +267,7 @@ fn build_opening_tree_library(
         &par,
         &window_years,
         season_map_ref,
-        &derived_inflow_seeds.lag_values,
-        max_order,
-        &derived_inflow_seeds.accum,
-        &derived_inflow_seeds.weight,
+        derived_inflow_seeds.as_seed(max_order),
         &stage_lag_transitions,
         downstream_par_order,
     );
@@ -330,11 +327,7 @@ fn compute_external_scenario_counts(
         return None;
     }
     let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
-    let schemes = ClassSchemes {
-        inflow: Some(training_source.inflow_scheme),
-        load: Some(training_source.load_scheme),
-        ncs: Some(training_source.ncs_scheme),
-    };
+    let schemes = class_schemes_for(training_source);
     let noise_order = noise_entity_order(system, &schemes);
 
     let inflow_counts = class_scenario_counts(
@@ -468,11 +461,7 @@ pub fn build_stochastic_context_for_study(
             external_scenario_counts,
             noise_group_ids: Some(study_stage_noise_group_ids(system)),
         },
-        ClassSchemes {
-            inflow: Some(training_source.inflow_scheme),
-            load: Some(training_source.load_scheme),
-            ncs: Some(training_source.ncs_scheme),
-        },
+        class_schemes_for(training_source),
     )?;
     Ok(stochastic)
 }
@@ -483,13 +472,13 @@ mod tests {
     use chrono::NaiveDate;
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, HorizonGraph,
-        HydroBlockBounds, HydroStageBounds, HydroStagePenalties, InitialConditions,
-        LineBlockBounds, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
-        PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder,
-        ThermalBlockBounds, ThermalStageBounds,
+        HydroBlockBounds, HydroPenalties, HydroStageBounds, InitialConditions, LineBlockBounds,
+        LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
+        PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder, ThermalBlockBounds,
+        ThermalStageBounds,
         entities::{
             bus::{Bus, DeficitSegment},
-            hydro::{Hydro, HydroGenerationModel, HydroPenalties},
+            hydro::{Hydro, HydroGenerationModel},
         },
         scenario::{
             ExternalLoadRow, ExternalScenarioRow, InflowHistoryRow, InflowModel, LoadModel,
@@ -800,7 +789,7 @@ mod tests {
                 n_stages: 5,
             },
             &PenaltiesDefaults {
-                hydro: HydroStagePenalties {
+                hydro: HydroPenalties {
                     spillage_cost: 0.01,
                     diversion_cost: 0.0,
                     turbined_cost: 0.0,
@@ -827,7 +816,7 @@ mod tests {
         );
 
         let policy_graph = HorizonGraph {
-            stage_discount_rate_overrides: std::collections::HashMap::new(),
+            stage_discount_rate_overrides: std::collections::BTreeMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,
             transitions: vec![],
@@ -1215,7 +1204,7 @@ mod tests {
                 n_stages: 12,
             },
             &PenaltiesDefaults {
-                hydro: HydroStagePenalties {
+                hydro: HydroPenalties {
                     spillage_cost: 0.01,
                     diversion_cost: 0.0,
                     turbined_cost: 0.0,
@@ -1242,7 +1231,7 @@ mod tests {
         );
 
         let policy_graph = HorizonGraph {
-            stage_discount_rate_overrides: std::collections::HashMap::new(),
+            stage_discount_rate_overrides: std::collections::BTreeMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,
             transitions: vec![],
@@ -1354,8 +1343,8 @@ mod tests {
 
     /// Given a declared lag depth (24) exceeding the fitted AR(0) order,
     /// `derive_inflow_seeds` — the function `build_opening_tree_library` calls
-    /// to build the `derived_lag_values`/`l_state` pair `run_eta_inversion`'s
-    /// `max_order.min(l_state)` copy loop reads — must actually seed the
+    /// to build the `DerivedSeed` `run_eta_inversion`'s
+    /// `max_order.min(seed.l_state)` copy loop reads — must actually seed the
     /// DEEPEST declared lag slot from real history, not merely report a wider
     /// `max_order()`. Complements
     /// `build_opening_tree_library_and_resolve_state_layout_agree_at_declared_depth`'s
@@ -1615,7 +1604,7 @@ mod tests {
                 n_stages,
             },
             &PenaltiesDefaults {
-                hydro: HydroStagePenalties {
+                hydro: HydroPenalties {
                     spillage_cost: 0.01,
                     diversion_cost: 0.0,
                     turbined_cost: 0.0,
@@ -1642,7 +1631,7 @@ mod tests {
         );
 
         let policy_graph = HorizonGraph {
-            stage_discount_rate_overrides: std::collections::HashMap::new(),
+            stage_discount_rate_overrides: std::collections::BTreeMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,
             transitions: vec![],

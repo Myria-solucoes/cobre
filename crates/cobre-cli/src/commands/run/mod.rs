@@ -7,6 +7,7 @@ use cobre_io::OutputContext;
 use cobre_io::now_iso8601;
 use cobre_sddp::SolverStatsDelta;
 use cobre_sddp::build_deviation_summary;
+use cobre_sddp::setup::RunPhasePlan;
 use cobre_solver::active_solver_metadata_id;
 
 use crate::progress::RenderMode;
@@ -25,7 +26,7 @@ use cobre_comm::{BackendKind, Communicator, ExecutionTopology};
 
 use crate::error::CliError;
 
-/// Communication backend selected by `--comm-backend`. Maps to [`BackendKind`].
+/// Communication backend selected by `--comm-backend`.
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
 pub enum CommBackendArg {
     /// Auto-detect (default): the MPI backend when launched under an MPI
@@ -84,40 +85,22 @@ pub struct RunArgs {
 
 /// Shared context for execute phases (communicator, output, topology, etc.).
 pub(super) struct RunContext<C: Communicator> {
-    /// The MPI (or local) communicator.
     pub(super) comm: C,
-    /// Whether this rank is rank 0.
     pub(super) is_root: bool,
-    /// Whether terminal output is suppressed.
     pub(super) quiet: bool,
-    /// Number of rayon worker threads.
     pub(super) n_threads: usize,
-    /// Resolved output directory.
     pub(super) output_dir: PathBuf,
-    /// Case (input) directory — the root every input path resolves against,
-    /// including `policy.boundary.path` (an external source checkpoint), never
-    /// the output directory.
+    /// Input root every path resolves against, never the output directory.
     pub(super) case_dir: PathBuf,
-    /// Terminal width for progress bars.
     pub(super) term_width: u16,
-    /// Terminal handle for stderr output.
     pub(super) stderr: Term,
-    /// Rendering strategy for progress events; non-TTY stderr gets append-only
-    /// lines instead of cursor-driven bars.
+    /// Progress strategy: non-TTY stderr gets append-only lines, not bars.
     pub(super) render_mode: RenderMode,
-    /// Execution topology gathered during communicator setup.
     pub(super) topology: ExecutionTopology,
-    /// Solver version string.
     pub(super) solver_version: String,
 }
 
-/// Execute the `run` subcommand.
-///
-/// Under MPI, only rank 0 loads from disk and writes outputs; non-root ranks
-/// always behave as if `--quiet` is set, participating in collectives but
-/// producing no terminal output and writing no files. The raw `Config` stays on
-/// rank 0; a postcard-safe [`BroadcastConfig`](super::broadcast::BroadcastConfig)
-/// is broadcast because the `Config` `#[serde(tag)]` enums postcard cannot handle.
+/// Execute the `run` subcommand (load, train, optionally simulate, write outputs).
 ///
 /// # Errors
 ///
@@ -149,7 +132,6 @@ fn execute_inner<C: Communicator>(ctx: &RunContext<C>, args: &RunArgs) -> Result
         setup_timings,
     } = broadcast_and_build_setup(ctx, args)?;
 
-    // Pre-training data-preparation outputs run regardless of training_enabled.
     run_pre_training(
         ctx,
         &system,
@@ -163,84 +145,87 @@ fn execute_inner<C: Communicator>(ctx: &RunContext<C>, args: &RunArgs) -> Result
     let hostname = ctx.topology.leader_hostname().to_string();
     let mpi_world_size = u32::try_from(ctx.topology.world_size).unwrap_or(u32::MAX);
 
-    if training_enabled {
-        apply_training_policy(ctx, &system, &mut setup, root_config.as_ref(), policy_mode)?;
-        let training_started_at = now_iso8601();
-        let training = run_training_phase(ctx, &mut setup)?;
-        let training_completed_at = now_iso8601();
+    match RunPhasePlan::resolve(training_enabled, setup.simulation_config.n_scenarios > 0) {
+        RunPhasePlan::TrainedThenSimulated => {
+            apply_training_policy(ctx, &system, &mut setup, root_config.as_ref(), policy_mode)?;
+            let training_started_at = now_iso8601();
+            let training = run_training_phase(ctx, &mut setup)?;
+            let training_completed_at = now_iso8601();
 
-        // Write training outputs before simulation so they persist even if
-        // simulation fails.
-        if ctx.is_root {
-            let config = root_config.take().ok_or_else(|| CliError::Internal {
-                message: "root_config was None on rank 0 — internal invariant violated".to_string(),
-            })?;
-            let training_ctx = OutputContext {
-                hostname: hostname.clone(),
-                solver: active_solver_metadata_id().to_string(),
-                solver_version: Some(ctx.solver_version.clone()),
-                started_at: training_started_at,
-                completed_at: training_completed_at,
-                distribution: build_distribution_info(&ctx.topology, ctx.n_threads, mpi_world_size),
-                setup: setup_timings,
-                production_fit_deviation: build_deviation_summary(
-                    &setup.hydro_models.fpha_fit_deviations,
-                ),
-            };
-            write_training_outputs(&WriteTrainingArgs {
-                output_dir: &ctx.output_dir,
-                system: &system,
-                config: &config,
-                training_output: &training.output,
-                setup: &setup,
-                training_result: &training.result,
-                output_ctx: &training_ctx,
-                hydro_models: &setup.hydro_models,
-                quiet: ctx.quiet,
-                stderr: &ctx.stderr,
-            })?;
-            drop(config);
-        }
-
-        if let Some(ref training_error) = training.error {
             if ctx.is_root {
-                tracing::error!(
-                    "training failed after {} iterations: {training_error}",
-                    training.result.iterations
-                );
-                if !ctx.quiet {
-                    let _ = ctx.stderr.write_line(&format!(
-                        "Training failed after {} iterations. Partial outputs written to {}.",
-                        training.result.iterations,
-                        ctx.output_dir.display()
-                    ));
-                }
+                let config = root_config.take().ok_or_else(|| CliError::Internal {
+                    message: "root_config was None on rank 0 — internal invariant violated"
+                        .to_string(),
+                })?;
+                let training_ctx = OutputContext {
+                    hostname: hostname.clone(),
+                    solver: active_solver_metadata_id().to_string(),
+                    solver_version: Some(ctx.solver_version.clone()),
+                    started_at: training_started_at,
+                    completed_at: training_completed_at,
+                    distribution: build_distribution_info(
+                        &ctx.topology,
+                        ctx.n_threads,
+                        mpi_world_size,
+                    ),
+                    setup: setup_timings,
+                    production_fit_deviation: build_deviation_summary(
+                        &setup.hydro_models.fpha_fit_deviations,
+                    ),
+                };
+                write_training_outputs(&WriteTrainingArgs {
+                    output_dir: &ctx.output_dir,
+                    system: &system,
+                    config: &config,
+                    training_output: &training.output,
+                    setup: &setup,
+                    training_result: &training.result,
+                    output_ctx: &training_ctx,
+                    quiet: ctx.quiet,
+                    stderr: &ctx.stderr,
+                })?;
             }
-            return Err(CliError::Internal {
-                message: format!("training error: {training_error}"),
-            });
-        }
 
-        if setup.simulation_config.n_scenarios > 0 {
-            run_simulation_phase(ctx, &system, &mut setup, &training.result, &hostname)?;
+            if let Some(ref training_error) = training.error {
+                if ctx.is_root {
+                    tracing::error!(
+                        "training failed after {} iterations: {training_error}",
+                        training.result.iterations
+                    );
+                    if !ctx.quiet {
+                        let _ = ctx.stderr.write_line(&format!(
+                            "Training failed after {} iterations. Partial outputs written to {}.",
+                            training.result.iterations,
+                            ctx.output_dir.display()
+                        ));
+                    }
+                }
+                return Err(CliError::Internal {
+                    message: format!("training error: {training_error}"),
+                });
+            }
+
+            if setup.simulation_config.n_scenarios > 0 {
+                run_simulation_phase(ctx, &system, &mut setup, &training.result, &hostname)?;
+            }
         }
-    } else if setup.simulation_config.n_scenarios > 0 {
-        let training_result = load_policy_for_simulation(ctx, &system, &mut setup)?;
-        run_simulation_phase(ctx, &system, &mut setup, &training_result, &hostname)?;
-    } else if ctx.is_root && !ctx.quiet {
-        let _ = ctx
-            .stderr
-            .write_line("Training disabled, simulation disabled — nothing to do.");
+        RunPhasePlan::SimulateFromPolicy => {
+            let training_result = load_policy_for_simulation(ctx, &system, &mut setup)?;
+            run_simulation_phase(ctx, &system, &mut setup, &training_result, &hostname)?;
+        }
+        RunPhasePlan::Nothing => {
+            if ctx.is_root && !ctx.quiet {
+                let _ = ctx
+                    .stderr
+                    .write_line("Training disabled, simulation disabled — nothing to do.");
+            }
+        }
     }
 
     Ok(())
 }
 
-/// Guard the `u64 as f64` cast in [`cobre_sddp::pack_delta_scalars`] before the
-/// MPI `allreduce(Sum)`: a `u64` above `2^53` loses precision as `f64`, silently
-/// corrupting the global totals. The body's field list is the authoritative set
-/// of guarded counters; native-`f64` timing fields are excluded as they need no
-/// cast.
+/// Guard `u64 as f64` cast before MPI `allreduce(Sum)`: reject counters ≥ `2^53` that lose precision.
 ///
 /// # Errors
 ///
@@ -276,9 +261,6 @@ pub(super) fn check_stats_overflow(delta: &SolverStatsDelta) -> Result<(), CliEr
 }
 
 /// Build a [`cobre_io::DistributionInfo`] from the cached execution topology.
-///
-/// `ranks_participated` is the number of MPI ranks that actively contributed
-/// to the computation (may differ from `world_size` if some ranks were idle).
 pub(super) fn build_distribution_info(
     topology: &ExecutionTopology,
     n_threads: usize,
@@ -303,8 +285,12 @@ pub(super) fn build_distribution_info(
     }
 }
 
-/// Map per-host rank assignments into [`cobre_io::HostLayout`] carriers,
-/// preserving the topology's host ordering (first-rank order).
+pub(super) fn compute_parallelism(n_threads: usize, comm_size: usize) -> u32 {
+    u32::try_from(n_threads)
+        .unwrap_or(u32::MAX)
+        .saturating_mul(u32::try_from(comm_size).unwrap_or(u32::MAX))
+}
+
 fn host_layouts(topology: &ExecutionTopology) -> Vec<HostLayout> {
     topology
         .hosts

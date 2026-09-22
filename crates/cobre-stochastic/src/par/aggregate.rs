@@ -153,14 +153,13 @@ mod tests {
     use chrono::{Datelike, NaiveDate};
     use cobre_core::{
         EntityId,
-        temporal::{
-            Block, BlockMode, NoiseMethod, ScenarioSourceConfig, SeasonCycleType, SeasonDefinition,
-            SeasonMap, Stage, StageRiskConfig, StageStateConfig,
-        },
+        temporal::{SeasonCycleType, SeasonDefinition, SeasonMap, Stage},
+        test_support::{StageSpec, date, single_block},
     };
 
     use super::aggregate_observations_to_season;
     use crate::StochasticError;
+    use crate::test_support::{MonthlyLabels, monthly_season_map};
 
     // -----------------------------------------------------------------------
     // Helper constructors
@@ -175,28 +174,15 @@ mod tests {
         month_end: u32,
         season_id: Option<usize>,
     ) -> Stage {
-        Stage {
-            index,
+        cobre_core::test_support::make_stage(StageSpec {
             id,
-            start_date: NaiveDate::from_ymd_opt(year_start, month_start, 1).unwrap(),
-            end_date: NaiveDate::from_ymd_opt(year_end, month_end, 1).unwrap(),
+            index: Some(index),
+            start_date: date(year_start, month_start, 1),
+            end_date: date(year_end, month_end, 1),
             season_id,
-            blocks: vec![Block {
-                index: 0,
-                name: "SINGLE".to_string(),
-                duration_hours: 720.0,
-            }],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: true,
-                inflow_lags: false,
-            },
-            risk_config: StageRiskConfig::Expectation,
-            scenario_config: ScenarioSourceConfig {
-                branching_factor: 1,
-                noise_method: NoiseMethod::Saa,
-            },
-        }
+            blocks: single_block("SINGLE", 720.0),
+            ..Default::default()
+        })
     }
 
     /// Build quarterly stages for `n_years` starting at `base_year`.
@@ -271,24 +257,6 @@ mod tests {
         }
     }
 
-    /// Build a monthly `SeasonMap` (12 seasons, `Monthly` cycle).
-    fn make_monthly_season_map() -> SeasonMap {
-        let seasons = (1u32..=12)
-            .map(|m| SeasonDefinition {
-                id: (m - 1) as usize,
-                label: format!("Month{m:02}"),
-                month_start: m,
-                day_start: None,
-                month_end: None,
-                day_end: None,
-            })
-            .collect();
-        SeasonMap {
-            cycle_type: SeasonCycleType::Monthly,
-            seasons,
-        }
-    }
-
     fn obs(entity_id: i32, year: i32, month: u32, value: f64) -> (EntityId, NaiveDate, f64) {
         (
             EntityId::from(entity_id),
@@ -330,7 +298,6 @@ mod tests {
         // Representative date = Jan 15 (earliest in the group).
         assert_eq!(date, NaiveDate::from_ymd_opt(2020, 1, 15).unwrap());
 
-        // Duration-weighted average: (100*31 + 200*29 + 300*31) / (31+29+31)
         let expected = (v_jan * 31.0 + v_feb * 29.0 + v_mar * 31.0) / (31.0 + 29.0 + 31.0);
         assert!(
             (value - expected).abs() < 1e-10,
@@ -345,7 +312,7 @@ mod tests {
     #[test]
     fn test_identity_case_monthly_obs_monthly_seasons() {
         // 12 monthly observations, one per month in 2020.
-        let season_map = make_monthly_season_map();
+        let season_map = monthly_season_map(MonthlyLabels::ZeroPadded);
         // For the monthly identity case we only need the SeasonMap (no stages).
         let observations: Vec<(EntityId, NaiveDate, f64)> = (1u32..=12)
             .map(|m| obs(1, 2020, m, f64::from(m) * 10.0))
@@ -382,7 +349,6 @@ mod tests {
         let season_map = make_quarterly_season_map();
 
         let mut observations: Vec<(EntityId, NaiveDate, f64)> = Vec::new();
-        // Entity 1 and entity 2, all 12 months of 2020.
         for entity_id in [1, 2] {
             for month in 1u32..=12 {
                 observations.push(obs(entity_id, 2020, month, f64::from(month)));
@@ -556,8 +522,6 @@ mod tests {
             );
         }
 
-        // Directly verify the internal days_in_month calculation.
-        // Feb 2020 (leap year) = 29 days; Feb 2021 (non-leap) = 28 days.
         let feb_2020 = NaiveDate::from_ymd_opt(2020, 2, 15).unwrap();
         let feb_2021 = NaiveDate::from_ymd_opt(2021, 2, 15).unwrap();
         assert_eq!(

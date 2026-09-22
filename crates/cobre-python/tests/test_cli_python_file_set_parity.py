@@ -37,9 +37,10 @@ from __future__ import annotations
 import pathlib
 import re
 import shutil
-import subprocess
 
 import pytest
+
+from _cobre_cli import resolve_cli_binary, run_cli
 
 _REPO_ROOT = pathlib.Path(__file__).parents[3]
 D28_CASE = _REPO_ROOT / "examples" / "deterministic" / "d28-decomp-weekly-monthly"
@@ -57,37 +58,6 @@ _EXPECTED_SIMULATION_ENTITY_DIRS = (
     "thermals",
     "hydro_bus_generation",
 )
-
-
-def _cli_binary() -> pathlib.Path:
-    """Return the compiled `cobre` CLI binary path, skipping if absent."""
-    for profile in ("release", "debug"):
-        candidate = _REPO_ROOT / "target" / profile / "cobre"
-        if candidate.is_file():
-            return candidate
-    pytest.skip(
-        "No compiled `cobre` binary found in target/release or target/debug. "
-        "Run `cargo build -p cobre-cli` first."
-    )
-    raise RuntimeError("unreachable: pytest.skip raises Skipped")
-
-
-def _run_cli(case_dir: pathlib.Path, output_dir: pathlib.Path) -> None:
-    """Run the cobre CLI for `case_dir`, writing outputs to `output_dir`."""
-    binary = _cli_binary()
-    result = subprocess.run(
-        [str(binary), "run", str(case_dir), "--output", str(output_dir)],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=120,
-    )
-    if result.returncode != 0:
-        pytest.fail(
-            f"cobre CLI failed (exit {result.returncode}):\n"
-            f"stdout: {result.stdout}\n"
-            f"stderr: {result.stderr}"
-        )
 
 
 def _relative_files(root: pathlib.Path) -> set[str]:
@@ -123,11 +93,13 @@ def _file_set_diff_message(
 
 
 @pytest.fixture(scope="module")
-def d28_cli_output(tmp_path_factory: pytest.TempPathFactory) -> pathlib.Path:
+def d28_cli_output(
+    tmp_path_factory: pytest.TempPathFactory, cli_binary: pathlib.Path
+) -> pathlib.Path:
     """Run D28 (training + simulation enabled) through the compiled CLI binary."""
     assert D28_CASE.is_dir(), f"the D28 fixture must exist at {D28_CASE}"
     output_dir = tmp_path_factory.mktemp("d28_cli_out")
-    _run_cli(D28_CASE, output_dir)
+    run_cli(D28_CASE, output_dir, cli_binary)
     return output_dir
 
 
@@ -218,3 +190,19 @@ def test_missing_python_output_file_fails_the_gate(
         assert cli_files == py_files_after, _file_set_diff_message(
             d28_cli_output, scratch, cli_files, py_files_after
         )
+
+
+def test_resolve_cli_binary_not_required_skips_when_absent(
+    tmp_path: pathlib.Path,
+) -> None:
+    """When required=False, a missing binary raises pytest.Skipped."""
+    with pytest.raises(pytest.skip.Exception):
+        resolve_cli_binary(tmp_path, required=False)
+
+
+def test_resolve_cli_binary_required_fails_when_absent(tmp_path: pathlib.Path) -> None:
+    """When required=True, a missing binary raises pytest.Failed with build guidance."""
+    with pytest.raises(
+        pytest.fail.Exception, match=r"cargo build --release -p cobre-cli"
+    ):
+        resolve_cli_binary(tmp_path, required=True)

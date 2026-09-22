@@ -1,8 +1,5 @@
-//! Latin Hypercube Sampling (LHS) for batch and point-wise noise generation.
-//!
-//! - [`generate_lhs`]: batch LHS filling `n_openings × dim` N(0,1) values.
-//! - [`sample_lhs_point`]: point-wise LHS for a single scenario, no inter-worker
-//!   coordination.
+//! Latin Hypercube Sampling (LHS) for batch ([`generate_lhs`]) and point-wise
+//! ([`sample_lhs_point`], no inter-worker coordination) noise generation.
 //!
 //! Output layout is opening-major: `output[opening * dim + entity]`. Determinism:
 //! the same `(base_seed, stage_id)` always produces identical output.
@@ -11,13 +8,13 @@ use rand::Rng;
 use rand::RngExt;
 use rand_distr::Uniform;
 
+use super::NoisePointSpec;
 use crate::noise::{
     quantile::norm_quantile,
     rng::rng_from_seed,
     seed::{derive_forward_seed, derive_opening_seed, derive_stage_seed},
 };
 
-/// Shuffle `perm` in place using the Fisher-Yates algorithm in O(n) time.
 pub(crate) fn fisher_yates(perm: &mut [usize], rng: &mut impl Rng) {
     let n = perm.len();
     for i in (1..n).rev() {
@@ -26,11 +23,22 @@ pub(crate) fn fisher_yates(perm: &mut [usize], rng: &mut impl Rng) {
     }
 }
 
+fn reset_identity_perm(perm: &mut [usize]) {
+    for (i, p) in perm.iter_mut().enumerate() {
+        *p = i;
+    }
+}
+
+#[allow(clippy::expect_used)]
+fn unit_uniform() -> Uniform<f64> {
+    Uniform::new(0.0_f64, 1.0_f64).expect("0.0 < 1.0 is always a valid range")
+}
+
 /// Fill `output` with `n_openings × dim` standard-normal N(0,1) values using LHS.
 ///
 /// Each dimension is independently stratified into `N = n_openings` strata, one
 /// sample each, with a per-dimension Fisher-Yates shuffle assigning strata to
-/// openings. Output layout: `output[opening * dim + entity]`.
+/// openings.
 ///
 /// # Panics
 ///
@@ -55,8 +63,7 @@ pub fn generate_lhs(
 
     let seed = derive_stage_seed(base_seed, stage_id);
     let mut rng = rng_from_seed(seed);
-    #[allow(clippy::expect_used)]
-    let uniform = Uniform::new(0.0_f64, 1.0_f64).expect("0.0 < 1.0 is always a valid range");
+    let uniform = unit_uniform();
 
     let mut samples = vec![0.0_f64; n_openings];
     let mut perm: Vec<usize> = (0..n_openings).collect();
@@ -73,9 +80,7 @@ pub fn generate_lhs(
             *sample = s.clamp(f64::MIN_POSITIVE, 1.0 - f64::EPSILON);
         }
 
-        for (i, p) in perm.iter_mut().enumerate() {
-            *p = i;
-        }
+        reset_identity_perm(&mut perm);
         fisher_yates(&mut perm, &mut rng);
 
         for k in 0..n_openings {
@@ -84,34 +89,19 @@ pub fn generate_lhs(
     }
 }
 
-/// Configuration for single-scenario LHS point generation.
-#[derive(Debug, Clone, Copy)]
-pub struct LhsPointSpec {
-    /// Forward-pass base seed.
-    pub sampling_seed: u64,
-    /// Training iteration index.
-    pub iteration: u32,
-    /// Global scenario index in `0..total_scenarios`.
-    pub scenario: u32,
-    /// Stage domain identifier.
-    pub stage_id: u32,
-    /// Total forward scenarios per iteration (= N strata).
-    pub total_scenarios: u32,
-    /// Noise vector dimension.
-    pub dim: usize,
-}
-
-/// Generate one scenario's noise vector using LHS without inter-worker coordination.
-///
-/// Each scenario derives the same per-dimension permutations from `(sampling_seed, iteration, stage_id)`,
-/// looks up its stratum, and samples within-stratum offset independently. The `N = total_scenarios`
-/// scenarios across all workers form a valid LHS design without communication.
+/// Derives the per-dimension stratum permutations per call; this is the
+/// reference `sample_lhs_point` is tested against.
 ///
 /// # Panics
 ///
 /// Panics if `output.len() < spec.dim` or `perm_scratch.len() < spec.total_scenarios as usize`.
+#[cfg(test)]
 #[allow(clippy::cast_precision_loss)]
-pub fn sample_lhs_point(spec: &LhsPointSpec, output: &mut [f64], perm_scratch: &mut [usize]) {
+pub(crate) fn sample_lhs_point_reference(
+    spec: &NoisePointSpec,
+    output: &mut [f64],
+    perm_scratch: &mut [usize],
+) {
     let n = spec.total_scenarios as usize;
     assert!(
         perm_scratch.len() >= n,
@@ -125,28 +115,25 @@ pub fn sample_lhs_point(spec: &LhsPointSpec, output: &mut [f64], perm_scratch: &
         output.len(),
     );
 
-    let perm_seed = derive_opening_seed(spec.sampling_seed, spec.iteration, spec.stage_id);
+    let perm_seed = derive_opening_seed(spec.sampling_seed, spec.iteration, spec.stream_id);
     let mut perm_rng = rng_from_seed(perm_seed);
 
     let draw_seed = derive_forward_seed(
         spec.sampling_seed,
         spec.iteration,
         spec.scenario,
-        spec.stage_id,
+        spec.stream_id,
     );
     let mut draw_rng = rng_from_seed(draw_seed);
 
-    #[allow(clippy::expect_used)]
-    let uniform = Uniform::new(0.0_f64, 1.0_f64).expect("0.0 < 1.0 is always a valid range");
+    let uniform = unit_uniform();
 
     let perm = &mut perm_scratch[..n];
     let scenario_idx = spec.scenario as usize;
 
     for slot in output.iter_mut().take(spec.dim) {
         // perm_rng advances identically on all workers, so the permutation matches.
-        for (i, p) in perm.iter_mut().enumerate() {
-            *p = i;
-        }
+        reset_identity_perm(perm);
         fisher_yates(perm, &mut perm_rng);
 
         let stratum = perm[scenario_idx];
@@ -157,14 +144,110 @@ pub fn sample_lhs_point(spec: &LhsPointSpec, output: &mut [f64], perm_scratch: &
     }
 }
 
+/// Per-dimension stratum permutations built once per
+/// (`sampling_seed`, `iteration`, `stream_id`, `dim`, `total_scenarios`) tuple and
+/// reused across all scenarios for that stream. `strata` is row-major: `strata[d *
+/// n + k]` is the stratum assigned to scenario `k` in dimension `d`.
+#[derive(Debug, Clone)]
+pub struct LhsPrecomputed {
+    dim: usize,
+    n: usize,
+    strata: Vec<u32>,
+}
+
+impl LhsPrecomputed {
+    /// Builds the permutation tables described on [`LhsPrecomputed`].
+    #[must_use]
+    pub fn new(
+        sampling_seed: u64,
+        iteration: u32,
+        stream_id: u32,
+        dim: usize,
+        total_scenarios: u32,
+    ) -> Self {
+        let perm_seed = derive_opening_seed(sampling_seed, iteration, stream_id);
+        let mut perm_rng = rng_from_seed(perm_seed);
+
+        let n = total_scenarios as usize;
+        let mut strata = vec![0u32; dim * n];
+        let mut work: Vec<usize> = (0..n).collect();
+
+        for d in 0..dim {
+            reset_identity_perm(&mut work);
+            fisher_yates(&mut work, &mut perm_rng);
+
+            let row = &mut strata[d * n..(d + 1) * n];
+            // Values are strictly less than n, which itself derives from a u32,
+            // so the cast cannot truncate.
+            #[allow(clippy::cast_possible_truncation)]
+            for (slot, &p) in row.iter_mut().zip(work.iter()) {
+                *slot = p as u32;
+            }
+        }
+
+        Self { dim, n, strata }
+    }
+}
+
+/// Generate one scenario's noise vector from precomputed stratum permutations.
+///
+/// # Panics
+///
+/// Panics if `output.len() < spec.dim`. Panics (debug-only) if `spec.scenario`
+/// is out of range `0..ctx.n`.
+#[allow(clippy::cast_precision_loss)]
+pub fn sample_lhs_point(spec: &NoisePointSpec, ctx: &LhsPrecomputed, output: &mut [f64]) {
+    assert!(
+        output.len() >= spec.dim,
+        "output too short: need {}, got {}",
+        spec.dim,
+        output.len(),
+    );
+
+    debug_assert!(
+        spec.dim <= ctx.dim,
+        "spec.dim {} exceeds precomputed dim {}",
+        spec.dim,
+        ctx.dim,
+    );
+
+    let draw_seed = derive_forward_seed(
+        spec.sampling_seed,
+        spec.iteration,
+        spec.scenario,
+        spec.stream_id,
+    );
+    let mut draw_rng = rng_from_seed(draw_seed);
+
+    let uniform = unit_uniform();
+
+    let scenario_idx = spec.scenario as usize;
+    debug_assert!(
+        scenario_idx < ctx.n,
+        "scenario {} out of range 0..{}",
+        spec.scenario,
+        ctx.n,
+    );
+
+    for (d, slot) in output.iter_mut().take(spec.dim).enumerate() {
+        let stratum = ctx.strata[d * ctx.n + scenario_idx];
+        let u_raw = draw_rng.sample(uniform);
+        let u_stratified = (f64::from(stratum) + u_raw) / ctx.n as f64;
+
+        *slot = norm_quantile(u_stratified.clamp(f64::MIN_POSITIVE, 1.0 - f64::EPSILON));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rand::SeedableRng;
     use rand_pcg::Pcg64;
 
-    use super::{LhsPointSpec, fisher_yates, generate_lhs, sample_lhs_point};
+    use super::{
+        LhsPrecomputed, NoisePointSpec, fisher_yates, generate_lhs, sample_lhs_point,
+        sample_lhs_point_reference,
+    };
 
-    /// A shuffled slice must contain exactly all elements 0..N (is a permutation).
     #[test]
     fn fisher_yates_is_permutation() {
         let n = 20_usize;
@@ -181,7 +264,6 @@ mod tests {
         );
     }
 
-    /// Different RNG states must produce different permutations (with high probability).
     #[test]
     fn fisher_yates_different_states_differ() {
         let n = 10_usize;
@@ -198,7 +280,6 @@ mod tests {
         );
     }
 
-    /// Empty and single-element slices must not panic.
     #[test]
     fn fisher_yates_edge_cases_do_not_panic() {
         let mut rng = Pcg64::seed_from_u64(0);
@@ -211,7 +292,6 @@ mod tests {
         assert_eq!(single, vec![7]);
     }
 
-    /// Same (`base_seed`, `stage_id`) must produce bitwise identical output.
     #[test]
     #[allow(clippy::float_cmp)]
     fn lhs_determinism() {
@@ -227,7 +307,6 @@ mod tests {
         );
     }
 
-    /// Different seeds must produce different output.
     #[test]
     fn lhs_different_seeds_differ() {
         let n_openings = 20;
@@ -239,7 +318,6 @@ mod tests {
         assert_ne!(out_a, out_b, "different seeds produced identical output");
     }
 
-    /// Output length must equal `n_openings` * dim.
     #[test]
     fn lhs_correct_length() {
         let n_openings = 10;
@@ -249,7 +327,6 @@ mod tests {
         assert_eq!(output.len(), n_openings * dim);
     }
 
-    /// All output values must be finite.
     #[test]
     fn lhs_all_finite() {
         let n_openings = 30;
@@ -261,8 +338,6 @@ mod tests {
         }
     }
 
-    /// Marginal uniformity: for each dimension, `floor(Φ(x) * N)` over the output
-    /// must be a permutation of {0, …, N-1} (Φ approximated via `libm_erf`).
     #[test]
     #[allow(
         clippy::cast_sign_loss,
@@ -297,7 +372,6 @@ mod tests {
         }
     }
 
-    /// Statistical sanity: mean ≈ 0, std ≈ 1 for large N.
     #[test]
     #[allow(clippy::cast_precision_loss)]
     fn lhs_mean_and_std_within_tolerance() {
@@ -321,7 +395,6 @@ mod tests {
         );
     }
 
-    /// `n_openings=0` must not panic and must leave output unchanged.
     #[test]
     #[allow(clippy::float_cmp)]
     fn lhs_zero_openings_does_not_panic() {
@@ -330,7 +403,6 @@ mod tests {
         assert!(output.is_empty());
     }
 
-    /// dim=0 must not panic.
     #[test]
     fn lhs_zero_dim_does_not_panic() {
         let mut output: Vec<f64> = vec![];
@@ -349,7 +421,6 @@ mod tests {
         sign * (1.0 - poly * (-x * x).exp())
     }
 
-    /// Same inputs must produce bitwise identical output (determinism).
     #[test]
     #[allow(clippy::float_cmp, clippy::cast_possible_truncation)]
     fn lhs_point_determinism() {
@@ -358,17 +429,17 @@ mod tests {
         let mut out1 = vec![0.0_f64; dim];
         let mut out2 = vec![0.0_f64; dim];
         let mut perm = vec![0_usize; n];
-        let spec = LhsPointSpec {
+        let spec = NoisePointSpec {
             sampling_seed: 42,
             iteration: 0,
             scenario: 0,
-            stage_id: 0,
+            stream_id: 0,
             total_scenarios: n as u32,
             dim,
         };
 
-        sample_lhs_point(&spec, &mut out1, &mut perm);
-        sample_lhs_point(&spec, &mut out2, &mut perm);
+        sample_lhs_point_reference(&spec, &mut out1, &mut perm);
+        sample_lhs_point_reference(&spec, &mut out2, &mut perm);
 
         assert_eq!(
             out1, out2,
@@ -376,7 +447,6 @@ mod tests {
         );
     }
 
-    /// Different `sampling_seed` values must produce different outputs.
     #[test]
     #[allow(clippy::cast_possible_truncation)]
     fn lhs_point_different_seeds_differ() {
@@ -386,24 +456,24 @@ mod tests {
         let mut out2 = vec![0.0_f64; dim];
         let mut perm = vec![0_usize; n];
 
-        sample_lhs_point(
-            &LhsPointSpec {
+        sample_lhs_point_reference(
+            &NoisePointSpec {
                 sampling_seed: 42,
                 iteration: 0,
                 scenario: 0,
-                stage_id: 0,
+                stream_id: 0,
                 total_scenarios: n as u32,
                 dim,
             },
             &mut out1,
             &mut perm,
         );
-        sample_lhs_point(
-            &LhsPointSpec {
+        sample_lhs_point_reference(
+            &NoisePointSpec {
                 sampling_seed: 43,
                 iteration: 0,
                 scenario: 0,
-                stage_id: 0,
+                stream_id: 0,
                 total_scenarios: n as u32,
                 dim,
             },
@@ -417,7 +487,6 @@ mod tests {
         );
     }
 
-    /// All output values across all scenarios must be finite.
     #[test]
     #[allow(clippy::cast_possible_truncation)]
     fn lhs_point_all_finite() {
@@ -427,12 +496,12 @@ mod tests {
 
         for scenario in 0..n {
             let mut output = vec![0.0_f64; dim];
-            sample_lhs_point(
-                &LhsPointSpec {
+            sample_lhs_point_reference(
+                &NoisePointSpec {
                     sampling_seed: 42,
                     iteration: 0,
                     scenario: scenario as u32,
-                    stage_id: 0,
+                    stream_id: 0,
                     total_scenarios: n as u32,
                     dim,
                 },
@@ -448,10 +517,8 @@ mod tests {
         }
     }
 
-    /// For all scenarios 0..N, the strata per dimension must form a permutation
-    /// of {0, …, N-1}, verifying a valid LHS design without communication.
-    ///
-    /// Uses the same Φ approximation as `lhs_marginal_stratification`.
+    /// Point-wise sampling forms a valid LHS design with no inter-worker
+    /// communication.
     #[test]
     #[allow(
         clippy::cast_sign_loss,
@@ -468,12 +535,12 @@ mod tests {
         let mut strata_by_dim: Vec<Vec<usize>> = (0..dim).map(|_| Vec::with_capacity(n)).collect();
         for scenario in 0..n {
             let mut output = vec![0.0_f64; dim];
-            sample_lhs_point(
-                &LhsPointSpec {
+            sample_lhs_point_reference(
+                &NoisePointSpec {
                     sampling_seed: 42,
                     iteration: 0,
                     scenario: scenario as u32,
-                    stage_id: 0,
+                    stream_id: 0,
                     total_scenarios: n as u32,
                     dim,
                 },
@@ -493,6 +560,54 @@ mod tests {
             assert_eq!(
                 *strata, expected,
                 "dimension {d}: strata across all scenarios are not a permutation of 0..{n}"
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn lhs_point_matches_reference() {
+        for (dim, total_scenarios) in [(1_usize, 4_u32), (3, 10), (2, 16)] {
+            let ctx = LhsPrecomputed::new(11, 2, 1, dim, total_scenarios);
+            let mut precomputed_out = vec![0.0_f64; dim];
+            let mut direct_out = vec![0.0_f64; dim];
+            let mut perm_scratch = vec![0_usize; total_scenarios as usize];
+
+            for scenario in 0..total_scenarios {
+                let spec = NoisePointSpec {
+                    sampling_seed: 11,
+                    iteration: 2,
+                    scenario,
+                    stream_id: 1,
+                    total_scenarios,
+                    dim,
+                };
+
+                sample_lhs_point(&spec, &ctx, &mut precomputed_out);
+                sample_lhs_point_reference(&spec, &mut direct_out, &mut perm_scratch);
+
+                assert_eq!(
+                    precomputed_out, direct_out,
+                    "mismatch at dim={dim}, total_scenarios={total_scenarios}, scenario={scenario}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lhs_precomputed_strata_rows_are_permutations() {
+        let dim = 3_usize;
+        let total_scenarios = 10_u32;
+        let n = total_scenarios as usize;
+        let ctx = LhsPrecomputed::new(11, 2, 1, dim, total_scenarios);
+
+        for d in 0..dim {
+            let mut row: Vec<u32> = ctx.strata[d * n..(d + 1) * n].to_vec();
+            row.sort_unstable();
+            let expected: Vec<u32> = (0..total_scenarios).collect();
+            assert_eq!(
+                row, expected,
+                "dimension {d}: strata row is not a permutation of 0..{n}"
             );
         }
     }

@@ -40,6 +40,17 @@ mod simulation_only {
 
     use super::common::StubComm;
 
+    /// Ascending, distinct `end_date` per pool (`2030-01-01` plus the pool
+    /// index in months) — the study-stage calendar fed to
+    /// `build_stage_cuts_payloads` to self-describe each pool's
+    /// `priced_state_date`.
+    fn ascending_stage_end_dates(n_pools: usize) -> Vec<chrono::NaiveDate> {
+        let base = chrono::NaiveDate::from_ymd_opt(2030, 1, 1).unwrap();
+        (0..n_pools as u32)
+            .map(|i| base.checked_add_months(chrono::Months::new(i)).unwrap())
+            .collect()
+    }
+
     #[test]
     fn simulation_only_fcf_round_trip() {
         let case_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -68,8 +79,8 @@ mod simulation_only {
         let hydro_models =
             prepare_hydro_models(&system, &case_dir, false).expect("prepare_hydro_models");
 
-        let mut setup =
-            StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup");
+        let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
+            .expect("StudySetup");
 
         let comm = StubComm;
         let mut solver = ActiveSolver::new().expect("ActiveSolver");
@@ -100,10 +111,12 @@ mod simulation_only {
         let stage_active_indices = build_active_indices(&stage_records);
         let stage_manifests: Vec<Vec<cobre_io::EntitySlot>> = vec![Vec::new(); fcf.pools.len()];
         let study_stage_ids: Vec<i32> = (0..fcf.pools.len() as i32).collect();
+        let study_stage_end_dates = ascending_stage_end_dates(fcf.pools.len());
         let stage_cuts = build_stage_cuts_payloads(
             fcf,
             &setup.node_graph,
             &study_stage_ids,
+            &study_stage_end_dates,
             1_000_000.0,
             &stage_records,
             &stage_active_indices,
@@ -270,9 +283,8 @@ mod d17_signed_evaporation {
             .simulation_scenario_source(sentinel)
             .expect("simulation_scenario_source must parse");
 
-        let params = StudyParams::from_config(&config_with_sim)
+        let construction = StudyParams::from_config(&config_with_sim, Vec::new())
             .expect("StudyParams::from_config must succeed");
-        let construction = params;
 
         let mut setup = StudySetup::from_broadcast_params(
             &system,
@@ -444,8 +456,8 @@ mod d41_energy_contracts_simulation {
         let hydro_models = prepare_hydro_models(&system, &case_dir, false)
             .expect("prepare_hydro_models must succeed");
 
-        let mut setup =
-            StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup::new");
+        let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
+            .expect("StudySetup::new");
 
         let comm = StubComm;
         let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
@@ -662,8 +674,14 @@ mod multi_resolution_integration {
             .expect("prepare_stochastic");
         let hydro_models =
             prepare_hydro_models(&prep.system, case_dir, false).expect("prepare_hydro_models");
-        StudySetup::new(&prep.system, config, prep.stochastic, hydro_models)
-            .expect("StudySetup::new")
+        StudySetup::new(
+            &prep.system,
+            config,
+            prep.stochastic,
+            hydro_models,
+            Vec::new(),
+        )
+        .expect("StudySetup::new")
     }
 
     // ---------------------------------------------------------------------------
@@ -745,8 +763,8 @@ mod multi_resolution_integration {
 
         // Monthly stages 0-5 each pair a unique season_id with a unique year, so each
         // gets its own group ID — hence 6 distinct values.
-        let monthly_groups: Vec<u32> = groups[..6].to_vec();
-        let mut unique_monthly: Vec<u32> = monthly_groups.clone();
+        let monthly_groups = &groups[..6];
+        let mut unique_monthly: Vec<u32> = monthly_groups.to_vec();
         unique_monthly.sort_unstable();
         unique_monthly.dedup();
         assert_eq!(
@@ -961,6 +979,17 @@ mod decomp_integration {
             .join("examples/deterministic/d28-decomp-weekly-monthly")
     }
 
+    /// Ascending, distinct `end_date` per pool (`2030-01-01` plus the pool
+    /// index in months) — the study-stage calendar fed to
+    /// `build_stage_cuts_payloads` to self-describe each pool's
+    /// `priced_state_date`.
+    fn ascending_stage_end_dates(n_pools: usize) -> Vec<chrono::NaiveDate> {
+        let base = chrono::NaiveDate::from_ymd_opt(2030, 1, 1).unwrap();
+        (0..n_pools as u32)
+            .map(|i| base.checked_add_months(chrono::Months::new(i)).unwrap())
+            .collect()
+    }
+
     /// Write a policy checkpoint to `policy_dir` from the given setup and training result.
     fn write_test_checkpoint(
         policy_dir: &Path,
@@ -991,10 +1020,12 @@ mod decomp_integration {
         let stage_records = build_stage_cut_records(fcf);
         let stage_active_indices = build_active_indices(&stage_records);
         let study_stage_ids: Vec<i32> = (0..fcf.pools.len() as i32).collect();
+        let study_stage_end_dates = ascending_stage_end_dates(fcf.pools.len());
         let stage_cuts = build_stage_cuts_payloads(
             fcf,
             &setup.node_graph,
             &study_stage_ids,
+            &study_stage_end_dates,
             1_000_000.0,
             &stage_records,
             &stage_active_indices,
@@ -1039,8 +1070,14 @@ mod decomp_integration {
             .expect("prepare_stochastic");
         let hydro_models =
             prepare_hydro_models(&prep.system, case_dir, false).expect("prepare_hydro_models");
-        let setup = StudySetup::new(&prep.system, config, prep.stochastic, hydro_models)
-            .expect("StudySetup::new");
+        let setup = StudySetup::new(
+            &prep.system,
+            config,
+            prep.stochastic,
+            hydro_models,
+            Vec::new(),
+        )
+        .expect("StudySetup::new");
         (setup, prep.system)
     }
 
@@ -1201,7 +1238,8 @@ mod decomp_integration {
         write_test_checkpoint(&source_policy_dir, &setup_a, &outcome_a.result, 42);
 
         let num_stages = setup_a.fcf.pools.len();
-        let source_stage = (num_stages - 2) as u32; // second-to-last stage has backward-pass cuts
+        // second-to-last stage has backward-pass cuts
+        let boundary_date = ascending_stage_end_dates(num_stages)[num_stages - 2];
 
         let (mut setup_b, _system_b) = build_setup(&case_dir, &config);
         let mut solver_b = ActiveSolver::new().expect("solver B");
@@ -1217,19 +1255,15 @@ mod decomp_integration {
         let (mut setup_c, system_c) = build_setup(&case_dir, &config);
         let state_dim = setup_c.fcf.state_dimension as u32;
         let current_manifest = setup_c.build_terminal_entity_manifest(&system_c);
-        let mut warnings: Vec<String> = Vec::new();
-        let boundary_records = cobre_sddp::load_boundary_cuts(
-            &source_policy_dir,
-            source_stage,
-            state_dim,
-            &current_manifest,
-            &vec![None; current_manifest.len()],
-            &[],
-            None,
-            1_000_000.0,
-            &mut |msg| warnings.push(msg.to_string()),
-        )
-        .expect("load_boundary_cuts");
+        let boundary_records =
+            cobre_sddp::load_boundary_cuts(&cobre_sddp::BoundaryLoadRequest::new(
+                &source_policy_dir,
+                boundary_date,
+                state_dim,
+                &current_manifest,
+                1_000_000.0,
+            ))
+            .expect("load_boundary_cuts");
         assert!(
             !boundary_records.is_empty(),
             "source stage must have cuts after training"
@@ -1309,19 +1343,15 @@ mod decomp_integration {
             &stage_manifests,
         );
 
-        let source_stage = (n_pools - 2) as u32;
+        let boundary_date = ascending_stage_end_dates(n_pools)[n_pools - 2];
         let state_dim = setup_a.fcf.state_dimension as u32;
-        let result = cobre_sddp::load_boundary_cuts(
+        let result = cobre_sddp::load_boundary_cuts(&cobre_sddp::BoundaryLoadRequest::new(
             &source_policy_dir,
-            source_stage,
+            boundary_date,
             state_dim,
             &current_manifest,
-            &vec![None; current_manifest.len()],
-            &[],
-            None,
             1_000_000.0,
-            &mut |_| {},
-        );
+        ));
 
         assert!(
             result.is_err(),
@@ -1354,12 +1384,11 @@ mod transit_seed_output {
     };
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, DeficitSegment,
-        EntityId, HydroBlockBounds, HydroPastDefluence, HydroStageBounds, HydroStagePenalties,
+        EntityId, HydroBlockBounds, HydroPastDefluence, HydroPenalties, HydroStageBounds,
         HydroStorage, InitialConditions, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
         PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
         ResolvedPenalties, System, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
     };
-    use cobre_io::ParquetWriterConfig;
     use cobre_io::config::{
         Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
         InflowNonNegativityMethod, ModelingConfig, PolicyConfig, RowSelectionConfig,
@@ -1422,8 +1451,8 @@ mod transit_seed_output {
             .collect()
     }
 
-    fn hydro_penalties() -> HydroStagePenalties {
-        HydroStagePenalties {
+    fn hydro_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.01,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -1671,10 +1700,8 @@ mod transit_seed_output {
         );
 
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
-        let parquet_config = ParquetWriterConfig::default();
-        let mut writer =
-            SimulationParquetWriter::new(tmp.path(), &build_system(false), &parquet_config)
-                .expect("SimulationParquetWriter::new must succeed");
+        let mut writer = SimulationParquetWriter::new(tmp.path(), &build_system(false))
+            .expect("SimulationParquetWriter::new must succeed");
         writer
             .write_scenario(ScenarioWritePayload::from(scenario))
             .expect("write_scenario must succeed");
@@ -1694,12 +1721,10 @@ mod transit_seed_output {
     /// `right_boundary_output.rs::identical_runs_produce_byte_identical_anticipated_lanes_parquet`.
     #[test]
     fn identical_runs_produce_byte_identical_transit_seed_parquet() {
-        let parquet_config = ParquetWriterConfig::default();
         let write_once = |tmp_path: &std::path::Path| {
             let scenario = simulate_one(build_system(true));
-            let mut writer =
-                SimulationParquetWriter::new(tmp_path, &build_system(true), &parquet_config)
-                    .expect("SimulationParquetWriter::new must succeed");
+            let mut writer = SimulationParquetWriter::new(tmp_path, &build_system(true))
+                .expect("SimulationParquetWriter::new must succeed");
             writer
                 .write_scenario(ScenarioWritePayload::from(scenario))
                 .expect("write_scenario must succeed");
@@ -1753,7 +1778,7 @@ mod transit_seed_round_trip {
     };
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, DeficitSegment,
-        EntityId, HydroBlockBounds, HydroPastDefluence, HydroStageBounds, HydroStagePenalties,
+        EntityId, HydroBlockBounds, HydroPastDefluence, HydroPenalties, HydroStageBounds,
         HydroStorage, InitialConditions, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
         PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
         ResolvedPenalties, System, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
@@ -1829,8 +1854,8 @@ mod transit_seed_round_trip {
             .collect()
     }
 
-    fn zero_hydro_stage_penalties() -> HydroStagePenalties {
-        HydroStagePenalties {
+    fn zero_hydro_stage_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.0,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -2031,7 +2056,7 @@ mod transit_seed_round_trip {
             policy: PolicyConfig {
                 boundary: boundary_on.then(|| BoundaryPolicy {
                     path: "unused".to_string(),
-                    source_stage: None,
+                    strict: false,
                 }),
                 ..PolicyConfig::default()
             },
@@ -2321,7 +2346,7 @@ mod diversion_outflow_bounds {
     };
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, DeficitSegment,
-        EntityId, HydroBlockBounds, HydroStageBounds, HydroStagePenalties, HydroStorage,
+        EntityId, HydroBlockBounds, HydroPenalties, HydroStageBounds, HydroStorage,
         InitialConditions, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
         PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
         ResolvedPenalties, System, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
@@ -2411,12 +2436,12 @@ mod diversion_outflow_bounds {
     /// `Max`: spill cheaper than diversion, so the LP fills the natural channel to
     /// the cap and diverts only the forced surplus. The high violation costs make
     /// each bound bind rather than be paid off.
-    fn hydro_penalties(bound: Bound) -> HydroStagePenalties {
+    fn hydro_penalties(bound: Bound) -> HydroPenalties {
         let (spillage_cost, diversion_cost) = match bound {
             Bound::Min => (0.5, 0.0),
             Bound::Max => (0.01, 10.0),
         };
-        HydroStagePenalties {
+        HydroPenalties {
             spillage_cost,
             diversion_cost,
             turbined_cost: 0.0,
@@ -2779,15 +2804,13 @@ mod water_arc_and_post_study_anticipated_coexist_on_extended_layout {
         RowSelectionConfig, SimulationConfig, StoppingMode, StoppingRuleConfig, TrainingConfig,
         TrainingSelection, TrainingSolverConfig, UpperBoundEvaluationConfig,
     };
-    use cobre_io::{
-        GraphManifest, ManifestNode, PolicyCutRecord, ProducerBlock, StageCutsPayload,
-        write_policy_checkpoint,
-    };
     use cobre_sddp::indexer::{CutStateProjection, StateDim};
     use cobre_sddp::setup::{NodeId, StageIdx};
     use cobre_sddp::test_support::{patch_backward_opening_for_probe, solve_stage_for_probe};
     use cobre_sddp::workspace::SolverWorkspace;
-    use cobre_sddp::{SolverStatsDelta, inject_boundary_cuts, load_boundary_cuts};
+    use cobre_sddp::{
+        BoundaryLoadRequest, SolverStatsDelta, inject_boundary_cuts, load_boundary_cuts,
+    };
     use cobre_solver::{
         ActiveSolver, FreezeScratch, RowBatch, SolverInterface, StageTemplate,
         freeze_rows_into_template,
@@ -2945,9 +2968,10 @@ mod water_arc_and_post_study_anticipated_coexist_on_extended_layout {
     }
 
     fn penalties() -> cobre_core::resolved::ResolvedPenalties {
+        use cobre_core::HydroPenalties;
         use cobre_core::resolved::{
-            BusStagePenalties, HydroStagePenalties, LineStagePenalties, NcsStagePenalties,
-            PenaltiesCountsSpec, PenaltiesDefaults, ResolvedPenalties,
+            BusStagePenalties, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
+            PenaltiesDefaults, ResolvedPenalties,
         };
         ResolvedPenalties::new(
             &PenaltiesCountsSpec {
@@ -2958,7 +2982,7 @@ mod water_arc_and_post_study_anticipated_coexist_on_extended_layout {
                 n_stages: N_STAGES,
             },
             &PenaltiesDefaults {
-                hydro: HydroStagePenalties {
+                hydro: HydroPenalties {
                     spillage_cost: 0.01,
                     diversion_cost: 0.0,
                     turbined_cost: 0.0,
@@ -3110,7 +3134,7 @@ mod water_arc_and_post_study_anticipated_coexist_on_extended_layout {
             policy: PolicyConfig {
                 boundary: Some(BoundaryPolicy {
                     path: "unused-boundary-checkpoint".to_string(),
-                    source_stage: None,
+                    strict: false,
                 }),
                 ..PolicyConfig::default()
             },
@@ -3172,66 +3196,13 @@ mod water_arc_and_post_study_anticipated_coexist_on_extended_layout {
         pin
     }
 
-    /// Write a synthetic single-cut boundary checkpoint carrying `intercept`
-    /// and the explicit per-slot `coefficients`. No entity manifest (`&[]`):
-    /// the loader's identity check short-circuits with a warning (mirrors
-    /// `right_boundary_pricing.rs`'s `write_synthetic_boundary`), so this test
-    /// controls only the state dimension, not entity-identity matching.
-    fn write_synthetic_boundary(
-        dir: &Path,
-        state_dimension: u32,
-        intercept: f64,
-        coefficients: &[f64],
-    ) {
-        let cuts = vec![PolicyCutRecord {
-            cut_id: 0,
-            slot_index: 0,
-            iteration: 0,
-            forward_pass_index: 0,
-            intercept,
-            coefficients,
-            is_active: true,
-        }];
-        let payload = StageCutsPayload {
-            stage_id: 0,
-            state_dimension,
-            capacity: 1,
-            warm_start_count: 0,
-            cuts: &cuts,
-            active_cut_indices: &[0],
-            populated_count: 1,
-            entity_manifest: &[],
-            cost_scale_factor: 1_000_000.0,
-            node_id: 100,
-            graph_stage_id: -1,
-        };
-        let metadata = cobre_sddp::test_support::checkpoint_metadata(
-            1,
-            GraphManifest {
-                n_pools: 1,
-                nodes: vec![ManifestNode {
-                    id: 100,
-                    stage_id: 0,
-                    pool_id: 0,
-                }],
-                edges: vec![],
-            },
-            ProducerBlock {
-                completed_iterations: 0,
-                final_lower_bound: 0.0,
-                best_upper_bound: None,
-                max_iterations: 0,
-                forward_passes: 0,
-                warm_start_cuts: 0,
-                warm_start_counts: vec![],
-                rng_seed: 0,
-                total_visited_states: 0,
-                training_block_mode: "parallel".to_string(),
-                training_block_mode_per_stage: vec![],
-                cost_scale_factor: Some(1.0),
-            },
-        );
-        write_policy_checkpoint(dir, &[payload], &[], &metadata, &[]).expect("write checkpoint");
+    /// Pool `pool`'s fixture `priced_state_date`: `2030-01-01` plus `pool`
+    /// months.
+    fn fixture_priced_date(pool: u32) -> NaiveDate {
+        cobre_sddp::test_support::fixture_priced_date(
+            cobre_sddp::test_support::ymd(2030, 1, 1),
+            pool,
+        )
     }
 
     /// Load a boundary carrying `BETA_WATER` on `water_priced_slot` and
@@ -3247,19 +3218,21 @@ mod water_arc_and_post_study_anticipated_coexist_on_extended_layout {
         let mut coefficients = vec![0.0_f64; state_dimension as usize];
         coefficients[water_priced_slot] = BETA_WATER;
         coefficients[ant_slot] = BETA_ANT;
-        write_synthetic_boundary(dir, state_dimension, ALPHA, &coefficients);
-
-        let boundary_cuts = load_boundary_cuts(
+        cobre_sddp::test_support::write_synthetic_boundary(
             dir,
-            0,
+            state_dimension,
+            ALPHA,
+            &coefficients,
+            fixture_priced_date(0),
+        );
+
+        let boundary_cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
+            dir,
+            fixture_priced_date(0),
             state_dimension,
             &[],
-            &[],
-            &[],
-            None,
             1.0,
-            &mut |_msg| {},
-        )
+        ))
         .expect("boundary cut must load");
         inject_boundary_cuts(setup, &boundary_cuts);
     }
@@ -3339,8 +3312,7 @@ mod water_arc_and_post_study_anticipated_coexist_on_extended_layout {
             StageIdx(terminal_stage),
             pinned_state,
             &raw_noise,
-        )
-        .expect("StageSolvePrep::run must not error on the combined-deck fixture");
+        );
 
         let view =
             solve_stage_for_probe(ws, &ctx, pool, None, StageIdx(terminal_stage), 0, node_id)

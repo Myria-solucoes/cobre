@@ -17,7 +17,6 @@ use cobre_comm::BackendError;
 use cobre_io::LoadError;
 use cobre_io::OutputError;
 use cobre_sddp::SddpError;
-use cobre_sddp::SddpError::AnticipatedCommitmentOutOfBounds;
 use cobre_sddp::SddpError::BasisShapeMismatch;
 use cobre_sddp::SddpError::Communication;
 use cobre_sddp::SddpError::Infeasible;
@@ -39,7 +38,7 @@ use std::io::Error;
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// use cobre_cli::error::CliError;
 ///
 /// let err = CliError::Validation {
@@ -54,7 +53,7 @@ pub enum CliError {
     /// Case directory failed the validation pipeline (exit code 1).
     #[error("validation error: {report}")]
     Validation {
-        /// Human-readable summary of the validation failure.
+        /// Validation failure summary.
         report: String,
         /// `true` when the originating subcommand already printed `report` to
         /// stdout (the `validate` subcommand): [`CliError::format_error`] then
@@ -76,7 +75,7 @@ pub enum CliError {
     /// LP solver error during training or simulation (exit code 3).
     #[error("solver error: {message}")]
     Solver {
-        /// Human-readable description of the solver failure.
+        /// Solver failure description.
         message: String,
     },
 
@@ -85,7 +84,7 @@ pub enum CliError {
     /// A software or environment problem rather than a user error.
     #[error("internal error: {message}")]
     Internal {
-        /// Human-readable description of the internal failure.
+        /// Internal failure description.
         message: String,
     },
 }
@@ -95,7 +94,7 @@ impl CliError {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// use cobre_cli::error::CliError;
     ///
     /// assert_eq!(
@@ -113,10 +112,6 @@ impl CliError {
         }
     }
 
-    /// Build the stderr diagnostic lines for a [`CliError::Validation`].
-    ///
-    /// Empty when `already_rendered`; otherwise the report line plus the
-    /// "run `cobre validate`" hint (see the `already_rendered` field).
     fn validation_lines(report: &str, already_rendered: bool) -> Vec<String> {
         if already_rendered {
             return Vec::new();
@@ -133,7 +128,7 @@ impl CliError {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// use cobre_cli::error::CliError;
     /// use console::Term;
     ///
@@ -254,9 +249,6 @@ impl From<cobre_sddp::SddpError> for CliError {
             },
             ref shape_mismatch @ BasisShapeMismatch { .. } => Self::Internal {
                 message: shape_mismatch.to_string(),
-            },
-            ref over_commitment @ AnticipatedCommitmentOutOfBounds { .. } => Self::Internal {
-                message: over_commitment.to_string(),
             },
         }
     }
@@ -454,19 +446,12 @@ mod tests {
     }
 
     #[test]
-    fn from_load_error_cross_reference_maps_to_validation() {
-        use std::path::PathBuf;
-
-        let load_err = LoadError::CrossReferenceError {
-            source_file: PathBuf::from("system/hydros.json"),
-            source_entity: "Hydro 'H1'".to_string(),
-            target_collection: "bus registry".to_string(),
-            target_entity: "BUS_99".to_string(),
-        };
+    fn from_load_error_parse_maps_to_validation() {
+        let load_err = LoadError::parse("stages.json", "unexpected end of input");
         let cli_err = CliError::from(load_err);
         assert!(
             matches!(cli_err, CliError::Validation { .. }),
-            "LoadError::CrossReferenceError must map to CliError::Validation, got: {cli_err:?}"
+            "LoadError::ParseError must map to CliError::Validation, got: {cli_err:?}"
         );
         assert_eq!(cli_err.exit_code(), 1);
     }

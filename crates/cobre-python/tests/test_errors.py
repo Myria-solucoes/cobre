@@ -17,10 +17,9 @@ MISSING_CASE = "/tmp/nonexistent_cobre_case_xzy123"
 
 
 def test_errors_importable_and_subclass_builtins() -> None:
-    """The seven classes import from cobre.errors and subclass the right builtins."""
+    """The eight classes import from cobre.errors and subclass the right builtins."""
     import cobre.errors as e  # noqa: PLC0415
 
-    # All seven names resolve from cobre.errors.
     assert e.CobreError is not None
     assert e.ValidationError is not None
     assert e.CaseIoError is not None
@@ -28,6 +27,7 @@ def test_errors_importable_and_subclass_builtins() -> None:
     assert e.SolverError is not None
     assert e.SimulationError is not None
     assert e.OutputError is not None
+    assert e.InternalError is not None
 
     # CobreError is the common base.
     assert issubclass(e.CobreError, Exception)
@@ -45,10 +45,15 @@ def test_errors_importable_and_subclass_builtins() -> None:
     assert issubclass(e.SolverError, e.CobreError)
     assert issubclass(e.SimulationError, RuntimeError)
     assert issubclass(e.SimulationError, e.CobreError)
+    assert issubclass(e.InternalError, RuntimeError)
+    assert issubclass(e.InternalError, e.CobreError)
+    # InternalError is a sibling, not a subclass of SolverError.
+    assert not issubclass(e.InternalError, e.SolverError)
 
     # Qualified names read cobre.errors.<Name> (so tracebacks are unambiguous).
     assert e.SolverError.__module__ == "cobre.errors"
     assert e.SolverError.__qualname__ == "SolverError"
+    assert e.InternalError.__module__ == "cobre.errors"
 
 
 def test_run_nonexistent_dir_raises_oserror(tmp_path: pathlib.Path) -> None:
@@ -59,32 +64,53 @@ def test_run_nonexistent_dir_raises_oserror(tmp_path: pathlib.Path) -> None:
         cobre.run.run(MISSING_CASE, output_dir=str(tmp_path))
 
 
-def test_run_empty_dir_raises_runtime_error(tmp_path: pathlib.Path) -> None:
-    """run() raises RuntimeError for a directory missing required case files."""
+def test_run_empty_dir_raises_validation_error(tmp_path: pathlib.Path) -> None:
+    """run() raises ValidationError for a directory missing required case files."""
+    import cobre.errors  # noqa: PLC0415
     import cobre.run  # noqa: PLC0415
 
     empty_case = tmp_path / "empty_case"
     empty_case.mkdir()
     output = tmp_path / "output"
 
-    with pytest.raises(RuntimeError, match="constraint violation"):
+    with pytest.raises(cobre.errors.ValidationError, match="constraint violation"):
+        cobre.run.run(str(empty_case), output_dir=str(output))
+
+    # The same failure is catchable as the builtin ValueError (dual base intact).
+    with pytest.raises(ValueError):
         cobre.run.run(str(empty_case), output_dir=str(output))
 
 
 def test_run_empty_dir_error_mentions_missing_files(tmp_path: pathlib.Path) -> None:
-    """The RuntimeError for an empty case lists specific missing files."""
+    """The ValidationError for an empty case lists specific missing files."""
+    import cobre.errors  # noqa: PLC0415
     import cobre.run  # noqa: PLC0415
 
     empty_case = tmp_path / "empty_case"
     empty_case.mkdir()
     output = tmp_path / "output"
 
-    with pytest.raises(RuntimeError) as exc_info:
+    with pytest.raises(cobre.errors.ValidationError) as exc_info:
         cobre.run.run(str(empty_case), output_dir=str(output))
 
     msg = str(exc_info.value)
     assert "config.json" in msg, "error must mention config.json"
     assert "FileNotFound" in msg, "error must include FileNotFound kind"
+
+
+def test_study_empty_dir_raises_validation_error(tmp_path: pathlib.Path) -> None:
+    """Study() construction raises ValidationError for a directory missing required case files.
+
+    Proves that the constructor and run() now agree on the exception class.
+    """
+    import cobre.errors  # noqa: PLC0415
+
+    empty_case = tmp_path / "empty_case"
+    empty_case.mkdir()
+    output = tmp_path / "output"
+
+    with pytest.raises(cobre.errors.ValidationError, match="constraint violation"):
+        cobre.Study(str(empty_case), output_dir=str(output))
 
 
 def test_load_case_nonexistent_raises_oserror() -> None:
@@ -115,7 +141,6 @@ def test_validation_failure_raises_validation_error(tmp_path: pathlib.Path) -> N
     empty_case = tmp_path / "empty_case"
     empty_case.mkdir()
 
-    # Raises ValidationError with the verbatim "constraint violation" message.
     with pytest.raises(cobre.errors.ValidationError, match="constraint violation"):
         cobre.io.load_case(str(empty_case))
 
@@ -153,7 +178,6 @@ def test_io_failure_raises_caseio_error(tmp_path: pathlib.Path) -> None:
 
     os.chmod(out, 0o500)  # read + execute, no write
     try:
-        # Raises CaseIoError carrying the verbatim "output write error" message.
         with pytest.raises(cobre.errors.CaseIoError, match="output write error"):
             cobre.run.run(str(case_dir), output_dir=str(out))
 

@@ -3,8 +3,7 @@
 //! `cuts/<pool>.bin`'s own self-describing facts (`cost_scale_factor`,
 //! `graph_stage_id`), never `metadata.producer`/`metadata.graph_manifest`; a
 //! pre-change `.bin` (missing those facts) rejects instead of silently
-//! defaulting, and the auto-resolver rejects a winning pool it cannot map
-//! back to a `source_stage` safely.
+//! defaulting.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -13,19 +12,15 @@ use std::process::Command;
 
 use chrono::NaiveDate;
 use cobre_io::{
-    ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, GraphManifest, PolicyCutRecord, ProducerBlock,
-    StageCutsPayload, StateFamily, write_policy_checkpoint,
+    ENTITY_SLOT_DATE_SENTINEL, FORMAT_VERSION, GraphManifest, PolicyCutRecord, ProducerBlock,
+    StageCutsPayload, encode_slot_date, write_policy_checkpoint,
 };
-use cobre_sddp::{SddpError, load_boundary_cuts, resolve_boundary_source_stage};
+use cobre_sddp::test_support::ymd;
+use cobre_sddp::{BoundaryLoadRequest, SddpError, load_boundary_cuts};
 use serde_json::json;
 
-fn ymd(year: i32, month: u32, day: u32) -> NaiveDate {
-    NaiveDate::from_ymd_opt(year, month, day).expect("valid calendar date")
-}
-
-/// Discard warnings: a `&mut dyn FnMut(&str)` for tests asserting only the `Result`.
-fn ignore_warnings() -> impl FnMut(&str) {
-    |_| {}
+fn fixture_priced_date(pool: u32) -> NaiveDate {
+    cobre_sddp::test_support::fixture_priced_date(ymd(2030, 1, 1), pool)
 }
 
 /// A minimal producer block for artifact-writing test helpers. Its own
@@ -35,29 +30,9 @@ fn ignore_warnings() -> impl FnMut(&str) {
 fn producer_block() -> ProducerBlock {
     ProducerBlock {
         completed_iterations: 1,
-        final_lower_bound: 0.0,
-        best_upper_bound: None,
         max_iterations: 1,
         forward_passes: 1,
-        warm_start_cuts: 0,
-        warm_start_counts: vec![],
-        rng_seed: 0,
-        total_visited_states: 0,
-        training_block_mode: "parallel".to_string(),
-        training_block_mode_per_stage: vec![],
-        cost_scale_factor: None,
-    }
-}
-
-/// A single dated `AnticipatedThermalState` slot (`entity_type 2`), delivery
-/// anchored at `delivery_date` (`YYYYMM01`).
-fn dated_anticipated_slot(thermal_id: i32, ring_slot: u32, delivery_date: i32) -> EntitySlot {
-    EntitySlot {
-        entity_type: StateFamily::AnticipatedThermalState.code(),
-        entity_id: thermal_id,
-        subindex: ring_slot,
-        was_active: true,
-        delivery_date,
+        ..cobre_sddp::test_support::producer_block()
     }
 }
 
@@ -96,6 +71,7 @@ fn boundary_load_reads_cost_scale_from_bin() {
         cost_scale_factor: 500_000.0,
         node_id: 0,
         graph_stage_id: 0,
+        priced_state_date: encode_slot_date(fixture_priced_date(0)),
     };
     let metadata = cobre_sddp::test_support::checkpoint_metadata(
         1,
@@ -105,17 +81,13 @@ fn boundary_load_reads_cost_scale_from_bin() {
     write_policy_checkpoint(tmp.path(), &[payload], &[], &metadata, &[]).unwrap();
 
     let loading_factor = 2_500_000.0;
-    let cuts = load_boundary_cuts(
+    let cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
         tmp.path(),
-        0,
+        fixture_priced_date(0),
         2,
         &[],
-        &[],
-        &[],
-        None,
         loading_factor,
-        &mut ignore_warnings(),
-    )
+    ))
     .expect(
         "a self-describing checkpoint with metadata.producer.cost_scale_factor: None must \
          still load via the .bin's own marked cost_scale_factor",
@@ -229,7 +201,7 @@ fn build_pre_self_describing_stage_cuts_bin(
                 "entity_id": 1,
                 "subindex": 0,
                 "was_active": true,
-                "delivery_date": ENTITY_SLOT_DELIVERY_DATE_SENTINEL
+                "delivery_date": ENTITY_SLOT_DATE_SENTINEL
             }
         ]
     });
@@ -295,6 +267,7 @@ fn boundary_load_rejects_pre_self_describing_checkpoint() {
         cost_scale_factor: 1_000_000.0,
         node_id: 0,
         graph_stage_id: 0,
+        priced_state_date: encode_slot_date(fixture_priced_date(0)),
     };
     let metadata = cobre_sddp::test_support::checkpoint_metadata(
         1,
@@ -306,17 +279,13 @@ fn boundary_load_rejects_pre_self_describing_checkpoint() {
     let pre_change_buf = build_pre_self_describing_stage_cuts_bin(0, 7.0, 3.5);
     std::fs::write(tmp.path().join("cuts/000.bin"), &pre_change_buf).unwrap();
 
-    let result = load_boundary_cuts(
+    let result = load_boundary_cuts(&BoundaryLoadRequest::new(
         tmp.path(),
-        0,
+        fixture_priced_date(0),
         1,
         &[],
-        &[],
-        &[],
-        None,
         1_000_000.0,
-        &mut ignore_warnings(),
-    );
+    ));
 
     let err = result.expect_err("a pre-self-describing .bin must reject, never load silently");
     assert!(
@@ -334,25 +303,22 @@ fn boundary_load_rejects_pre_self_describing_checkpoint() {
     );
 }
 
-/// The auto-resolver rejects a winning pool whose own `graph_stage_id` is the
-/// `-1` sentinel (unresolved at export time — a pre-change or otherwise
-/// unresolved stage key): it cannot map the pool back to a
-/// `load_boundary_cuts` `source_stage` safely, so it advises an explicit
-/// `policy.boundary.source_stage` rather than guessing (and never falls back
-/// to the raw pool id, which could numerically coincide with an unrelated
-/// pool's own id on a branching graph).
+/// A checkpoint whose `CheckpointManifest::format_version` predates
+/// `FORMAT_VERSION` rejects as a boundary-path error naming the checkpoint
+/// directory and the version field — never a fall-through to a generic
+/// not-found or dimension message.
 #[test]
-fn auto_resolver_rejects_sentinel_graph_stage_id() {
+fn boundary_load_rejects_pre_format_version_checkpoint() {
     let tmp = tempfile::tempdir().unwrap();
-    let manifest = vec![dated_anticipated_slot(9, 0, 20_260_401)];
-    let coefficients = [1.0_f64];
+
+    let placeholder_coeff = [1.0_f64];
     let cut = PolicyCutRecord {
         cut_id: 0,
         slot_index: 0,
         iteration: 0,
         forward_pass_index: 0,
         intercept: 1.0,
-        coefficients: &coefficients,
+        coefficients: &placeholder_coeff,
         is_active: true,
     };
     let payload = StageCutsPayload {
@@ -363,32 +329,40 @@ fn auto_resolver_rejects_sentinel_graph_stage_id() {
         cuts: &[cut],
         active_cut_indices: &[0],
         populated_count: 1,
-        entity_manifest: &manifest,
+        entity_manifest: &[],
         cost_scale_factor: 1_000_000.0,
-        node_id: -1,
-        graph_stage_id: -1,
+        node_id: 0,
+        graph_stage_id: 0,
+        priced_state_date: encode_slot_date(fixture_priced_date(0)),
     };
-    let metadata = cobre_sddp::test_support::checkpoint_metadata(
+    let mut metadata = cobre_sddp::test_support::checkpoint_metadata(
         1,
         GraphManifest::default(),
         producer_block(),
     );
+    metadata.format_version = FORMAT_VERSION - 1;
     write_policy_checkpoint(tmp.path(), &[payload], &[], &metadata, &[]).unwrap();
 
-    let current_intervals = vec![Some((ymd(2026, 4, 1), ymd(2026, 4, 8)))];
-    let result = resolve_boundary_source_stage(tmp.path(), &current_intervals);
+    let result = load_boundary_cuts(&BoundaryLoadRequest::new(
+        tmp.path(),
+        fixture_priced_date(0),
+        1,
+        &[],
+        1_000_000.0,
+    ));
 
-    let err = result.expect_err(
-        "a winning pool with a sentinel graph_stage_id must reject, never silently pick a \
-         numerically-coincidental stage id",
-    );
+    let err = result.expect_err("a pre-format-version checkpoint must reject, never load silently");
     assert!(
         matches!(err, SddpError::Validation(_)),
         "must reject as SddpError::Validation: {err:?}"
     );
     let msg = err.to_string();
     assert!(
-        msg.contains("policy.boundary.source_stage"),
-        "message must advise an explicit source_stage: {msg}"
+        msg.contains(&tmp.path().display().to_string()),
+        "message must name the checkpoint directory: {msg}"
+    );
+    assert!(
+        msg.contains("format_version"),
+        "message must name the version field: {msg}"
     );
 }

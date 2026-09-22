@@ -27,7 +27,7 @@
 //! in Rust, so this partition is an audited, re-runnable manual enumeration,
 //! not a mechanically-provable one.
 
-use cobre_sddp::lp_builder::DeliveryRing;
+use cobre_sddp::lp::builder::DeliveryRing;
 
 #[test]
 fn depth_one_emit_shift_rows_never_writes_an_in_col_entry() {
@@ -134,10 +134,7 @@ const K1_SURVIVORS: &[&str] = &[
 /// actually moves that fixture's bytes/assertions: a `.sha256` regen for the tier-1 parity case,
 /// a hold-geometry rewrite for a shift-geometry-asserting structural test, or
 /// no change at all for an assertion that turns out robust to the
-/// permutation. There are zero `k_max >= 2` tier-1 parity goldens today
-/// (`parity_hash_d34` is `k_max == 1`); every entry below is an LP-structural
-/// or behavioral fixture (`.claude/rules/testing.md` tiers 2/3), not a
-/// `.sha256` golden.
+/// permutation.
 ///
 /// `test_anticipated_decision_no_column_at_boundary_stage_strict_predicate`
 /// sweeps `k_max in {1, 2, 3}` in one fixture; it lands here (the superset)
@@ -178,7 +175,6 @@ const LEAD_GE2_REBASELINE: &[&str] = &[
     "anticipated_commissioning_warm_start_zero_basis_rejections",
     "anticipated_commitment_at_cap_survives_ring_carry",
     "anticipated_commitment_drifted_over_cap_is_absorbed",
-    "anticipated_commitment_over_cap_seed_is_refused",
     // tests/lp_builder.rs
     "anticipated_k2_manifest_has_thermal_state_slots",
     // tests/commitment_hold_wiring_probe.rs

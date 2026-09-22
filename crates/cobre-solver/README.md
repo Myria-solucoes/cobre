@@ -104,9 +104,11 @@ includes at least one runnable end-to-end integration test.
 | `ffi::highs` / `ffi::clp` | Raw `unsafe` FFI bindings to the `cobre_highs_*` / `cobre_clp_*` C wrapper functions                                        |
 
 The `backends::highs` and `ffi::highs` modules compile only with the `highs`
-feature; `backends::clp` and `ffi::clp` only with `clp`. `trait_def` and
-`types` are always compiled, so algorithm code can be written against
-`SolverInterface` without depending on either concrete backend.
+feature; `backends::clp` and `ffi::clp` only with `clp`. `trait_def`, `types`,
+and `basis_status` are always compiled — the canonical `BasisStatus` mapping is
+feature-independent, built regardless of which backend feature is selected —
+so algorithm code can be written against `SolverInterface` without depending
+on either concrete backend.
 
 ## `SolverInterface` trait
 

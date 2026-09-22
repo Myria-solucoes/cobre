@@ -4,24 +4,17 @@
 //! Methods: SAA, LHS, QMC (Sobol/Halton); Selective and `HistoricalResiduals`
 //! fall back to SAA in the forward pass.
 
-#[cfg(test)]
-use cobre_core::EntityId;
 use cobre_core::temporal::NoiseMethod;
 use rand::RngExt;
 use rand_distr::StandardNormal;
 
 #[cfg(test)]
-use crate::DecomposedCorrelation;
+use crate::{ClassNoiseTables, DecomposedCorrelation, EntityClass};
 use crate::{
-    StochasticError,
+    NoisePointSpec, NoiseTable, StochasticError,
     noise::{rng::rng_from_seed, seed::derive_forward_seed_grouped},
     tree::{
-        lhs::{LhsPointSpec, sample_lhs_point},
-        qmc_halton::{HaltonPointSpec, scrambled_halton_point},
-        qmc_sobol::{
-            MAX_SOBOL_DIM, SobolPointSpec, SobolPrecomputed, scrambled_sobol_point,
-            scrambled_sobol_point_precomputed,
-        },
+        lhs::sample_lhs_point, qmc_halton::scrambled_halton_point, qmc_sobol::scrambled_sobol_point,
     },
 };
 
@@ -32,7 +25,6 @@ pub(crate) struct FreshNoiseSpec {
     pub noise_method: NoiseMethod,
     pub iteration: u32,
     pub scenario: u32,
-    pub stage_id: u32,
     /// Seed-derivation identifier: stages sharing a `(season_id, year)` bucket
     /// share a `noise_group_id` so their noise draws are identical.
     pub noise_group_id: u32,
@@ -41,29 +33,47 @@ pub(crate) struct FreshNoiseSpec {
 }
 
 /// Fill `output[0..spec.dim]` with fresh N(0,1) noise, then apply spatial
-/// spectral correlation in-place. No heap allocation.
-///
-/// # Errors
-///
-/// Returns [`StochasticError::DimensionExceedsCapacity`] when `QmcSobol`
-/// and `spec.dim > MAX_SOBOL_DIM`.
+/// spectral correlation in-place for the inflow class — this helper's fixtures
+/// never populate load or NCS segments.
 ///
 /// # Panics
 ///
-/// Panics if `output.len() < spec.dim` or (for LHS)
-/// `perm_scratch.len() < spec.total_scenarios`.
+/// Panics if `output.len() < spec.dim`.
 #[cfg(test)]
 pub(crate) fn sample_fresh(
     spec: FreshNoiseSpec,
     output: &mut [f64],
-    perm_scratch: &mut [usize],
     correlation: &DecomposedCorrelation,
-    entity_order: &[EntityId],
+    stage_id: i32,
 ) -> Result<(), StochasticError> {
-    fill_uncorrelated(spec, None, output, perm_scratch)?;
-    #[allow(clippy::cast_possible_wrap)]
-    correlation.apply_correlation(spec.stage_id as i32, &mut output[..spec.dim], entity_order);
+    let table = table_for_spec(spec)?;
+    fill_uncorrelated(spec, &table, output)?;
+    let groups = correlation.groups_for_stage(stage_id);
+    let mut scratch = vec![0.0_f64; 2 * spec.dim];
+    DecomposedCorrelation::apply_groups_for_class(
+        groups,
+        EntityClass::Inflow,
+        &mut output[..spec.dim],
+        &mut scratch,
+    );
     Ok(())
+}
+
+/// Build the [`NoiseTable`] a single `spec` would resolve to under
+/// [`ClassNoiseTables::refill`], for tests that call [`fill_uncorrelated`]
+/// directly instead of through a driver's rebuilt tables.
+#[cfg(test)]
+fn table_for_spec(spec: FreshNoiseSpec) -> Result<NoiseTable, StochasticError> {
+    let mut tables = ClassNoiseTables::default();
+    tables.refill(
+        spec.forward_seed,
+        spec.dim,
+        spec.iteration,
+        spec.total_scenarios,
+        &[spec.noise_group_id],
+        &[spec.noise_method],
+    )?;
+    Ok(tables.table_at(0).cloned().unwrap_or(NoiseTable::Direct))
 }
 
 /// Fill `output[0..spec.dim]` with independent N(0,1) noise, omitting the
@@ -72,88 +82,67 @@ pub(crate) fn sample_fresh(
 ///
 /// # Errors
 ///
-/// Returns [`StochasticError::DimensionExceedsCapacity`] when `QmcSobol`
-/// and `spec.dim > MAX_SOBOL_DIM`.
+/// Returns [`StochasticError::InsufficientData`] when `table`'s variant does
+/// not match `spec.noise_method`.
 ///
 /// # Panics
 ///
-/// Panics if `output.len() < spec.dim` or (for LHS)
-/// `perm_scratch.len() < spec.total_scenarios`.
+/// Panics if `output.len() < spec.dim`.
 pub(crate) fn fill_uncorrelated(
     spec: FreshNoiseSpec,
-    sobol_ctx: Option<&SobolPrecomputed>,
+    table: &NoiseTable,
     output: &mut [f64],
-    perm_scratch: &mut [usize],
 ) -> Result<(), StochasticError> {
+    let point_spec = NoisePointSpec {
+        sampling_seed: spec.forward_seed,
+        iteration: spec.iteration,
+        scenario: spec.scenario,
+        stream_id: spec.noise_group_id,
+        total_scenarios: spec.total_scenarios,
+        dim: spec.dim,
+    };
     match spec.noise_method {
-        NoiseMethod::Saa => {
-            fill_saa(spec, output);
-        }
+        NoiseMethod::Saa => fill_saa(spec, output),
         NoiseMethod::Lhs => {
-            let lhs_spec = LhsPointSpec {
-                sampling_seed: spec.forward_seed,
-                iteration: spec.iteration,
-                scenario: spec.scenario,
-                stage_id: spec.noise_group_id,
-                total_scenarios: spec.total_scenarios,
-                dim: spec.dim,
+            let NoiseTable::Lhs(ctx) = table else {
+                return Err(StochasticError::InsufficientData {
+                    context: format!(
+                        "fill_uncorrelated: noise_group_id {} expected NoiseTable::Lhs, got {table:?}",
+                        spec.noise_group_id,
+                    ),
+                });
             };
-            sample_lhs_point(&lhs_spec, output, perm_scratch);
+            sample_lhs_point(&point_spec, ctx, output);
         }
         NoiseMethod::QmcSobol => {
-            if spec.dim > MAX_SOBOL_DIM {
-                return Err(StochasticError::DimensionExceedsCapacity {
-                    dim: spec.dim,
-                    max_dim: MAX_SOBOL_DIM,
-                    method: "sobol".to_string(),
+            let NoiseTable::Sobol(ctx) = table else {
+                return Err(StochasticError::InsufficientData {
+                    context: format!(
+                        "fill_uncorrelated: noise_group_id {} expected NoiseTable::Sobol, got {table:?}",
+                        spec.noise_group_id,
+                    ),
                 });
-            }
-            let sobol_spec = SobolPointSpec {
-                sampling_seed: spec.forward_seed,
-                iteration: spec.iteration,
-                scenario: spec.scenario,
-                stage_id: spec.noise_group_id,
-                total_scenarios: spec.total_scenarios,
-                dim: spec.dim,
             };
-            if let Some(ctx) = sobol_ctx {
-                scrambled_sobol_point_precomputed(&sobol_spec, ctx, output);
-            } else {
-                scrambled_sobol_point(&sobol_spec, output);
-            }
+            scrambled_sobol_point(&point_spec, ctx, output);
         }
         NoiseMethod::QmcHalton => {
-            let halton_spec = HaltonPointSpec {
-                sampling_seed: spec.forward_seed,
-                iteration: spec.iteration,
-                scenario: spec.scenario,
-                stage_id: spec.noise_group_id,
-                total_scenarios: spec.total_scenarios,
-                dim: spec.dim,
+            let NoiseTable::Halton(ctx) = table else {
+                return Err(StochasticError::InsufficientData {
+                    context: format!(
+                        "fill_uncorrelated: noise_group_id {} expected NoiseTable::Halton, got {table:?}",
+                        spec.noise_group_id,
+                    ),
+                });
             };
-            scrambled_halton_point(&halton_spec, output);
+            scrambled_halton_point(&point_spec, ctx, output);
         }
-        NoiseMethod::Selective => {
-            tracing::warn!(
-                stage_id = spec.stage_id,
-                "selective noise method not supported in forward pass; falling back to SAA at stage {}",
-                spec.stage_id,
-            );
-            fill_saa(spec, output);
-        }
-        NoiseMethod::HistoricalResiduals => {
-            tracing::warn!(
-                stage_id = spec.stage_id,
-                "historical_residuals noise method not yet wired in forward pass; falling back to SAA at stage {}",
-                spec.stage_id,
-            );
+        NoiseMethod::Selective | NoiseMethod::HistoricalResiduals => {
             fill_saa(spec, output);
         }
     }
     Ok(())
 }
 
-/// Fill `output[0..spec.dim]` with independent N(0,1) draws using SAA.
 fn fill_saa(spec: FreshNoiseSpec, output: &mut [f64]) {
     let seed = derive_forward_seed_grouped(
         spec.forward_seed,
@@ -187,9 +176,9 @@ mod tests {
         temporal::NoiseMethod,
     };
 
-    use crate::{StochasticError, correlation::resolve::DecomposedCorrelation};
+    use crate::{ClassDimensions, StochasticError, correlation::resolve::DecomposedCorrelation};
 
-    use super::{FreshNoiseSpec, fill_uncorrelated, sample_fresh};
+    use super::{FreshNoiseSpec, fill_uncorrelated, sample_fresh, table_for_spec};
 
     fn identity_correlation(entity_ids: &[i32]) -> DecomposedCorrelation {
         let n = entity_ids.len();
@@ -213,16 +202,21 @@ mod tests {
                 }],
             },
         );
-        DecomposedCorrelation::build(&CorrelationModel {
-            method: "spectral".to_string(),
-            profiles,
-            schedule: vec![],
-        })
+        let entity_order: Vec<EntityId> = entity_ids.iter().map(|&id| EntityId(id)).collect();
+        DecomposedCorrelation::build(
+            &CorrelationModel {
+                method: "spectral".to_string(),
+                profiles,
+                schedule: vec![],
+            },
+            &entity_order,
+            ClassDimensions {
+                n_hydros: entity_ids.len(),
+                n_load_buses: 0,
+                n_ncs: 0,
+            },
+        )
         .unwrap()
-    }
-
-    fn make_entity_order(ids: &[i32]) -> Vec<EntityId> {
-        ids.iter().map(|&id| EntityId(id)).collect()
     }
 
     fn base_spec(noise_method: NoiseMethod) -> FreshNoiseSpec {
@@ -231,7 +225,6 @@ mod tests {
             noise_method,
             iteration: 0,
             scenario: 0,
-            stage_id: 0,
             noise_group_id: 0,
             dim: 3,
             total_scenarios: 10,
@@ -241,15 +234,13 @@ mod tests {
     #[test]
     fn test_saa_determinism() {
         let corr = identity_correlation(&[1, 2, 3]);
-        let entity_order = make_entity_order(&[1, 2, 3]);
         let spec = base_spec(NoiseMethod::Saa);
 
         let mut out_a = vec![0.0f64; spec.dim];
         let mut out_b = vec![0.0f64; spec.dim];
-        let mut perm = vec![0usize; spec.total_scenarios as usize];
 
-        sample_fresh(spec, &mut out_a, &mut perm, &corr, &entity_order).unwrap();
-        sample_fresh(spec, &mut out_b, &mut perm, &corr, &entity_order).unwrap();
+        sample_fresh(spec, &mut out_a, &corr, 0).unwrap();
+        sample_fresh(spec, &mut out_b, &corr, 0).unwrap();
 
         assert_eq!(
             out_a, out_b,
@@ -261,7 +252,6 @@ mod tests {
     fn test_saa_different_seeds_differ() {
         let corr_a = identity_correlation(&[1, 2, 3]);
         let corr_b = identity_correlation(&[1, 2, 3]);
-        let entity_order = make_entity_order(&[1, 2, 3]);
 
         let spec_a = FreshNoiseSpec {
             forward_seed: 42,
@@ -274,10 +264,9 @@ mod tests {
 
         let mut out_a = vec![0.0f64; spec_a.dim];
         let mut out_b = vec![0.0f64; spec_b.dim];
-        let mut perm = vec![0usize; 10];
 
-        sample_fresh(spec_a, &mut out_a, &mut perm, &corr_a, &entity_order).unwrap();
-        sample_fresh(spec_b, &mut out_b, &mut perm, &corr_b, &entity_order).unwrap();
+        sample_fresh(spec_a, &mut out_a, &corr_a, 0).unwrap();
+        sample_fresh(spec_b, &mut out_b, &corr_b, 0).unwrap();
 
         assert_ne!(
             out_a, out_b,
@@ -288,16 +277,14 @@ mod tests {
     #[test]
     fn test_lhs_produces_finite_noise() {
         let corr = identity_correlation(&[1, 2, 3]);
-        let entity_order = make_entity_order(&[1, 2, 3]);
         let spec = FreshNoiseSpec {
             scenario: 5,
             ..base_spec(NoiseMethod::Lhs)
         };
 
         let mut output = vec![0.0f64; spec.dim];
-        let mut perm = vec![0usize; spec.total_scenarios as usize];
 
-        let result = sample_fresh(spec, &mut output, &mut perm, &corr, &entity_order);
+        let result = sample_fresh(spec, &mut output, &corr, 0);
 
         assert!(result.is_ok(), "LHS must return Ok(()), got {result:?}");
         for (i, &v) in output.iter().enumerate() {
@@ -308,13 +295,11 @@ mod tests {
     #[test]
     fn test_sobol_produces_finite_noise() {
         let corr = identity_correlation(&[1, 2, 3]);
-        let entity_order = make_entity_order(&[1, 2, 3]);
         let spec = base_spec(NoiseMethod::QmcSobol);
 
         let mut output = vec![0.0f64; spec.dim];
-        let mut perm = vec![0usize; spec.total_scenarios as usize];
 
-        let result = sample_fresh(spec, &mut output, &mut perm, &corr, &entity_order);
+        let result = sample_fresh(spec, &mut output, &corr, 0);
 
         assert!(
             result.is_ok(),
@@ -328,16 +313,14 @@ mod tests {
     #[test]
     fn test_sobol_dim_exceeds_capacity() {
         let corr = identity_correlation(&[1]);
-        let entity_order = make_entity_order(&[1]);
         let spec = FreshNoiseSpec {
-            dim: 21_202, // one above MAX_SOBOL_DIM = 21_201
+            dim: 21_202, // one above the crate's Sobol dimension cap (21_201)
             ..base_spec(NoiseMethod::QmcSobol)
         };
 
         let mut output = vec![0.0f64; spec.dim];
-        let mut perm = vec![0usize; spec.total_scenarios as usize];
 
-        let result = sample_fresh(spec, &mut output, &mut perm, &corr, &entity_order);
+        let result = sample_fresh(spec, &mut output, &corr, 0);
 
         match result {
             Err(StochasticError::DimensionExceedsCapacity {
@@ -360,13 +343,11 @@ mod tests {
     #[test]
     fn test_halton_produces_finite_noise() {
         let corr = identity_correlation(&[1, 2, 3]);
-        let entity_order = make_entity_order(&[1, 2, 3]);
         let spec = base_spec(NoiseMethod::QmcHalton);
 
         let mut output = vec![0.0f64; spec.dim];
-        let mut perm = vec![0usize; spec.total_scenarios as usize];
 
-        let result = sample_fresh(spec, &mut output, &mut perm, &corr, &entity_order);
+        let result = sample_fresh(spec, &mut output, &corr, 0);
 
         assert!(
             result.is_ok(),
@@ -380,13 +361,11 @@ mod tests {
     #[test]
     fn test_selective_falls_back_to_saa() {
         let corr = identity_correlation(&[1, 2, 3]);
-        let entity_order = make_entity_order(&[1, 2, 3]);
         let spec = base_spec(NoiseMethod::Selective);
 
         let mut output = vec![0.0f64; spec.dim];
-        let mut perm = vec![0usize; spec.total_scenarios as usize];
 
-        let result = sample_fresh(spec, &mut output, &mut perm, &corr, &entity_order);
+        let result = sample_fresh(spec, &mut output, &corr, 0);
 
         assert!(
             result.is_ok(),
@@ -401,12 +380,10 @@ mod tests {
     fn test_selective_matches_saa() {
         let corr_a = identity_correlation(&[1, 2, 3]);
         let corr_b = identity_correlation(&[1, 2, 3]);
-        let entity_order = make_entity_order(&[1, 2, 3]);
 
         let spec = FreshNoiseSpec {
             iteration: 1,
             scenario: 2,
-            stage_id: 3,
             ..base_spec(NoiseMethod::Selective)
         };
         let spec_saa = FreshNoiseSpec {
@@ -416,10 +393,9 @@ mod tests {
 
         let mut out_selective = vec![0.0f64; spec.dim];
         let mut out_saa = vec![0.0f64; spec.dim];
-        let mut perm = vec![0usize; spec.total_scenarios as usize];
 
-        sample_fresh(spec, &mut out_selective, &mut perm, &corr_a, &entity_order).unwrap();
-        sample_fresh(spec_saa, &mut out_saa, &mut perm, &corr_b, &entity_order).unwrap();
+        sample_fresh(spec, &mut out_selective, &corr_a, 3).unwrap();
+        sample_fresh(spec_saa, &mut out_saa, &corr_b, 3).unwrap();
 
         assert_eq!(
             out_selective, out_saa,
@@ -436,10 +412,10 @@ mod tests {
         let spec = base_spec(NoiseMethod::Saa);
         let mut out_a = vec![0.0f64; spec.dim];
         let mut out_b = vec![0.0f64; spec.dim];
-        let mut perm = vec![0usize; spec.total_scenarios as usize];
+        let table = table_for_spec(spec).expect("Saa never exceeds the Sobol dimension cap");
 
-        fill_uncorrelated(spec, None, &mut out_a, &mut perm).unwrap();
-        fill_uncorrelated(spec, None, &mut out_b, &mut perm).unwrap();
+        fill_uncorrelated(spec, &table, &mut out_a).unwrap();
+        fill_uncorrelated(spec, &table, &mut out_b).unwrap();
 
         assert_eq!(
             out_a, out_b,
@@ -450,13 +426,11 @@ mod tests {
     #[test]
     fn test_fill_uncorrelated_sobol_dim_exceeds_capacity() {
         let spec = FreshNoiseSpec {
-            dim: 21_202, // one above MAX_SOBOL_DIM = 21_201
+            dim: 21_202, // one above the crate's Sobol dimension cap (21_201)
             ..base_spec(NoiseMethod::QmcSobol)
         };
-        let mut output = vec![0.0f64; spec.dim];
-        let mut perm = vec![0usize; spec.total_scenarios as usize];
 
-        let result = fill_uncorrelated(spec, None, &mut output, &mut perm);
+        let result = table_for_spec(spec);
 
         match result {
             Err(StochasticError::DimensionExceedsCapacity {
@@ -471,7 +445,7 @@ mod tests {
                     "method must contain 'sobol', got: {method}"
                 );
             }
-            Ok(()) => panic!("expected Err(DimensionExceedsCapacity) but got Ok"),
+            Ok(_) => panic!("expected Err(DimensionExceedsCapacity) but got Ok"),
             Err(other) => panic!("expected DimensionExceedsCapacity, got {other:?}"),
         }
     }
@@ -492,9 +466,9 @@ mod tests {
                 ..base_spec(method)
             };
             let mut output = vec![0.0f64; spec.dim];
-            let mut perm = vec![0usize; spec.total_scenarios as usize];
+            let table = table_for_spec(spec).expect("dim=3 never exceeds the Sobol dimension cap");
 
-            let result = fill_uncorrelated(spec, None, &mut output, &mut perm);
+            let result = fill_uncorrelated(spec, &table, &mut output);
 
             assert!(
                 result.is_ok(),

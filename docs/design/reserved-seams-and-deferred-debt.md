@@ -99,6 +99,29 @@ backed by `MPI_Win_allocate_shared`. When the first such consumer lands,
 stays reserved rather than removed, per the "unwired config is reserved, not
 dead" rule.
 
+### Boundary-cut wire `graph_stage_id` (`STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL`)
+
+**What it is.** Every exported stage-cuts payload carries a `graph_stage_id`
+field (`policy_export.rs`'s `build_stage_cuts_payloads`, falling back to
+`STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL` when a pool's `pool_stage` is out of
+range), round-trips through the FlatBuffers wire encoding
+(`cobre-io/src/output/policy/codec.rs`), and is exposed to Python callers
+(`cobre-python/src/policy.rs`, `results.rs`). No code in `cobre-sddp` reads the
+decoded value back off a loaded checkpoint any more — boundary-cut selection
+reads `priced_state_date` instead, which the node-graph-to-calendar switchover
+made the authoritative pool key.
+
+**Owner.** The policy / boundary owner
+(`crates/cobre-sddp/src/policy/policy_export.rs`, `policy_load.rs`;
+`crates/cobre-io/src/output/policy/codec.rs`).
+
+**Consuming milestone.** The first `cobre-sddp` reader that needs the
+originating node-graph stage id independent of the calendar-derived
+`priced_state_date` — for example a diagnostic cross-checking a loaded
+checkpoint's graph shape, or a future selection mode disambiguating pools that
+share one `priced_state_date` by graph position. Until such a reader lands the
+field stays a write-only wire and Python-visible diagnostic surface.
+
 ## Verified NOT reserved
 
 `historical_years` (`cobre_core::scenario::ScenarioSource`,
@@ -308,18 +331,16 @@ touches many sites next to a protected hot path.
 **Trigger.** The planned traversal-stride index rename lands in the same
 neighborhood (a deliberate typed-index sweep of the cut-pool indices).
 
-### Superseded cut-sync public methods
+### Superseded cut-sync public methods — RESOLVED
 
-**What it is.** Three methods on `CutSyncBuffers` — `sync_cuts`,
-`pack_local_records`, `sync_packed_records` — have no production call site (they
-are the legacy single-pool exchange, superseded by the per-level batched
-`sync_level_records`), yet remain re-exported public API on a published crate,
-so removal is a breaking change. Their test suite gives false "still used"
-confidence.
+**What it was.** Three methods on `CutSyncBuffers` — `sync_cuts`,
+`pack_local_records`, `sync_packed_records` — were the legacy single-pool
+exchange, superseded by the per-level batched `sync_level_records` but still
+re-exported public API on a published crate, so removing them was a breaking
+change; their test suite gave false "still used" confidence.
 
-**Owner.** The comm / training owner.
-
-**Trigger.** The next licensed public-API break.
+**Resolution.** The three methods and their tests are removed in a licensed
+public-API break; `sync_level_records` is the sole cut-exchange path.
 
 ### Python-binding Rust tests invisible to CI
 
@@ -377,8 +398,8 @@ approximation.
 ### Boundary-policy source-node
 
 **What it is.** The boundary-policy config (`BoundaryPolicy`,
-`crates/cobre-io/src/config/policy.rs`) addresses its source by stage
-(`source_stage`), has no source-node selector, shares one leaf pool
+`crates/cobre-io/src/config/policy.rs`) addresses its source by the study's own
+boundary date, has no source-node selector, shares one leaf pool
 unconditionally, and rejects a multi-node source. It relocates once, under a
 study-level boundary configuration.
 
@@ -527,6 +548,30 @@ unknown-field / unknown-variant deserialize error, pinned by the reject tests in
 `crates/cobre-io/src/config/{training,simulation}.rs` and the FlatBuffers schema
 conformance test — the invariant that stands in for a version snapshot.
 
+### cobre-bridge and cobre-docs adoption of the integrated-productivity contract
+
+**What it is.** Two follow-ups on external repositories (not part of this
+tree) remain open, adopting the stored-energy / 2x2 scope x evaluator
+productivity contract published in
+`docs/design/hydro-productivity-and-stored-energy.md`:
+
+- `cobre-bridge` must adopt the contract's "Bridge-facing deviations"
+  section — author a security-curve constraint's coefficient as
+  `integrated_accumulated_productivity`, keep flood-control and
+  stored-volume ceilings as operative `HydroStageBounds` rows, and retire
+  its per-plant basis-selection field — none of which has landed there yet.
+  **Owner.** The `cobre-bridge` integration owner.
+  **Trigger.** The next `cobre-bridge` release that authors or updates a
+  security-curve constraint against this contract.
+- `cobre-docs` methodology pages must document the integrated productivity /
+  computed-parameter surface — the 2x2 scope x evaluator model, the
+  quadrature invariant, and the physical/operative split — currently
+  published only in this repository's own
+  `docs/design/hydro-productivity-and-stored-energy.md`.
+  **Owner.** The `cobre-docs` methodology owner.
+  **Trigger.** The next `cobre-docs` methodology-page revision cycle that
+  covers hydro productivity.
+
 ## Deferred-debt register — whole-lifecycle audit findings
 
 Findings of the full `cobre run` lifecycle read, described by behavior. Each
@@ -571,6 +616,12 @@ simulation outputs, including the census scenario-summary tuple-reshape copied
 on both sides and pinned by a test that itself exists in both crates. Target:
 hoist the shared "output set + guards" (the pattern the Python `*_if_any`
 helpers already prove) into a crate both the CLI and Python depend on.
+
+**Current state (2026-09-17).** The Python side now has one internal owner (`cobre.run.run`
+drives the `Study` lifecycle), and a golden test runs the toy example through both entry
+points and compares every output value under a literal wall-clock mask, with an
+import-resolving parity gate in CI; the two content divergences that test exposed were fixed
+rather than masked. Drift is caught, but the write orchestration is still two copies.
 
 **Owner.** The architecture owner.
 
@@ -727,20 +778,18 @@ found those overwhelmingly clean (`hull/`, `lead_time/`, `horizon_mode.rs`'s
 single-variant enum is a documented reserved seam, `generic_constraint_echo.rs`,
 `config.rs`, `training/backward/replicated.rs`) plus two architecture items:
 
-- **Prep-phase abstraction covers three of four phases; boundary check
-  unmirrored.** `crates/cobre-sddp/src/validate_phases.rs` `PrepPhase` documents
-  itself as unifying "one of the four SDDP preparation steps," but the enum has
+- **Prep-phase abstraction covered three of four phases; boundary check
+  unmirrored — RESOLVED.** `crates/cobre-sddp/src/validate_phases.rs` `PrepPhase`
+  documented itself as unifying the SDDP preparation steps while the enum had
   exactly three variants (`Config`, `Stochastic`, `HydroModels`) — a doc/code
-  mismatch. The real fourth step — boundary-cut reconciliation — bypasses the
+  mismatch. The real fourth step — boundary-cut reconciliation — bypassed the
   shared `PrepPhase` / `prep_phase_metadata` abstraction with its own ad-hoc error
-  formatting (`crates/cobre-cli/src/commands/validate.rs`) and has no equivalent
-  in the Python binding (`crates/cobre-python/src/io.rs` carries no boundary check).
-  This is a validation-surface asymmetry (the Python-parity hard rule proper
-  governs _output_ files, not validation phases — so whether the Python path must
-  gain the check is an owner call), plus an over-sold "shared validation-phase"
-  contract. Fold the boundary check into `PrepPhase` (or correct the doc to
-  "three"). **Owner.** The setup / I-O owner. **Trigger.** The next
-  validation-phase or boundary-check change.
+  formatting (`crates/cobre-cli/src/commands/validate.rs`) and had no equivalent
+  in the Python binding. **Resolution.** `PrepPhase` carries a `Boundary` variant
+  that both front ends route the boundary reject through (its own
+  `prep_phase_metadata` row, `validate --json` error object included), the Python
+  binding runs the boundary reconciliation as a validation phase of its own, and
+  the enum doc states no variant count — see the fixed-items register below.
 - **Enumerated forward and enumerated simulation duplicate their mid-level
   claim/scatter orchestration.** `simulation/enumerated.rs` and
   `training/forward/enumerated.rs` each reimplement the stage-synchronous
@@ -848,40 +897,39 @@ collapsing it is the setup-layer redesign above.
 #### Boundary state-family coupling channels are per-family bespoke
 
 **What it is.** The question "how does an externally-authored boundary
-future-cost function's coupling on a given state family reach the study's
-state space?" is answered by a different bespoke mechanism per family. The
-setup channel is now unified — the resolved requirements ride the carriers as
-one generic `BoundaryStateRequirements` (the entry above) — but the WRITER and
+future-cost function's coupling on a given state family reach the study's state
+space?" is answered by a different bespoke mechanism per family. The setup
+channel is now unified — the resolved requirements ride the carriers as one
+generic `BoundaryStateRequirements` (the entry above) — but the WRITER and
 manifest channels are still family-specific: the inflow-lag family carries a
 Python writer argument and per-cut keyed field, a family-specific manifest
 decoder (`boundary_cut_lag_depth`), a family-specific widening
 (`widen_lag_state_depth`), and a family-specific writer helper
-(`reserve_boundary_inflow_lag_slots`). The anticipated family has its own
-manifest decoder (`decode_pool_anticipated_months`) and reserves post-horizon
-lanes from study config with calendar fan-out reconciliation. Transit buckets
-reserve from study arc topology with boundary-gated terminal unmasking and have
-NO widening path — a boundary bucket coupling the study's topology does not
-reserve is dropped during reconciliation. That drop is now SURFACED (a
-per-family load-time warning in `load_boundary_cuts` naming the dropped
-family + slot), no longer silent, so the remaining transit limitation is only
-the absent widening path — which is intentional: a study cannot fabricate a
-transit arc it never declared, and rejecting would break a legitimate superset
-boundary source. Each new family under this shape still repeats the per-family
-manifest decoder + reservation slot-body. The generic frame half-exists: the
-checkpoint manifest already self-describes every slot
-(`entity_type`/`entity_id`/`subindex`/`delivery_date` — no format change
-needed) and the load-side rebind dispatch is already family-generic in frame.
-The setup half of the target is DONE (one `BoundaryStateRequirements` rides the
-config carriers, on the typed state-family enum's vocabulary), and the writer's
-family-INDEPENDENT core is now extracted (`splice_reserved_state_block` owns the
-prefix/reserved/tail splice + keyed-coefficient placement + alignment guards).
-What REMAINS for a second authored family is its own reserved slot-body
-constructor and keyed per-cut coefficient field — and, for the anticipated
-family, the resolver-derived `delivery_date` the writer cannot recover from
-coefficients alone (so it needs the resolution context or an author-supplied
-date). Per-family reconciliation SEMANTICS (widen vs calendar fan-out vs reject)
-are genuinely irreducible and stay per-family; the debt is the missing
-per-family slot-body wiring, not the shared mechanism.
+(`reserve_boundary_inflow_lag_slots`). The anticipated family reserves
+post-horizon lanes from study config with calendar fan-out reconciliation.
+Transit buckets reserve from study arc topology with boundary-gated terminal
+unmasking and have NO widening path — a boundary bucket coupling the study's
+topology does not reserve is dropped during reconciliation. That drop is now
+SURFACED (the reconciliation report's `superset_summary` names the dropping
+family and its count, and `dropped_source_slots` carries every dropped slot's
+own identity and interval; `policy.boundary.strict` rejects the load outright
+instead), no longer silent, so the remaining transit limitation is only the
+absent widening path — which is intentional: a study cannot fabricate a transit
+arc it never declared, and rejecting would break a legitimate superset boundary
+source. Each new family under this shape still repeats the per-family manifest
+decoder + reservation slot-body. The generic frame half-exists: the checkpoint
+manifest already self-describes every slot
+(`entity_type`/`entity_id`/`subindex`/`reference_date`/`interval_start`/
+`interval_end` — no format change needed) and the load-side rebind dispatch is
+already family-generic in frame. The setup half of the target is DONE (one
+`BoundaryStateRequirements` rides the config carriers, on the typed
+state-family enum's vocabulary), and the writer's family-INDEPENDENT core is
+now extracted (`splice_reserved_state_block` owns the prefix/reserved/tail
+splice + keyed-coefficient placement + alignment guards). What REMAINS for a
+second authored family is its own reserved slot-body constructor and keyed
+per-cut coefficient field. Per-family reconciliation SEMANTICS (widen vs
+calendar fan-out vs reject) are genuinely irreducible and stay per-family; the
+debt is the missing per-family slot-body wiring, not the shared mechanism.
 
 **Owner.** The policy / setup owner.
 
@@ -1047,6 +1095,356 @@ the canonical manifest builder, with the generic cobre-io writer unchanged —
 cleared for execution and homing only; its family-specific mechanism shape is
 the per-family-channel entry above, not cleared.
 
+## Deferred-debt register — 2026-09 quality evaluation (core-io and stochastic stations)
+
+Two of the evaluation's eleven stations have passed their owner gate: the descent through
+`cobre-core` + `cobre-io` and the descent through `cobre-stochastic`. Every ratified finding was
+re-derived against the tree at the `develop` merge that followed the gates, then ranked into the
+tiers below. The finding ledger, its ranking and the per-finding evidence live in the evaluation's
+own plan directory (tracked on the evaluation branch); this section is the behaviour-described
+mirror. Each open entry names an owner and a trigger; each fixed entry is recorded so a future
+audit does not re-raise it.
+
+### Fixed — user-visible correctness (2026-09-11)
+
+- **Per-stage curtailment-penalty overrides for non-controllable sources reach the LP objective.**
+  The stage LP priced curtailment from the source's declaration-time constant; the resolved
+  per-(source, stage) penalty table was written but never read. The column fill now reads it, on
+  the same path as the hydro, line and bus fills.
+- **Every bound-override family rejects a row naming an undeclared study stage.** Five families
+  dropped such rows silently at resolution; the thermal family tested a `[0, n)` position while
+  resolution keys rows by declared id, which mis-admitted gapped or 1-based id sets. One
+  table-driven rule in `crates/cobre-io/src/validation/semantic/block_bounds.rs` now covers all six
+  by declared-id set membership. The non-controllable-source family keeps its referential check.
+- **An invalid `simulation.scenario_source` fails at load and under `cobre validate`.** Config
+  loading validated only the training source; the CLI and Python validate paths mirrored that
+  gap while `cobre run` failed later at setup. `validate_config` resolves both sources once.
+- **Entity classes sampled out of sample draw independent noise streams.** Every class sampler
+  was seeded from the same forward seed with no class tag, so a deck with two or more classes
+  out of sample drew bit-identical noise for the k-th entity of each class under every noise
+  method. The load and non-controllable-source classes now derive their seed from the root seed
+  and their class tag; the inflow class keeps the root seed so inflow-only decks reproduce
+  bit-for-bit.
+- **Policy checkpoint writes are atomic and a rewrite cannot mix runs.** Payloads, the manifest
+  and both dictionary CSVs go through the crate's atomic writer. A rewrite removes the previous
+  manifest, then every previous payload file, before writing — the reader enumerates the payload
+  directories, so a rerun into the same output directory with fewer pools or with states export
+  off would otherwise read the earlier run's files back.
+
+**Owner.** The `cobre-io` validation and output owners and the LP-builder owner (as executed).
+**Trigger.** None — done.
+
+### Fixed — forward-sampler hot path under out-of-sample QMC/LHS and wide correlation groups (2026-09-12)
+
+- **No forward draw rebuilds scenario-invariant sampling state.** Under `scheme: out_of_sample`
+  every Sobol draw rebuilt the direction matrix and scramble parameters on the heap, every Halton
+  draw re-ran the prime sieve and rebuilt its scramble tables, and every LHS draw reshuffled the
+  full stratification permutation set, quadratic in the scenario count per stage. Each driver now
+  builds one table per entity class and per distinct (noise group, noise method) pair once per
+  iteration and hands a shared reference down through the sample request; a draw reads its table.
+  The direct generators survive only as test-only reference oracles that pin the precomputed
+  paths bit-for-bit, and the table records the iteration and scenario count it was built for so a
+  debug build fails loudly on a stale table.
+- **The correlation applier is one code path with positions resolved at construction.** The
+  decomposition takes the canonical entity order and class dimensions at build, parses each
+  group's entity class into a closed enum, and resolves per-class positions once; the full-vector
+  twin, the linear-scan fallback and the differential oracles that existed only to pin them are
+  gone. A group of any width is correlated from caller-owned scratch that the per-worker scratch
+  struct sizes at twice the noise dimension.
+- **An out-of-sample class wider than the Sobol direction table is rejected when the tables are
+  built.** Moving the Sobol construction ahead of the draw had turned the graceful dimension error
+  into a panic; the table build is fallible and both drivers propagate the error.
+- **A counting-allocator guard pins the draw.** One integration binary asserts zero heap
+  allocations across Sobol, Halton and LHS stages with a correlation group wider than the stack
+  fast path. It must be the only test in its binary, so it includes the shared fixture builders
+  file directly rather than the aggregator module.
+
+**Owner.** The `cobre-stochastic` sampling and tree-noise owners; the training and simulation
+state structs own the tables (as executed). **Trigger.** None — done.
+
+### Fixed — latent footguns, one change each (2026-09-14)
+
+- **The builder owns canonical order.** `SystemBuilder::build` assigns each stage's index from its
+  own sort instead of the loader; the three scenario model tables are validated as canonically
+  ordered at construction (a new validation error; `System::with_scenario_models` is now fallible)
+  rather than sorted, so every deck the loader emits is byte-identical. The canonical key is stated
+  once, on the builder, and every resolver and parser doc points at it. Closing this exposed two
+  pre-existing violations of the order contract: the pre-build lag-transition precompute in the
+  inflow-seeding validation read the stage index the loader no longer writes (it now derives the
+  window from slice position, which also corrects a latent over-skip when pre-study stages exist),
+  and the partial-estimation path appended pre-study rows unsorted (now sorted). Both carry regression
+  tests through the real parser and estimation entry points.
+- **The input-file registry is keyed, not positional.** One enum keys the structural file table and
+  the presence manifest; a reordering is a compile error or a registry-test failure, never a silent
+  flag misassignment. The manifest exposes one read accessor.
+- **One hydro penalty type.** The per-stage twin is removed; the resolved table stores the entity
+  type and the sixteen-field copy is a move. The forward-hydro-production clause on the turbined-cost
+  field now says it is not enforced by validation, which is true.
+- **The sampler's class identity is typed end to end.** The factory carries the entity-class enum,
+  the historical-replay gate matches a variant, and the load and non-controllable-source forward seeds
+  derive from the enum's wire label so both pinned seed constants are unchanged. Each class's scheme
+  and library are one per-class source inside the factory, with no historical variant for load and
+  non-controllable sources; every missing-source diagnostic keeps its text and raise order.
+- **The stage-0 derived seed travels as one aggregate** through the three standardizers and their two
+  library builders, removing the adjacent same-typed slice hazard; every argument-count suppression
+  stays with a rationale that is true.
+- **The shared noise point spec names its key for the slot it fills** (a noise group on the forward
+  path, a stage on the opening-tree path).
+- **An unsupported forward noise method warns once per class at sampler construction**, naming the
+  affected stages; the draw arms are silent fallbacks and allocate nothing.
+
+**Owner.** The `cobre-core` builder owner, the `cobre-io` validation owner and the `cobre-stochastic`
+sampling owner (as executed). **Trigger.** None — done.
+
+### Fixed — a shared test-fixture surface per type owner (2026-09-15)
+
+- **Every crate that owns shareable fixtures exposes them behind its own `test-support`
+  feature.** The gate is `#[cfg(any(test, feature = "test-support"))]`, enabled by consumers as a
+  dev-dependency feature, so a fixture has one definition where its type lives: the entity, stage
+  and penalty builders (a spec struct with `Default` plus a `make_*` constructor, parameterised on
+  the axes the former copies varied), the bit-exact scalar comparators and the numeric helpers in
+  `cobre-core`; the Parquet and JSON writers, the minimal-case corpus, the validation-phase
+  fixtures, the stats-parser template and the output-context fixtures in `cobre-io`; the
+  opening-tree, season-map and inflow-model builders in `cobre-stochastic`. The `cobre-stochastic`
+  integration binaries share one `tests/common` prelude that re-exports from those surfaces.
+- **The struct-specific bit comparators are exhaustive by construction.** Each destructures both
+  sides with a full field pattern and no rest, so a field added to a bounds struct fails to compile
+  until the comparator names it; the scalar and `Option<f64>` comparison is one shared helper.
+- **The shared Parquet extractors carry their own contract tests.** The happy path, the
+  missing-column message and the wrong-type message are pinned once at the owner rather than
+  incidentally in consumer test modules.
+- **The order-invariance, reproducibility and golden-value pins relocated and none changed.** The
+  declaration-order-invariance parser tests, the reproducibility suite, the sample-average golden
+  value and the forward-sampler golden arrays pass with their constants unedited. The one declared
+  coverage addition on the stats parsers is a zero-standard-deviation acceptance case for inflows;
+  the out-of-range case is specific to availability factors and was recorded as not applying to the
+  inflow and load parsers rather than copied to them.
+- **Consolidation was a refactor, not a coverage change.** Every duplicated fixture that folded
+  kept its callers' assertions; the test listing moves only by the declared additions and by the
+  permutation-helper tests that the solver-linking test aggregator no longer inherits into every
+  binary.
+
+**What the convention has not reached.** `crates/cobre-sddp/tests/common/` still holds its own
+fixture directory rather than collapsing into that crate's `test-support` surface, and
+`crates/cobre-python` does not yet dev-depend on it; both remain the open half of the convention in
+`docs/design/testing-architecture.md`. The `cobre-stochastic` in-`src` unit-test modules still keep
+local identity-correlation builders where the integration binaries share one.
+
+**Owner.** The `cobre-core`, `cobre-io` and `cobre-stochastic` owners (as executed).
+**Trigger.** None — done.
+
+### Fixed — the dead-surface sweep (2026-09-15)
+
+- **Every public item the workspace ships has a production reader, or a recorded owner and
+  milestone.** The unwired public error variants are gone: the validation variants no builder path
+  produced, the cross-reference load-error variant no loading path produced, the stochastic-error
+  variants no code path constructed, and the single-inhabitant PAR warning taxonomy whose one
+  caller discarded it. The never-read output columns are gone: the per-iteration setup timings
+  that reached no file, and the written-partition inventory together with the rank exchange that
+  merged it. The unread projections are gone: the dictionary writer's configuration argument, the
+  severity-defaulting method, the aggregate scenario-loading entry point, the case-relative
+  scalar-parameter loader and raw season-map builder, the free postcard serializers, the dead
+  penalties bundle field, the f32 vector decoder, the pipeline projection wrappers, the
+  population-statistics arm of the Welford accumulator, the bare season-map forwarders and the
+  sort-direction knob with one reachable setting. The reader-less bus adjacency topology is deleted
+  with its constructor's unread bus argument.
+- **The broadcast payload no longer carries content-determined derivations.** The cascade
+  adjacency is rebuilt on receipt from the entity slices already in the payload, and a bit-equality
+  round-trip guard pins that the rebuild is exact.
+- **The read-side reader prologue has one owner.** Every Parquet input parser that maps open and
+  build failures to the loading error opens through one crate-internal helper; the
+  convergence-output readers, which map to the output error type or to an option, are named
+  exclusions rather than absorbed into a wider helper.
+- **The write-side ensure-parent-then-write sequence has one owner.** The parent-directory helper
+  lives beside the atomic writers, its inline copies fold onto it, and an atomic batch writer
+  performs the sequence for the writers whose shape matches; the writers that thread their own
+  configuration or create the output directory themselves are named exclusions.
+- **The copied extension extractors fold onto the shared pair**, so a required column missing from
+  the hydro-geometry, energy-productivity or tailrace inputs reports the same wording every other
+  tabular input already produced.
+- **The load- and non-controllable-source factor resolvers are one generic routine** over a private
+  kind marker, with the public entry points unchanged.
+- **PAR parameter validation returns the fatal check directly**; the zero-standard-deviation rule,
+  its message and its fields are unchanged.
+- **The opening solve order is always descending by key**, ties broken by ascending canonical
+  order — the same permutation every run produced before.
+
+**Owner.** The `cobre-core`, `cobre-io` and `cobre-stochastic` owners (as executed).
+**Trigger.** None — done.
+
+### Fixed — documentation and rule-table drift (2026-09-15)
+
+- **The uniform entity-table stride has one owner.** The resolved-bounds table indexes every
+  non-thermal family through one private helper that carries the same stride assertion the
+  thermal helper already had, so a layout change is one edit rather than a fourteen-site sweep.
+- **The System wire payload serializes in content-determined order, stated once.** The last
+  unordered map on the payload (the per-stage discount-rate overrides) is key-ordered, the rule
+  lives on the `System` doc, and a test pins byte identity across insertion orders.
+- **The semantic rule tables match the code.** Two rules the parse layer already enforces are
+  retired from the semantic layer with their unreachable branches and tests; a ghost row for a
+  field that no longer exists is retired; seven checks that ran without a row are tabulated;
+  three drifted rows are reworded; and every dispatched check carries its rule number on its
+  first doc line so a row greps to its implementation.
+- **The bound-override family has one rule set.** Generic-constraint bounds join the per-family
+  descriptor table and so get the per-column duplicate rule and the same error kind as the other
+  six families (a deck-visible change recorded in the CHANGELOG); the referential module keeps
+  only dangling-id and non-family-shaped checks, and the two non-controllable-source value checks
+  that the parsers already enforced are gone.
+- **The dangling-reference message has one owner.** A descriptor and one emit helper carry the
+  same-shaped sites; the differently shaped ones stay explicit.
+- **Every output schema is declared in one module and listed once.** The registry drives the
+  axis-spelling gate, which now really covers the whole family, and the variables dictionary.
+- **Each simulation entity family is declared once**, with its declared-predicate and batch
+  adapter; directory creation and per-scenario writes iterate the same table, and the rule that a
+  declared family's directory exists from construction while a partition needs a non-empty
+  payload is stated once.
+- **Docs tell the truth about ownership and layering.** The result-writer entry point documents
+  what it writes and what the callers write; the stage lag-transition type no longer cites an
+  engine-private function; the PAR module docs describe their layout without engine phase names.
+
+**Not done here, by design.** The lag-transition type's crate home is a layering decision for the
+alignment station, and consolidating the output orchestration into one owner is its own entry.
+
+**Owner.** The `cobre-core`, `cobre-io` and `cobre-stochastic` owners (as executed).
+**Trigger.** None — done.
+
+### Deprioritized (recorded, not scheduled)
+
+Setup-time performance items below the sweep threshold; the generalization-alignment holds, which
+the alignment station adjudicates before any code; and the test-corpus sweep, which follows the
+fixture surface above.
+
+## Deferred-debt register — 2026-09 quality evaluation (remaining stations)
+
+This section mirrors the fixed items from the 2026-09 quality evaluation's remaining
+stations — the SDDP engine, the CLI/Python facade, the solver backends, the comm
+layer and the build/CI surface. Every item was re-derived against the live tree
+before it was fixed; the finding ledger and per-finding evidence live in the
+evaluation's own plan directory, and this section is the behaviour-described mirror,
+recorded so a future audit does not re-raise these items.
+
+### Fixed — validate-time rejections replace mid-run and silent failures (2026-09-21)
+
+- **The `--json` error vocabulary has one owner across both front ends.** One
+  `LoadError`→kind map in `cobre-io` is called by the CLI and the Python
+  `cobre.io.validate` binding, every CLI early return under `--json` routes through
+  the shared `emit_validate_json` (carrying `error.phase` for `ParseError` /
+  `SchemaError`), and the standalone `CaseValidationError` kind is retired with no
+  alias — a documented `--json` contract change.
+- **The boundary-preparation reject is a first-class preparation phase.**
+  `PrepPhase` gains a `Boundary` variant, so both front ends route a boundary
+  reject through the shared `PrepPhase` / `prep_phase_metadata` (its own metadata
+  row) and `validate --json` emits the error object; the enum doc states no variant
+  count.
+- **The scalar-parameter table is a `StudySetup` constructor input and its
+  resolution gaps fail loud.** The three `ResolvedParametersError` classes
+  (`MissingSeason`, `PerStageBlockCoverage`, `MissingSpecificProductivity`) are
+  raised at the LP-build / admission site, so both `cobre validate` and Python
+  `cobre.io.validate` reject an unresolvable generic-constraint scalar parameter
+  instead of exiting cleanly and failing later at run; `ResolvedParameters::get`
+  stays infallible.
+- **An enumerated-traversal study that also configures dynamic cut selection is
+  rejected at setup.** A typed admission-gate arm refuses `Traversal::Enumerated`
+  combined with dynamic cut selection beside the existing enumerated preconditions,
+  with a named regression and a `.claude/rules/sddp.md` contract entry, rather than
+  silently exercising an untested cut-eviction path.
+- **A negative FPHA discretization count is rejected at the input boundary.**
+  `cobre-io` validates the four count fields (`volume_discretization_points`,
+  `turbine_discretization_points`, `spillage_discretization_points`,
+  `max_planes_per_hydro`) non-negative when present, so a declared negative count
+  fails validation instead of wrapping past the `< 2` / `< 1` grid guards into
+  `build_grid`.
+
+**Owner.** The `cobre-sddp`, `cobre-io`, `cobre-cli` and `cobre-python` owners (as
+executed). **Trigger.** None — done.
+
+### Fixed — one owner for each duplicated front-end computation (2026-09-21)
+
+- **The run-phase plan is one owned value both front ends consume.** The engine
+  answers the run-phase plan once and the CLI and Python entry points consume it,
+  replacing the two non-equivalent simulate-arm gate copies; the per-front-end
+  no-op rendering is kept.
+- **The solver-stats log-to-totals fold has one home.** `solver_stats.rs` in
+  `cobre-sddp` folds `&[SolverStatsLogEntry]` with the rank filter as an argument,
+  called by both the CLI and Python; the `total_lp_solves` caveat is a doc line
+  pinned by a named regression.
+- **The simulation entity-family names are declared once.** The Python simulation
+  readers iterate the `cobre-io` family declaration instead of a hand-kept copy, so
+  no second enumeration exists to drift.
+- **The convergence-output reader keys off the schema.** The Python convergence
+  reader asserts its keys equal the declared schema fields rather than a fixed
+  hand-listed column set.
+
+**Owner.** The `cobre-sddp`, `cobre-cli` and `cobre-python` owners (as executed).
+**Trigger.** None — done.
+
+### Fixed — LP-builder anticipated-commitment fill has one walker (2026-09-21)
+
+- **One ring-residue walker drives the anticipated-commitment fill.** A single
+  `lp/builder` walker (via `ring_index`) drives the anticipated row fill, the column
+  fill and `build_anticipated_slot_row_pos`, byte-neutral against every golden.
+- **The anticipated-commitment LP columns resolve through typed accessors.** Typed
+  `commitment_hold_incoming_col` / `commitment_hold_outgoing_col` resolvers on
+  `StateSpace` replace the untyped column recompositions in
+  `simulation/extraction.rs`, byte-neutral via an equivalence test.
+
+**Owner.** The LP-builder and simulation owners (as executed). **Trigger.** None —
+done.
+
+### Fixed — public Rust-API surfaces removed in a licensed break (2026-09-21)
+
+- **Unused and superseded public items are gone.** Removed in one licensed
+  public-API break: `CutManagementConfig::warm_start_cuts` (with its two production
+  literals, the `train_inner` reset and its tests); the `Col` / `Row` newtypes and
+  their round-trip tests, dropped from the `lp/indexer` re-export; `FphaRowRange`
+  and its smoke test; the `pub use policy::orchestration` crate-root re-export (with
+  callers moved to the owning module path); the superseded single-pool cut-sync
+  methods on `CutSyncBuffers`; and the CLP hot-start acquire half
+  (`cobre_clp_mark_hot_start`, `cobre_clp_solve_from_hot_start` and their safe
+  wrappers), with the release half kept. No deck, CLI output or Python package
+  output is affected.
+
+**Owner.** The `cobre-sddp`, `cobre-comm` and `cobre-solver` owners (as executed).
+**Trigger.** None — done.
+
+### Fixed — rustdoc and module-doc drift (2026-09-21)
+
+- **The infrastructure-crate docs read in the generic register.** The `cobre-solver`
+  doc sites are reworded to describe solver-handle properties without
+  algorithm-specific names, and the crate README's HiGHS feature-gating contract is
+  corrected (the `BasisStatus` mapping is unconditional).
+- **The stale rustdoc lines are corrected.** The
+  `CutManagementConfig::warm_start_cuts` line and the `FphaRowRange` /
+  `BlockGrid::advance_fpha_base` lines are corrected before the surfaces they
+  described are removed, and the `claim_scatter.rs` module-doc consumer list is
+  corrected to name every importer.
+
+**Owner.** The `cobre-solver` and `cobre-sddp` owners (as executed). **Trigger.**
+None — done.
+
+### Fixed — byte-neutral setup-path and output-path reductions (2026-09-21)
+
+- **The setup-path scans and allocations are bounded.** The inflow-history and
+  observation joins bucket by hydro id in one pass and borrow the contiguous
+  subslice instead of copying per occurrence; the distance-matrix fill is symmetric
+  with hoisted per-start buffers; the per-block reservation regrowth is removed so
+  each branch reserves the exact product; the coverage-gated observation join walks
+  one forward-sweep cursor; and `long_term_mean_inflow` bounds its scan to the total
+  history rows once. Each is byte-neutral against the parity goldens.
+- **The output writers allocate less.** The checkpoint write path consumes the
+  serializer's finished bytes without a `to_vec()` copy; one lazily-initialised
+  Arrow schema per output is cloned by the batch builders with `WriterProperties`
+  resolved once; `delta_to_stats_row` carries its phase as a `&'static str`
+  rather than an allocated `String`; and `build_iterations_columns` uses the
+  builder-with-capacity idiom instead of intermediate vectors.
+- **The Parquet writer configuration is frozen to internal constants.** The
+  `ParquetWriterConfig` values are an internal constant set and the threaded
+  `&ParquetWriterConfig` machinery is collapsed; no user-facing compression knob is
+  exposed.
+
+**Owner.** The `cobre-sddp`, `cobre-io` and `cobre-core` owners (as executed).
+**Trigger.** None — done.
+
 ## Audit-evidence
 
 The following mechanical checks were run against the tree at the time this
@@ -1074,13 +1472,17 @@ grep -rn '#!\?\[allow(' crates/*/src --include='*.rs'
 
 Every hit falls into one of three classes, and none is plan-dead-unconsumed:
 
-- **Load-bearing.** Numeric-cast lints (`cast_possible_truncation`,
-  `cast_precision_loss`, `cast_sign_loss`, `cast_possible_wrap`) and
-  refactor-decision lints (`too_many_arguments`, `too_many_lines`,
-  `type_complexity`, `struct_field_names`, `implicit_hasher`,
-  `needless_pass_by_value`, and similar) on production code, each carrying a
-  `// Rationale:` comment naming the non-obvious choice the lint would
-  otherwise flag — the majority of the census.
+- **Load-bearing.** Refactor-decision lints on `.claude/rules/comments.md` D4's
+  closed list (`too_many_arguments`, `too_many_lines`, `type_complexity`,
+  `dead_code`, `unused_*`) plus borrow-checker workarounds each carry a
+  `// Rationale:` comment naming the non-obvious choice the lint would otherwise
+  flag — the majority of the census. Numeric-cast lints
+  (`cast_possible_truncation`, `cast_precision_loss`, `cast_sign_loss`,
+  `cast_possible_wrap`), `needless_pass_by_value`, and the remaining pedantic
+  openers (`struct_field_names`, `implicit_hasher`) sit outside that closed list:
+  their suppressions are still load-bearing because CI's zero-warning bar needs
+  them, but D4 mandates no rationale on them, so a bare opener there is a
+  consistency preference rather than a rule violation.
 - **Reserved-seam (Voice 4).** `dead_code` attributes each paired with a
   comment naming what will consume the item once a specific reader lands (the
   water travel-time topology and Lipschitz entries above are examples; several

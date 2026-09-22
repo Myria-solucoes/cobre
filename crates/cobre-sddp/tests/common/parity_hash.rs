@@ -77,23 +77,21 @@ pub fn compute_parity_hash(
         for stage in &mut scenario.stages {
             stage.hydros.sort_by_key(|h| (h.block_id, h.hydro_id));
 
-            let num_primals = stage.hydros.len() as u32;
+            let num_hydros = stage.hydros.len() as u32;
             hasher.update(stage.stage_id.to_le_bytes());
-            hasher.update(num_primals.to_le_bytes());
+            hasher.update(num_hydros.to_le_bytes());
             for h in &stage.hydros {
                 hasher.update(h.storage_final_hm3.to_le_bytes());
             }
 
-            let num_duals = stage.hydros.len() as u32;
             hasher.update(stage.stage_id.to_le_bytes());
-            hasher.update(num_duals.to_le_bytes());
+            hasher.update(num_hydros.to_le_bytes());
             for h in &stage.hydros {
                 hasher.update(h.water_value_per_hm3.to_le_bytes());
             }
 
-            let num_equipment = stage.hydros.len() as u32;
             hasher.update(stage.stage_id.to_le_bytes());
-            hasher.update(num_equipment.to_le_bytes());
+            hasher.update(num_hydros.to_le_bytes());
             for h in &stage.hydros {
                 hasher.update(h.spillage_m3s.to_le_bytes());
             }
@@ -282,14 +280,13 @@ where
         .simulation_scenario_source(sentinel)
         .expect("simulation_scenario_source must parse");
 
-    let params =
-        StudyParams::from_config(&config_with_sim).expect("StudyParams::from_config must succeed");
-    let construction = params;
+    let params = StudyParams::from_config(&config_with_sim, Vec::new())
+        .expect("StudyParams::from_config must succeed");
 
     let mut setup = StudySetup::from_broadcast_params(
         &system,
         stochastic,
-        construction,
+        params,
         hydro_models,
         &training_source,
         &simulation_source,

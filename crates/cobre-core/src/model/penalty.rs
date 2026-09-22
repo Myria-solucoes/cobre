@@ -243,7 +243,6 @@ pub fn resolve_hydro_penalties(
     match entity_overrides {
         None => *g,
         Some(ov) => {
-            // Resolve symmetric costs first — directional costs default to these.
             let evap_cost = ov
                 .evaporation_violation_cost
                 .unwrap_or(g.evaporation_violation_cost);

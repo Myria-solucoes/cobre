@@ -88,9 +88,8 @@ mod extraction_nonuniform_block_bases {
         config_with_sim.simulation.selection =
             Some(SimulationSelection::Sampled { num_scenarios: 1 });
 
-        let params = StudyParams::from_config(&config_with_sim)
+        let params = StudyParams::from_config(&config_with_sim, Vec::new())
             .expect("StudyParams::from_config must succeed");
-        let construction = params;
 
         let sentinel = Path::new("config.json");
         let training_source = config_with_sim
@@ -103,7 +102,7 @@ mod extraction_nonuniform_block_bases {
         let mut setup = StudySetup::from_broadcast_params(
             &system,
             stochastic,
-            construction,
+            params,
             hydro_models,
             &training_source,
             &simulation_source,
@@ -560,12 +559,8 @@ mod policy_entity_manifest {
 
     use cobre_core::scenario::ScenarioSource;
     use cobre_io::StateFamily;
-    use cobre_sddp::{
-        StudySetup,
-        hydro_models::prepare_hydro_models,
-        orchestration::{CheckpointParams, write_checkpoint},
-        setup::prepare_stochastic,
-    };
+    use cobre_sddp::policy::orchestration::{CheckpointParams, write_checkpoint};
+    use cobre_sddp::{StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic};
     use cobre_solver::ActiveSolver;
 
     use super::common::StubComm;
@@ -591,7 +586,7 @@ mod policy_entity_manifest {
         let hydro_models =
             prepare_hydro_models(&system, &dir, false).expect("prepare_hydro_models must succeed");
 
-        let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models)
+        let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models, Vec::new())
             .expect("StudySetup must build");
 
         let comm = StubComm;
@@ -803,7 +798,7 @@ mod cell_partition_gates {
     };
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, Bus, BusStagePenalties, ContractBlockBounds,
-        DeficitSegment, EntityId, HydroBlockBounds, HydroStageBounds, HydroStagePenalties,
+        DeficitSegment, EntityId, HydroBlockBounds, HydroPenalties, HydroStageBounds,
         HydroUnitGroup, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
         PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
         ResolvedPenalties, System, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
@@ -1023,7 +1018,7 @@ mod cell_partition_gates {
         ResolvedPenalties::new(
             counts,
             &PenaltiesDefaults {
-                hydro: HydroStagePenalties {
+                hydro: HydroPenalties {
                     spillage_cost: 0.0,
                     diversion_cost: 0.0,
                     turbined_cost: 0.0,

@@ -20,7 +20,7 @@ use rayon::iter::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelI
 
 use cobre_comm::Communicator;
 use cobre_solver::{SolverInterface, StageTemplate};
-use cobre_stochastic::{ForwardSampler, SampleRequest};
+use cobre_stochastic::{ForwardNoiseTables, ForwardSampler, SampleRequest};
 
 use crate::{
     claim_scatter::{ClaimCursor, canonical_scatter},
@@ -113,6 +113,7 @@ struct EnumeratedSimParams<'p> {
     output: &'p SimulationOutputSpec<'p>,
     load_spec: &'p SimScenarioLoadSpec<'p>,
     sampler: &'p ForwardSampler<'p>,
+    noise_tables: &'p ForwardNoiseTables,
     lookups: &'p SimLookups,
     total_scenarios: u32,
 }
@@ -172,8 +173,8 @@ fn enumerated_sim_stage_worker<S: SolverInterface + Send>(
 
     let mut raw_noise_buf = std::mem::take(&mut ws.scratch.raw_noise_buf);
     raw_noise_buf.resize(training_ctx.stochastic.dim(), 0.0_f64);
-    let mut perm_scratch = std::mem::take(&mut ws.scratch.perm_scratch);
-    perm_scratch.resize(params.total_scenarios.max(1) as usize, 0_usize);
+    let mut corr_scratch = std::mem::take(&mut ws.scratch.corr_scratch);
+    corr_scratch.resize(2 * training_ctx.stochastic.dim(), 0.0_f64);
 
     let mut count = 0usize;
     while let Some(u) = cursor.claim() {
@@ -213,12 +214,13 @@ fn enumerated_sim_stage_worker<S: SolverInterface + Send>(
             stage: t32,
             stage_idx: t.0,
             noise_buf: &mut raw_noise_buf,
-            perm_scratch: &mut perm_scratch,
+            corr_scratch: &mut corr_scratch,
             total_scenarios: params.total_scenarios,
             noise_group_id: params.ctx.noise_group_id_at(t),
             node_opening_offset,
             node_opening_len,
             pinned_scenario,
+            tables: params.noise_tables,
         })?;
 
         let pool_id = node_graph.nodes[node].pool_id;
@@ -270,7 +272,7 @@ fn enumerated_sim_stage_worker<S: SolverInterface + Send>(
     }
 
     ws.scratch.raw_noise_buf = raw_noise_buf;
-    ws.scratch.perm_scratch = perm_scratch;
+    ws.scratch.corr_scratch = corr_scratch;
     Ok(count)
 }
 
@@ -424,6 +426,7 @@ pub(crate) fn run_enumerated_simulation<S, C: Communicator>(
     inputs: &mut SimulationInputs<'_, S, C>,
     frozen_templates: &[StageTemplate],
     sampler: &ForwardSampler<'_>,
+    noise_tables: &ForwardNoiseTables,
 ) -> Result<(WorkerCosts, WorkerStats), SimulationError>
 where
     S: SolverInterface + Send,
@@ -458,6 +461,7 @@ where
         output: &inputs.output,
         load_spec: &load_spec,
         sampler,
+        noise_tables,
         lookups: &lookups,
         total_scenarios,
     };
@@ -586,6 +590,17 @@ mod tests {
 
         let sampler =
             crate::simulation::state::build_sim_sampler(&training_ctx).expect("forward sampler");
+        #[allow(clippy::cast_possible_truncation)]
+        let total_scenarios_u32 = k as u32;
+        let mut noise_tables = ForwardNoiseTables::default();
+        sampler
+            .rebuild_noise_tables(
+                SIMULATION_ITERATION,
+                total_scenarios_u32,
+                stage_ctx.noise_group_ids,
+                &mut noise_tables,
+            )
+            .expect("test fixture never exceeds the Sobol dimension cap");
 
         let lookups = SimLookups::build(
             training_ctx.study_dims,
@@ -605,8 +620,9 @@ mod tests {
             output: &output,
             load_spec: &load_spec,
             sampler: &sampler,
+            noise_tables: &noise_tables,
             lookups: &lookups,
-            total_scenarios: k as u32,
+            total_scenarios: total_scenarios_u32,
         };
 
         let mut scratch = EnumeratedSimScratch::new(plan, n_workers);

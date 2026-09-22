@@ -195,6 +195,27 @@ pub fn resolve_stage_seasons(
     stages: &[Stage],
     season_map: Option<&SeasonMap>,
 ) -> (HashMap<i32, usize>, usize) {
+    let (dense_index, n_seasons) = season_dense_index(stages, season_map);
+
+    let stage_to_season: HashMap<i32, usize> = stages
+        .iter()
+        .filter_map(|s| {
+            let raw = s.season_id?;
+            dense_index.get(&raw).map(|&idx| (s.id, idx))
+        })
+        .collect();
+
+    (stage_to_season, n_seasons)
+}
+
+/// The raw-season-id-to-dense-ordinal ranking `resolve_stage_seasons` assigns,
+/// factored out so [`crate::scenarios::estimation::resolve_model_stage_seasons`]
+/// can rank a synthesized season id the same way without re-deriving stages'
+/// season coverage.
+pub(crate) fn season_dense_index(
+    stages: &[Stage],
+    season_map: Option<&SeasonMap>,
+) -> (HashMap<usize, usize>, usize) {
     let mut raw_ids: Vec<usize> = season_map.map_or_else(
         || {
             stages
@@ -210,21 +231,13 @@ pub fn resolve_stage_seasons(
     raw_ids.dedup();
     let n_seasons = raw_ids.len();
 
-    let dense_index: HashMap<usize, usize> = raw_ids
+    let dense_index = raw_ids
         .into_iter()
         .enumerate()
         .map(|(idx, raw)| (raw, idx))
         .collect();
 
-    let stage_to_season: HashMap<i32, usize> = stages
-        .iter()
-        .filter_map(|s| {
-            let raw = s.season_id?;
-            dense_index.get(&raw).map(|&idx| (s.id, idx))
-        })
-        .collect();
-
-    (stage_to_season, n_seasons)
+    (dense_index, n_seasons)
 }
 
 #[cfg(test)]

@@ -211,11 +211,13 @@ pub(crate) fn resolve_variable_ref(
     match var_ref {
         VariableRef::HydroStorage { hydro_id } => resolve_hydro_storage(*hydro_id, geom, hydro_pos),
 
-        VariableRef::HydroStorageInitial { hydro_id, block_id } => {
+        VariableRef::HydroStorageInitial { hydro_id, block_id }
+        | VariableRef::HydroUsefulVolumeInitial { hydro_id, block_id } => {
             resolve_hydro_storage_boundary(*hydro_id, *block_id, 0, geom, hydro_pos)
         }
 
-        VariableRef::HydroStorageFinal { hydro_id, block_id } => {
+        VariableRef::HydroStorageFinal { hydro_id, block_id }
+        | VariableRef::HydroUsefulVolumeFinal { hydro_id, block_id } => {
             resolve_hydro_storage_boundary(*hydro_id, *block_id, 1, geom, hydro_pos)
         }
 
@@ -389,12 +391,13 @@ pub(crate) fn resolve_variable_ref(
 }
 
 /// Whether a single [`VariableRef`] resolves to the *same* LP column(s) regardless
-/// of `block_idx` — **block-independent** ("stock"). Five kinds qualify:
+/// of `block_idx` — **block-independent** ("stock"). Seven kinds qualify:
 /// [`VariableRef::HydroStorage`] (stage-final alias `Sᴷ`),
 /// [`VariableRef::AnticipatedDecision`], [`VariableRef::HydroEvaporation`] (a fixed
 /// single-block column or the all-block sum — both `block_idx`-independent), and the
-/// two storage-boundary variants [`VariableRef::HydroStorageInitial`] /
-/// [`VariableRef::HydroStorageFinal`], each resolving to a fixed boundary column
+/// four storage/useful-volume-boundary variants [`VariableRef::HydroStorageInitial`] /
+/// [`VariableRef::HydroStorageFinal`] / [`VariableRef::HydroUsefulVolumeInitial`] /
+/// [`VariableRef::HydroUsefulVolumeFinal`], each resolving to a fixed boundary column
 /// (`Sᵏ` / `S⁰` / `Sᴷ`) that does not follow the materialized row's block.
 ///
 /// [`VariableRef::HydroInflow`] is block-DEPENDENT: its upstream-release terms are
@@ -414,6 +417,8 @@ fn variable_ref_is_block_independent(var_ref: &VariableRef) -> bool {
         VariableRef::HydroStorage { .. }
         | VariableRef::HydroStorageInitial { .. }
         | VariableRef::HydroStorageFinal { .. }
+        | VariableRef::HydroUsefulVolumeInitial { .. }
+        | VariableRef::HydroUsefulVolumeFinal { .. }
         | VariableRef::HydroEvaporation { .. }
         | VariableRef::AnticipatedDecision { .. } => true,
         VariableRef::HydroInflow { .. }

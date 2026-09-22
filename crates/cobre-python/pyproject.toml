@@ -30,9 +30,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://cobre-rs.github.io/cobre-docs/"
+Homepage = "https://docs.cobre-rs.dev/"
 Repository = "https://github.com/cobre-rs/cobre"
-Documentation = "https://cobre-rs.github.io/cobre-docs/"
+Documentation = "https://docs.cobre-rs.dev/"
 "Bug Tracker" = "https://github.com/cobre-rs/cobre/issues"
 
 [tool.maturin]

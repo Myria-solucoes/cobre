@@ -19,13 +19,22 @@
 
 use std::path::Path;
 
+use chrono::NaiveDate;
 use cobre_io::{
-    GraphManifest, PolicyCutRecord, ProducerBlock, STAGE_CUTS_NODE_ID_SENTINEL, StageCutsPayload,
-    write_policy_checkpoint,
+    GraphManifest, PolicyCutRecord, STAGE_CUTS_NODE_ID_SENTINEL, StageCutsPayload,
+    encode_slot_date, write_policy_checkpoint,
 };
 use cobre_sddp::setup::{NodeGraph, NodePos};
 use cobre_sddp::test_support::k_fan_setup;
-use cobre_sddp::{LEGACY_COST_SCALE_FACTOR, inject_boundary_cuts, load_boundary_cuts};
+use cobre_sddp::{
+    BoundaryLoadRequest, LEGACY_COST_SCALE_FACTOR, inject_boundary_cuts, load_boundary_cuts,
+};
+
+/// Pool `pool`'s fixture `priced_state_date`: `2030-01-01` plus `pool`
+/// months.
+fn fixture_priced_date(pool: u32) -> NaiveDate {
+    cobre_sddp::test_support::fixture_priced_date(cobre_sddp::test_support::ymd(2030, 1, 1), pool)
+}
 
 /// Write a synthetic single-pool policy checkpoint whose pool's own
 /// `graph_stage_id`/`node_id` self-describing facts are derived from
@@ -91,24 +100,12 @@ fn write_synthetic_checkpoint(
         cost_scale_factor: 1_000_000.0,
         node_id,
         graph_stage_id,
+        priced_state_date: encode_slot_date(fixture_priced_date(pool_id)),
     };
     let metadata = cobre_sddp::test_support::checkpoint_metadata(
         1,
         GraphManifest::default(),
-        ProducerBlock {
-            completed_iterations: 0,
-            final_lower_bound: 0.0,
-            best_upper_bound: None,
-            max_iterations: 0,
-            forward_passes: 0,
-            warm_start_cuts: 0,
-            warm_start_counts: vec![],
-            rng_seed: 0,
-            total_visited_states: 0,
-            training_block_mode: "parallel".to_string(),
-            training_block_mode_per_stage: vec![],
-            cost_scale_factor: None,
-        },
+        cobre_sddp::test_support::producer_block(),
     );
     write_policy_checkpoint(dir, &[payload], &[], &metadata, &[]).expect("write checkpoint");
 }
@@ -164,18 +161,13 @@ fn single_node_source_injects_into_the_one_pool_every_terminal_fan_leaf_shares()
         state_dimension,
     );
 
-    let mut warnings: Vec<String> = Vec::new();
-    let boundary_cuts = load_boundary_cuts(
+    let boundary_cuts = load_boundary_cuts(&BoundaryLoadRequest::new(
         &source_dir,
-        0,
+        fixture_priced_date(0),
         state_dimension,
         &[],
-        &[],
-        &[],
-        None,
         LEGACY_COST_SCALE_FACTOR,
-        &mut |msg| warnings.push(msg.to_string()),
-    )
+    ))
     .expect(
         "a single-node source boundary must load into a fanned terminal target, not reject on \
          node-count or graph identity",
@@ -214,24 +206,20 @@ fn single_node_source_injects_into_the_one_pool_every_terminal_fan_leaf_shares()
 }
 
 #[test]
-fn multi_node_source_stage_is_rejected() {
+fn multi_node_shared_pool_is_rejected() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let source_dir = tmp.path().join("multi_node_source");
-    // Two declared nodes (ids 200, 201) both at stage 5, sharing pool 0: the
-    // pool's own node_id reads the STAGE_CUTS_NODE_ID_SENTINEL.
+    // Two declared nodes (ids 200, 201) share pool 0: the pool's own node_id
+    // reads the STAGE_CUTS_NODE_ID_SENTINEL rather than a single owner.
     write_synthetic_checkpoint(&source_dir, &[(200, 5, 0), (201, 5, 0)], 0, &[7.0, 11.0], 2);
 
-    let result = load_boundary_cuts(
+    let result = load_boundary_cuts(&BoundaryLoadRequest::new(
         &source_dir,
-        5,
+        fixture_priced_date(0),
         2,
         &[],
-        &[],
-        &[],
-        None,
         LEGACY_COST_SCALE_FACTOR,
-        &mut |_| {},
-    );
+    ));
 
     let err = result.expect_err(
         "a source pool shared by multiple nodes must be rejected, not silently resolved to one \

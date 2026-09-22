@@ -7,6 +7,7 @@ use cobre_core::{
     EnergyContract, EntityId, GenericConstraint, Hydro, Line, LoadModel, NonControllableSource,
     PumpingStation, ResolvedBounds, ResolvedGenericConstraintBounds, ResolvedLoadFactors,
     ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, SlackConfig, Stage, Thermal,
+    VariableRef,
 };
 use cobre_stochastic::par::precompute::PrecomputedPar;
 
@@ -23,6 +24,7 @@ use crate::indexer::{
 use crate::lead_time::{AnticipatedResolution, SpreadResolution};
 use crate::setup::PostStudyResolved;
 
+use super::delivery_ring::for_each_ring_residue;
 use super::template::StageGeometry;
 use super::{
     EVAP_COLS_PER_HYDRO, EVAP_F_MINUS_OFFSET, EVAP_F_PLUS_OFFSET, EVAP_FLOW_OFFSET,
@@ -686,53 +688,26 @@ fn build_transit_bucket_row_pos(
 /// [`build_anticipated_fishing_row_pos`] and its entries-side `if`/`else` —
 /// never duplicated here.
 ///
-/// The sweep walks the RING axis, `r = stage_idx + depth + 1` — `stage_idx`
-/// is in-study, where [`PointResolution::physical_target`]'s excision is the
-/// identity, so this is exactly the ring's strictly-future window, contiguous
-/// by construction. Each plant's own physical delivery target
-/// `m = point.physical_target(r)` is resolved inside the plant loop, since
-/// the excision is per-plant. Walking the RAW delivery axis instead (a shared
-/// `m = stage_idx + depth + 1` read directly, pre-migration) is the
-/// wrong-but-compiling alternative once any plant's fixed post-horizon window
-/// excises part of the ring: `m mod k_max` is injective only over a
-/// contiguous run, which the excised window breaks. Returns the mapping and
-/// the reachable count.
+/// The strictly-future ring-window sweep and its per-plant physical-target
+/// resolution are owned by [`for_each_ring_residue`]; this builder only
+/// classifies each visited residue as carry (`is_interior`), deposit, or
+/// not-yet-ready. Returns the mapping and the reachable count.
 fn build_anticipated_slot_row_pos(
     state: &StateSpace,
     n_stages: usize,
     stage_idx: usize,
 ) -> (Vec<Option<usize>>, usize) {
     let n_anticipated = state.n_anticipated;
-    let k_max = state.k_max;
-    if n_anticipated == 0 || k_max == 0 {
-        return (Vec::new(), 0);
-    }
-    let n_delivery = state.delivery_stage_count(n_stages);
-    let points: Vec<_> = (0..n_anticipated)
-        .map(|plant| anticipated_resolution_for(state, AnticipatedLocal::new(plant), n_stages))
-        .collect();
-
-    let mut row_pos = vec![None; n_anticipated * k_max];
+    let mut row_pos = vec![None; n_anticipated * state.k_max];
     let mut n_reachable = 0_usize;
-    for depth in 0..k_max {
-        let r = stage_idx + depth + 1;
-        // `depth in 0..k_max` enumerates exactly `k_max` consecutive ring-axis
-        // `r` values, so every residue is visited exactly once — no
-        // self-collision within this sweep.
-        let slot = r % k_max;
-        for (plant, point) in points.iter().enumerate() {
-            let m = point.physical_target(r);
-            if m >= n_delivery {
-                continue;
-            }
-            let is_deposit = point.decider.get(m).copied().flatten() == Some(stage_idx);
-            let is_interior = !is_deposit && point.is_ready_at(m, stage_idx);
-            if is_interior {
-                row_pos[slot * n_anticipated + plant] = Some(n_reachable);
-                n_reachable += 1;
-            }
+    for_each_ring_residue(state, n_stages, stage_idx, |res, point| {
+        let is_deposit = point.decider.get(res.target).copied().flatten() == Some(stage_idx);
+        let is_interior = !is_deposit && point.is_ready_at(res.target, stage_idx);
+        if is_interior {
+            row_pos[res.slot * n_anticipated + res.plant] = Some(n_reachable);
+            n_reachable += 1;
         }
-    }
+    });
     debug_assert_eq!(
         row_pos.iter().filter(|pos| pos.is_some()).count(),
         n_reachable,
@@ -1069,6 +1044,51 @@ fn fold_endpoint(
     }
 }
 
+/// Sum of `resolved_coeff * V_lo` over `constraint`'s `HydroUsefulVolume{Initial,
+/// Final}` terms, or `None` when none are present (the no-term path must leave the
+/// folded endpoints untouched, never add `0.0`). A useful-volume term resolves to
+/// the absolute storage column, so its dead volume shifts onto the bound instead of
+/// the column; `V_lo` is the entity-level physical `Hydro.min_storage_hm3`, never
+/// the per-stage resolved `HydroStageBounds.min_storage_hm3`.
+fn useful_volume_bound_shift(
+    constraint: &GenericConstraint,
+    ctx: &TemplateBuildCtx<'_>,
+    stage_idx: usize,
+    block_idx: usize,
+) -> Option<f64> {
+    let resolved_parameters = ctx.resolved.resolved_parameters;
+    let mut shift = 0.0;
+    let mut found = false;
+    for term in &constraint.expression.terms {
+        let (VariableRef::HydroUsefulVolumeInitial { hydro_id, .. }
+        | VariableRef::HydroUsefulVolumeFinal { hydro_id, .. }) = term.variable
+        else {
+            continue;
+        };
+        found = true;
+        // A dangling hydro_id is unreachable past referential validation
+        // (`validate_variable_ref_entity`); mirrors `ResolvedParameters::get`'s
+        // test-loud, production-safe miss handling.
+        let Some(&h_idx) = ctx.hydro_pos.get(&hydro_id) else {
+            debug_assert!(
+                false,
+                "generic constraint {:?} useful-volume term references unknown hydro {hydro_id:?}",
+                constraint.id
+            );
+            continue;
+        };
+        let coef = match term.coefficient {
+            CoefficientRef::Literal(v) => v,
+            CoefficientRef::Parameter(param_id) => {
+                resolved_parameters.get(param_id, stage_idx, block_idx)
+            }
+        };
+        let v_lo = ctx.hydros[h_idx].min_storage_hm3;
+        shift += coef * term.scale * v_lo;
+    }
+    found.then_some(shift)
+}
+
 /// Whether either affine bound on `constraint` references a block-varying
 /// (`PerStageBlock`) parameter. When true, the stage-level collapse is suppressed:
 /// a single collapsed row would resolve one arbitrary block's bound value, losing
@@ -1134,20 +1154,26 @@ fn enumerate_generic_constraint_rows(
             for block_idx in block_start..block_start + block_count {
                 // The folded pair drives both the row bound and, below, the
                 // two-sided slack shape.
-                let effective_lower = fold_endpoint(
+                let mut effective_lower = fold_endpoint(
                     entry.bound_lower,
                     constraint.bound_lower_affine.as_ref(),
                     resolved_parameters,
                     stage_idx,
                     block_idx,
                 );
-                let effective_upper = fold_endpoint(
+                let mut effective_upper = fold_endpoint(
                     entry.bound_upper,
                     constraint.bound_upper_affine.as_ref(),
                     resolved_parameters,
                     stage_idx,
                     block_idx,
                 );
+                if let Some(shift) =
+                    useful_volume_bound_shift(constraint, ctx, stage_idx, block_idx)
+                {
+                    effective_lower = effective_lower.map(|v| v + shift);
+                    effective_upper = effective_upper.map(|v| v + shift);
+                }
                 let (slack_plus_col, slack_minus_col) = allocate_generic_slack_cols(
                     &constraint.slack,
                     effective_lower,

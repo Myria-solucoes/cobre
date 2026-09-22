@@ -2,7 +2,7 @@
 //!
 //! The state-vector column layout is owned by [`StateSpace`]; the per-stage
 //! equipment column/row geometry is owned by
-//! [`StageLayout`](crate::lp_builder)/[`StageGeometry`](crate::lp_builder::StageGeometry);
+//! [`StageLayout`](crate::lp::builder)/[`StageGeometry`](crate::lp::builder::StageGeometry);
 //! the non-state study shape is owned by [`StudyDimensions`]. The authoritative
 //! ranges live on the owning types.
 //!
@@ -17,7 +17,7 @@
 //! The equipment, slack, generic-constraint, and filling-phase column and row
 //! ranges that follow `theta` — allocated in that equipment -> slack ->
 //! generic -> filling family order — are owned entirely by
-//! [`StageLayout`](crate::lp_builder).
+//! [`StageLayout`](crate::lp::builder).
 //!
 //! The `anticipated_decision` block is stage-level (one column per anticipated
 //! plant, NOT per-block) and has length `A = n_anticipated`. The block collapses
@@ -37,32 +37,23 @@
 //! row 0.
 //!
 //! The per-solve patch sequence layered on top of this geometry is documented in
-//! [`crate::lp_builder`].
+//! [`crate::lp::builder`].
 //!
 //! # Submodule layout
 //!
 //! - `anticipated_gate` — the anticipated-decision temporal-gating free
 //!   functions (`is_anticipated_decision_active_for_delivery`,
-//!   `anticipated_resolution_for`, plus the test-only constant-lead wrapper
-//!   `is_anticipated_decision_active`), taking `state: &`[`StateSpace`]
-//!   rather than living as methods on it — column geometry and temporal
-//!   gating are separate concerns.
-//! - `layout` — the per-stage geometry satellite types [`EvaporationIndices`]
-//!   and [`FphaRowRange`] (locating one hydro's evaporation columns/row and FPHA
-//!   row block within a stage LP).
-//! - `index` — the base typed vocabulary [`Col`]/[`Row`]/[`StateDim`] and the
-//!   [`InCol`]/[`OutCol`] incoming/outgoing column-role split. Every
-//!   `StateSpace`/`CutStateProjection` incoming and outgoing resolver, plus
-//!   [`CutStateProjection::render_pairs`], resolves through it. [`BlockIdx`]
-//!   is the block operand every [`BlockGrid`] shape method takes. [`Boundary`]
-//!   is the chronological storage-boundary operand
-//!   [`StorageBoundaryGrid::col`] takes, classified from a dynamic `k` via
-//!   [`Boundary::from_index`].
+//!   `anticipated_resolution_for`).
+//! - `layout` — the per-stage geometry satellite type [`EvaporationIndices`]
+//!   (locating one hydro's evaporation columns/row within a stage LP).
+//! - `index` — the base typed vocabulary: [`StateDim`], [`InCol`]/[`OutCol`]
+//!   (incoming/outgoing column roles), [`BlockIdx`] (block operand), and
+//!   [`Boundary`] (chronological storage-boundary operand).
 //! - `block_grid` — the [`BlockGrid`] typed block-stride address primitive and
 //!   its three shape methods ([`BlockGrid::flat`], [`BlockGrid::fpha_plane`],
 //!   [`BlockGrid::deficit`]).
 //! - `range_cursor` — the `RangeCursor` running column/row offset allocator
-//!   shared by [`StageLayout`](crate::lp_builder)'s per-stage equipment chains
+//!   shared by [`StageLayout`](crate::lp::builder)'s per-stage equipment chains
 //!   and [`StateSpace`]'s stage-invariant state-vector chain.
 //! - `storage_boundary_grid` — the [`StorageBoundaryGrid`] typed
 //!   storage-boundary address primitive ([`StorageBoundaryGrid::col`]), the
@@ -81,14 +72,11 @@
 //!   projection of [`StateSpace`] exposing only the cut-state dimensions a
 //!   stage's `StageStateConfig` enables (anticipated state always included),
 //!   delegating each column to [`StateSpace::state_to_lp_incoming_column`].
-//! - `entity_index` — the entity system/local index vocabulary
+//! - `entity_index` — entity system/local index vocabulary
 //!   ([`HydroSys`]/[`ThermalSys`]/[`LineSys`], [`FphaLocal`]/[`EvapLocal`]/
 //!   [`FillingTargetLocal`]/[`FloorLocal`]/[`AnticipatedLocal`],
-//!   [`HydroCell`]/[`FphaCellLocal`]), distinguishing an entity's canonical
-//!   system position from its position within a per-stage local identity list
-//!   or within the study-scope hydro-cell partition.
-//! - `hydro_cell` — the [`HydroCellIndex`] study-scope partition of each hydro
-//!   plant's unit groups into `bus_id`-equivalence-class cells ([`HydroCell`]).
+//!   [`HydroCell`]/[`FphaCellLocal`]).
+//! - `hydro_cell` — the [`HydroCellIndex`] partition and [`HydroCell`] type.
 //!
 //! Every public symbol is re-exported here so the `cobre_sddp::indexer::Symbol`
 //! and `crate::indexer::Symbol` module paths resolve to the same item regardless
@@ -116,8 +104,8 @@ pub use entity_index::{
     HydroCell, HydroSys, LineSys, ThermalSys,
 };
 pub use hydro_cell::HydroCellIndex;
-pub use index::{BlockIdx, Boundary, Col, CutSlot, InCol, OutCol, Row, StateDim};
-pub use layout::{EvaporationIndices, FphaRowRange};
+pub use index::{BlockIdx, Boundary, CutSlot, InCol, OutCol, StateDim};
+pub use layout::EvaporationIndices;
 pub(crate) use range_cursor::RangeCursor;
 pub use state_space::StateSpace;
 pub(crate) use state_space::{REGION_ORDER, StateRegion};

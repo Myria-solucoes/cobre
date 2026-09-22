@@ -17,11 +17,9 @@ use chrono::NaiveDate;
 
 use super::date32_days;
 
-use crate::output::atomic::write_parquet_atomic;
+use crate::output::atomic::write_batch_atomic;
 use crate::output::error::OutputError;
-use crate::output::parquet_config::ParquetWriterConfig;
 use crate::output::schemas::fixed_delivery_schema;
-use crate::output::stochastic::ensure_parent_dir;
 
 /// One row of the run-level fixed post-horizon commitment echo.
 ///
@@ -81,10 +79,8 @@ pub fn write_fixed_delivery(
     let path = output_dir
         .join("anticipated")
         .join("fixed_deliveries.parquet");
-    ensure_parent_dir(&path)?;
-    let config = ParquetWriterConfig::default();
     let batch = build_fixed_delivery_batch(rows)?;
-    write_parquet_atomic(&path, &batch, &config)
+    write_batch_atomic(&path, &batch)
 }
 
 fn build_fixed_delivery_batch(rows: &[FixedDeliveryRow]) -> Result<RecordBatch, OutputError> {
@@ -118,8 +114,8 @@ fn build_fixed_delivery_batch(rows: &[FixedDeliveryRow]) -> Result<RecordBatch, 
 #[allow(clippy::expect_used, clippy::float_cmp, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::test_support::output::read_first_batch;
     use arrow::array::{Date32Array, Float64Array, Int32Array};
-    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use tempfile::tempdir;
 
     fn sample_rows() -> Vec<FixedDeliveryRow> {
@@ -139,13 +135,6 @@ mod tests {
         ]
     }
 
-    fn read_batch(path: &Path) -> RecordBatch {
-        let file = std::fs::File::open(path).unwrap();
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
-        let mut reader = builder.build().unwrap();
-        reader.next().unwrap().unwrap()
-    }
-
     #[test]
     fn fixed_delivery_round_trip_preserves_rows_in_order() {
         let rows = sample_rows();
@@ -158,7 +147,7 @@ mod tests {
             .join("fixed_deliveries.parquet");
         assert!(path.exists(), "file must exist after non-empty write");
 
-        let batch = read_batch(&path);
+        let batch = read_first_batch(&path);
         assert_eq!(batch.num_columns(), 4, "must have 4 columns");
         assert_eq!(batch.num_rows(), rows.len(), "one row per input record");
 

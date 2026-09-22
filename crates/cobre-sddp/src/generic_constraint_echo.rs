@@ -12,7 +12,7 @@ use cobre_io::GenericConstraintEchoRow;
 
 use crate::ResolvedParameters;
 use crate::StudySetup;
-use crate::lp_builder::GenericConstraintRowEntry;
+use crate::lp::builder::GenericConstraintRowEntry;
 
 /// Build the resolved generic-constraint echo rows for `setup`/`system` in
 /// canonical `(constraint, stage, block, term)` order.
@@ -294,6 +294,14 @@ fn render_variable(v: &VariableRef) -> (&'static str, String) {
             "hydro_storage_final",
             format!("id={}, block={}", hydro_id.0, block_label(block_id)),
         ),
+        VariableRef::HydroUsefulVolumeInitial { hydro_id, block_id } => (
+            "hydro_useful_volume_initial",
+            format!("id={}, block={}", hydro_id.0, block_label(block_id)),
+        ),
+        VariableRef::HydroUsefulVolumeFinal { hydro_id, block_id } => (
+            "hydro_useful_volume_final",
+            format!("id={}, block={}", hydro_id.0, block_label(block_id)),
+        ),
     };
     (kind, format!("{kind}({args})"))
 }
@@ -436,6 +444,37 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].bound_upper, Some(95.0));
         assert_eq!(rows[0].derived_shape, "cap");
+    }
+
+    /// A `hydro_useful_volume_final` constraint's `V_lo`-folded lower bound
+    /// (already composed by the layout fold before the row entry is built)
+    /// reaches `GenericConstraintEchoRow.bound_lower` verbatim, not only the
+    /// internal `generic_constraint_rows` layout row it is read from.
+    #[test]
+    fn useful_volume_folded_lower_bound_reaches_the_echo_row() {
+        let hydro_ref = VariableRef::HydroUsefulVolumeFinal {
+            hydro_id: EntityId(9),
+            block_id: None,
+        };
+        let constraints = vec![constraint(
+            9,
+            "useful_volume_floor",
+            vec![LinearTerm::literal(1.0, hydro_ref)],
+        )];
+        // 20.0 (raw) + 1.0 * V_lo(9) = 32.5, already folded by the time it reaches
+        // this row entry.
+        let entries = vec![vec![entry(0, 9, 0, true, Some(32.5), None, false, 0.0)]];
+        let resolved = ResolvedParameters::default();
+
+        let rows = build_echo_rows_from_parts(&entries, &[0], &resolved, &constraints);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].bound_lower, Some(32.5));
+        assert_eq!(rows[0].derived_shape, "floor");
+        assert_eq!(
+            rows[0].variable_kind.as_deref(),
+            Some("hydro_useful_volume_final")
+        );
     }
 
     /// A two-endpoint per-block entry (the d54 shape) renders a `band` row with
@@ -639,5 +678,19 @@ mod tests {
             bus_id: Some(EntityId(1)),
         });
         assert_eq!(r, "hydro_generation(id=66, bus=1, block=2)");
+
+        let (kind, r) = render_variable(&VariableRef::HydroUsefulVolumeInitial {
+            hydro_id: EntityId(66),
+            block_id: None,
+        });
+        assert_eq!(kind, "hydro_useful_volume_initial");
+        assert_eq!(r, "hydro_useful_volume_initial(id=66, block=all)");
+
+        let (kind, r) = render_variable(&VariableRef::HydroUsefulVolumeFinal {
+            hydro_id: EntityId(66),
+            block_id: Some(2),
+        });
+        assert_eq!(kind, "hydro_useful_volume_final");
+        assert_eq!(r, "hydro_useful_volume_final(id=66, block=2)");
     }
 }

@@ -40,12 +40,12 @@
 
 use arrow::array::Array;
 use cobre_core::EntityId;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use std::fs::File;
 use std::path::Path;
 
 use crate::LoadError;
-use crate::parquet_helpers::{extract_required_float64, extract_required_int32};
+use crate::parquet_helpers::{
+    extract_required_float64, extract_required_int32, open_record_batch_reader,
+};
 
 /// A single row from `scenarios/inflow_annual_component.parquet`.
 ///
@@ -85,6 +85,39 @@ pub struct InflowAnnualComponentRow {
     pub annual_std_m3s: f64,
 }
 
+fn check_not_null<A: Array>(
+    col: &A,
+    i: usize,
+    path: &Path,
+    row_idx: usize,
+    field_name: &str,
+) -> Result<(), LoadError> {
+    if col.is_null(i) {
+        return Err(LoadError::SchemaError {
+            path: path.to_path_buf(),
+            field: format!("inflow_annual_component[{row_idx}].{field_name}"),
+            message: format!("null value in non-null column {field_name}"),
+        });
+    }
+    Ok(())
+}
+
+fn check_finite(
+    value: f64,
+    path: &Path,
+    row_idx: usize,
+    field_name: &str,
+) -> Result<(), LoadError> {
+    if !value.is_finite() {
+        return Err(LoadError::SchemaError {
+            path: path.to_path_buf(),
+            field: format!("inflow_annual_component[{row_idx}].{field_name}"),
+            message: format!("value must be finite (NaN and ±infinity are rejected), got {value}"),
+        });
+    }
+    Ok(())
+}
+
 /// Parse `scenarios/inflow_annual_component.parquet` and return a sorted row table.
 ///
 /// # Errors
@@ -112,14 +145,7 @@ pub struct InflowAnnualComponentRow {
 pub fn parse_inflow_annual_component(
     path: &Path,
 ) -> Result<Vec<InflowAnnualComponentRow>, LoadError> {
-    let file = File::open(path).map_err(|e| LoadError::io(path, e))?;
-
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
-
-    let reader = builder
-        .build()
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
+    let reader = open_record_batch_reader(path)?;
 
     let mut rows: Vec<InflowAnnualComponentRow> = Vec::new();
 
@@ -139,41 +165,17 @@ pub fn parse_inflow_annual_component(
         for i in 0..n {
             let row_idx = base_idx + i;
 
-            if hydro_id_col.is_null(i) {
-                return Err(LoadError::SchemaError {
-                    path: path.to_path_buf(),
-                    field: format!("inflow_annual_component[{row_idx}].hydro_id"),
-                    message: "null value in non-null column hydro_id".to_string(),
-                });
-            }
-            if stage_id_col.is_null(i) {
-                return Err(LoadError::SchemaError {
-                    path: path.to_path_buf(),
-                    field: format!("inflow_annual_component[{row_idx}].stage_id"),
-                    message: "null value in non-null column stage_id".to_string(),
-                });
-            }
-            if annual_coefficient_col.is_null(i) {
-                return Err(LoadError::SchemaError {
-                    path: path.to_path_buf(),
-                    field: format!("inflow_annual_component[{row_idx}].annual_coefficient"),
-                    message: "null value in non-null column annual_coefficient".to_string(),
-                });
-            }
-            if annual_mean_m3s_col.is_null(i) {
-                return Err(LoadError::SchemaError {
-                    path: path.to_path_buf(),
-                    field: format!("inflow_annual_component[{row_idx}].annual_mean_m3s"),
-                    message: "null value in non-null column annual_mean_m3s".to_string(),
-                });
-            }
-            if annual_std_m3s_col.is_null(i) {
-                return Err(LoadError::SchemaError {
-                    path: path.to_path_buf(),
-                    field: format!("inflow_annual_component[{row_idx}].annual_std_m3s"),
-                    message: "null value in non-null column annual_std_m3s".to_string(),
-                });
-            }
+            check_not_null(hydro_id_col, i, path, row_idx, "hydro_id")?;
+            check_not_null(stage_id_col, i, path, row_idx, "stage_id")?;
+            check_not_null(
+                annual_coefficient_col,
+                i,
+                path,
+                row_idx,
+                "annual_coefficient",
+            )?;
+            check_not_null(annual_mean_m3s_col, i, path, row_idx, "annual_mean_m3s")?;
+            check_not_null(annual_std_m3s_col, i, path, row_idx, "annual_std_m3s")?;
 
             let hydro_id = EntityId::from(hydro_id_col.value(i));
             let stage_id = stage_id_col.value(i);
@@ -181,25 +183,8 @@ pub fn parse_inflow_annual_component(
             let annual_mean_m3s = annual_mean_m3s_col.value(i);
             let annual_std_m3s = annual_std_m3s_col.value(i);
 
-            if !annual_coefficient.is_finite() {
-                return Err(LoadError::SchemaError {
-                    path: path.to_path_buf(),
-                    field: format!("inflow_annual_component[{row_idx}].annual_coefficient"),
-                    message: format!(
-                        "value must be finite (NaN and ±infinity are rejected), got {annual_coefficient}"
-                    ),
-                });
-            }
-
-            if !annual_mean_m3s.is_finite() {
-                return Err(LoadError::SchemaError {
-                    path: path.to_path_buf(),
-                    field: format!("inflow_annual_component[{row_idx}].annual_mean_m3s"),
-                    message: format!(
-                        "value must be finite (NaN and ±infinity are rejected), got {annual_mean_m3s}"
-                    ),
-                });
-            }
+            check_finite(annual_coefficient, path, row_idx, "annual_coefficient")?;
+            check_finite(annual_mean_m3s, path, row_idx, "annual_mean_m3s")?;
 
             if !annual_std_m3s.is_finite() || annual_std_m3s <= 0.0 {
                 return Err(LoadError::SchemaError {
@@ -241,12 +226,11 @@ pub fn parse_inflow_annual_component(
 )]
 mod tests {
     use super::*;
+    use crate::test_support::write_parquet;
     use arrow::array::{Float64Array, Int32Array};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
-    use parquet::arrow::ArrowWriter;
     use std::sync::Arc;
-    use tempfile::NamedTempFile;
 
     fn schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
@@ -256,15 +240,6 @@ mod tests {
             Field::new("annual_mean_m3s", DataType::Float64, false),
             Field::new("annual_std_m3s", DataType::Float64, false),
         ]))
-    }
-
-    fn write_parquet(batch: &RecordBatch) -> NamedTempFile {
-        let tmp = NamedTempFile::new().expect("tempfile");
-        let mut writer = ArrowWriter::try_new(tmp.reopen().expect("reopen"), batch.schema(), None)
-            .expect("ArrowWriter");
-        writer.write(batch).expect("write batch");
-        writer.close().expect("close writer");
-        tmp
     }
 
     fn make_batch(

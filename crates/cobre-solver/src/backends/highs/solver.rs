@@ -317,9 +317,9 @@ impl HighsSolver {
     /// **Note on `time_limit`**: `HiGHS` tracks elapsed time cumulatively from
     /// instance creation, not per-`run()` call — neither `clear_solver()` nor
     /// option changes reset the internal timer. This makes `time_limit`
-    /// unusable for the scenario-loop pattern (thousands of solves per
-    /// instance). Wall-clock measurement via `Instant` is used instead for
-    /// time-based budget management.
+    /// unusable across a long sequence of solves on one instance (thousands of
+    /// solves is typical). Wall-clock measurement via `Instant` is used instead
+    /// for time-based budget management.
     pub(super) fn set_iteration_limits(&mut self) {
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         let simplex_iter_limit: i32 =
@@ -387,11 +387,9 @@ impl HighsSolver {
         status: i32,
         solve_time_seconds: f64,
     ) -> Option<SolverError> {
+        #[allow(clippy::match_same_arms)]
         match status {
-            ffi::HIGHS_MODEL_STATUS_OPTIMAL => {
-                // Caller should have handled optimal before reaching here.
-                None
-            }
+            ffi::HIGHS_MODEL_STATUS_OPTIMAL => None,
             ffi::HIGHS_MODEL_STATUS_INFEASIBLE => Some(SolverError::Infeasible),
             ffi::HIGHS_MODEL_STATUS_UNBOUNDED_OR_INFEASIBLE => {
                 // A dual ray classifies as Infeasible, a primal ray as Unbounded.
@@ -473,9 +471,10 @@ impl HighsSolver {
     ///
     /// Core simplex execution, called after (for warm-start) the basis has been
     /// installed. `HiGHS` retains its internal simplex basis across consecutive
-    /// `solve_inner` calls on the same LP shape, which is the primary warm-start
-    /// mechanism for the backward pass. No `Highs_clearSolver` call is issued —
-    /// clearing the solver discards the retained basis and forfeits the warm start.
+    /// `solve_inner` calls on the same LP shape — the primary warm-start
+    /// mechanism when a handle solves a long sequence of same-shape LPs. No
+    /// `Highs_clearSolver` call is issued — clearing the solver discards the
+    /// retained basis and forfeits the warm start.
     pub(super) fn solve_inner(&mut self) -> Result<SolutionView<'_>, SolverError> {
         // Iteration limits only, no time_limit (see `set_iteration_limits`):
         // wall-clock time is measured after `run_once` to detect stuck solves.
@@ -488,8 +487,6 @@ impl HighsSolver {
         self.stats.solve_count += 1;
 
         if model_status == ffi::HIGHS_MODEL_STATUS_OPTIMAL {
-            // Read the iteration count before `extract_solution_view` borrows
-            // self, so stats can be updated without an aliasing conflict.
             // SAFETY: handle is valid non-null HiGHS pointer.
             #[allow(clippy::cast_sign_loss)]
             let iterations =

@@ -23,11 +23,11 @@ use std::collections::BTreeMap;
 use chrono::NaiveDate;
 use cobre_core::{
     BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, DeficitSegment,
-    EntityId, HydroBlockBounds, HydroStageBounds, HydroStagePenalties, LineBlockBounds,
+    EntityId, HydroBlockBounds, HydroPenalties, HydroStageBounds, LineBlockBounds,
     LineStagePenalties, NcsStagePenalties, NonControllableSource, PenaltiesCountsSpec,
     PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, ScenarioSource,
     SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
-    entities::hydro::{HydroGenerationModel, HydroPenalties},
+    entities::hydro::HydroGenerationModel,
     scenario::{
         CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile, ExternalLoadRow,
         ExternalNcsRow, ExternalScenarioRow, InflowHistoryRow, InflowModel, LoadModel, NcsModel,
@@ -45,8 +45,8 @@ use cobre_sddp::{
 };
 use cobre_solver::ActiveSolver;
 use cobre_stochastic::{
-    ClassSchemes, ExternalScenarioLibrary, HistoricalScenarioLibrary, OpeningTreeInputs,
-    PrecomputedPar, build_stochastic_context,
+    ClassSchemes, DerivedSeed, ExternalScenarioLibrary, HistoricalScenarioLibrary,
+    OpeningTreeInputs, PrecomputedPar, build_stochastic_context,
     par::lag_kernel::{DownstreamLagAccum, LagMajor, PrimaryLagAccum, advance_lag_chain},
     par::lag_transition::{derive_downstream_par_order, precompute_stage_lag_transitions},
     solve_par_noise, standardize_external_inflow, standardize_historical_windows,
@@ -77,8 +77,8 @@ fn hydro_block_bounds() -> HydroBlockBounds {
     }
 }
 
-fn hydro_stage_penalties() -> HydroStagePenalties {
-    HydroStagePenalties {
+fn hydro_stage_penalties() -> HydroPenalties {
+    HydroPenalties {
         spillage_cost: 0.0,
         diversion_cost: 0.0,
         turbined_cost: 0.0,
@@ -469,6 +469,7 @@ fn build_two_hydro_system(
             });
         }
     }
+    inflow_models.sort_by_key(|m| (m.hydro_id.0, m.stage_id));
 
     // The CorrelationGroup entity-list order drives `entity_order` in
     // `build_stochastic_context` — this is the invariance path under test.
@@ -726,7 +727,7 @@ fn build_historical_system(
     );
     let id = EntityId(hydro_raw_id);
     let hydro = make_hydro(
-        EntityId(hydro_raw_id),
+        id,
         HydroSpec {
             name: format!("H{hydro_raw_id}"),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -955,7 +956,7 @@ fn build_external_system(
     );
     let id = EntityId(hydro_raw_id);
     let hydro = make_hydro(
-        EntityId(hydro_raw_id),
+        id,
         HydroSpec {
             name: format!("H{hydro_raw_id}"),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -2317,10 +2318,12 @@ fn differential_lag_chain_forward_external_historical_agree_at_quarterly_transit
         &fx.hydro_ids,
         &fx.stages,
         &fx.par,
-        &derived_lag_values,
-        1,
-        &[],
-        &[],
+        DerivedSeed {
+            lag_values: &derived_lag_values,
+            l_state: 1,
+            accum: &[],
+            weight: &[],
+        },
         &fx.transitions,
         1,
     );
@@ -2349,10 +2352,12 @@ fn differential_lag_chain_forward_external_historical_agree_at_quarterly_transit
         &fx.par,
         &[window_year],
         None,
-        &derived_lag_values,
-        1,
-        &[],
-        &[],
+        DerivedSeed {
+            lag_values: &derived_lag_values,
+            l_state: 1,
+            accum: &[],
+            weight: &[],
+        },
         &fx.transitions,
         1,
     );
@@ -2460,10 +2465,12 @@ fn opening_tree_historical_standardization_ring_aware_eta_requires_derived_downs
         &fx.par,
         &[window_year],
         None,
-        &derived_lag_values,
-        1,
-        &[],
-        &[],
+        DerivedSeed {
+            lag_values: &derived_lag_values,
+            l_state: 1,
+            accum: &[],
+            weight: &[],
+        },
         &fx.transitions,
         derived,
     );
@@ -2478,10 +2485,12 @@ fn opening_tree_historical_standardization_ring_aware_eta_requires_derived_downs
         &fx.par,
         &[window_year],
         None,
-        &derived_lag_values,
-        1,
-        &[],
-        &[],
+        DerivedSeed {
+            lag_values: &derived_lag_values,
+            l_state: 1,
+            accum: &[],
+            weight: &[],
+        },
         &fx.transitions,
         0,
     );
