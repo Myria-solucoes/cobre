@@ -205,6 +205,10 @@ pub struct HydroWriteRecord {
     pub integrated_equivalent_productivity_mw_per_m3s: f64,
     /// Storage-range mean accumulated productivity along the downstream cascade in MW/(m³/s).
     pub integrated_accumulated_productivity_mw_per_m3s: f64,
+    /// Stored energy at block start, averaged over the stage's total hours, in MW.
+    pub stored_energy_initial_mw: f64,
+    /// Stored energy at block end, averaged over the stage's total hours, in MW.
+    pub stored_energy_final_mw: f64,
 }
 
 /// Thermal unit result for one (stage, block, thermal) tuple.
@@ -1398,6 +1402,8 @@ struct HydroBuilders {
     water_withdrawal_violation_neg_m3s: Float64Builder,
     integrated_equivalent_productivity_mw_per_m3s: Float64Builder,
     integrated_accumulated_productivity_mw_per_m3s: Float64Builder,
+    stored_energy_initial_mw: Float64Builder,
+    stored_energy_final_mw: Float64Builder,
 }
 
 impl HydroBuilders {
@@ -1442,6 +1448,8 @@ impl HydroBuilders {
             water_withdrawal_violation_neg_m3s: Float64Builder::with_capacity(n),
             integrated_equivalent_productivity_mw_per_m3s: Float64Builder::with_capacity(n),
             integrated_accumulated_productivity_mw_per_m3s: Float64Builder::with_capacity(n),
+            stored_energy_initial_mw: Float64Builder::with_capacity(n),
+            stored_energy_final_mw: Float64Builder::with_capacity(n),
         }
     }
 }
@@ -1514,6 +1522,10 @@ fn fill_hydro_builders<'a>(
             .append_value(r.integrated_equivalent_productivity_mw_per_m3s);
         b.integrated_accumulated_productivity_mw_per_m3s
             .append_value(r.integrated_accumulated_productivity_mw_per_m3s);
+        b.stored_energy_initial_mw
+            .append_value(r.stored_energy_initial_mw);
+        b.stored_energy_final_mw
+            .append_value(r.stored_energy_final_mw);
     }
 }
 
@@ -1570,6 +1582,8 @@ fn build_hydros_batch<'a>(
             Arc::new(b.water_withdrawal_violation_neg_m3s.finish()),
             Arc::new(b.integrated_equivalent_productivity_mw_per_m3s.finish()),
             Arc::new(b.integrated_accumulated_productivity_mw_per_m3s.finish()),
+            Arc::new(b.stored_energy_initial_mw.finish()),
+            Arc::new(b.stored_energy_final_mw.finish()),
         ],
     )
     .map_err(|e| OutputError::serialization("hydros", e.to_string()))
@@ -2514,6 +2528,8 @@ mod tests {
             water_withdrawal_violation_neg_m3s: 0.0,
             integrated_equivalent_productivity_mw_per_m3s: 1.5,
             integrated_accumulated_productivity_mw_per_m3s: 6.0,
+            stored_energy_initial_mw: 1.7145,
+            stored_energy_final_mw: 1.7222,
         }
     }
 
@@ -2583,7 +2599,7 @@ mod tests {
         let batch = build_hydros_batch(records.iter().copied(), 0, &block_durations, records.len())
             .expect("hydros batch must build");
         assert_eq!(batch.num_rows(), 2);
-        assert_eq!(batch.num_columns(), 39, "hydros schema has 39 columns");
+        assert_eq!(batch.num_columns(), 41, "hydros schema has 41 columns");
 
         let gen_mwh_col = batch
             .column_by_name("generation_mwh")
@@ -3344,12 +3360,14 @@ mod tests {
             "generation_mwh at row 3 (stage 1) must equal generation_mw * 744"
         );
 
-        // The two tail-appended integrated-productivity columns round-trip as
-        // non-nullable Float64. make_hydro_record sets them to 1.5 and 6.0.
+        // The four tail-appended integrated-productivity and stored-energy-power
+        // columns round-trip as non-nullable Float64.
         let schema = batch.schema();
         for col in [
             "integrated_equivalent_productivity_mw_per_m3s",
             "integrated_accumulated_productivity_mw_per_m3s",
+            "stored_energy_initial_mw",
+            "stored_energy_final_mw",
         ] {
             let field = schema
                 .field_with_name(col)
@@ -3379,6 +3397,16 @@ mod tests {
             read_f64("integrated_accumulated_productivity_mw_per_m3s"),
             6.0,
             "integrated_accumulated_productivity_mw_per_m3s must round-trip"
+        );
+        assert_eq!(
+            read_f64("stored_energy_initial_mw"),
+            1.7145,
+            "stored_energy_initial_mw must round-trip"
+        );
+        assert_eq!(
+            read_f64("stored_energy_final_mw"),
+            1.7222,
+            "stored_energy_final_mw must round-trip"
         );
     }
 
@@ -3452,12 +3480,12 @@ mod tests {
     }
 
     #[test]
-    fn hydros_schema_has_thirty_nine_fields() {
+    fn hydros_schema_has_forty_one_fields() {
         let schema = hydros_schema();
         assert_eq!(
             schema.fields().len(),
-            39,
-            "hydros_schema must have 39 fields (37 + scenario_id + node_id)"
+            41,
+            "hydros_schema must have 41 fields (39 + scenario_id + node_id)"
         );
     }
 

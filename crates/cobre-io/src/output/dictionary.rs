@@ -404,6 +404,8 @@ fn unit_for(file: &str, column: &str) -> &'static str {
         ("hydros", "incremental_inflow_energy_mw") => "MW",
         ("hydros", "stored_energy_initial_mwh") => "MWh",
         ("hydros", "stored_energy_final_mwh") => "MWh",
+        ("hydros", "stored_energy_initial_mw") => "MW",
+        ("hydros", "stored_energy_final_mw") => "MW",
         ("hydros", "generation_slack_mw") => "MW",
         _ => "",
     }
@@ -486,6 +488,12 @@ fn description_for(file: &str, column: &str) -> &'static str {
         }
         ("hydros", "stored_energy_initial_mwh") => "Stored energy at start of block",
         ("hydros", "stored_energy_final_mwh") => "Stored energy at end of block",
+        ("hydros", "stored_energy_initial_mw") => {
+            "Stored energy at start of block, averaged over the stage's total hours"
+        }
+        ("hydros", "stored_energy_final_mw") => {
+            "Stored energy at end of block, averaged over the stage's total hours"
+        }
         ("hydros", "spillage_cost") => "Spillage regularization cost",
         ("hydros", "water_value_per_hm3") => "Marginal water value",
         ("hydros", "storage_binding_code") => "Storage bound binding code",
@@ -2277,8 +2285,8 @@ mod tests {
 
         let row_count = rdr.records().count();
         assert_eq!(
-            row_count, 260,
-            "variables.csv must have exactly 260 data rows (one per column across all schemas)"
+            row_count, 262,
+            "variables.csv must have exactly 262 data rows (one per column across all schemas)"
         );
     }
 

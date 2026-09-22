@@ -1078,6 +1078,8 @@ fn make_hydro_write_record(
         water_withdrawal_violation_neg_m3s: 0.0,
         integrated_equivalent_productivity_mw_per_m3s: 0.0,
         integrated_accumulated_productivity_mw_per_m3s: 0.0,
+        stored_energy_initial_mw: 0.0,
+        stored_energy_final_mw: 0.0,
     }
 }
 

@@ -98,6 +98,8 @@ impl IntoWriteRecord for SimulationHydroResult {
                 .integrated_equivalent_productivity_mw_per_m3s,
             integrated_accumulated_productivity_mw_per_m3s: s
                 .integrated_accumulated_productivity_mw_per_m3s,
+            stored_energy_initial_mw: s.stored_energy_initial_mw,
+            stored_energy_final_mw: s.stored_energy_final_mw,
         }
     }
 }
@@ -422,6 +424,8 @@ mod tests {
             water_withdrawal_violation_neg_m3s: 0.0,
             integrated_equivalent_productivity_mw_per_m3s: 0.0,
             integrated_accumulated_productivity_mw_per_m3s: 0.0,
+            stored_energy_initial_mw: 0.0,
+            stored_energy_final_mw: 0.0,
         }
     }
 

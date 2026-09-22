@@ -133,6 +133,8 @@ fn build_hydros_schema() -> Schema {
             DataType::Float64,
             false,
         ),
+        Field::new("stored_energy_initial_mw", DataType::Float64, false),
+        Field::new("stored_energy_final_mw", DataType::Float64, false),
     ]);
     Schema::new(fields)
 }
@@ -1068,8 +1070,8 @@ mod tests {
         let schema = hydros_schema();
         assert_eq!(
             schema.fields().len(),
-            39,
-            "hydros schema must have 39 fields"
+            41,
+            "hydros schema must have 41 fields"
         );
         let names = field_names(&schema);
         assert_eq!(
@@ -1114,6 +1116,8 @@ mod tests {
                 "water_withdrawal_violation_neg_m3s",
                 "integrated_equivalent_productivity_mw_per_m3s",
                 "integrated_accumulated_productivity_mw_per_m3s",
+                "stored_energy_initial_mw",
+                "stored_energy_final_mw",
             ]
         );
     }
@@ -1165,6 +1169,8 @@ mod tests {
             "water_withdrawal_violation_neg_m3s",
             "integrated_equivalent_productivity_mw_per_m3s",
             "integrated_accumulated_productivity_mw_per_m3s",
+            "stored_energy_initial_mw",
+            "stored_energy_final_mw",
         ] {
             assert!(
                 !is_nullable(&schema, col),
@@ -1699,7 +1705,7 @@ mod tests {
             .collect();
         let expected: &[(&str, usize)] = &[
             ("costs", 29),
-            ("hydros", 39),
+            ("hydros", 41),
             ("hydro_bus_generation", 9),
             ("thermals", 12),
             ("exchanges", 13),

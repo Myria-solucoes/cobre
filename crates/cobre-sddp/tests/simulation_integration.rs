@@ -1690,6 +1690,7 @@ fn enumerated_census_k1_matches_sampled_single_scenario() {
     };
     let hydro_cell_index = cobre_sddp::test_support::identity_hydro_cell_index(256);
     let hydro_productivities_per_stage = vec![vec![1.0]; fx.n_stages];
+    let block_hours_per_stage = vec![vec![1.0]; fx.n_stages];
 
     let run_sim =
         |traversal: &Traversal| -> cobre_sddp::simulation::types::SimulationScenarioResult {
@@ -1720,7 +1721,7 @@ fn enumerated_census_k1_matches_sampled_single_scenario() {
                     result_tx: &result_tx,
                     zeta_per_stage: &[],
                     hydro_cell_index: &hydro_cell_index,
-                    block_hours_per_stage: &[],
+                    block_hours_per_stage: &block_hours_per_stage,
                     entity_counts: &entity_counts,
                     generic_constraint_row_entries: &[],
                     ncs_col_starts: &[],

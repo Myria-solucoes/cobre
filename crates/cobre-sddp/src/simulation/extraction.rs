@@ -824,9 +824,8 @@ fn extract_hydro_no_turbine(
             let mut ob = 0.0_f64;
             let mut oa = 0.0_f64;
             let mut gb = 0.0_f64;
-            let total_hours: f64 = spec.block_hours.iter().sum();
             for blk in 0..n_blks {
-                let w = spec.block_hours[blk] / total_hours;
+                let w = spec.block_hours[blk] / ctx.stage_total_hours;
                 let (turb_slack, below_slack, above_slack, gen_slack) =
                     hydro_operational_slacks(view, spec, grid, h, blk);
                 tb += turb_slack * w;
@@ -838,6 +837,11 @@ fn extract_hydro_no_turbine(
         } else {
             (0.0, 0.0, 0.0, 0.0)
         };
+
+    let stored_energy_initial_mwh =
+        stored_energy_mwh(ctx.storage_initial, ctx.v_min, ctx.rho_acum_integrated);
+    let stored_energy_final_mwh =
+        stored_energy_mwh(ctx.storage_final, ctx.v_min, ctx.rho_acum_integrated);
 
     SimulationHydroResult {
         stage_id,
@@ -856,16 +860,8 @@ fn extract_hydro_no_turbine(
         equivalent_productivity_mw_per_m3s: ctx.equivalent_productivity_mw_per_m3s,
         accumulated_productivity_mw_per_m3s: ctx.accumulated_productivity_mw_per_m3s,
         incremental_inflow_energy_mw: ctx.incremental_inflow_energy_mw,
-        stored_energy_initial_mwh: stored_energy_mwh(
-            ctx.storage_initial,
-            ctx.v_min,
-            ctx.rho_acum_integrated,
-        ),
-        stored_energy_final_mwh: stored_energy_mwh(
-            ctx.storage_final,
-            ctx.v_min,
-            ctx.rho_acum_integrated,
-        ),
+        stored_energy_initial_mwh,
+        stored_energy_final_mwh,
         spillage_cost: 0.0,
         water_value_per_hm3: ctx.water_value,
         storage_binding_code: 0,
@@ -885,6 +881,8 @@ fn extract_hydro_no_turbine(
             .integrated_equivalent_productivity_mw_per_m3s,
         integrated_accumulated_productivity_mw_per_m3s: ctx
             .integrated_accumulated_productivity_mw_per_m3s,
+        stored_energy_initial_mw: stored_energy_initial_mwh / ctx.stage_total_hours,
+        stored_energy_final_mw: stored_energy_final_mwh / ctx.stage_total_hours,
     }
 }
 
@@ -910,6 +908,8 @@ struct HydroStageContext {
     integrated_equivalent_productivity_mw_per_m3s: f64,
     integrated_accumulated_productivity_mw_per_m3s: f64,
     incremental_inflow_energy_mw: f64,
+    /// `Σ block_hours` — the `stored_energy_*_mw` divisor; never a per-block hours.
+    stage_total_hours: f64,
     /// `V_min` (hm³), block-invariant, retained so the per-block closure derives
     /// each boundary's stored energy without re-querying conversions.
     v_min: f64,
@@ -1001,6 +1001,7 @@ impl HydroStageContext {
             .energy_conversion
             .integrated_accumulated_productivity(h, spec.stage_index);
         let v_min = spec.hydro_min_storage_hm3.get(h).copied().unwrap_or(0.0);
+        let stage_total_hours: f64 = spec.block_hours.iter().sum();
         Self {
             storage_final,
             storage_initial,
@@ -1016,6 +1017,7 @@ impl HydroStageContext {
             integrated_equivalent_productivity_mw_per_m3s: integrated_equivalent,
             integrated_accumulated_productivity_mw_per_m3s: integrated_accumulated,
             incremental_inflow_energy_mw: rho_acum * incremental_inflow,
+            stage_total_hours,
             v_min,
             rho_acum_integrated: integrated_accumulated,
             evaporation_m3s,
@@ -1124,6 +1126,8 @@ fn extract_hydro_per_block<'a>(
             stored_energy_mwh(storage_initial, ctx.v_min, ctx.rho_acum_integrated);
         let stored_energy_final_mwh =
             stored_energy_mwh(storage_final, ctx.v_min, ctx.rho_acum_integrated);
+        let stored_energy_initial_mw = stored_energy_initial_mwh / ctx.stage_total_hours;
+        let stored_energy_final_mw = stored_energy_final_mwh / ctx.stage_total_hours;
 
         // Chronological block `b` reports its own block's evaporation triple
         // (`evap_indices[local * n_blks + b]`); parallel keeps the stage-level block-0
@@ -1192,6 +1196,8 @@ fn extract_hydro_per_block<'a>(
                 .integrated_equivalent_productivity_mw_per_m3s,
             integrated_accumulated_productivity_mw_per_m3s: ctx
                 .integrated_accumulated_productivity_mw_per_m3s,
+            stored_energy_initial_mw,
+            stored_energy_final_mw,
         }
     })
 }
@@ -2246,6 +2252,8 @@ mod transit_seed_tests {
             water_withdrawal_violation_neg_m3s: 0.0,
             integrated_equivalent_productivity_mw_per_m3s: 0.0,
             integrated_accumulated_productivity_mw_per_m3s: 0.0,
+            stored_energy_initial_mw: 0.0,
+            stored_energy_final_mw: 0.0,
         }
     }
 

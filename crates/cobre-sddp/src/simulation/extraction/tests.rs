@@ -4798,6 +4798,149 @@ fn stored_energy_rides_integrated_grid_distinct_from_reference_point() {
     );
 }
 
+/// `stored_energy_{initial,final}_mw` divide the corresponding `_mwh` value by
+/// the STAGE's total hours (`Σ block_hours`), never a per-block hours — proven
+/// on the no-turbine path and, under Parallel block mode (storage held constant
+/// across blocks), identical on every per-block row of the stage.
+#[test]
+fn stored_energy_mw_divides_by_stage_total_hours() {
+    let rho_acum_integrated = 2.0_f64;
+    let v_min = 5.0_f64;
+    let storage_initial = 20.0_f64;
+    let storage_final = 50.0_f64;
+    let ec = one_hydro_energy_set(0.0, rho_acum_integrated);
+    let block_hours = [100.0_f64, 200.0, 300.0];
+    let stage_total_hours: f64 = block_hours.iter().sum();
+
+    let indexer = test_support::geom(1, 1);
+    let study_dims = test_support::study_dims();
+    let state = test_support::state_layout(1, 1);
+    let primal = make_primal_1_1(storage_final, storage_initial, 0.0);
+    let dual = vec![0.0; 2];
+
+    let result = extract_stage_result(
+        &SolutionView {
+            primal: &primal,
+            dual: &dual,
+            objective: 0.0,
+            objective_coeffs: &[],
+            row_lower: &[],
+        },
+        &StageExtractionSpec {
+            study_dims: &study_dims,
+            geometry: &indexer,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
+            state: &state,
+            n_blks: indexer.n_blks,
+            entity_counts: &make_entity_counts_1_hydro(),
+            inflow_m3s_per_hydro: &[0.0],
+            block_hours: &block_hours,
+            generic_constraint_entries: &[],
+            ncs_col_start: 0,
+            n_ncs: 0,
+            ncs_entity_ids: &[],
+            ncs_col_upper: &[],
+            pumping_col_start: 0,
+            n_pumping: 0,
+            pumping_consumption_mw_per_m3s: &[],
+            contract_prices: &[],
+            contract_is_import: &[],
+            diversion_upstream: &HashMap::new(),
+            hydro_productivities: &[1.0],
+            col_scale: &[],
+            row_scale: &[],
+            cumulative_discount_factor: 1.0,
+            cost_scale_factor: 1_000_000.0,
+            energy_conversion: &ec,
+            hydro_min_storage_hm3: &[v_min],
+            stage_index: 0,
+            n_stages: 1,
+            anticipated_windows: &[],
+            study_stage_ids: &[],
+        },
+        0,
+    );
+
+    assert_eq!(result.hydros.len(), 1);
+    let row = &result.hydros[0];
+    let expected_initial_mw = row.stored_energy_initial_mwh / stage_total_hours;
+    let expected_final_mw = row.stored_energy_final_mwh / stage_total_hours;
+    assert_eq!(
+        row.stored_energy_initial_mw.to_bits(),
+        expected_initial_mw.to_bits(),
+        "no-turbine path: stored_energy_initial_mw must equal _mwh / stage total hours"
+    );
+    assert_eq!(
+        row.stored_energy_final_mw.to_bits(),
+        expected_final_mw.to_bits(),
+        "no-turbine path: stored_energy_final_mw must equal _mwh / stage total hours"
+    );
+
+    let k = 3_usize;
+    let geom = single_hydro_block_geometry(BlockMode::Parallel, k);
+    let pb_state = test_support::state_layout(1, 0);
+    let n_cols = geom.spillage.end + k * 3;
+    let mut pb_primal = vec![0.0_f64; n_cols];
+    pb_primal[0] = storage_final; // Sᴷ (outgoing)
+    pb_primal[2] = storage_initial; // S⁰ (incoming)
+    let pb_dual = vec![0.0_f64; 4];
+
+    let pb_spec = StageExtractionSpec {
+        study_dims: &study_dims,
+        geometry: &geom,
+        hydro_cell_index: &test_support::identity_hydro_cell_index(256),
+        state: &pb_state,
+        n_blks: k,
+        entity_counts: &entity_counts_1_hydro(),
+        inflow_m3s_per_hydro: &[0.0],
+        block_hours: &block_hours,
+        generic_constraint_entries: &[],
+        ncs_col_start: 0,
+        n_ncs: 0,
+        ncs_entity_ids: &[],
+        ncs_col_upper: &[],
+        pumping_col_start: 0,
+        n_pumping: 0,
+        pumping_consumption_mw_per_m3s: &[],
+        contract_prices: &[],
+        contract_is_import: &[],
+        diversion_upstream: &HashMap::new(),
+        hydro_productivities: &[0.0],
+        col_scale: &[],
+        row_scale: &[],
+        cumulative_discount_factor: 1.0,
+        cost_scale_factor: 1_000_000.0,
+        energy_conversion: &ec,
+        hydro_min_storage_hm3: &[v_min],
+        stage_index: 0,
+        n_stages: 1,
+        anticipated_windows: &[],
+        study_stage_ids: &[],
+    };
+    let pb_view = SolutionView {
+        primal: &pb_primal,
+        dual: &pb_dual,
+        objective: 0.0,
+        objective_coeffs: &vec![0.0_f64; n_cols],
+        row_lower: &[],
+    };
+
+    let pb_result = extract_stage_result(&pb_view, &pb_spec, 0);
+    assert_eq!(pb_result.hydros.len(), k);
+    for pb_row in &pb_result.hydros {
+        assert_eq!(
+            pb_row.stored_energy_initial_mw.to_bits(),
+            expected_initial_mw.to_bits(),
+            "per-block path: stored_energy_initial_mw must divide by stage, not per-block, hours"
+        );
+        assert_eq!(
+            pb_row.stored_energy_final_mw.to_bits(),
+            expected_final_mw.to_bits(),
+            "per-block path: stored_energy_final_mw must divide by stage, not per-block, hours"
+        );
+    }
+}
+
 #[test]
 fn stage_path_propagates_productivity_values() {
     // The per-stage path (block_hours empty) must read ρ_eq and ρ_acum
