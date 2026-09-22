@@ -8,6 +8,7 @@
 
 use chrono::NaiveDate;
 use cobre_comm::ExecutionTopology;
+use cobre_io::RankAffinity;
 use cobre_io::SetupTimings;
 use console::Term;
 
@@ -72,6 +73,14 @@ fn format_rank_list(ranks: &[usize]) -> String {
     segments.join(", ")
 }
 
+fn format_u32_id_list(ids: &[u32]) -> String {
+    let ids = ids
+        .iter()
+        .map(|&id| usize::try_from(id).unwrap_or(usize::MAX))
+        .collect::<Vec<_>>();
+    format_rank_list(&ids)
+}
+
 /// Print the execution topology summary to `stderr`.
 ///
 /// Renders a bold header followed by indented detail lines showing the
@@ -104,6 +113,7 @@ pub fn print_execution_topology(
     n_threads: usize,
     solver_name: &str,
     solver_version: Option<&str>,
+    affinity: Option<&RankAffinity>,
 ) {
     use cobre_comm::BackendKind;
 
@@ -179,6 +189,74 @@ pub fn print_execution_topology(
         BackendKind::Auto => {
             let _ = stderr.write_line(&format!("  Backend:   {:?}", topology.backend));
             let _ = stderr.write_line(&format!("  Threads:   {n_threads} {thread_word}"));
+        }
+    }
+
+    if let Some(affinity) = affinity {
+        match (
+            affinity.physical_cores,
+            affinity.visible_processing_units,
+            affinity.online_processing_units,
+            affinity.numa_nodes,
+        ) {
+            (Some(cores), Some(visible), Some(online), Some(nodes)) => {
+                let restriction = if visible < online {
+                    format!(", {visible}/{online} logical CPUs visible")
+                } else {
+                    format!(", {visible} logical CPUs visible")
+                };
+                let _ = stderr.write_line(&format!(
+                    "  CPU:       {cores} physical cores, {nodes} NUMA node(s){restriction}"
+                ));
+            }
+            _ => {
+                if let Some(error) = &affinity.discovery_error {
+                    let _ = stderr.write_line(&format!("  CPU:       unavailable ({error})"));
+                }
+            }
+        }
+        let detail = if affinity.worker_cpus.is_empty() {
+            affinity.policy.clone()
+        } else {
+            format!(
+                "{} ({} worker bindings)",
+                affinity.policy,
+                affinity.worker_cpus.len()
+            )
+        };
+        let _ = stderr.write_line(&format!("  Affinity:  {detail}"));
+        if let Some(policy) = &affinity.memory_policy {
+            let policy_nodes = if affinity.memory_policy_nodes.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " on nodes {}",
+                    format_u32_id_list(&affinity.memory_policy_nodes)
+                )
+            };
+            let allowed_nodes = if affinity.allowed_memory_nodes.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    ", allowed nodes {}",
+                    format_u32_id_list(&affinity.allowed_memory_nodes)
+                )
+            };
+            let _ = stderr.write_line(&format!(
+                "  Memory:    {policy}{policy_nodes}{allowed_nodes}"
+            ));
+        } else if let Some(error) = &affinity.memory_discovery_error {
+            let allowed_nodes = if affinity.allowed_memory_nodes.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    ", allowed nodes {}",
+                    format_u32_id_list(&affinity.allowed_memory_nodes)
+                )
+            };
+            let _ = stderr.write_line(&format!(
+                "  Memory:    policy unavailable ({error}){allowed_nodes}"
+            ));
         }
     }
 }

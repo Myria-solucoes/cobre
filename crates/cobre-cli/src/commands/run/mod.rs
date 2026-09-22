@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use clap::{Args, ValueEnum};
 use console::Term;
 
-use cobre_comm::{BackendKind, Communicator, ExecutionTopology};
+use cobre_comm::{AffinityPolicy, BackendKind, Communicator, ExecutionTopology};
 
 use crate::error::CliError;
 
@@ -45,6 +45,28 @@ impl From<CommBackendArg> for BackendKind {
             CommBackendArg::Auto => BackendKind::Auto,
             CommBackendArg::Local => BackendKind::Local,
             CommBackendArg::Mpi => BackendKind::Mpi,
+        }
+    }
+}
+
+/// Worker CPU-binding policy selected by `--cpu-bind`.
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+pub enum CpuBindArg {
+    /// Preserve operating-system or launcher scheduling.
+    #[default]
+    None,
+    /// Fill physical cores before using SMT siblings.
+    Core,
+    /// Spread workers across visible NUMA nodes, then physical cores.
+    Numa,
+}
+
+impl From<CpuBindArg> for AffinityPolicy {
+    fn from(arg: CpuBindArg) -> Self {
+        match arg {
+            CpuBindArg::None => AffinityPolicy::None,
+            CpuBindArg::Core => AffinityPolicy::Core,
+            CpuBindArg::Numa => AffinityPolicy::Numa,
         }
     }
 }
@@ -75,6 +97,11 @@ pub struct RunArgs {
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
     pub threads: Option<u32>,
 
+    /// Bind Rayon workers to visible CPUs: `none`, `core`, or `numa`.
+    /// The default preserves operating-system or launcher scheduling.
+    #[arg(long, value_enum, default_value_t = CpuBindArg::None)]
+    pub cpu_bind: CpuBindArg,
+
     /// Communication backend. `auto` (default) selects `mpi` when launched under
     /// an MPI launcher (`mpiexec`/`mpirun`/`srun`) and `local` otherwise; `local`
     /// forces single-process; `mpi` forces the MPI backend (requires the binary
@@ -89,6 +116,9 @@ pub(super) struct RunContext<C: Communicator> {
     pub(super) is_root: bool,
     pub(super) quiet: bool,
     pub(super) n_threads: usize,
+    /// CPU topology and per-rank worker placement captured during setup.
+    pub(super) rank_affinity: Vec<cobre_io::RankAffinity>,
+    /// Resolved output directory.
     pub(super) output_dir: PathBuf,
     /// Input root every path resolves against, never the output directory.
     pub(super) case_dir: PathBuf,
@@ -167,6 +197,7 @@ fn execute_inner<C: Communicator>(ctx: &RunContext<C>, args: &RunArgs) -> Result
                         &ctx.topology,
                         ctx.n_threads,
                         mpi_world_size,
+                        &ctx.rank_affinity,
                     ),
                     setup: setup_timings,
                     production_fit_deviation: build_deviation_summary(
@@ -265,6 +296,7 @@ pub(super) fn build_distribution_info(
     topology: &ExecutionTopology,
     n_threads: usize,
     ranks_participated: u32,
+    rank_affinity: &[cobre_io::RankAffinity],
 ) -> DistributionInfo {
     DistributionInfo {
         backend: match topology.backend {
@@ -282,6 +314,7 @@ pub(super) fn build_distribution_info(
         thread_level: topology.mpi.as_ref().map(|m| m.thread_level.clone()),
         slurm_job_id: topology.slurm.as_ref().map(|s| s.job_id.clone()),
         hosts: host_layouts(topology),
+        rank_affinity: rank_affinity.to_vec(),
     }
 }
 

@@ -108,7 +108,7 @@ pub use output::{
     GenericConstraintEchoRow, HostLayout, IterationRecord, MetadataBounds, MetadataConfiguration,
     MetadataConvergence, MetadataCost, MetadataIterations, MetadataProblemDimensions,
     MetadataRowPool, MetadataScenarios, MetadataSimulationSolveStats, MetadataTrainingSolveStats,
-    OutputContext, OutputError, RowPoolStatistics, RowSelectionRecord, SetupTimings,
+    OutputContext, OutputError, RankAffinity, RowPoolStatistics, RowSelectionRecord, SetupTimings,
     SimulationMetadata, SimulationOutput, SolverStatsRow, TrainingMetadata, TrainingOutput,
     TrainingParquetWriter, WorkerTimingRecord, get_hostname, now_iso8601, read_simulation_metadata,
     read_training_metadata, simulation_family_subpaths, write_dictionaries,

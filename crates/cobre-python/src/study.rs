@@ -12,6 +12,8 @@
 //! Like [`crate::run`], this module uses [`cobre_comm::LocalBackend`] exclusively
 //! and never initializes MPI.
 
+use cobre_comm::AffinityPolicy;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -93,6 +95,7 @@ pub struct Study {
     case_dir: PathBuf,
     /// The requested thread count, stored for later `train`/`simulate` calls.
     threads: Option<u32>,
+    cpu_bind: AffinityPolicy,
 }
 
 /// The output of [`Study::train`]: an in-memory trained-policy handle.
@@ -279,6 +282,7 @@ impl Study {
         case_dir: &std::path::Path,
         output_dir: Option<PathBuf>,
         threads: Option<u32>,
+        cpu_bind: AffinityPolicy,
         overrides: Option<serde_json::Map<String, serde_json::Value>>,
     ) -> Result<Self, PhaseError> {
         let resolved_output = output_dir.unwrap_or_else(|| case_dir.join("output"));
@@ -308,6 +312,7 @@ impl Study {
             output_dir: resolved_output,
             case_dir: case_dir.to_path_buf(),
             threads,
+            cpu_bind,
         })
     }
 
@@ -342,13 +347,14 @@ impl Study {
         let output_dir = self.output_dir.clone();
         let case_dir = self.case_dir.clone();
         let threads = self.threads;
+        let cpu_bind = self.cpu_bind;
         let setup_timings = self.setup_timings.clone();
         let setup = &mut self.setup;
         let system = self.system.as_ref();
         let config = &self.config;
 
         let phase_result: Result<(TrainingPhaseResult, Option<PyErr>), PhaseError> =
-            run_in_scoped_pool(threads, |n| {
+            run_in_scoped_pool(threads, cpu_bind, |n, rank_affinity| {
                 apply_training_policy_mode(setup, system, config, &output_dir, &case_dir)?;
 
                 let (training, callback_error) = match on_iteration {
@@ -365,6 +371,7 @@ impl Study {
                     &setup_timings,
                     seed,
                     n,
+                    rank_affinity,
                 )?;
                 write_fpha_hyperplanes_if_any(&output_dir, setup)?;
                 write_evaporation_models_if_any(&output_dir, setup, system)?;
@@ -432,12 +439,13 @@ impl Study {
         self.setup.replace_fcf(policy.fcf.clone());
 
         let threads = self.threads;
+        let cpu_bind = self.cpu_bind;
         let setup = &mut self.setup;
         let system = self.system.as_ref();
         let training_result = &policy.training_result;
 
-        run_in_scoped_pool(threads, |n| {
-            run_simulation_phase_py(setup, &out_dir, system, training_result, n)
+        run_in_scoped_pool(threads, cpu_bind, |n, rank_affinity| {
+            run_simulation_phase_py(setup, &out_dir, system, training_result, n, rank_affinity)
         })?
     }
 }
@@ -476,7 +484,7 @@ impl Study {
     /// - Raises `SolverError` (a `RuntimeError`) on any other preprocessing or
     ///   construction failure.
     #[new]
-    #[pyo3(signature = (case_dir, output_dir=None, threads=None, config_overrides=None))]
+    #[pyo3(signature = (case_dir, output_dir=None, threads=None, config_overrides=None, cpu_bind=None))]
     // needless_pass_by_value: PyO3's from-Python extraction hands over owned
     // values, so the `PathBuf`/`Bound` arguments cannot be borrowed here.
     #[allow(clippy::needless_pass_by_value)]
@@ -486,6 +494,7 @@ impl Study {
         output_dir: Option<PathBuf>,
         threads: Option<u32>,
         config_overrides: Option<Bound<'_, PyDict>>,
+        cpu_bind: Option<String>,
     ) -> PyResult<Self> {
         if !case_dir.exists() {
             return Err(PyOSError::new_err(format!(
@@ -495,12 +504,17 @@ impl Study {
         }
 
         let threads = crate::run::validated_threads(threads)?;
+        let cpu_bind = cpu_bind
+            .as_deref()
+            .unwrap_or("none")
+            .parse::<AffinityPolicy>()
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
 
         let overrides = config_overrides
             .map(|dict| pydict_to_json_map(&dict))
             .transpose()?;
 
-        py.detach(|| Self::new_native(&case_dir, output_dir, threads, overrides))
+        py.detach(|| Self::new_native(&case_dir, output_dir, threads, cpu_bind, overrides))
             .map_err(phase_error_to_pyerr)
     }
 

@@ -44,7 +44,7 @@ use crate::errors::{
 };
 use cobre_io::LoadError;
 
-use cobre_comm::LocalBackend;
+use cobre_comm::{AffinityPolicy, AffinityReport, LocalBackend, WorkerAffinity};
 use cobre_core::System;
 use cobre_core::TrainingEvent::IterationSummary;
 use cobre_io::BoundaryPolicy;
@@ -58,6 +58,7 @@ use cobre_io::MetadataTrainingSolveStats;
 use cobre_io::OutputContext;
 use cobre_io::PolicyMode::Resume;
 use cobre_io::PolicyMode::WarmStart;
+use cobre_io::RankAffinity;
 use cobre_io::ReportEntry;
 use cobre_io::SetupTimings;
 use cobre_io::SolverStatsRow;
@@ -113,13 +114,13 @@ use cobre_sddp::rescale_checkpoint_cuts_for_load;
 use cobre_sddp::resolve_boundary_state_requirements;
 use cobre_sddp::setup::RunPhasePlan;
 use cobre_sddp::solver_stats_log_to_rows;
-use cobre_sddp::study_horizon_end;
 use cobre_sddp::validate_policy_load;
 use cobre_sddp::{
     ArOrderSummary, DEFAULT_SEED, HydroModelSummary, ModelProvenanceReport, SolverStatsDelta,
     StochasticSource, StochasticSummary, StudyParams, StudySetup, build_hydro_model_summary,
     build_provenance_report, build_stochastic_summary, prepare_stochastic,
 };
+use cobre_sddp::{study_horizon_end, sum_phase_timing_ms};
 use cobre_solver::ActiveSolver;
 use cobre_solver::active_solver_metadata_id;
 use cobre_solver::active_solver_version;
@@ -242,17 +243,70 @@ pub(crate) fn validated_threads(threads: Option<u32>) -> PyResult<Option<u32>> {
 /// silently falling back to an implicit pool.
 pub(crate) fn run_in_scoped_pool<T>(
     threads: Option<u32>,
-    f: impl FnOnce(usize) -> T + Send,
+    cpu_bind: AffinityPolicy,
+    f: impl FnOnce(usize, &RankAffinity) -> T + Send,
 ) -> Result<T, String>
 where
     T: Send,
 {
     let n = threads.map_or(1, |t| t as usize);
+    let affinity = WorkerAffinity::prepare(cpu_bind, n)
+        .map_err(|error| format!("{INTERNAL_ERROR_PREFIX}: CPU affinity setup failed: {error}"))?;
+    let worker_affinity = affinity.clone();
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(n)
+        .start_handler(move |worker_index| worker_affinity.bind_worker(worker_index))
         .build()
         .map_err(|e| format!("{INTERNAL_ERROR_PREFIX}: rayon pool construction failed: {e}"))?;
-    Ok(pool.install(|| f(n)))
+    // Start every worker before `verify`; start hooks cannot return errors.
+    pool.broadcast(|_| {});
+    affinity
+        .verify()
+        .map_err(|error| format!("{INTERNAL_ERROR_PREFIX}: CPU affinity setup failed: {error}"))?;
+    let rank_affinity = rank_affinity_from_report(affinity.report());
+    Ok(pool.install(|| f(n, &rank_affinity)))
+}
+
+pub(crate) fn rank_affinity_from_report(report: &AffinityReport) -> RankAffinity {
+    RankAffinity {
+        rank: 0,
+        policy: report.policy.as_str().to_string(),
+        online_processing_units: report
+            .online_processing_units
+            .map(|value| u32::try_from(value).unwrap_or(u32::MAX)),
+        visible_processing_units: report
+            .visible_processing_units
+            .map(|value| u32::try_from(value).unwrap_or(u32::MAX)),
+        physical_cores: report
+            .physical_cores
+            .map(|value| u32::try_from(value).unwrap_or(u32::MAX)),
+        numa_nodes: report
+            .numa_nodes
+            .map(|value| u32::try_from(value).unwrap_or(u32::MAX)),
+        visible_cpus: report
+            .visible_cpus
+            .iter()
+            .map(|&cpu| u32::try_from(cpu).unwrap_or(u32::MAX))
+            .collect(),
+        memory_policy: report.memory_policy.clone(),
+        memory_policy_nodes: report
+            .memory_policy_nodes
+            .iter()
+            .map(|&node| u32::try_from(node).unwrap_or(u32::MAX))
+            .collect(),
+        allowed_memory_nodes: report
+            .allowed_memory_nodes
+            .iter()
+            .map(|&node| u32::try_from(node).unwrap_or(u32::MAX))
+            .collect(),
+        memory_discovery_error: report.memory_discovery_error.clone(),
+        worker_cpus: report
+            .worker_cpus
+            .iter()
+            .map(|&cpu| u32::try_from(cpu).unwrap_or(u32::MAX))
+            .collect(),
+        discovery_error: report.discovery_error.clone(),
+    }
 }
 
 /// Result of the training phase within `run_via_study`.
@@ -289,7 +343,9 @@ fn build_training_phase_result(
         .sum();
     let (first_try, retried, failed, forward_solve_seconds, backward_solve_seconds) =
         aggregate_solver_stats_log(&training_result.solver_stats_log, None);
-    training_output.training_solve_stats = MetadataTrainingSolveStats {
+    let phase_timing = sum_phase_timing_ms(&training_output.convergence_records);
+    #[allow(clippy::cast_precision_loss)]
+    let persisted_stats = MetadataTrainingSolveStats {
         total_lp_solves: Some(total_lp_solves),
         first_try: Some(first_try),
         retried: Some(retried),
@@ -297,7 +353,17 @@ fn build_training_phase_result(
         forward_solve_seconds: Some(forward_solve_seconds),
         backward_solve_seconds: Some(backward_solve_seconds),
         parallelism: Some(u32::try_from(n_threads).unwrap_or(u32::MAX)),
+        forward_phase_wall_seconds: Some(phase_timing.forward_wall_ms as f64 / 1000.0),
+        backward_phase_wall_seconds: Some(phase_timing.backward_wall_ms as f64 / 1000.0),
+        forward_wait_seconds: Some(phase_timing.forward_wait_ms as f64 / 1000.0),
+        backward_wait_seconds: Some(phase_timing.backward_wait_ms as f64 / 1000.0),
+        serial_lower_bound_seconds: Some(phase_timing.lower_bound_ms as f64 / 1000.0),
+        serial_row_selection_seconds: Some(phase_timing.cut_selection_ms as f64 / 1000.0),
+        serial_row_sync_seconds: Some(phase_timing.cut_sync_ms as f64 / 1000.0),
+        serial_allreduce_seconds: Some(phase_timing.allreduce_ms as f64 / 1000.0),
+        serial_scheduling_seconds: Some(phase_timing.scheduling_ms as f64 / 1000.0),
     };
+    training_output.training_solve_stats = persisted_stats;
 
     TrainingPhaseResult {
         result: training_result,
@@ -483,7 +549,7 @@ fn drain_training_events(
 
 /// [`DistributionInfo`] for a single-process (non-MPI) run, shared by the
 /// training and simulation `OutputContext` sites.
-fn single_process_distribution(n_threads: usize) -> DistributionInfo {
+fn single_process_distribution(n_threads: usize, rank_affinity: &RankAffinity) -> DistributionInfo {
     DistributionInfo {
         backend: "local".to_string(),
         world_size: 1,
@@ -498,6 +564,7 @@ fn single_process_distribution(n_threads: usize) -> DistributionInfo {
             hostname: get_hostname(),
             ranks: vec![0],
         }],
+        rank_affinity: vec![rank_affinity.clone()],
     }
 }
 
@@ -512,6 +579,7 @@ pub(crate) fn write_training_artifacts(
     setup_timings: &SetupTimings,
     seed: u64,
     n_threads: usize,
+    rank_affinity: &RankAffinity,
 ) -> Result<(), String> {
     write_checkpoint(
         &output_dir.join(&setup.policy_path),
@@ -544,7 +612,7 @@ pub(crate) fn write_training_artifacts(
         solver_version: Some(active_solver_version()),
         started_at: training.started_at.clone(),
         completed_at: now_iso8601(),
-        distribution: single_process_distribution(n_threads),
+        distribution: single_process_distribution(n_threads, rank_affinity),
         setup: Some(setup_timings.clone()),
         // Mirrors the CLI write site so Python and CLI emit the same
         // `production_fit_deviation` section.
@@ -671,6 +739,7 @@ pub(crate) fn run_simulation_phase_py(
     system: &System,
     training_result: &TrainingResult,
     n_threads: usize,
+    rank_affinity: &RankAffinity,
 ) -> Result<SimSummary, PhaseError> {
     let sim_started_at = now_iso8601();
     let io_capacity = setup.simulation_config().io_channel_capacity;
@@ -820,7 +889,7 @@ pub(crate) fn run_simulation_phase_py(
         solver_version: Some(active_solver_version()),
         started_at: sim_started_at,
         completed_at: now_iso8601(),
-        distribution: single_process_distribution(n_threads),
+        distribution: single_process_distribution(n_threads, rank_affinity),
         setup: None,
         // training-only.
         production_fit_deviation: None,
@@ -1383,12 +1452,19 @@ pub(crate) fn run_via_study(
     case_dir: &Path,
     output_dir: PathBuf,
     threads: Option<u32>,
+    cpu_bind: AffinityPolicy,
     overrides: Option<Map<String, Value>>,
     on_iteration: Option<Py<PyAny>>,
 ) -> Result<RunSummary, RunError> {
     use crate::study::Study;
 
-    let mut study = Study::new_native(case_dir, Some(output_dir.clone()), threads, overrides)?;
+    let mut study = Study::new_native(
+        case_dir,
+        Some(output_dir.clone()),
+        threads,
+        cpu_bind,
+        overrides,
+    )?;
 
     let should_simulate = study.simulation_enabled();
 
@@ -1655,7 +1731,7 @@ fn iteration_summary_to_dict<'py>(
 // so the `PathBuf`/`Py<PyAny>` arguments cannot be borrowed at this boundary.
 #[allow(clippy::needless_pass_by_value)]
 #[pyfunction]
-#[pyo3(signature = (case_dir, output_dir=None, threads=None, config_overrides=None, on_iteration=None))]
+#[pyo3(signature = (case_dir, output_dir=None, threads=None, config_overrides=None, on_iteration=None, cpu_bind=None))]
 pub fn run(
     py: Python<'_>,
     case_dir: PathBuf,
@@ -1663,6 +1739,7 @@ pub fn run(
     threads: Option<u32>,
     config_overrides: Option<Bound<'_, PyDict>>,
     on_iteration: Option<Py<PyAny>>,
+    cpu_bind: Option<String>,
 ) -> PyResult<Py<PyAny>> {
     if !case_dir.exists() {
         return Err(PyOSError::new_err(format!(
@@ -1672,6 +1749,11 @@ pub fn run(
     }
 
     let threads = validated_threads(threads)?;
+    let cpu_bind = cpu_bind
+        .as_deref()
+        .unwrap_or("none")
+        .parse::<AffinityPolicy>()
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
 
     let resolved_output = output_dir.unwrap_or_else(|| case_dir.join("output"));
 
@@ -1680,7 +1762,14 @@ pub fn run(
         .transpose()?;
 
     let result: Result<RunSummary, RunError> = py.detach(move || {
-        run_via_study(&case_dir, resolved_output, threads, overrides, on_iteration)
+        run_via_study(
+            &case_dir,
+            resolved_output,
+            threads,
+            cpu_bind,
+            overrides,
+            on_iteration,
+        )
     });
 
     match result {
@@ -1764,6 +1853,7 @@ mod tests {
         read_policy_checkpoint, reconstruct_policy_from_checkpoint, run_in_scoped_pool,
         run_via_study,
     };
+    use cobre_comm::AffinityPolicy;
 
     /// `build_study_setup` is Python-free, so its happy path can be exercised
     /// without a GIL token. It must load `examples/1dtoy`, resolve the effective
@@ -2077,8 +2167,15 @@ mod tests {
             std::env::temp_dir().join(format!("cobre_py_parity_{}", std::process::id()));
         std::fs::create_dir_all(&output_dir).expect("create output dir");
 
-        run_via_study(&case_dir, output_dir.clone(), Some(1), None, None)
-            .expect("run_via_study must succeed for 1dtoy via Python path");
+        run_via_study(
+            &case_dir,
+            output_dir.clone(),
+            Some(1),
+            AffinityPolicy::None,
+            None,
+            None,
+        )
+        .expect("run_via_study must succeed for 1dtoy via Python path");
 
         let training = cobre_io::read_training_metadata(&output_dir.join("training/metadata.json"))
             .expect("read training metadata");
@@ -2173,8 +2270,8 @@ mod tests {
     /// requests yield distinct values regardless of call order.
     #[test]
     fn scoped_pool_honors_per_call_thread_count() {
-        let first = run_in_scoped_pool(Some(2), |n| n);
-        let second = run_in_scoped_pool(Some(3), |n| n);
+        let first = run_in_scoped_pool(Some(2), AffinityPolicy::None, |n, _| n);
+        let second = run_in_scoped_pool(Some(3), AffinityPolicy::None, |n, _| n);
 
         assert_eq!(
             first,
@@ -2242,8 +2339,15 @@ mod tests {
         .expect("write edited config.json");
 
         std::fs::create_dir_all(&edited_out).expect("create edited out dir");
-        run_via_study(&edited_case, edited_out.clone(), Some(1), None, None)
-            .expect("edited-config run must succeed");
+        run_via_study(
+            &edited_case,
+            edited_out.clone(),
+            Some(1),
+            AffinityPolicy::None,
+            None,
+            None,
+        )
+        .expect("edited-config run must succeed");
 
         // (b) Override path: run the unedited case with the equivalent override.
         let mut overrides = serde_json::Map::new();
@@ -2253,6 +2357,7 @@ mod tests {
             &case_dir,
             override_out.clone(),
             Some(1),
+            AffinityPolicy::None,
             Some(overrides),
             None,
         )
@@ -2309,8 +2414,15 @@ mod tests {
         std::fs::create_dir_all(&output_dir).expect("create output dir");
 
         // Produce a checkpoint by running the full lifecycle once.
-        run_via_study(&case_dir, output_dir.clone(), Some(1), None, None)
-            .expect("run_via_study must succeed for 1dtoy");
+        run_via_study(
+            &case_dir,
+            output_dir.clone(),
+            Some(1),
+            AffinityPolicy::None,
+            None,
+            None,
+        )
+        .expect("run_via_study must succeed for 1dtoy");
 
         // Build a fresh study and reconstruct the policy from the checkpoint. The
         // policy directory is `<output_dir>/<policy_path>` (the configured
@@ -2390,8 +2502,15 @@ mod tests {
 
         // (a) Train + simulate into dir A; this writes the checkpoint and the
         // train-then-simulate simulation metadata.
-        run_via_study(&case_dir, output_dir.clone(), Some(1), None, None)
-            .expect("train-then-simulate run_via_study must succeed");
+        run_via_study(
+            &case_dir,
+            output_dir.clone(),
+            Some(1),
+            AffinityPolicy::None,
+            None,
+            None,
+        )
+        .expect("train-then-simulate run_via_study must succeed");
 
         let train_then_sim =
             cobre_io::read_simulation_metadata(&output_dir.join("simulation/metadata.json"))
@@ -2411,6 +2530,7 @@ mod tests {
             &case_dir,
             output_dir.clone(),
             Some(1),
+            AffinityPolicy::None,
             Some(overrides),
             None,
         )

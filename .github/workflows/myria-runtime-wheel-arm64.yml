@@ -6,11 +6,11 @@ on:
       tag:
         description: Existing immutable Myria runtime release tag
         required: true
-        default: v0.15.0-myria.1
+        default: v0.16.0-myria.1
       source_ref:
         description: Source tag or commit used to build the release artifact
         required: true
-        default: v0.15.0-myria.1
+        default: v0.16.0-myria.1
 
 permissions:
   contents: write
@@ -28,6 +28,8 @@ jobs:
           submodules: recursive
       - name: Install native build tools
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake
+      - name: Validate native affinity and checkpoints
+        run: cargo test --locked -p cobre-comm --features affinity && cargo test --locked -p cobre-cli --test cli_run --test cli_run_affinity
       - name: Build CLI archive
         run: |
           cargo build --release -p cobre-cli
@@ -38,7 +40,7 @@ jobs:
       - name: Upload ARM64 CLI to immutable release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ inputs.tag }}" dist/cobre-cli-aarch64-unknown-linux-gnu.tar.xz --clobber
+        run: gh release upload "${{ inputs.tag }}" dist/cobre-cli-aarch64-unknown-linux-gnu.tar.xz
 
   wheel:
     runs-on: ubuntu-24.04-arm
@@ -60,4 +62,4 @@ jobs:
       - name: Upload ARM64 wheel to immutable release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ inputs.tag }}" crates/cobre-python/dist/*.whl --clobber
+        run: gh release upload "${{ inputs.tag }}" crates/cobre-python/dist/*.whl

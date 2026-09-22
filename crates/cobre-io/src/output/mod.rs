@@ -44,9 +44,10 @@ pub use manifest::{
     DeviationSummary, DeviationWorstEntry, DistributionInfo, HostLayout, MetadataBounds,
     MetadataConfiguration, MetadataConvergence, MetadataCost, MetadataGapRegime,
     MetadataIterations, MetadataProblemDimensions, MetadataRowPool, MetadataScenarios,
-    MetadataSimulationSolveStats, MetadataTrainingSolveStats, OutputContext, SetupTimings,
-    SimulationMetadata, TrainingMetadata, get_hostname, now_iso8601, read_simulation_metadata,
-    read_training_metadata, write_simulation_metadata, write_training_metadata,
+    MetadataSimulationSolveStats, MetadataTrainingSolveStats, OutputContext, RankAffinity,
+    SetupTimings, SimulationMetadata, TrainingMetadata, get_hostname, now_iso8601,
+    read_simulation_metadata, read_training_metadata, write_simulation_metadata,
+    write_training_metadata,
 };
 pub use provenance::write_provenance_report;
 pub use results_writer::{write_results, write_simulation_results, write_training_results};

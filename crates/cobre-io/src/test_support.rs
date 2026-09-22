@@ -1306,6 +1306,7 @@ pub mod output {
                 thread_level: None,
                 slurm_job_id: None,
                 hosts: Vec::new(),
+                rank_affinity: Vec::new(),
             },
             setup: None,
             production_fit_deviation: None,

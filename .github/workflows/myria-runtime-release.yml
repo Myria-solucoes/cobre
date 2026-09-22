@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Immutable GitHub Release tag (for example v0.15.0-myria.1)
+        description: Immutable GitHub Release tag (for example v0.16.0-myria.1)
         required: true
-        default: v0.15.0-myria.1
+        default: v0.16.0-myria.1
       prerelease:
         description: Publish an opt-in preview without changing the latest release
         type: boolean
@@ -45,6 +45,9 @@ jobs:
       - name: Install native build tools
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake
 
+      - name: Validate native affinity and checkpoint integration
+        run: cargo test --locked -p cobre-comm --features affinity && cargo test --locked -p cobre-cli --test cli_run --test cli_run_affinity
+
       - name: Build CLI archive
         run: |
           cargo build --release -p cobre-cli
@@ -68,6 +71,11 @@ jobs:
 
       - name: Collect Python wheel
         run: cp crates/cobre-python/dist/*.whl dist/
+
+      - name: Validate matching CLI and wheel
+        run: |
+          python -m pip install --no-deps dist/*.whl
+          python scripts/benchmarks/verify_runtime.py --cli dist/cli/cobre --case examples/4ree
 
       - name: Publish immutable GitHub Release
         env:
