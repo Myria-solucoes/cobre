@@ -76,8 +76,7 @@ factor, the `hydro_useful_volume_*` fold's `V_lo` term, and the
 `Hydro.{min,max}_storage_hm3`. `ResolvedBounds::hydro_bounds` is not called by
 any of these four consumers. This is a modeled input distinction, not an
 authoring obligation on any one input source: a plant's physical capacity and
-its per-stage operative envelope are two different facts, and the operative
-one is deliberately absent from every stored-energy calculation, so an active
+its per-stage operative envelope are two different facts, so an active
 flood-control ceiling never truncates a reported stored-energy value or the
 security-curve integration range. A per-stage physical range (as opposed to
 the stage-invariant entity field) is a reserved, not-built extension point,
@@ -249,12 +248,12 @@ described above — never a `"basis"` field on `computed_spec`, and never a
 both expressed by tag name, not by a field). Two designs considered earlier in
 this feature's development are retired and should not be re-attempted: moving
 the flood-control ceiling and similar per-stage operative limits out of
-`hydro_bounds` and into a separate physical-range-purity channel (the physical
-and operative ranges stay exactly where they are — `Hydro.{min,max}_storage_hm3`
-and `HydroStageBounds`, respectively); and a per-plant basis or
-participation field selecting which evaluator a plant uses (the
-collapsed-range rule above makes this unnecessary — a plant with a collapsed
-range already gets point-equal-to-mean behavior with no field to set).
+`hydro_bounds` into a separate physical-range-purity channel (see "The
+physical/operative split" above — the two ranges stay exactly where they
+are); and a per-plant basis or participation field selecting which evaluator
+a plant uses (the collapsed-range rule above already makes this unnecessary —
+a plant with a collapsed range gets point-equal-to-mean behavior with no
+field to set).
 
 ## Corner cases
 
