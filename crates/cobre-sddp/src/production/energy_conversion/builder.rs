@@ -2281,10 +2281,11 @@ mod tests {
     /// geometry gate key by `hydro.id`, never by declaration position.
     #[test]
     fn rho_esp_override_grids_are_declaration_order_invariant() {
-        let mut hydro_a = make_hydro_with(1, HydroGenerationModel::Fpha, 100.0, 300.0, 50.0, None);
-        hydro_a.tailrace = None;
-        hydro_a.hydraulic_losses = None;
-        let hydro_b = make_hydro_with(
+        let mut fpha_plant =
+            make_hydro_with(1, HydroGenerationModel::Fpha, 100.0, 300.0, 50.0, None);
+        fpha_plant.tailrace = None;
+        fpha_plant.hydraulic_losses = None;
+        let constant_plant = make_hydro_with(
             2,
             HydroGenerationModel::ConstantProductivity,
             50.0,
@@ -2293,21 +2294,21 @@ mod tests {
             None,
         );
 
-        let (id_a, rows_a) = vha_constant_height(hydro_a.id, 400.0);
-        let (id_b, rows_b) = vha_constant_height(hydro_b.id, 200.0);
+        let (id_a, rows_a) = vha_constant_height(fpha_plant.id, 400.0);
+        let (id_b, rows_b) = vha_constant_height(constant_plant.id, 200.0);
         let mut map = HashMap::new();
         map.insert(id_a, rows_a);
         map.insert(id_b, rows_b);
 
         let override_table = build_hydro_energy_productivity_override(&[
-            rho_esp_override_row(hydro_a.id, None, Some(0.02)),
-            rho_esp_override_row(hydro_b.id, None, Some(0.05)),
+            rho_esp_override_row(fpha_plant.id, None, Some(0.02)),
+            rho_esp_override_row(constant_plant.id, None, Some(0.05)),
         ])
         .expect("override builds");
 
         for hydros in [
-            vec![hydro_a.clone(), hydro_b.clone()],
-            vec![hydro_b.clone(), hydro_a.clone()],
+            vec![fpha_plant.clone(), constant_plant.clone()],
+            vec![constant_plant.clone(), fpha_plant.clone()],
         ] {
             let cascade = CascadeTopology::build(&hydros);
             let resolver = constant_resolver(&hydros, 0.5, 1);
@@ -2322,23 +2323,28 @@ mod tests {
             )
             .expect("builder succeeds");
 
-            let idx_a = hydros.iter().position(|h| h.id == hydro_a.id).unwrap();
-            let idx_b = hydros.iter().position(|h| h.id == hydro_b.id).unwrap();
+            let fpha_idx = hydros.iter().position(|h| h.id == fpha_plant.id).unwrap();
+            let constant_idx = hydros
+                .iter()
+                .position(|h| h.id == constant_plant.id)
+                .unwrap();
 
             assert_eq!(
-                set.conversion(idx_a, 0)
+                set.conversion(fpha_idx, 0)
                     .equivalent_productivity_mw_per_m3s
                     .to_bits(),
                 (0.02_f64 * 400.0).to_bits(),
                 "hydro A's overridden ρ_eq must be order-invariant"
             );
             assert_eq!(
-                set.integrated_equivalent_productivity(idx_a, 0).to_bits(),
+                set.integrated_equivalent_productivity(fpha_idx, 0)
+                    .to_bits(),
                 (0.02_f64 * 400.0).to_bits(),
                 "hydro A's overridden mean own term must be order-invariant"
             );
             assert_eq!(
-                set.integrated_equivalent_productivity(idx_b, 0).to_bits(),
+                set.integrated_equivalent_productivity(constant_idx, 0)
+                    .to_bits(),
                 (0.05_f64 * 200.0).to_bits(),
                 "hydro B's overridden mean own term must be order-invariant"
             );
