@@ -733,7 +733,7 @@ impl UsefulVolumeFixtures {
     }
 }
 
-/// AC1: `1.0 * hydro_useful_volume_final(h) >= B` resolves to `B + 1.0*V_lo(h,t)`.
+/// `1.0 * hydro_useful_volume_final(h) >= B` resolves to `B + 1.0*V_lo(h,t)`.
 #[test]
 fn useful_volume_single_term_lower_bound_folds_v_lo() {
     let mut fixtures = UsefulVolumeFixtures::new(1, 1);
@@ -796,7 +796,7 @@ fn useful_volume_negative_coefficient_lower_bound_subtracts_v_lo() {
     assert_eq!(row.bound_upper, None);
 }
 
-/// AC2: `c1*ufv(h1) + c2*ufv(h2) >= B` resolves to `B + c1*V_lo(h1,t) + c2*V_lo(h2,t)`.
+/// `c1*ufv(h1) + c2*ufv(h2) >= B` resolves to `B + c1*V_lo(h1,t) + c2*V_lo(h2,t)`.
 #[test]
 fn useful_volume_multi_term_lower_bound_sums_each_hydros_v_lo() {
     let mut fixtures = UsefulVolumeFixtures::new(2, 1);
@@ -837,7 +837,7 @@ fn useful_volume_multi_term_lower_bound_sums_each_hydros_v_lo() {
     );
 }
 
-/// AC4: a constraint with no useful-volume term is bit-identical to the pre-fold
+/// A constraint with no useful-volume term is bit-identical to the pre-fold
 /// value — proven with a `-0.0` endpoint, since `-0.0 + 0.0` would flip the sign
 /// bit, catching an implementation that always adds the (possibly zero) shift.
 #[test]
