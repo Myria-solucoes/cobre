@@ -45,12 +45,14 @@ pip install cobre-python
 | API Docs      | [docs.rs/cobre-sddp](https://docs.rs/cobre-sddp)                        |
 | PyPI          | [pypi.org/project/cobre-python](https://pypi.org/project/cobre-python/) |
 | Myria runtime | [installation and validation guide](docs/guide/myria-runtime.md)         |
+| Myria convergence | [parallel convergence readings](docs/guide/convergence-gap-regimes.md) |
 
 ## Getting Started
 
 - **Coming from other software?** -- See the [cobre-bridge guide](https://docs.cobre-rs.dev/guide/cobre-bridge.html)
 - **New to SDDP?** -- Read [What Cobre Solves](https://docs.cobre-rs.dev/tutorial/what-cobre-solves.html)
 - **Python user?** -- Try the [Python Quickstart](https://docs.cobre-rs.dev/guide/python-quickstart.html)
+- **Using the Myria runtime?** -- Understand the [parallel legacy gap and lower-bound stability readings](docs/guide/convergence-gap-regimes.md)
 
 On Linux, worker affinity is opt-in and respects the CPU set inherited from the
 shell, container, MPI launcher, or scheduler:
