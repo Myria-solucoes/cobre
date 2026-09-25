@@ -421,6 +421,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The gap rule's API documentation now includes uniform CVaR admissibility.
 - Correct the validation JSON release notes: the CLI field is `error.phase`,
   while Python validation entries use `kind`.
+- `cobre validate` now classifies top-level parse, schema, and policy-compatibility
+  load failures as validation errors (exit 1), matching `cobre run`, instead of
+  internal errors (exit 4). Filesystem failures remain exit 2, and the validation
+  report and JSON error format are unchanged.
 
 - **`cobre validate` and `cobre.io.validate` now reject a boundary-configured
   study whose scalar-parameter table has a genuine gap, instead of silently

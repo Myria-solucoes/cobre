@@ -359,6 +359,33 @@ fn emit_json_error(json: bool, kind: &str, message: &str) -> Result<(), CliError
     Ok(())
 }
 
+fn report_load_error(
+    err: LoadError,
+    stdout: Option<&Term>,
+    json: bool,
+    case_dir: &Path,
+) -> Result<(), CliError> {
+    let kind = err.kind();
+    let message = err.to_string();
+    match err {
+        LoadError::ConstraintError { description } => {
+            // Warnings are unavailable when errors abort the pipeline.
+            if let Some(term) = stdout {
+                format_constraint_description(term, &description, 0, case_dir);
+            }
+            emit_json_error(json, kind, &description)?;
+            Err(CliError::Validation {
+                report: description,
+                already_rendered: true,
+            })
+        }
+        other => {
+            emit_json_error(json, kind, &message)?;
+            Err(CliError::from(other))
+        }
+    }
+}
+
 /// Execute the `validate` subcommand, printing a structured diagnostic report
 /// (with any pipeline warnings) to stdout. Honors the module's validation contract:
 /// exit 0 implies `cobre run` will not fail before the solver begins iterating.
@@ -367,7 +394,7 @@ fn emit_json_error(json: bool, kind: &str, message: &str) -> Result<(), CliError
 ///
 /// Returns [`CliError::Validation`] when the case directory fails validation,
 /// [`CliError::Io`] on filesystem errors, or [`CliError::Internal`] for
-/// unexpected parse or schema failures.
+/// internal preparation or output-serialization failures.
 pub fn execute(args: &ValidateArgs) -> Result<(), CliError> {
     let stdout = Term::stdout();
     let stdout_sink = (!args.json).then_some(&stdout);
@@ -386,32 +413,7 @@ pub fn execute(args: &ValidateArgs) -> Result<(), CliError> {
     let (loaded, report) = match validate_case_with_artifacts(&args.case_dir) {
         Ok(result) => result,
         Err(err) => {
-            let kind = err.kind();
-            let message = err.to_string();
-            match err {
-                LoadError::IoError { path, source } => {
-                    emit_json_error(args.json, kind, &message)?;
-                    return Err(CliError::Io {
-                        source,
-                        context: path.display().to_string(),
-                    });
-                }
-                LoadError::ConstraintError { description } => {
-                    // Warnings are not available when errors abort the pipeline, so report 0.
-                    if let Some(term) = stdout_sink {
-                        format_constraint_description(term, &description, 0, &args.case_dir);
-                    }
-                    emit_json_error(args.json, kind, &description)?;
-                    return Err(CliError::Validation {
-                        report: description,
-                        already_rendered: true,
-                    });
-                }
-                _ => {
-                    emit_json_error(args.json, kind, &message)?;
-                    return Err(CliError::Internal { message });
-                }
-            }
+            return report_load_error(err, stdout_sink, args.json, &args.case_dir);
         }
     };
 
@@ -543,6 +545,67 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn top_level_load_failures_exit_as_validation_errors() {
+        let errors = [
+            LoadError::ParseError {
+                path: PathBuf::from("system/buses.json"),
+                message: "invalid JSON".to_string(),
+            },
+            LoadError::SchemaError {
+                path: PathBuf::from("system/buses.json"),
+                field: "buses".to_string(),
+                message: "required field is missing".to_string(),
+            },
+            LoadError::PolicyIncompatible {
+                check: "stage count".to_string(),
+                policy_value: "2".to_string(),
+                system_value: "3".to_string(),
+            },
+        ];
+        let actual_codes = errors.map(|error| {
+            let message = error.to_string();
+            let result = report_load_error(error, None, false, Path::new("case"))
+                .expect_err("invalid input must fail validation");
+            assert!(result.to_string().contains(&message));
+            result.exit_code()
+        });
+        assert_eq!(actual_codes, [1, 1, 1]);
+    }
+
+    #[test]
+    fn load_error_reporting_preserves_io_and_rendered_constraints() {
+        let io = report_load_error(
+            LoadError::IoError {
+                path: PathBuf::from("system/buses.json"),
+                source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
+            },
+            None,
+            false,
+            Path::new("case"),
+        )
+        .expect_err("unreadable input must fail");
+        assert_eq!(io.exit_code(), 2);
+        assert!(matches!(io, CliError::Io { source, context }
+            if source.kind() == std::io::ErrorKind::PermissionDenied
+                && context == "system/buses.json"));
+
+        let constraint = report_load_error(
+            LoadError::ConstraintError {
+                description: "invalid bounds".to_string(),
+            },
+            None,
+            false,
+            Path::new("case"),
+        )
+        .expect_err("invalid bounds must fail");
+        assert_eq!(constraint.exit_code(), 1);
+        assert!(
+            matches!(constraint, CliError::Validation { report, already_rendered: true }
+            if report == "invalid bounds")
+        );
+    }
 
     #[test]
     fn format_report_contains_warning_label() {
