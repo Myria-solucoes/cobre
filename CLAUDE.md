@@ -44,6 +44,11 @@ These are non-negotiable. Violations must be fixed before committing.
 - Do not use `bincode` — use `postcard` for MPI, `FlatBuffers` for policy
 - Do not commit secrets, `.env` files, or credentials
 - Do not force-push to `main`
+- **Documentation ships with every change.** Update `CHANGELOG.md` for every
+  user-visible or operational change and update the owning guide with a verified
+  example for changed commands, configuration, APIs, outputs, warnings, or
+  packaging. A code-only refactor with no user-visible effect must say so in the
+  pull request. See `AGENTS.md` and `.claude/rules/doc-integrity.md`.
 - **`slow-tests` feature** — long-running tests (D-case sweep, FPHA plane-selection, forward-sampler convergence) are gated behind `#[cfg_attr(not(feature = "slow-tests"), ignore = ...)]`. Default `cargo test --workspace` skips them; pass `--features slow-tests` to include them.
 - **No plan-structure references in user-facing artifacts** — identifiers such
   as `Epic 09`, `ticket-007`, or `architecture-unification plan` must not
