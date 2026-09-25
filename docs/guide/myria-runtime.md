@@ -24,12 +24,9 @@ to `Myria-solucoes/cobre-bridge@f9cdf7dbe49dde7472f0c669f8a0cf28f83f1083`.
 The original does not support Myria periodic checkpoints. Historical runtime
 tags remain immutable but are no longer application choices for new operations.
 
-On 2026-09-25 both x86_64 variants converted, validated and executed the real
-NEWAVE fixture (112 stages, 155 hydros), completing two training iterations
-and four simulation scenarios without failures. Both Ubuntu 24.04 installers
-and application runners passed repeated-install and execution checks. Native
-x86_64 and ARM64 release gates passed; these checks are not an OCI deployment
-canary or a claim of policy convergence.
+The [changelog](../../CHANGELOG.md) records validation evidence. Application
+integration checks do not establish policy convergence or replace a deployment
+canary.
 
 ## Install the CLI artifact
 

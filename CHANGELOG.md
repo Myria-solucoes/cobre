@@ -11,6 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Consolidated the Myria application runtime as `v0.16.0-myria.2` alongside
+  the unmodified upstream `v0.16.0`. Tag publication now builds and validates
+  native x86_64 and ARM64 CLI/wheel pairs, including validation contracts and
+  typed policy errors. See [runtime installation](docs/guide/myria-runtime.md).
+  On 2026-09-25 both x86_64 application variants completed the real NEWAVE
+  fixture (112 stages, 155 hydros), two training iterations and four simulation
+  scenarios without failures; repeated Ubuntu 24.04 installation and application
+  runner checks also passed. This is not an OCI canary or convergence claim.
+
 - Support dynamic cut selection in by-node scheduling and optional adaptive batches.
 - Add complete-state deduplication and exploration-envelope feedback to the
   experimental point budget, with conservative full coverage after resume.
