@@ -9,13 +9,35 @@ Runtime artifacts are attached to a versioned GitHub release. They are not a
 replacement for the crates.io or PyPI distributions: use them when deploying
 the corresponding Myria runtime tag.
 
+## Supported application choices
+
+The Myria application exposes exactly `0.16` and `0.16-myria`. The original
+uses the unmodified upstream `v0.16.0` CLI and PyPI wheel, including its known
+CVaR mixture limitation. The corrected choice uses `v0.16.0-myria.2` from
+commit `59d0b42257be37bd83ff4eaada1002827b013129`, consolidating CVaR fixes,
+stationarity regularization, durable checkpoints, convergence diagnostics,
+validation contracts, typed policy errors and runtime optimizations.
+Approximate point selection and progressive population remain opt-in.
+
+Keep each CLI and matching Python wheel isolated. The NEWAVE bridge is pinned
+to `Myria-solucoes/cobre-bridge@f9cdf7dbe49dde7472f0c669f8a0cf28f83f1083`.
+The original does not support Myria periodic checkpoints. Historical runtime
+tags remain immutable but are no longer application choices for new operations.
+
+On 2026-09-25 both x86_64 variants converted, validated and executed the real
+NEWAVE fixture (112 stages, 155 hydros), completing two training iterations
+and four simulation scenarios without failures. Both Ubuntu 24.04 installers
+and application runners passed repeated-install and execution checks. Native
+x86_64 and ARM64 release gates passed; these checks are not an OCI deployment
+canary or a claim of policy convergence.
+
 ## Install the CLI artifact
 
 Choose a tag from the repository's GitHub Releases page and set it explicitly:
 
 ```bash
 REPOSITORY=Myria-solucoes/cobre
-RELEASE_TAG=v0.15.0-myria.1
+RELEASE_TAG=v0.16.0-myria.2
 ARTIFACT_DIR=$(mktemp -d)
 
 case "$(uname -m)" in
@@ -42,7 +64,7 @@ architectures. Select exactly one architecture-specific wheel:
 
 ```bash
 REPOSITORY=Myria-solucoes/cobre
-RELEASE_TAG=v0.15.0-myria.1
+RELEASE_TAG=v0.16.0-myria.2
 ARTIFACT_DIR=$(mktemp -d)
 
 case "$(uname -m)" in
@@ -109,10 +131,10 @@ nearly deterministic.
 The release workflows are intentionally separate from the normal package
 publication workflows:
 
-- `.github/workflows/myria-runtime-release.yml` creates the release and uploads
-  the x86_64 Linux CLI archive and wheel.
-- `.github/workflows/myria-runtime-wheel-arm64.yml` adds the matching aarch64
-  Linux artifacts to that existing release.
+- `.github/workflows/myria-runtime-release.yml` builds and validates native
+  x86_64 and aarch64 CLI archives and wheels, then publishes the release.
+- `.github/workflows/myria-runtime-wheel-arm64.yml` remains available for
+  historical runtime maintenance.
 
 Before publishing a new runtime tag, update `CHANGELOG.md`, this guide when the
 runtime contract changed, and any affected user guide. Document the base Cobre
