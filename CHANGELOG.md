@@ -339,7 +339,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   catch the base `cobre.errors.CobreError` to handle every error class the
   package raises.
 
-- **BREAKING — `cobre validate --json`'s error object `kind` for a load-phase
+- **BREAKING — `cobre validate --json`'s error object `phase` for a load-phase
   failure now uses `cobre_io::LoadError`'s own vocabulary (`IoError`,
   `ParseError`, `SchemaError`, `ConstraintError`, `PolicyIncompatible`)
   instead of the CLI-only `CaseValidationError`, matching `cobre.io.validate`'s
@@ -351,11 +351,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failure.
 
 - **`cobre validate --json` now emits an error object for a boundary
-  reconciliation reject, with `kind == "BoundaryReconciliationError"`.**
+  reconciliation reject, with `error.phase == "BoundaryReconciliationError"`.**
   Previously a boundary reject under `--json` left stdout empty; the boundary
   phase now shares the same phase-metadata mapping `cobre.io.validate` already
-  used for this kind, so both front ends report an identical `kind` and
-  message shape.
+  used for this category, so CLI `error.phase` and Python `errors[].kind`
+  report the same category vocabulary.
 
 ### Removed
 
@@ -411,6 +411,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     budget is set through `config.json`'s cut-management section as before.
 
 ### Fixed
+
+- Warn when training omits an explicit `iteration_limit` and uses the existing
+  implicit iteration budget. Other stopping rules and their composition are unchanged.
+  See the [configuration advisory guide](docs/guide/configuration-advisories.md)
+  for explicit-limit and reserved-parameter examples.
+- Warn during case validation when `spillage_discretization_points` is supplied:
+  the reserved parameter does not affect computed or precomputed hyperplanes.
+  The gap rule's API documentation now includes uniform CVaR admissibility.
+- Correct the validation JSON release notes: the CLI field is `error.phase`,
+  while Python validation entries use `kind`.
 
 - **`cobre validate` and `cobre.io.validate` now reject a boundary-configured
   study whose scalar-parameter table has a genuine gap, instead of silently

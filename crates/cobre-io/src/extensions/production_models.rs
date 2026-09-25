@@ -171,7 +171,8 @@ pub struct FphaColumnLayout {
     pub volume_discretization_points: Option<i32>,
     /// Number of turbine flow discretization points used when computing hyperplanes.
     pub turbine_discretization_points: Option<i32>,
-    /// Number of spillage discretization points used when computing hyperplanes.
+    /// Reserved, currently unused. Explicit values produce a validation warning;
+    /// computed hyperplanes discretize volume and turbine flow at zero spillage.
     pub spillage_discretization_points: Option<i32>,
     /// Maximum number of planes per hydro after heuristic selection.
     pub max_planes_per_hydro: Option<i32>,

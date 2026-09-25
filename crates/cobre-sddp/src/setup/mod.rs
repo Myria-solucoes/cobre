@@ -2260,7 +2260,7 @@ fn build_risk_measures(system: &System) -> Vec<RiskMeasure> {
 /// # Errors
 ///
 /// Returns [`SddpError::Validation`] when a `gap` stopping rule is present under
-/// any stage's effective non-expectation risk measure, under sampled forward
+/// nonuniform effective risk measures across stages or sampled forward
 /// selection, or when dynamic cut selection is paired with enumerated forward
 /// traversal.
 fn admission_gate(

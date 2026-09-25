@@ -265,6 +265,21 @@ impl StudyParams {
             Some(ForwardPassesResolution::Enumerated) => (DEFAULT_FORWARD_PASSES, true),
         };
 
+        if config.training.enabled
+            && !config
+                .training
+                .stopping_rules
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .any(|rule| matches!(rule, StoppingRuleConfig::IterationLimit { .. }))
+        {
+            tracing::warn!(
+                "training.stopping_rules has no iteration_limit; using the implicit maximum of {} iterations. Other stopping rules retain their configured composition; set iteration_limit explicitly to choose the iteration budget",
+                DEFAULT_MAX_ITERATIONS
+            );
+        }
+
         let rule_configs = match &config.training.stopping_rules {
             Some(rules) if !rules.is_empty() => rules.clone(),
             _ => vec![StoppingRuleConfig::IterationLimit {
@@ -527,6 +542,86 @@ mod tests {
             simulation: IoSimulationConfig::default(),
             exports: ExportsConfig::default(),
             estimation: EstimationConfig::default(),
+        }
+    }
+
+    #[test]
+    fn missing_iteration_limit_warns_and_preserves_rules_and_budget() {
+        use crate::stopping_rule::StoppingRule;
+        for mode in [StoppingMode::Any, StoppingMode::All] {
+            for rules in [
+                None,
+                Some(vec![]),
+                Some(vec![
+                    StoppingRuleConfig::TimeLimit { seconds: 30.0 },
+                    StoppingRuleConfig::BoundStalling {
+                        iterations: 4,
+                        tolerance: 0.01,
+                    },
+                ]),
+            ] {
+                let mut config = base_test_config();
+                config.training.stopping_mode = mode;
+                config.training.stopping_rules = rules.clone();
+                let (subscriber, messages) = WarnRecorder::new();
+                let params = tracing::subscriber::with_default(subscriber, || {
+                    StudyParams::from_config(&config, vec![]).unwrap()
+                });
+                let messages = messages.lock().unwrap();
+                assert_eq!(messages.len(), 1);
+                assert!(messages[0].contains("no iteration_limit"));
+                assert!(messages[0].contains("100 iterations"));
+                assert_eq!(
+                    super::super::max_iterations_from_rules(&params.stopping_rule_set),
+                    100
+                );
+                assert_eq!(
+                    format!("{:?}", params.stopping_rule_set.mode),
+                    format!("{mode:?}")
+                );
+                if rules.as_ref().is_none_or(Vec::is_empty) {
+                    assert!(matches!(
+                        params.stopping_rule_set.rules.as_slice(),
+                        [StoppingRule::IterationLimit { limit: 100 }]
+                    ));
+                } else {
+                    assert!(matches!(
+                        params.stopping_rule_set.rules.as_slice(),
+                        [
+                            StoppingRule::TimeLimit { seconds: 30.0 },
+                            StoppingRule::BoundStalling {
+                                iterations: 4,
+                                tolerance: 0.01
+                            }
+                        ]
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_iteration_limit_or_disabled_training_does_not_warn() {
+        for enabled in [true, false] {
+            let mut config = base_test_config();
+            config.training.enabled = enabled;
+            config.training.stopping_rules = if enabled {
+                Some(vec![
+                    StoppingRuleConfig::TimeLimit { seconds: 30.0 },
+                    StoppingRuleConfig::IterationLimit { limit: 7 },
+                ])
+            } else {
+                None
+            };
+            let (subscriber, messages) = WarnRecorder::new();
+            let params = tracing::subscriber::with_default(subscriber, || {
+                StudyParams::from_config(&config, vec![]).unwrap()
+            });
+            assert!(messages.lock().unwrap().is_empty());
+            assert_eq!(
+                super::super::max_iterations_from_rules(&params.stopping_rule_set),
+                if enabled { 7 } else { 100 }
+            );
         }
     }
 

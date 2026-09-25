@@ -136,7 +136,8 @@ pub enum StoppingRule {
 
     /// Terminate once the clamped canonical-R$ gap `UB_exact − LB` satisfies the
     /// disjunction of the configured tolerance arms. Admissible only under
-    /// enumerated forwards + an expectation measure (enforced by the setup
+    /// enumerated forwards + a uniform effective risk measure (expectation or
+    /// `CVaR` with identical parameters across stages, enforced by the setup
     /// admission gate); at least one tolerance arm is required (enforced at
     /// config mapping).
     Gap {
