@@ -17,6 +17,7 @@ use cobre_core::AnticipatedCommitmentHistory;
 use cobre_io::Config;
 use cobre_io::EntitySlot;
 use cobre_io::GraphManifest;
+use cobre_io::LoadError;
 use cobre_io::OwnedPolicyBasisRecord;
 use cobre_io::OwnedPolicyCutRecord;
 use cobre_io::PolicyCheckpoint;
@@ -244,33 +245,35 @@ pub struct PolicyLoadProof<K: PolicyLoadKind> {
 ///
 /// # Errors
 ///
-/// Returns [`SddpError::Validation`] under [`FullFcf`] on a
-/// `state_dimension` mismatch, a `num_stages` mismatch, or a per-slot
+/// Returns [`SddpError::Io`] wrapping [`LoadError::PolicyIncompatible`] under
+/// [`FullFcf`] on a dimension, stage count, pool count, graph or per-slot
 /// identity mismatch (see [`compare_manifest_slot_identity`]).
 pub fn validate_policy_load<K: PolicyLoadKind>(
     source: &PolicyStageManifest<'_>,
     current: &PolicyStageManifest<'_>,
 ) -> Result<PolicyLoadProof<K>, SddpError> {
     if K::CHECK_STATE_DIMENSION && source.state_dimension != current.state_dimension {
-        return Err(SddpError::Validation(format!(
-            "policy state_dimension mismatch: policy has {}, current system has {} (a lag-state \
-             depth mismatch is a common cause)",
-            source.state_dimension, current.state_dimension
-        )));
+        return Err(policy_incompatible(
+            "state_dimension",
+            source.state_dimension.to_string(),
+            current.state_dimension.to_string(),
+        ));
     }
 
     if K::CHECK_NUM_STAGES && source.num_stages != current.num_stages {
-        return Err(SddpError::Validation(format!(
-            "policy num_stages mismatch: policy has {}, current system has {}",
-            source.num_stages, current.num_stages
-        )));
+        return Err(policy_incompatible(
+            "num_stages",
+            source.num_stages.to_string(),
+            current.num_stages.to_string(),
+        ));
     }
 
     if K::CHECK_N_POOLS && source.n_pools != current.n_pools {
-        return Err(SddpError::Validation(format!(
-            "policy n_pools mismatch: policy has {}, current system has {}",
-            source.n_pools, current.n_pools
-        )));
+        return Err(policy_incompatible(
+            "n_pools",
+            source.n_pools.to_string(),
+            current.n_pools.to_string(),
+        ));
     }
 
     let mut warnings = Vec::new();
@@ -290,6 +293,19 @@ pub fn validate_policy_load<K: PolicyLoadKind>(
     })
 }
 
+fn policy_incompatible(
+    check: impl Into<String>,
+    policy_value: String,
+    system_value: String,
+) -> SddpError {
+    LoadError::PolicyIncompatible {
+        check: check.into(),
+        policy_value,
+        system_value,
+    }
+    .into()
+}
+
 /// Compare two graph manifests for structural identity: pool-set size, per-node
 /// `(id, stage_id, pool_id)`, and per-edge `(source_id, target_id)`.
 ///
@@ -301,7 +317,8 @@ pub fn validate_policy_load<K: PolicyLoadKind>(
 ///
 /// # Errors
 ///
-/// Returns [`SddpError::Validation`] on a pool-count, node, or edge divergence.
+/// Returns [`SddpError::Io`] wrapping [`LoadError::PolicyIncompatible`] on a
+/// pool-count, node, or edge divergence.
 pub fn compare_graph_manifest_identity(
     source: &GraphManifest,
     current: &GraphManifest,
@@ -311,44 +328,52 @@ pub fn compare_graph_manifest_identity(
     }
 
     if source.n_pools != current.n_pools {
-        return Err(SddpError::Validation(format!(
-            "graph manifest n_pools mismatch: source has {}, current study has {}",
-            source.n_pools, current.n_pools
-        )));
+        return Err(policy_incompatible(
+            "graph manifest n_pools",
+            source.n_pools.to_string(),
+            current.n_pools.to_string(),
+        ));
     }
 
     if source.nodes.len() != current.nodes.len() {
-        return Err(SddpError::Validation(format!(
-            "graph manifest node-count mismatch: source has {} nodes, current study has {}",
-            source.nodes.len(),
-            current.nodes.len()
-        )));
+        return Err(policy_incompatible(
+            "graph manifest node-count",
+            source.nodes.len().to_string(),
+            current.nodes.len().to_string(),
+        ));
     }
 
     for (i, (src, cur)) in source.nodes.iter().zip(&current.nodes).enumerate() {
         if (src.id, src.stage_id, src.pool_id) != (cur.id, cur.stage_id, cur.pool_id) {
-            return Err(SddpError::Validation(format!(
-                "graph manifest node {i} mismatch: source (id={}, stage_id={}, pool_id={}) != \
-                 current (id={}, stage_id={}, pool_id={})",
-                src.id, src.stage_id, src.pool_id, cur.id, cur.stage_id, cur.pool_id
-            )));
+            return Err(policy_incompatible(
+                format!("graph manifest node {i}"),
+                format!(
+                    "(id={}, stage_id={}, pool_id={})",
+                    src.id, src.stage_id, src.pool_id
+                ),
+                format!(
+                    "(id={}, stage_id={}, pool_id={})",
+                    cur.id, cur.stage_id, cur.pool_id
+                ),
+            ));
         }
     }
 
     if source.edges.len() != current.edges.len() {
-        return Err(SddpError::Validation(format!(
-            "graph manifest edge-count mismatch: source has {} edges, current study has {}",
-            source.edges.len(),
-            current.edges.len()
-        )));
+        return Err(policy_incompatible(
+            "graph manifest edge-count",
+            source.edges.len().to_string(),
+            current.edges.len().to_string(),
+        ));
     }
 
     for (i, (src, cur)) in source.edges.iter().zip(&current.edges).enumerate() {
         if (src.source_id, src.target_id) != (cur.source_id, cur.target_id) {
-            return Err(SddpError::Validation(format!(
-                "graph manifest edge {i} mismatch: source ({} -> {}) != current ({} -> {})",
-                src.source_id, src.target_id, cur.source_id, cur.target_id
-            )));
+            return Err(policy_incompatible(
+                format!("graph manifest edge {i}"),
+                format!("{} -> {}", src.source_id, src.target_id),
+                format!("{} -> {}", cur.source_id, cur.target_id),
+            ));
         }
     }
 
@@ -480,8 +505,9 @@ fn manifest_identity_verifiable(source: &[EntitySlot], current: &[EntitySlot]) -
 ///
 /// # Errors
 ///
-/// Returns [`SddpError::Validation`] if `source` and `current` differ in length
-/// or in any slot's `(entity_type, entity_id, subindex)`.
+/// Returns [`SddpError::Io`] wrapping [`LoadError::PolicyIncompatible`] if
+/// `source` and `current` differ in length or in any slot's
+/// `(entity_type, entity_id, subindex)`.
 pub fn compare_manifest_slot_identity(
     source: &[EntitySlot],
     current: &[EntitySlot],
@@ -498,27 +524,26 @@ pub fn compare_manifest_slot_identity(
     }
 
     if source.len() != current.len() {
-        return Err(SddpError::Validation(format!(
-            "entity manifest length mismatch: source has {} slots, current study has {}",
-            source.len(),
-            current.len()
-        )));
+        return Err(policy_incompatible(
+            "entity manifest length",
+            source.len().to_string(),
+            current.len().to_string(),
+        ));
     }
 
     for (i, (src, cur)) in source.iter().zip(current).enumerate() {
         if slot_identity(src) != slot_identity(cur) {
-            return Err(SddpError::Validation(format!(
-                "entity-identity mismatch at slot {i}: \
-                 source (entity_type={}, entity_id={}, subindex={}) != \
-                 current (entity_type={}, entity_id={}, subindex={}); \
-                 the cut coefficient at this slot would attach to the wrong state variable",
-                src.entity_type,
-                src.entity_id,
-                src.subindex,
-                cur.entity_type,
-                cur.entity_id,
-                cur.subindex
-            )));
+            return Err(policy_incompatible(
+                format!("entity-identity at slot {i}"),
+                format!(
+                    "(entity_type={}, entity_id={}, subindex={})",
+                    src.entity_type, src.entity_id, src.subindex
+                ),
+                format!(
+                    "(entity_type={}, entity_id={}, subindex={})",
+                    cur.entity_type, cur.entity_id, cur.subindex
+                ),
+            ));
         }
         if !src.was_active && cur.was_active {
             on_warning(&format!(
@@ -3074,7 +3099,7 @@ mod tests {
     /// The full-FCF terminal-manifest shape: a checkpoint terminal manifest
     /// `[storage(7), storage(2)]` vs a current terminal manifest
     /// `[storage(9), storage(2)]` at equal `state_dimension` is rejected with a
-    /// `Validation` error naming slot `0` — the same guard
+    /// `PolicyIncompatible` error naming slot `0` — the same guard
     /// `load_and_validate_checkpoint` applies after the dims/`num_stages` check.
     #[test]
     fn compare_manifest_full_fcf_terminal_entity_swap_rejects() {
@@ -3088,8 +3113,13 @@ mod tests {
         );
 
         assert!(
-            matches!(result, Err(SddpError::Validation(_))),
-            "same-dimension terminal entity swap must be a Validation error"
+            matches!(
+                result,
+                Err(SddpError::Io(
+                    cobre_io::LoadError::PolicyIncompatible { .. }
+                ))
+            ),
+            "same-dimension terminal entity swap must be a PolicyIncompatible error"
         );
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("slot 0"), "error must name slot 0: {msg}");
@@ -3100,6 +3130,110 @@ mod tests {
     }
 
     // ── validate_policy_load tests ────────────────────────────────────────────
+
+    fn assert_incompatible(error: &SddpError, expected_check: &str, policy: &str, system: &str) {
+        assert!(
+            matches!(
+            error,
+                SddpError::Io(cobre_io::LoadError::PolicyIncompatible {
+                    check, policy_value, system_value,
+                }) if check == expected_check && policy_value == policy && system_value == system
+            ),
+            "expected {expected_check}: policy={policy}, system={system}; got {error:?}"
+        );
+    }
+
+    #[test]
+    fn full_fcf_count_checks_preserve_typed_values() {
+        let slots = storage_manifest(1, 2);
+        let current = psm(2, 12, &slots);
+        for check in ["state_dimension", "num_stages", "n_pools"] {
+            let mut source = psm(2, 12, &slots);
+            match check {
+                "state_dimension" => source.state_dimension = 9,
+                "num_stages" => source.num_stages = 9,
+                _ => source.n_pools = 9,
+            }
+            assert_incompatible(
+                &validate_policy_load::<FullFcf>(&source, &current).unwrap_err(),
+                check,
+                "9",
+                if check == "state_dimension" {
+                    "2"
+                } else {
+                    "12"
+                },
+            );
+            assert!(validate_policy_load::<BoundaryInjection>(&source, &current).is_ok());
+        }
+    }
+
+    #[test]
+    fn graph_checks_preserve_typed_values() {
+        let current_graph = chain_graph_manifest(3);
+        let slots = storage_manifest(1, 2);
+        for (case, check, policy, system) in [
+            (0, "graph manifest n_pools", "9", "3"),
+            (1, "graph manifest node-count", "2", "3"),
+            (
+                2,
+                "graph manifest node 0",
+                "(id=9, stage_id=0, pool_id=0)",
+                "(id=0, stage_id=0, pool_id=0)",
+            ),
+            (3, "graph manifest edge-count", "1", "2"),
+            (4, "graph manifest edge 0", "0 -> 9", "0 -> 1"),
+        ] {
+            let mut graph = current_graph.clone();
+            match case {
+                0 => graph.n_pools = 9,
+                1 => graph.nodes.truncate(2),
+                2 => graph.nodes[0].id = 9,
+                3 => graph.edges.truncate(1),
+                _ => graph.edges[0].target_id = 9,
+            }
+            let source = PolicyStageManifest {
+                graph: &graph,
+                ..psm(2, 3, &slots)
+            };
+            let current = PolicyStageManifest {
+                graph: &current_graph,
+                ..psm(2, 3, &slots)
+            };
+            assert_incompatible(
+                &validate_policy_load::<FullFcf>(&source, &current).unwrap_err(),
+                check,
+                policy,
+                system,
+            );
+            assert!(validate_policy_load::<BoundaryInjection>(&source, &current).is_ok());
+        }
+    }
+
+    #[test]
+    fn slot_checks_preserve_typed_values() {
+        let source = storage_manifest(7, 2);
+        let current = storage_manifest(9, 2);
+        assert_incompatible(
+            &compare_manifest_slot_identity(&source[..1], &current, &mut ignore_warnings())
+                .unwrap_err(),
+            "entity manifest length",
+            "1",
+            "2",
+        );
+        assert_incompatible(
+            &compare_manifest_slot_identity(&source, &current, &mut ignore_warnings()).unwrap_err(),
+            "entity-identity at slot 0",
+            &format!(
+                "(entity_type={}, entity_id=7, subindex=0)",
+                source[0].entity_type
+            ),
+            &format!(
+                "(entity_type={}, entity_id=9, subindex=0)",
+                current[0].entity_type
+            ),
+        );
+    }
 
     /// Identical `state_dimension`, `num_stages`, and slot-for-slot matching
     /// manifests pass `FullFcf` with no warnings.
@@ -3118,9 +3252,7 @@ mod tests {
         );
     }
 
-    /// A `state_dimension` mismatch is a hard reject on `FullFcf`, and its message
-    /// names lag depth as a probable cause so an `inflow_lag_depth`-driven mismatch
-    /// is legible.
+    /// A `state_dimension` mismatch preserves the check and both dimensions.
     #[test]
     fn validate_policy_load_full_fcf_state_dimension_mismatch_rejects() {
         let slots = storage_manifest(1, 2);
@@ -3130,14 +3262,16 @@ mod tests {
         let result = validate_policy_load::<FullFcf>(&source, &current);
 
         assert!(result.is_err(), "state_dimension mismatch must reject");
-        let msg = result.unwrap_err().to_string();
+        let error = result.unwrap_err();
+        assert!(
+            matches!(&error, SddpError::Io(cobre_io::LoadError::PolicyIncompatible {
+            check, policy_value, system_value,
+        }) if check == "state_dimension" && policy_value == "10" && system_value == "8")
+        );
+        let msg = error.to_string();
         assert!(msg.contains("state_dimension"), "{msg}");
         assert!(msg.contains("10"), "should include source value: {msg}");
         assert!(msg.contains('8'), "should include current value: {msg}");
-        assert!(
-            msg.contains("lag-state depth"),
-            "message must name lag depth as a probable cause: {msg}"
-        );
     }
 
     /// A differing `state_dimension` (14 vs 17) passes `BoundaryInjection`:
@@ -3296,7 +3430,12 @@ mod tests {
             &psm(current_narrow.len() as u32, 12, &current_narrow),
         );
         assert!(
-            matches!(full_fcf, Err(SddpError::Validation(_))),
+            matches!(
+                full_fcf,
+                Err(SddpError::Io(
+                    cobre_io::LoadError::PolicyIncompatible { .. }
+                ))
+            ),
             "a lane-era (wider) checkpoint must reject under FullFcf: {full_fcf:?}"
         );
         let msg = full_fcf.unwrap_err().to_string();

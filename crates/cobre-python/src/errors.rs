@@ -11,10 +11,9 @@
 //! the raising paths. It accepts a concrete [`ErrorSource`] enum (never a
 //! `Box<dyn Trait>`) so the match is exhaustive: a newly added `LoadError` /
 //! `OutputError` variant fails the build, surfacing the need to map it. The
-//! `SddpError` match keeps explicit `Infeasible`/`Simulation` arms plus the
-//! documented total `other => SolverError(None)` fallthrough (every other
-//! `SddpError` reaches this site only through the training/simulation phase
-//! helpers, whose failures are `RuntimeError`-shaped).
+//! `SddpError` match preserves wrapped `LoadError` kinds and keeps explicit
+//! `Infeasible`/`Simulation` arms, with a total `other => SolverError(None)`
+//! fallthrough for remaining algorithm failures.
 //!
 //! The `cobre.io.validate` data-report `kind` field is intentionally NOT routed
 //! here — it is a stable data contract decoupled from these class names.
@@ -240,6 +239,7 @@ fn convert_error_with(py: Python<'_>, source: ErrorSource<'_>) -> PyErr {
             OutputError::ManifestError { .. } => validation_error(py, &err.to_string()),
         },
         ErrorSource::Sddp { error, message } => match error {
+            SddpError::Io(err) => convert_error_with(py, ErrorSource::Load(err)),
             SddpError::Infeasible {
                 stage,
                 iteration,

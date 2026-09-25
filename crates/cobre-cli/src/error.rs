@@ -500,6 +500,31 @@ mod tests {
     }
 
     #[test]
+    fn actual_policy_incompatibility_maps_to_validation_exit() {
+        use cobre_sddp::{FullFcf, PolicyStageManifest, validate_policy_load};
+        let graph = cobre_io::GraphManifest::default();
+        let source = PolicyStageManifest {
+            state_dimension: 2,
+            num_stages: 1,
+            n_pools: 1,
+            slots: &[],
+            graph: &graph,
+        };
+        let current = PolicyStageManifest {
+            state_dimension: 1,
+            ..source
+        };
+        let error = validate_policy_load::<FullFcf>(&source, &current).unwrap_err();
+        let cli_error = CliError::from(error);
+        assert_eq!(cli_error.exit_code(), 1);
+        assert!(matches!(cli_error, CliError::Validation { .. }));
+        let report = cli_error.to_string();
+        assert!(report.contains("state_dimension"));
+        assert!(report.contains("policy has 2"));
+        assert!(report.contains("system has 1"));
+    }
+
+    #[test]
     fn from_sddp_error_validation_maps_to_validation() {
         let sddp_err = Validation("forward_passes must be > 0".to_string());
         let cli_err = CliError::from(sddp_err);

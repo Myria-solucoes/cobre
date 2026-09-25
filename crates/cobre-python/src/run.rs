@@ -140,6 +140,8 @@ pub(crate) enum RunError {
     /// A typed case-load failure, carried verbatim so the mapping site can pick
     /// the per-variant class.
     Load(LoadError),
+    /// A checkpoint read failure, preserving its I/O or format error kind.
+    Output(cobre_io::OutputError),
     /// A typed SDDP failure carried verbatim with its descriptive message, so the
     /// mapping site can attach structured fields (e.g. `Infeasible`'s
     /// stage/iteration/scenario) without losing the message text.
@@ -162,6 +164,7 @@ impl From<PhaseError> for RunError {
         match err {
             PhaseError::Message(msg) => RunError::Message(msg),
             PhaseError::Load(err) => RunError::Load(err),
+            PhaseError::Output(err) => RunError::Output(err),
             PhaseError::Sddp { error, message } => RunError::Sddp { error, message },
         }
     }
@@ -170,8 +173,8 @@ impl From<PhaseError> for RunError {
 /// Error returned by the training/simulation phase helpers.
 ///
 /// Mirrors [`RunError`] minus the callback variant. The `From<String>` impl keeps
-/// every existing `?` site unchanged; only a hard `train`/`simulate` failure
-/// builds the typed `Sddp` arm.
+/// message-based sites unchanged; typed load, checkpoint and SDDP failures
+/// preserve their error kinds until the Python boundary.
 #[derive(Debug)]
 pub(crate) enum PhaseError {
     /// A descriptive message.
@@ -179,6 +182,8 @@ pub(crate) enum PhaseError {
     /// A typed case-load failure, carried verbatim so the mapping site can pick
     /// the per-variant class.
     Load(LoadError),
+    /// A checkpoint read failure, preserving its I/O or format error kind.
+    Output(cobre_io::OutputError),
     /// A typed SDDP failure carried verbatim with its descriptive message.
     Sddp {
         /// The typed SDDP error.
@@ -1143,13 +1148,12 @@ pub(crate) fn build_study_setup(
 ///
 /// # Errors
 ///
-/// Returns `Err(String)` formatted as `"policy validation error: {e}"` on a
-/// `state_dimension`, `num_stages`, or entity-manifest mismatch.
+/// Preserves typed compatibility failures as [`PhaseError::Sddp`].
 fn validate_loaded_policy(
     checkpoint: &mut cobre_io::PolicyCheckpoint,
     system: &System,
     setup: &StudySetup,
-) -> Result<PolicyLoadProof<FullFcf>, String> {
+) -> Result<PolicyLoadProof<FullFcf>, PhaseError> {
     let source_cost_scale_factor = checkpoint_terminal_cost_scale_factor(checkpoint)
         .map_err(|e| format!("{POLICY_VALIDATION_ERROR_PREFIX}: {e}"))?;
     rescale_checkpoint_cuts_for_load(
@@ -1189,8 +1193,11 @@ fn validate_loaded_policy(
         slots: &current_manifest,
         graph: &current_graph,
     };
-    let proof = validate_policy_load::<FullFcf>(&source, &current)
-        .map_err(|e| format!("{POLICY_VALIDATION_ERROR_PREFIX}: {e}"))?;
+    let proof =
+        validate_policy_load::<FullFcf>(&source, &current).map_err(|error| PhaseError::Sddp {
+            message: format!("{POLICY_VALIDATION_ERROR_PREFIX}: {error}"),
+            error,
+        })?;
 
     for msg in &proof.warnings {
         eprintln!("cobre-python: policy validation warning: {msg}");
@@ -1307,30 +1314,18 @@ pub(crate) fn reconcile_boundary_policy(
 ///
 /// # Errors
 ///
-/// Returns a descriptive `Err(String)` when a `WarmStart`/`Resume` mode finds no
-/// prior policy directory, when the checkpoint cannot be read, when policy
-/// validation fails, when warm-start/resume FCF construction fails, or when the
-/// boundary cuts cannot be loaded. The caller maps the message to a Python
-/// exception type via [`crate::errors::convert_error`].
+/// Preserves checkpoint read and compatibility error kinds. FCF construction
+/// and boundary-cut failures carry descriptive messages.
 pub(crate) fn apply_training_policy_mode(
     setup: &mut StudySetup,
     system: &System,
     config: &Config,
     output_dir: &Path,
     case_dir: &Path,
-) -> Result<(), String> {
+) -> Result<(), PhaseError> {
     if config.policy.mode == WarmStart {
         let policy_dir = output_dir.join(&setup.policy_path);
-        if !policy_dir.exists() {
-            return Err(format!(
-                "Policy directory not found: {}. Cannot warm-start \
-                 without a prior policy.",
-                policy_dir.display()
-            ));
-        }
-
-        let mut checkpoint = read_policy_checkpoint(&policy_dir)
-            .map_err(|e| format!("failed to read policy checkpoint: {e}"))?;
+        let mut checkpoint = read_policy_checkpoint(&policy_dir).map_err(PhaseError::Output)?;
         let proof = validate_loaded_policy(&mut checkpoint, system, setup)?;
 
         let warm_fcf = build_warm_start_fcf(setup, &proof, &checkpoint, "warm-start")?;
@@ -1338,16 +1333,7 @@ pub(crate) fn apply_training_policy_mode(
         seed_warm_start_basis_cache(setup, &checkpoint);
     } else if config.policy.mode == Resume {
         let policy_dir = output_dir.join(&setup.policy_path);
-        if !policy_dir.exists() {
-            return Err(format!(
-                "Policy directory not found: {}. Cannot resume \
-                 without a prior checkpoint.",
-                policy_dir.display()
-            ));
-        }
-
-        let mut checkpoint = read_policy_checkpoint(&policy_dir)
-            .map_err(|e| format!("failed to read policy checkpoint: {e}"))?;
+        let mut checkpoint = read_policy_checkpoint(&policy_dir).map_err(PhaseError::Output)?;
         let proof = validate_loaded_policy(&mut checkpoint, system, setup)?;
 
         let completed = u64::from(checkpoint.metadata.producer.completed_iterations);
@@ -1394,26 +1380,14 @@ pub(crate) fn apply_training_policy_mode(
 ///
 /// # Errors
 ///
-/// Returns a descriptive `Err(String)` when `policy_dir` does not exist (the
-/// `"Policy directory not found: ..."` message), when the checkpoint cannot be
-/// read, when policy validation fails, or when FCF reconstruction fails. The
-/// caller maps the message to a Python exception type via
-/// [`crate::errors::convert_error`].
+/// Preserves checkpoint read and compatibility error kinds. FCF reconstruction
+/// failures carry a descriptive message.
 pub(crate) fn reconstruct_policy_from_checkpoint(
     setup: &StudySetup,
     system: &System,
     policy_dir: &Path,
-) -> Result<(FutureCostFunction, TrainingResult), String> {
-    if !policy_dir.exists() {
-        return Err(format!(
-            "Policy directory not found: {}. Cannot run simulation-only \
-             mode without a trained policy.",
-            policy_dir.display()
-        ));
-    }
-
-    let mut checkpoint = read_policy_checkpoint(policy_dir)
-        .map_err(|e| format!("failed to read policy checkpoint: {e}"))?;
+) -> Result<(FutureCostFunction, TrainingResult), PhaseError> {
+    let mut checkpoint = read_policy_checkpoint(policy_dir).map_err(PhaseError::Output)?;
     let proof = validate_loaded_policy(&mut checkpoint, system, setup)?;
 
     let pool_state_dimensions: Vec<usize> =
@@ -1747,6 +1721,14 @@ fn iteration_summary_to_dict<'py>(
 /// from Rust, with no parameter to suppress them. These diagnostics are emitted to
 /// file descriptor 2 and are **not** captured by `contextlib.redirect_stderr` or
 /// pytest's `capsys`.
+///
+/// # Errors
+///
+/// Checkpoint reads raise `FileNotFoundError` for missing files, `OutputError`
+/// for corrupt/unsupported formats, and `CaseIoError` for other I/O failures,
+/// consistently with `cobre.results.load_policy` and `Study.load_policy`.
+/// A full-FCF checkpoint incompatible with the study raises
+/// `PolicyIncompatibleError`.
 // needless_pass_by_value: PyO3's from-Python extraction hands over owned values,
 // so the `PathBuf`/`Py<PyAny>` arguments cannot be borrowed at this boundary.
 #[allow(clippy::needless_pass_by_value)]
@@ -1840,6 +1822,7 @@ pub fn run(
         // Case-load failures: map via the typed lane so each `LoadError` variant
         // reaches its appropriate class (`CaseIoError` / `ValidationError` / etc.).
         Err(RunError::Load(err)) => Err(convert_error(ErrorSource::Load(&err))),
+        Err(RunError::Output(err)) => Err(convert_error(ErrorSource::Output(&err))),
         // Routed through the single mapping site so structured fields (e.g.
         // `Infeasible`) reach Python as `SolverError` attributes.
         Err(RunError::Sddp { error, message }) => Err(convert_error(ErrorSource::Sddp {

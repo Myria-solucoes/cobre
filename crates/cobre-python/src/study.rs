@@ -48,6 +48,7 @@ fn phase_error_to_pyerr(err: PhaseError) -> PyErr {
     match err {
         PhaseError::Message(msg) => convert_error(ErrorSource::Message(msg)),
         PhaseError::Load(err) => convert_error(ErrorSource::Load(&err)),
+        PhaseError::Output(err) => convert_error(ErrorSource::Output(&err)),
         PhaseError::Sddp { error, message } => convert_error(ErrorSource::Sddp {
             error: &error,
             message,
@@ -413,7 +414,10 @@ impl Study {
     }
 
     /// GIL-free policy reconstruction: read checkpoint from disk, validate, return [`Policy`].
-    pub(crate) fn load_policy_native(&self, output_dir: Option<PathBuf>) -> Result<Policy, String> {
+    pub(crate) fn load_policy_native(
+        &self,
+        output_dir: Option<PathBuf>,
+    ) -> Result<Policy, PhaseError> {
         let out_dir = output_dir.unwrap_or_else(|| self.output_dir.clone());
         let policy_dir = out_dir.join(&self.setup.policy_path);
 
@@ -639,9 +643,11 @@ impl Study {
     ///
     /// # Errors
     ///
-    /// - `SolverError` (a `RuntimeError`) on `HiGHS` init failure, a training
-    ///   error, or a policy-mode failure (e.g. a missing prior policy directory
-    ///   under `WarmStart`/`Resume`).
+    /// - `SolverError` (a `RuntimeError`) on `HiGHS` init or training failure.
+    /// - `FileNotFoundError` for a missing checkpoint directory or file.
+    /// - `OutputError` for a corrupt or unsupported checkpoint format;
+    ///   `CaseIoError` for other checkpoint I/O failures.
+    /// - `PolicyIncompatibleError` when the checkpoint does not match the study.
     /// - `InternalError` (a `RuntimeError`) on a drain-thread panic.
     /// - The original exception raised by a callback (or `KeyboardInterrupt`)
     ///   re-raised verbatim AFTER the training artifacts are written.
@@ -651,6 +657,7 @@ impl Study {
             Ok(policy) => Ok(policy),
             Err(RunError::Callback(err)) => Err(err),
             Err(RunError::Load(err)) => Err(convert_error(ErrorSource::Load(&err))),
+            Err(RunError::Output(err)) => Err(convert_error(ErrorSource::Output(&err))),
             Err(RunError::Sddp { error, message }) => Err(convert_error(ErrorSource::Sddp {
                 error: &error,
                 message,
@@ -677,15 +684,17 @@ impl Study {
     ///
     /// # Errors
     ///
-    /// - `SolverError` (a `RuntimeError`) when the policy directory is missing or
-    ///   the checkpoint cannot be read or reconstructed.
+    /// - `FileNotFoundError` for a missing checkpoint directory or file.
+    /// - `OutputError` for a corrupt or unsupported checkpoint format;
+    ///   `CaseIoError` for other checkpoint I/O failures.
+    /// - `SolverError` (a `RuntimeError`) when FCF reconstruction fails.
     /// - `PolicyIncompatibleError` (a `ValueError`) when policy validation
     ///   rejects it.
     #[pyo3(signature = (output_dir=None))]
     #[allow(clippy::needless_pass_by_value)]
     fn load_policy(&self, py: Python<'_>, output_dir: Option<PathBuf>) -> PyResult<Policy> {
         py.detach(|| self.load_policy_native(output_dir))
-            .map_err(|msg| convert_error(ErrorSource::Message(msg)))
+            .map_err(phase_error_to_pyerr)
     }
 
     /// Run the simulation phase against this study's in-memory [`StudySetup`]

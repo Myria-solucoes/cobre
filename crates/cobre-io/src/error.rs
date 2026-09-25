@@ -64,15 +64,16 @@ pub enum LoadError {
         description: String,
     },
 
-    /// Warm-start policy is structurally incompatible with the current system.
+    /// A full-FCF policy is structurally incompatible with the current system.
     ///
-    /// See SS7.1 in `input-loading-pipeline.md` for the four compatibility checks.
+    /// Produced by `cobre_sddp::validate_policy_load` for state dimension,
+    /// stage or pool counts, graph topology, or positional entity identity.
     #[error(
         "policy incompatible: {check} mismatch — policy has {policy_value}, \
          system has {system_value}"
     )]
     PolicyIncompatible {
-        /// Name of the failing compatibility check (e.g., `"hydro count"`).
+        /// Name of the failing compatibility check (e.g., `"state_dimension"`).
         check: String,
         /// Value recorded in the policy file.
         policy_value: String,
