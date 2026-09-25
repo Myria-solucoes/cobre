@@ -4,6 +4,9 @@ name: Release Myria runtime
 # the Linux CLI archive used on OCI and the matching Python wheel used by the
 # bridge/validation worker.  This intentionally does not publish to PyPI.
 on:
+  push:
+    tags:
+      - 'v0.16.0-myria.*'
   workflow_dispatch:
     inputs:
       tag:
@@ -43,8 +46,8 @@ jobs:
     env:
       CARGO_INCREMENTAL: 0
       CARGO_NET_RETRY: 10
-      RELEASE_TAG: ${{ inputs.tag }}
-      PRERELEASE: ${{ inputs.prerelease }}
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      PRERELEASE: ${{ inputs.prerelease || false }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -61,6 +64,9 @@ jobs:
         run: |
           cargo test --locked -p cobre-comm --features affinity
           cargo test --locked -p cobre-sddp --lib convergence::risk_measure
+          cargo test --locked -p cobre-io --lib validation::semantic
+          cargo test --locked -p cobre-sddp --lib policy::policy_load
+          cargo test --locked -p cobre-sddp --lib setup::params
           cargo test --locked -p cobre-sddp --features test-support --test mpi_wire progressive
           cargo test --locked -p cobre-cli --test cli_run --test cli_run_affinity
 
@@ -93,7 +99,7 @@ jobs:
           python -m pip install --no-deps dist/*.whl
           python -m pip install pytest numpy pyarrow
           python scripts/benchmarks/verify_runtime.py --cli dist/cli/cobre --case examples/4ree
-          python -m pytest -q crates/cobre-python/tests/test_study.py crates/cobre-python/tests/test_affinity_parity.py --require-cli-binary
+          python -m pytest -q crates/cobre-python/tests/test_study.py crates/cobre-python/tests/test_affinity_parity.py crates/cobre-python/tests/test_errors.py --require-cli-binary
 
       - uses: actions/upload-artifact@v4
         with:
@@ -109,8 +115,8 @@ jobs:
     permissions:
       contents: write
     env:
-      RELEASE_TAG: ${{ inputs.tag }}
-      PRERELEASE: ${{ inputs.prerelease }}
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      PRERELEASE: ${{ inputs.prerelease || false }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v6
