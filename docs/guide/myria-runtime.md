@@ -12,8 +12,9 @@ the corresponding Myria runtime tag.
 ## Supported application choices
 
 The Myria application exposes exactly `0.16` and `0.16-myria`. The original
-uses the unmodified upstream `v0.16.0` CLI and PyPI wheel, including its known
-CVaR mixture limitation. The corrected choice uses `v0.16.0-myria.2` from
+uses upstream with only the [automatic stationarity compatibility backport](original-compatibility.md),
+including the known upstream CVaR mixture limitation. Its CLI and wheel must
+come from the same original-compatible release. The corrected choice uses `v0.16.0-myria.2` from
 commit `59d0b42257be37bd83ff4eaada1002827b013129`, consolidating CVaR fixes,
 stationarity regularization, durable checkpoints, convergence diagnostics,
 validation contracts, typed policy errors and runtime optimizations.

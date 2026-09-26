@@ -55,6 +55,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Pure CVaR and expectation retain their mathematical definitions. See the
   `cobre-sddp` risk aggregation contract and its reproducible example.
 
+- The original-compatible application runtime backports only automatic PAR
+  stationarity regularization to upstream 0.16. An automatically fitted model
+  with non-finite residual variance now removes its annual component and then
+  the failing season's highest lags until the periodic closure is valid.
+  Explicit user coefficients still fail validation. Every adjustment is
+  reported by Python validation; stochastic outputs retain the reduced fitted
+  coefficients. CVaR aggregation,
+  training algorithms and checkpoint behavior remain upstream.
+  See [original compatibility](docs/guide/original-compatibility.md).
+
 ## [0.16.0] - 2026-09-22
 
 ### Added
