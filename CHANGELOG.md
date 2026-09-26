@@ -49,6 +49,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The Myria runtime counts historical inflow observations using the recurring
+  seasonal calendar when their dates fall outside the study horizon. Complete
+  pre-study histories no longer produce false missing-season warnings; genuinely
+  missing seasons still warn. This changes validation diagnostics only, not
+  fitting, training, CVaR, or case data. Published as `v0.16.0-myria.3`.
+
 - Preserve the expectation floor in expectation/CVaR mixture weights for
   backward cuts and risk-adjusted cost evaluation. Mixed-risk runs previously
   could overweight expensive scenarios; retrain affected policies and cuts.

@@ -245,7 +245,9 @@ pub(super) fn check_season_observation_coverage(
 
     let mut season_obs_count: HashMap<usize, usize> = HashMap::new();
     for row in &data.inflow_history {
-        if let Some(sid) = season_id_for_date(&stage_index, row.start_date) {
+        if let Some(sid) = season_id_for_date(&stage_index, row.start_date)
+            .or_else(|| season_map.season_for_date(row.start_date))
+        {
             *season_obs_count.entry(sid).or_insert(0) += 1;
         }
     }
@@ -1116,6 +1118,41 @@ mod tests {
             "all seasons with observations should produce no rule-28 warnings; \
              got: {rule28_warnings:?}"
         );
+    }
+
+    #[test]
+    fn test_observation_coverage_outside_horizon_uses_recurring_calendar() {
+        for first_year in [1980, 2030] {
+            for missing_month in [None, Some(6)] {
+                let stages = make_stages_with_seasons(36, true);
+                let mut history = Vec::new();
+                for year in first_year..first_year + 3 {
+                    for month in 1..=12 {
+                        if Some(month) != missing_month {
+                            history.push(history_row(
+                                EntityId::from(1),
+                                chrono::NaiveDate::from_ymd_opt(year, month, 15).unwrap(),
+                                100.0,
+                            ));
+                        }
+                    }
+                }
+                let data = make_data_estimation(vec![make_hydro(1, None)], stages, history);
+                let mut ctx = ValidationContext::new();
+                check_season_observation_coverage(
+                    &data,
+                    data.stages.policy_graph.season_map.as_ref().unwrap(),
+                    &mut ctx,
+                );
+                let warnings = ctx.warnings();
+                if missing_month.is_some() {
+                    assert_eq!(warnings.len(), 1);
+                    assert!(warnings[0].message.contains("season 5"));
+                } else {
+                    assert!(warnings.is_empty(), "{first_year}: {warnings:?}");
+                }
+            }
+        }
     }
 
     /// Given a study where season 5 has zero observations in inflow_history and

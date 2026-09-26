@@ -14,8 +14,7 @@ the corresponding Myria runtime tag.
 The Myria application exposes exactly `0.16` and `0.16-myria`. The original
 uses upstream with only the [automatic stationarity compatibility backport](original-compatibility.md),
 including the known upstream CVaR mixture limitation. Its CLI and wheel must
-come from the same original-compatible release. The corrected choice uses `v0.16.0-myria.2` from
-commit `59d0b42257be37bd83ff4eaada1002827b013129`, consolidating CVaR fixes,
+come from the same original-compatible release. The corrected choice uses `v0.16.0-myria.3`, consolidating CVaR fixes,
 stationarity regularization, durable checkpoints, convergence diagnostics,
 validation contracts, typed policy errors and runtime optimizations.
 Approximate point selection and progressive population remain opt-in.
@@ -35,7 +34,7 @@ Choose a tag from the repository's GitHub Releases page and set it explicitly:
 
 ```bash
 REPOSITORY=Myria-solucoes/cobre
-RELEASE_TAG=v0.16.0-myria.2
+RELEASE_TAG=v0.16.0-myria.3
 ARTIFACT_DIR=$(mktemp -d)
 
 case "$(uname -m)" in
@@ -49,7 +48,7 @@ gh release download "$RELEASE_TAG" \
   --pattern "$ASSET" \
   --dir "$ARTIFACT_DIR"
 tar -xJf "$ARTIFACT_DIR/$ASSET" -C "$ARTIFACT_DIR"
-"$ARTIFACT_DIR/cobre" --version
+"$ARTIFACT_DIR/cobre" version
 ```
 
 Keep the tag in deployment configuration rather than resolving "latest" at
@@ -62,7 +61,7 @@ architectures. Select exactly one architecture-specific wheel:
 
 ```bash
 REPOSITORY=Myria-solucoes/cobre
-RELEASE_TAG=v0.16.0-myria.2
+RELEASE_TAG=v0.16.0-myria.3
 ARTIFACT_DIR=$(mktemp -d)
 
 case "$(uname -m)" in
@@ -81,6 +80,25 @@ python -c 'import cobre; print(cobre.__version__)'
 
 The GitHub release page publishes a SHA-256 digest beside each asset. Deployment
 automation should verify that digest before installation.
+
+## Historical season coverage
+
+Validation assigns observations outside the study horizon to the recurring
+calendar in `season_definitions`. A history preceding the study is not missing
+merely because its dates do not intersect future stages. A season with no
+observations still produces a warning. Stage-window assignments retain priority
+for observations inside the horizon; external inflow sources retain their
+existing exemption.
+
+Inspect the validation warnings without running training:
+
+```bash
+cobre validate converted-case
+```
+
+This diagnostic correction does not change the case, fitted stochastic model,
+or optimization results. The original-compatible runtime retains upstream
+coverage diagnostics.
 
 ## Automatic PAR stationarity regularization
 
