@@ -9,6 +9,8 @@ Initial scheduler measurements used `66bfb2fa`; build experiments use
 `d74ed075`, which explicitly destructures the same borrowed buffers for Clippy
 and renames one test variable. The paired
 [refactor check](scheduler-refactor-parity.json) confirmed exact numerical parity.
+The final candidate, `3031c188`, also uses an allocation-free sort for the unique
+trial indices; the final confirmation below measures that source.
 
 ## Compact comparison
 
@@ -55,6 +57,19 @@ Raw commands, input/binary hashes, per-run timings and numerical signatures are
 in [compact-results.json](compact-results.json). These local binaries are not
 published release binaries. Timing repetitions use the same seed; they are not
 independent policy-quality observations and do not certify convergence.
+
+## Final scheduler confirmation
+
+Three additional matched epochs compared `.3` with the final candidate on the
+same compact `by_scenario` case. Baseline median: 20.885 s (20.675–21.085 s).
+Candidate median: 20.596 s (20.547–20.754 s), a 1.38% reduction. Paired reductions
+were 0.62%, 2.32% and 0.63%. All six numerical signatures match.
+[scheduler-confirmation.json](scheduler-confirmation.json) records the source
+commits, binary hashes and complete results.
+
+The two compact series support a modest, case-specific scheduling benefit,
+not a broad training-speed claim. The scheduling change is retained for Myria
+`.4`; native CLI/wheel publication validation remains a release gate.
 
 ## Reproduction
 
@@ -107,9 +122,9 @@ the complete private-case output remains at the local path recorded there.
 
 The single-pair timing difference is too small to establish a real-deck speedup.
 This trial validates numerical parity at the larger scale; two initial iterations
-do not characterize performance near convergence. Promotion remains pending
-further evaluation and release validation. Original cases and existing runtimes
-are untouched.
+do not characterize performance near convergence. It used the initial candidate,
+before the explicit-borrow and allocation-free-sort refinements measured in the
+final compact confirmation. Original cases are untouched.
 
 ## Affinity comparison
 

@@ -14,13 +14,16 @@ the corresponding Myria runtime tag.
 The Myria application exposes exactly `0.16` and `0.16-myria`. The original
 uses upstream with only the [automatic stationarity compatibility backport](original-compatibility.md),
 including the known upstream CVaR mixture limitation. Its CLI and wheel must
-come from the same original-compatible release. The corrected choice uses `v0.16.0-myria.3`, consolidating CVaR fixes,
+come from the same original-compatible release. The corrected choice uses `v0.16.0-myria.4`, consolidating CVaR fixes,
 stationarity regularization, durable checkpoints, convergence diagnostics,
 validation contracts, typed policy errors and runtime optimizations.
+The release adds dynamic whole-point backward scheduling; see the
+[measurements and scope](../benchmarks/scenario-scheduling-2026-09-27/README.md).
 Approximate point selection and progressive population remain opt-in.
 
-Keep each CLI and matching Python wheel isolated. The NEWAVE bridge is pinned
-to `Myria-solucoes/cobre-bridge@f9cdf7dbe49dde7472f0c669f8a0cf28f83f1083`.
+Keep each CLI and matching Python wheel isolated. Application bundles pin the
+bridge revision independently in their runtime catalog; a Cobre tag does not
+select a bridge revision.
 The original does not support Myria periodic checkpoints. Historical runtime
 tags remain immutable but are no longer application choices for new operations.
 
@@ -34,7 +37,7 @@ Choose a tag from the repository's GitHub Releases page and set it explicitly:
 
 ```bash
 REPOSITORY=Myria-solucoes/cobre
-RELEASE_TAG=v0.16.0-myria.3
+RELEASE_TAG=v0.16.0-myria.4
 ARTIFACT_DIR=$(mktemp -d)
 
 case "$(uname -m)" in
@@ -61,7 +64,7 @@ architectures. Select exactly one architecture-specific wheel:
 
 ```bash
 REPOSITORY=Myria-solucoes/cobre
-RELEASE_TAG=v0.16.0-myria.3
+RELEASE_TAG=v0.16.0-myria.4
 ARTIFACT_DIR=$(mktemp -d)
 
 case "$(uname -m)" in

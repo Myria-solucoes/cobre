@@ -2,6 +2,8 @@
 
 ## Dynamic scenario scheduling
 
+Available in Myria runtimes from `v0.16.0-myria.4`.
+
 With `training.parallelism.backward_scheduler.method = "by_scenario"`, idle
 workers claim complete trial-point chains from a shared queue. A claim transfers
 exclusive access to that scenario's basis slice and coefficient output slot;

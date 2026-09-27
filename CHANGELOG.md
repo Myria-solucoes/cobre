@@ -11,13 +11,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Schedule sampled backward scenario chains dynamically across workers while
-  preserving each scenario's bases, opening order, and canonical cut order.
-  Coefficients use disjoint trial-point slots independent of the worker that
-  claims them; each worker reuses one cut's coefficient scratch. See
-  [optimized training](docs/guide/optimized-training.md) and the
-  [matched benchmark](docs/benchmarks/scenario-scheduling-2026-09-27/README.md).
-
 - Consolidated the Myria application runtime as `v0.16.0-myria.2` alongside
   the unmodified upstream `v0.16.0`. Tag publication now builds and validates
   native x86_64 and ARM64 CLI/wheel pairs, including validation contracts and
@@ -77,6 +70,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   coefficients. CVaR aggregation,
   training algorithms and checkpoint behavior remain upstream.
   See [original compatibility](docs/guide/original-compatibility.md).
+
+## [0.16.0-myria.4] - 2026-09-27
+
+This runtime extends `v0.16.0-myria.3` without changing the input schema, Python
+API, risk calculation, point population or stopping rules.
+
+### Changed
+
+- Schedule sampled backward scenario chains dynamically across workers while
+  preserving each scenario's bases, opening order, and canonical cut order.
+  Coefficients use disjoint trial-point slots independent of the worker that
+  claims them; each worker reuses one cut's coefficient scratch. See
+  [optimized training](docs/guide/optimized-training.md) and the
+  [matched benchmark](docs/benchmarks/scenario-scheduling-2026-09-27/README.md).
+
+The final three-pair compact comparison reduced median training time from
+20.885 s to 20.596 s (1.38%), with identical policies, simulations and solver
+work. An earlier series measured 2.59%; one real-deck pair measured only 0.89%,
+which is insufficient to establish a real-deck speedup. The `by_node` scheduler,
+runner affinity and build profile remain unchanged. AVX2/ThinLTO experiments
+did not establish a benefit and were not adopted.
+
+Validation passed 2,462 SDDP unit tests, 41 wire/branching/determinism integration
+tests, 21 CLI/checkpoint tests, affinity parity, formatting and Clippy. Native
+x86_64 and aarch64 release jobs validate matching CLI/wheel pairs before
+publishing artifacts.
 
 ## [0.16.0] - 2026-09-22
 
@@ -4091,3 +4110,5 @@ disappears from `cobre.results.load_policy` per-cut dicts.
 [0.1.1]: https://github.com/cobre-rs/cobre/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/cobre-rs/cobre/compare/v0.0.1...v0.1.0
 [0.0.1]: https://github.com/cobre-rs/cobre/releases/tag/v0.0.1
+
+[0.16.0-myria.4]: https://github.com/Myria-solucoes/cobre/releases/tag/v0.16.0-myria.4
