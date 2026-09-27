@@ -1986,9 +1986,13 @@ fn process_stage_backward<S: SolverInterface + Send>(
             .filter(|params| params.is_active(iteration)),
     );
 
+    let ScenarioStageWork {
+        bases,
+        coefficients,
+    } = work;
     debug_assert!(trial_points.windows(2).all(|pair| pair[0] < pair[1]));
     let tasks = Mutex::new(
-        work.bases
+        bases
             .scenario_slices_mut()
             .take(trial_points.last().map_or(0, |m| m + 1))
             .enumerate()
@@ -1998,7 +2002,7 @@ fn process_stage_backward<S: SolverInterface + Send>(
                     .ok()
                     .map(|compacted| (compacted, m, basis))
             })
-            .zip(work.coefficients.chunks_mut(cut_n_state.max(1))),
+            .zip(coefficients.chunks_mut(cut_n_state.max(1))),
     );
 
     workspaces

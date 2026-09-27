@@ -3351,18 +3351,18 @@ mod scenario_claim_determinism {
                     })
                     .collect();
                 assert!(cuts.iter().any(|(intercepts, _, _)| !intercepts.is_empty()));
-                let solves: u64 = outcome
+                let solve_count: u64 = outcome
                     .result
                     .solver_stats_log
                     .iter()
                     .map(|entry| entry.delta.lp_solves)
                     .sum();
-                assert!(solves > 0);
+                assert!(solve_count > 0);
                 let signature = (
                     outcome.result.final_lb.to_bits(),
                     outcome.result.final_ub.to_bits(),
                     cuts,
-                    solves,
+                    solve_count,
                 );
                 if let Some(expected) = &reference {
                     assert_eq!(&signature, expected, "workers={workers}, dynamic={dynamic}");

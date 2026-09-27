@@ -1,0 +1,115 @@
+{
+  "platform": "Linux-7.0.0-34-generic-x86_64-with-glibc2.36",
+  "affinity": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27
+  ],
+  "summary": {
+    "baseline": {
+      "median": 725.141,
+      "min": 725.141,
+      "max": 725.141
+    },
+    "dynamic": {
+      "median": 718.685,
+      "min": 718.685,
+      "max": 718.685
+    }
+  },
+  "exact_numerical_parity": true,
+  "case": {
+    "label": "teko-152 converted case",
+    "stages": 111,
+    "hydros": 157,
+    "iterations": 2,
+    "forwards": 16,
+    "workers": 8
+  },
+  "runs": [
+    {
+      "arm": "dynamic",
+      "epoch": 0,
+      "binary_sha256": "ee333cbd075c61b2a673c06cd987622bbfec97a71bb0dc4094590c4e04ce3d18",
+      "case_sha256": "56623c2a4082c64a543d8f725fb62280a2b527ec7be587be07e7e3bbbfb4a48a",
+      "wall_seconds": 760.4073095280037,
+      "exit_code": 0,
+      "peak_rss_kib": 1086264,
+      "training_seconds": 718.685,
+      "solve_stats": {
+        "total_lp_solves": 73992,
+        "first_try": 73620,
+        "retried": 372,
+        "failed": 0,
+        "forward_solve_seconds": 541.7807510529998,
+        "backward_solve_seconds": 3913.9734761059963,
+        "parallelism": 8,
+        "forward_phase_wall_seconds": 75.683,
+        "backward_phase_wall_seconds": 640.215,
+        "forward_wait_seconds": 7.152,
+        "backward_wait_seconds": 137.786,
+        "serial_lower_bound_seconds": 2.178,
+        "serial_row_selection_seconds": 0.102,
+        "serial_row_sync_seconds": 0.0,
+        "serial_allreduce_seconds": 0.0,
+        "serial_scheduling_seconds": 9.161
+      },
+      "numerical_signature_sha256": "a4b4a6c1bab42f83cf57c66d3db0da94c7cfdb50d972ede8a93d2b3a7f0c1de3"
+    },
+    {
+      "arm": "baseline",
+      "epoch": 0,
+      "binary_sha256": "4da924ceeeea5ca4d1499bc3562e838632c2ce17043334985e826adcf68350e1",
+      "case_sha256": "56623c2a4082c64a543d8f725fb62280a2b527ec7be587be07e7e3bbbfb4a48a",
+      "wall_seconds": 766.6186312850041,
+      "exit_code": 0,
+      "peak_rss_kib": 1161476,
+      "training_seconds": 725.141,
+      "solve_stats": {
+        "total_lp_solves": 73992,
+        "first_try": 73620,
+        "retried": 372,
+        "failed": 0,
+        "forward_solve_seconds": 540.675124303,
+        "backward_solve_seconds": 3893.9631907889984,
+        "parallelism": 8,
+        "forward_phase_wall_seconds": 75.73,
+        "backward_phase_wall_seconds": 646.525,
+        "forward_wait_seconds": 7.331,
+        "backward_wait_seconds": 146.537,
+        "serial_lower_bound_seconds": 2.212,
+        "serial_row_selection_seconds": 0.116,
+        "serial_row_sync_seconds": 0.0,
+        "serial_allreduce_seconds": 0.0,
+        "serial_scheduling_seconds": 9.212
+      },
+      "numerical_signature_sha256": "a4b4a6c1bab42f83cf57c66d3db0da94c7cfdb50d972ede8a93d2b3a7f0c1de3"
+    }
+  ],
+  "source_report": "/home/jackson/code/cobre-validation/performance-20260927/real-16-dynamic-pilot/report.json"
+}

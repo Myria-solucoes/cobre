@@ -88,12 +88,40 @@ sparse progressive selection, and dynamic/frozen cut pools.
 
 An initial release-profile unit run had 14 existing `should_panic` tests fail
 because they rely on `debug_assert!`. The full unit suite was rerun in its
-normal profile; no assertion or test was weakened. Native release validation
-also runs the new scheduling integration test on x86_64 and aarch64.
+normal profile; no assertion or test was weakened. The native release workflow
+is configured to run the new scheduling integration test on x86_64 and aarch64.
 
 ## Real-deck follow-up
 
-A paired full-deck trial is in progress using the converted `teko-152` case
-(111 stages, 157 hydros), two iterations and 16 trajectories with eight workers.
-Promotion remains pending that comparison and release validation. The original
-case and existing runtimes are untouched.
+One paired full-deck trial used the converted `teko-152` case (111 stages,
+157 hydros), two iterations and 16 trajectories with eight workers. Training
+was 725.141 s baseline and 718.685 s candidate (0.89% lower); backward time
+was 646.525 s and 640.215 s, with imbalance estimates of 146.537 s and 137.786 s.
+Both executed 73,992 LPs, with 372 retries, zero terminal failures and exactly
+equal numerical signatures. See [real-pilot-results.json](real-pilot-results.json);
+the complete private-case output remains at the local path recorded there.
+
+The single-pair timing difference is too small to establish a real-deck speedup.
+This trial validates numerical parity at the larger scale; two initial iterations
+do not characterize performance near convergence. Promotion remains pending
+further evaluation and release validation. Original cases and existing runtimes
+are untouched.
+
+## Affinity comparison
+
+The baseline binary also ran three matched epochs of the same compact case
+with `by_node`, block size 10 and eight workers. The only changed command option
+was `--cpu-bind`; [affinity-results.json](affinity-results.json) retains each run
+and [affinity-config.json](affinity-config.json) is the case configuration overlay.
+
+| Binding | Median training | Range |
+|---|---:|---:|
+| `none` | 20.319 s | 20.077–20.405 s |
+| `core` | 20.282 s | 20.155–20.314 s |
+| `numa` | 20.043 s | 19.901–20.082 s |
+
+All nine numerical signatures match. The 1.36% median difference for `numa`
+is small and specific to this two-socket host with one model running. It does
+not establish a fleet-wide default; concurrent runs need disjoint CPU sets
+before a fixed placement policy can avoid colliding on the same cores.
+No runner default was changed.
