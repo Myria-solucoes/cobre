@@ -1,0 +1,21 @@
+{
+  "source_commit": "d74ed075edfcbcb3688a63dfe50aba147ab55797",
+  "compiler": "Rust 1.94.1; GCC 12 (Debian Bookworm)",
+  "arms": {
+    "cobre-dynamic-checked": {
+      "profile": "release",
+      "CXXFLAGS": null,
+      "sha256": "2bc1759f3e42b5500990c9e80af2ceb71d23b1414e02c683b967a2b53c7a3ffb"
+    },
+    "cobre-dynamic-avx2": {
+      "profile": "release",
+      "CXXFLAGS": "-mavx2 -msse4.2 -ffp-contract=off",
+      "sha256": "f46e6b99751f82e915785d6b5edae0881abdd2f986355a31916e6809cf785e42"
+    },
+    "cobre-dynamic-thinlto": {
+      "profile": "dist",
+      "CXXFLAGS": null,
+      "sha256": "9a8a8f1c5d47ac89cfea282ba69138d14e18883c15f28bac797a9502eba1b949"
+    }
+  }
+}

@@ -605,7 +605,7 @@ pub(crate) fn by_scenario_finish(
     // `trial_state_idx` is the SOLE sort key: globally unique across workers
     // (exclusive scenario claims), so the merge order is identical regardless
     // of worker index.
-    staged_cuts_buf.sort_by_key(|cut| cut.trial_state_idx);
+    staged_cuts_buf.sort_unstable_by_key(|cut| cut.trial_state_idx);
     debug_assert_eq!(staged_cuts_buf.len(), trial_points.len());
     for cut in &*staged_cuts_buf {
         let range = cut.coefficients_range.clone();

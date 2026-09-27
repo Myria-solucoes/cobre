@@ -537,7 +537,8 @@ disjoint basis slice with the scenario's original index; a worker index must
 never address a basis. Each successor child still resets solver history before
 the first opening. Shared coefficient slots use compact node-relative trial
 positions, and `by_scenario_finish` commits by original trial index. No queue lock
-is held during a solve. `scenario_basis_claims_preserve_sparse_global_indices`
+is held during a solve. Trial indices are unique, so the final sort must not
+allocate stability scratch. `scenario_basis_claims_preserve_sparse_global_indices`
 and `sparse_progressive_claims_preserve_every_cut_and_solve_count` pin sparse
 routing, progressive population, full cut coefficients and solve counts across
 worker counts with frozen and dynamic cut selection.

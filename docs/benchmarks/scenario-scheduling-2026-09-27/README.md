@@ -5,6 +5,10 @@ Baseline: `v0.16.0-myria.3`, commit
 `by_scenario` task ownership: free workers claim another complete point, with
 exclusive scenario bases and coefficient slots. Child resets, opening chains,
 point population, risk aggregation and final cut order remain unchanged.
+Initial scheduler measurements used `66bfb2fa`; build experiments use
+`d74ed075`, which explicitly destructures the same borrowed buffers for Clippy
+and renames one test variable. The paired
+[refactor check](scheduler-refactor-parity.json) confirmed exact numerical parity.
 
 ## Compact comparison
 
@@ -125,3 +129,38 @@ is small and specific to this two-socket host with one model running. It does
 not establish a fleet-wide default; concurrent runs need disjoint CPU sets
 before a fixed placement policy can avoid colliding on the same cores.
 No runner default was changed.
+
+## Build experiments
+
+Three matched epochs used the compact `by_node` case above, with eight workers
+and `--cpu-bind none`. The source and toolchain were identical; only the build
+setting differed. [Build provenance](build-provenance.json) records the binary
+hashes and [build-results.json](build-results.json) records the runs.
+
+| Build | Median training | Range |
+|---|---:|---:|
+| Existing `release` | 20.577 s | 20.170–20.897 s |
+| HiGHS C++ AVX2 | 20.611 s | 20.459–20.863 s |
+| Existing `dist` / ThinLTO | 20.535 s | 20.419–20.648 s |
+
+All nine numerical signatures match. The overlapping ranges show no convincing
+improvement in this case. A paired real `by_node` comparison (two iterations,
+eight trajectories, eight workers) also retained exact numerical parity but
+took 387.066 s with AVX2 versus 381.837 s with the existing build, 1.37% longer.
+See [real-build-results.json](real-build-results.json). Neither build experiment
+was retained; defaults remain unchanged.
+
+The AVX2 experiment used GCC 12.2.0 and temporary existing compiler settings,
+not a new runtime configuration:
+
+```bash
+CXXFLAGS='-mavx2 -msse4.2 -ffp-contract=off' CARGO_TARGET_DIR=/tmp/cobre-avx2-target \
+  cargo build --locked --release -p cobre-cli -j12
+cargo build --locked --profile dist -p cobre-cli -j12
+```
+
+The existing Rust x86_64 Linux target already requires AVX2. Floating-point
+contraction was disabled for the C++ experiment to avoid introducing fused
+multiply-add rounding. This did not bypass the numerical comparison gate.
+No timing run overlapped a build or another benchmark started by this task;
+the host remains a desktop environment with background services.
