@@ -85,6 +85,10 @@ API, risk calculation, point population or stopping rules.
   [optimized training](docs/guide/optimized-training.md) and the
   [matched benchmark](docs/benchmarks/scenario-scheduling-2026-09-27/README.md).
 
+- Exclude Myria and original-compatible runtime tags from general crates.io,
+  PyPI, MPI and cargo-dist release triggers. Runtime CLI/wheel publication stays
+  in its dedicated workflow.
+
 The final three-pair compact comparison reduced median training time from
 20.885 s to 20.596 s (1.38%), with identical policies, simulations and solver
 work. An earlier series measured 2.59%; one real-deck pair measured only 0.89%,

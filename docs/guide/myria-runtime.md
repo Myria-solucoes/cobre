@@ -148,7 +148,9 @@ nearly deterministic.
 ## Publishing a runtime tag
 
 The release workflows are intentionally separate from the normal package
-publication workflows:
+publication workflows. General crate, Python, MPI and cargo-dist tag triggers
+exclude `*-myria.*` and `*-original.*`; those tags publish only through their
+matching runtime workflow:
 
 - `.github/workflows/myria-runtime-release.yml` builds and validates native
   x86_64 and aarch64 CLI archives and wheels, then publishes the release.

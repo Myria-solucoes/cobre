@@ -19,6 +19,8 @@ on:
   push:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+*"
+      - '!**-myria.*'
+      - '!**-original.*'
   # Build + test wheels across all platforms on PRs that touch the Python
   # bindings, so platform-specific failures (e.g. a Windows-only test) are
   # caught before a release tag rather than in the post-tag publish. The
