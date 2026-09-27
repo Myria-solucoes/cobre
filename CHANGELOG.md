@@ -11,6 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Schedule sampled backward scenario chains dynamically across workers while
+  preserving each scenario's bases, opening order, and canonical cut order.
+  Coefficients use disjoint trial-point slots independent of the worker that
+  claims them; each worker reuses one cut's coefficient scratch. See
+  [optimized training](docs/guide/optimized-training.md) and the
+  [matched benchmark](docs/benchmarks/scenario-scheduling-2026-09-27/README.md).
+
 - Consolidated the Myria application runtime as `v0.16.0-myria.2` alongside
   the unmodified upstream `v0.16.0`. Tag publication now builds and validates
   native x86_64 and ARM64 CLI/wheel pairs, including validation contracts and

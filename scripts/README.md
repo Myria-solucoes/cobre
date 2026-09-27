@@ -50,3 +50,35 @@ still carry the canonical boundary regex).
 | Script                     | Purpose                                                                       |
 | -------------------------- | ----------------------------------------------------------------------------- |
 | `inject_wheel_licenses.py` | Bundle license files into built Python wheels (used by `release-python.yml`). |
+
+## Matched execution benchmarks
+
+`benchmarks/compare_execution.py` runs a JSON array of arms serially in shuffled,
+matched epochs. Each arm names an existing binary and case by absolute path:
+
+```json
+[
+  {"name": "reference", "binary": "/tmp/cobre-reference", "case": "/tmp/case", "threads": 8},
+  {"name": "candidate", "binary": "/tmp/cobre-candidate", "case": "/tmp/case", "threads": 8, "cpu_bind": "none"}
+]
+```
+
+After building the binaries and preparing the same case for both arms:
+
+```sh
+python3 -m pip install pyarrow
+python3 scripts/benchmarks/compare_execution.py /tmp/arms.json \
+  --output /tmp/cobre-comparison --repeats 3
+python3 -m unittest discover -s scripts/benchmarks -p test_compare_execution.py
+```
+
+The output directory must be new. Keep compilation and other heavy workloads
+outside the measured epochs. The report retains commands, input/binary hashes,
+peak resident memory, phase timing, and exact numerical signatures. Policy cut
+and basis bytes are checked alongside numerical Parquet contents, convergence
+history, solver work and bounds. Only explicit timing fields and worker-level
+solver/timing tables are excluded from the numerical payload hash; solver work
+is compared after summing by phase. Checkpoint manifest timestamps are excluded.
+A mixed-case or mixed-algorithm matrix can deliberately produce different
+signatures: `exact_numerical_parity` reports the observation and does not certify
+policy quality or turn a cross-algorithm comparison into an exact optimization.

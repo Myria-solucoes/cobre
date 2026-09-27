@@ -583,37 +583,36 @@ pub(crate) fn process_by_scenario_backward<S: SolverInterface + Send>(
 ///
 /// # Errors
 /// Returns the first failing worker's [`SddpError`]; on error no cut is committed.
-// Rationale: disjoint borrows (worker_staged, workspaces, fcf, the staged-cut
+// Rationale: disjoint borrows (worker_staged, coefficients, fcf, the staged-cut
 // scratch) plus the node/pool/iteration commit scalars; a struct would add
 // indirection without reducing the caller's borrow count.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn by_scenario_finish<S: SolverInterface>(
-    worker_staged: Vec<Result<(usize, Vec<StagedCut>), SddpError>>,
-    workspaces: &[SolverWorkspace<S>],
+pub(crate) fn by_scenario_finish(
+    worker_staged: Vec<Result<Vec<StagedCut>, SddpError>>,
+    coefficients: &[f64],
     trial_points: &[usize],
     cut_n_state: usize,
     fcf: &mut FutureCostFunction,
     node_id: NodeId,
     pool: usize,
     iteration: u64,
-    staged_cuts_buf: &mut Vec<(usize, StagedCut)>,
+    staged_cuts_buf: &mut Vec<StagedCut>,
 ) -> Result<usize, SddpError> {
     staged_cuts_buf.clear();
     for worker_result in worker_staged {
-        let (w, cuts) = worker_result?;
-        staged_cuts_buf.extend(cuts.into_iter().map(|cut| (w, cut)));
+        staged_cuts_buf.extend(worker_result?);
     }
     // `trial_state_idx` is the SOLE sort key: globally unique across workers
-    // (disjoint contiguous partitions), so the merge order is identical regardless
+    // (exclusive scenario claims), so the merge order is identical regardless
     // of worker index.
-    staged_cuts_buf.sort_by_key(|(_, cut)| cut.trial_state_idx);
+    staged_cuts_buf.sort_by_key(|cut| cut.trial_state_idx);
     debug_assert_eq!(staged_cuts_buf.len(), trial_points.len());
-    for (w, cut) in &*staged_cuts_buf {
+    for cut in &*staged_cuts_buf {
         let range = cut.coefficients_range.clone();
-        let arena = &workspaces[*w].backward_accum.agg_arena;
+        let arena = coefficients;
         debug_assert!(
             range.len() == cut_n_state && range.end <= arena.len(),
-            "coefficients_range must span exactly the pool's cut n_state and lie within the worker arena"
+            "coefficients_range must span exactly the pool's cut n_state and lie within the shared arena"
         );
         fcf.add_cut(
             node_id,

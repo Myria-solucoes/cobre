@@ -1,0 +1,99 @@
+# Whole-point backward scheduling — 2026-09-27
+
+Baseline: `v0.16.0-myria.3`, commit
+`64e40cb82f0d4e543b2192856413e0c402783345`. Candidate changes only
+`by_scenario` task ownership: free workers claim another complete point, with
+exclusive scenario bases and coefficient slots. Child resets, opening chains,
+point population, risk aggregation and final cut order remain unchanged.
+
+## Compact comparison
+
+Both binaries were built with Rust 1.94.1, GCC in Debian Bookworm, vendored
+HiGHS 1.13.1, and `cargo build --locked --release -p cobre-cli -j12`.
+The host is an Intel Xeon E5-2680 v4 with 28 physical cores, SMT disabled,
+two NUMA nodes and approximately 121 GiB RAM. Runs used eight workers,
+`--comm-backend local --cpu-bind none`, with no concurrent builds or benchmarks.
+
+Three matched epochs used a seeded shuffled arm order. The case is
+`examples/4ree` with the adjacent `compact-config.json` and
+`compact-stages.json`: 40 iterations, 96 forward trajectories, ten openings,
+CVaR alpha 0.15/lambda 0.4, LML1 every iteration, and 16 common out-of-sample
+simulation scenarios. All other example files are unchanged.
+
+| Metric | Baseline | Dynamic claims |
+|---|---:|---:|
+| Median training time | 21.039 s | 20.494 s |
+| Training range | 20.848–21.067 s | 20.448–20.704 s |
+| Median process wall time | 21.274 s | 20.677 s |
+| Median backward wall time | 16.791 s | 16.224 s |
+| Median backward imbalance estimate | 0.802 s | 0.300 s |
+| Median peak RSS | 124,988 KiB | 126,444 KiB |
+| LP solves | 468,880 | 468,880 |
+| LP solves requiring retries | 318 | 318 |
+| Terminal LP failures | 0 | 0 |
+
+The training median decreased 2.59% on this host/case. This is a modest,
+case-specific result; it is not evidence of the same gain on a different CPU,
+deck, scheduler or worker count. More workers than whole-point chains cannot
+increase chain concurrency. The `by_node` path is unchanged.
+The imbalance estimate sums the per-stage difference between the slowest
+worker's measured solver/setup time and the worker average; it is not a CPU
+utilization counter or the sum of idle time across all workers.
+
+All six runs have identical cut and basis bytes, convergence values, simulation
+results, training solver work totals and simulation solver counters. Numerical
+comparison excludes manifest timestamps and explicitly named timing columns.
+The initial comparator accidentally included four simulation solver timing
+columns; it was corrected, regression-tested and rerun on the same outputs.
+No simulation values or solver counters were excluded by that correction.
+
+Raw commands, input/binary hashes, per-run timings and numerical signatures are
+in [compact-results.json](compact-results.json). These local binaries are not
+published release binaries. Timing repetitions use the same seed; they are not
+independent policy-quality observations and do not certify convergence.
+
+## Reproduction
+
+Build the baseline and candidate separately, then prepare the compact case:
+
+```bash
+cp -a examples/4ree /tmp/cobre-scenario-case
+cp docs/benchmarks/scenario-scheduling-2026-09-27/compact-config.json /tmp/cobre-scenario-case/config.json
+cp docs/benchmarks/scenario-scheduling-2026-09-27/compact-stages.json /tmp/cobre-scenario-case/stages.json
+```
+
+Create `arms.json` with absolute paths to the two binaries:
+
+```json
+[
+  {"name":"baseline", "binary":"/path/to/baseline", "case":"/tmp/cobre-scenario-case", "threads":8},
+  {"name":"dynamic", "binary":"/path/to/candidate", "case":"/tmp/cobre-scenario-case", "threads":8}
+]
+```
+
+With PyArrow installed, use a fresh output directory:
+
+```bash
+python scripts/benchmarks/compare_execution.py arms.json --output /tmp/cobre-scenario-results --repeats 3
+python scripts/benchmarks/test_compare_execution.py
+```
+
+## Correctness checks
+
+The candidate passed 2,462 SDDP unit tests in the normal test profile,
+41 `mpi_wire` integration tests in release, 21 CLI/checkpoint tests and the
+CLI affinity parity test. The new integration test compares every cut,
+active mask, bounds and solve counts with 1/3/8 workers, repeated scheduling,
+sparse progressive selection, and dynamic/frozen cut pools.
+
+An initial release-profile unit run had 14 existing `should_panic` tests fail
+because they rely on `debug_assert!`. The full unit suite was rerun in its
+normal profile; no assertion or test was weakened. Native release validation
+also runs the new scheduling integration test on x86_64 and aarch64.
+
+## Real-deck follow-up
+
+A paired full-deck trial is in progress using the converted `teko-152` case
+(111 stages, 157 hydros), two iterations and 16 trajectories with eight workers.
+Promotion remains pending that comparison and release validation. The original
+case and existing runtimes are untouched.

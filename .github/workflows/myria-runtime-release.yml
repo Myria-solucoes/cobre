@@ -68,6 +68,7 @@ jobs:
           cargo test --locked -p cobre-sddp --lib policy::policy_load
           cargo test --locked -p cobre-sddp --lib setup::params
           cargo test --locked -p cobre-sddp --features test-support --test mpi_wire progressive
+          cargo test --locked -p cobre-sddp --features test-support --test mpi_wire scenario_claim_determinism
           cargo test --locked -p cobre-cli --test cli_run --test cli_run_affinity
 
       - name: Build CLI archive

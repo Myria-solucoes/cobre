@@ -1,0 +1,56 @@
+{
+  "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/schemas/config.schema.json",
+  "training": {
+    "selection": {
+      "method": "sampled",
+      "forward_passes": 96
+    },
+    "stopping_rules": [
+      {
+        "type": "iteration_limit",
+        "limit": 40
+      }
+    ],
+    "scenario_source": {
+      "seed": 42,
+      "inflow": {
+        "scheme": "in_sample"
+      },
+      "load": {
+        "scheme": "in_sample"
+      },
+      "ncs": {
+        "scheme": "in_sample"
+      }
+    },
+    "parallelism": {
+      "backward_scheduler": {
+        "method": "by_scenario"
+      }
+    },
+    "cut_selection": {
+      "selection": {
+        "method": "lml1",
+        "check_frequency": 1
+      }
+    }
+  },
+  "simulation": {
+    "enabled": true,
+    "selection": {
+      "method": "sampled",
+      "num_scenarios": 16
+    },
+    "scenario_source": {
+      "seed": 8675309,
+      "inflow": {
+        "scheme": "out_of_sample"
+      }
+    }
+  },
+  "modeling": {
+    "inflow_non_negativity": {
+      "method": "none"
+    }
+  }
+}

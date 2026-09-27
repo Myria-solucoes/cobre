@@ -3261,3 +3261,115 @@ mod branching_gate_roster {
     //! `training/backward_pass_state.rs`, `training/forward/stats_aggregation.rs`,
     //! `simulation/aggregation.rs`) is empty — no scratch mutation survives.
 }
+
+#[cfg(all(feature = "highs", feature = "test-support"))]
+mod scenario_claim_determinism {
+    use std::path::Path;
+
+    use cobre_io::config::training::{TrajectorySchedule, TrialPointSelection};
+    use cobre_io::config::{
+        BackwardScheduler, SelectionMethod, StoppingRuleConfig, TrainingSelection,
+    };
+    use cobre_sddp::RiskMeasure;
+    use cobre_solver::ActiveSolver;
+
+    use crate::common::{StubComm, fresh_setup_with};
+
+    #[test]
+    fn sparse_progressive_claims_preserve_every_cut_and_solve_count() {
+        for dynamic in [false, true] {
+            let mut reference = None;
+            for workers in [1, 3, 8, 3] {
+                let mut setup = fresh_setup_with(Path::new("../../examples/1dtoy"), |config| {
+                    config.training.selection =
+                        Some(TrainingSelection::Sampled { forward_passes: 7 });
+                    config.training.stopping_rules =
+                        Some(vec![StoppingRuleConfig::IterationLimit { limit: 6 }]);
+                    config.training.parallelism.backward_scheduler =
+                        BackwardScheduler::ByScenario {};
+                    config.training.forward_schedule = Some(TrajectorySchedule {
+                        initial_passes: 2.try_into().unwrap(),
+                        growth_interval: 1.try_into().unwrap(),
+                        full_from_iteration: 3.try_into().unwrap(),
+                    });
+                    config.training.backward_selection = Some(TrialPointSelection {
+                        initial_points: 1.try_into().unwrap(),
+                        exploration_points: 1.try_into().unwrap(),
+                        full_every: 3.try_into().unwrap(),
+                        full_from_iteration: 5.try_into().unwrap(),
+                        deduplicate: false,
+                        audit_relative_tolerance: None,
+                    });
+                    if dynamic {
+                        config.training.cut_selection.selection = Some(SelectionMethod::Dynamic {
+                            start_iteration: 1,
+                            seed_window: 1,
+                            candidate_recency: None,
+                            max_added_per_round: 2,
+                            adaptive_max_added_per_round: Some(8),
+                            violation_tolerance: 1e-10,
+                        });
+                    }
+                });
+                setup.set_risk_measures(vec![
+                    RiskMeasure::CVaR {
+                        alpha: 0.5,
+                        lambda: 0.4
+                    };
+                    setup.num_stages()
+                ]);
+                let mut solver = ActiveSolver::new().unwrap();
+                let outcome = setup
+                    .train(
+                        &mut solver,
+                        &StubComm,
+                        workers,
+                        ActiveSolver::new,
+                        None,
+                        None,
+                    )
+                    .unwrap();
+                assert!(outcome.error.is_none(), "{:?}", outcome.error);
+                let cuts: Vec<_> = setup
+                    .fcf
+                    .pools
+                    .iter()
+                    .map(|pool| {
+                        (
+                            pool.intercepts_prefix()
+                                .iter()
+                                .map(|v| v.to_bits())
+                                .collect::<Vec<_>>(),
+                            pool.coefficients_prefix()
+                                .iter()
+                                .map(|v| v.to_bits())
+                                .collect::<Vec<_>>(),
+                            (0..pool.populated())
+                                .map(|slot| pool.is_active(slot))
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .collect();
+                assert!(cuts.iter().any(|(intercepts, _, _)| !intercepts.is_empty()));
+                let solves: u64 = outcome
+                    .result
+                    .solver_stats_log
+                    .iter()
+                    .map(|entry| entry.delta.lp_solves)
+                    .sum();
+                assert!(solves > 0);
+                let signature = (
+                    outcome.result.final_lb.to_bits(),
+                    outcome.result.final_ub.to_bits(),
+                    cuts,
+                    solves,
+                );
+                if let Some(expected) = &reference {
+                    assert_eq!(&signature, expected, "workers={workers}, dynamic={dynamic}");
+                } else {
+                    reference = Some(signature);
+                }
+            }
+        }
+    }
+}

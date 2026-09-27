@@ -390,18 +390,10 @@ pub(crate) struct BackwardAccumulators {
     /// sibling pools never collide on a shared slot index; zeroed per trial point.
     pub(crate) slot_increments: Vec<u64>,
     /// Aggregated cut coefficients (`n_state` entries), written by
-    /// `aggregate_weighted_into` then copied into [`agg_arena`](Self::agg_arena)
-    /// at the trial point's slot.
+    /// `aggregate_weighted_into` then staged through [`agg_arena`](Self::agg_arena).
     pub(crate) agg_coefficients: Vec<f64>,
-    /// Per-worker flat arena holding every staged cut's coefficient vector for
-    /// the current stage.
-    ///
-    /// Sized lazily to at least `(end_m - start_m) * n_state` `f64`s; slot `i` of
-    /// the trial point with local index `local_idx = m - start_m` lives at
-    /// `agg_arena[local_idx * n_state + i]`. Each [`StagedCut`] stores a
-    /// `Range<usize>` into this arena instead of an owned `Vec<f64>`; the FCF
-    /// merge reads the slice after the parallel region returns. Overwritten per
-    /// trial point before any read, so no zero-fill is required.
+    /// Scratch for one aggregated cut, copied to its exclusively claimed shared slot
+    /// before the worker claims another point.
     pub(crate) agg_arena: Vec<f64>,
     /// Per-worker metadata sync contribution over the node's successor pool
     /// regions, concatenated per child (same layout as `slot_increments`). Zeroed
@@ -1043,6 +1035,18 @@ impl BasisStore {
         &mut self.bases[scenario * self.num_nodes + node.0]
     }
 
+    pub(crate) fn scenario_slices_mut(&mut self) -> impl Iterator<Item = BasisStoreSliceMut<'_>> {
+        let num_nodes = self.num_nodes;
+        self.bases
+            .chunks_mut(num_nodes.max(1))
+            .enumerate()
+            .map(move |(scenario_offset, bases)| BasisStoreSliceMut {
+                bases,
+                scenario_offset,
+                num_nodes,
+            })
+    }
+
     /// Split the store into `n_workers` disjoint mutable sub-views by scenario
     /// range, one per worker.
     ///
@@ -1485,6 +1489,32 @@ mod tests {
         let store = BasisStore::new(3, 0);
         assert_eq!(store.num_scenarios(), 0);
         assert_eq!(store.num_nodes(), 0);
+    }
+
+    #[test]
+    fn scenario_basis_claims_preserve_sparse_global_indices() {
+        let mut store = BasisStore::new(7, 3);
+        let mut selected: Vec<_> = store
+            .scenario_slices_mut()
+            .enumerate()
+            .filter(|(m, _)| [1, 4, 6].contains(m))
+            .collect();
+        for (m, slice) in selected.iter_mut().rev() {
+            assert_eq!(slice.scenario_window(), (*m, *m + 1));
+            *slice.get_mut(*m, NodePos(2)) =
+                Some(CapturedBasis::new(2, 1, 0, 0, 0, NodeId(*m as i32)));
+        }
+        drop(selected);
+        for m in 0..7 {
+            assert!(store.get(m, NodePos(0)).is_none());
+            assert!(store.get(m, NodePos(1)).is_none());
+            let basis = store.get(m, NodePos(2));
+            assert_eq!(basis.is_some(), [1, 4, 6].contains(&m));
+            if let Some(basis) = basis {
+                assert_eq!(basis.node_id, NodeId(m as i32));
+            }
+        }
+        assert_eq!(BasisStore::new(3, 0).scenario_slices_mut().count(), 0);
     }
 
     #[test]

@@ -1,5 +1,37 @@
 # Optimized training runtime
 
+## Dynamic scenario scheduling
+
+With `training.parallelism.backward_scheduler.method = "by_scenario"`, idle
+workers claim complete trial-point chains from a shared queue. A claim transfers
+exclusive access to that scenario's basis slice and coefficient output slot;
+the queue lock is released before solving. Each child still starts an independent
+solver history and retains its canonical opening solve order. Cut insertion uses
+the original trial-point order regardless of which worker claims each point.
+
+This changes scheduling, not the point population, opening count, risk measure,
+or stopping rules. It adds no configuration switch. The `by_node` scheduler
+continues to split work into opening blocks and is useful when the number of
+whole-point chains is smaller than the available worker count.
+
+Retain the rest of the study's training settings and set this fragment inside
+`training` to select whole-point chains:
+
+```json
+{
+  "parallelism": {
+    "backward_scheduler": { "method": "by_scenario" }
+  }
+}
+```
+
+Shared coefficient scratch grows with the trial population and state dimension;
+workers retain only one cut's coefficient scratch. Compare performance on the
+intended case and host before choosing a scheduler. More workers than independent
+chains cannot improve whole-chain concurrency.
+
+## Experimental training controls
+
 The optimized runtime is a separate build. Install it in a version-specific
 location and select it explicitly; do not replace an existing runtime executable
 or its current-version manifest. Keep input and output directories separate when

@@ -531,6 +531,17 @@ comparison on `examples/4ree`.
 
 ## By-node scheduler is warm-start-only
 
+The sampled `by_scenario` path also distributes claims dynamically, but its unit
+is a complete trial-point chain. `BasisStore::scenario_slices_mut` transfers a
+disjoint basis slice with the scenario's original index; a worker index must
+never address a basis. Each successor child still resets solver history before
+the first opening. Shared coefficient slots use compact node-relative trial
+positions, and `by_scenario_finish` commits by original trial index. No queue lock
+is held during a solve. `scenario_basis_claims_preserve_sparse_global_indices`
+and `sparse_progressive_claims_preserve_every_cut_and_solve_count` pin sparse
+routing, progressive population, full cut coefficients and solve counts across
+worker counts with frozen and dynamic cut selection.
+
 The live scheduler spellings are `by_scenario` (the default) and `by_node`, both
 under `training.parallelism.backward_scheduler`. The retired `trial_point` /
 `opening_block` spellings are unknown-variant deserialize errors — a clean break
