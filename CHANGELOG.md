@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-10-01
+
 ### Changed
 
 - **BREAKING — a policy loads only in the Cobre version that wrote it.**
@@ -4046,7 +4048,8 @@ disappears from `cobre.results.load_policy` per-cut dicts.
 
 <!-- next-url -->
 
-[Unreleased]: https://github.com/cobre-rs/cobre/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/cobre-rs/cobre/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/cobre-rs/cobre/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/cobre-rs/cobre/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/cobre-rs/cobre/compare/v0.14.3...v0.15.0
 [0.14.3]: https://github.com/cobre-rs/cobre/compare/v0.14.2...v0.14.3
