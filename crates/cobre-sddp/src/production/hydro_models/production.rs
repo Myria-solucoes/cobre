@@ -184,6 +184,15 @@ pub fn resolve_production_models_from_artifacts(
         })
         .collect::<Result<Vec<_>, SddpError>>()?;
     for (hydro, fit) in system.hydros().iter().zip(fits) {
+        if fit.provenance.1 == ProductionModelSource::NoTurbineCapacity {
+            tracing::warn!(
+                "hydro {} (id={}) requests computed FPHA but has no turbine capacity \
+                 (max_turbined_m3s = {}); modeling it with zero productivity",
+                hydro.name,
+                hydro.id.0,
+                hydro.max_turbined_m3s
+            );
+        }
         provenance.push(fit.provenance);
         export_rows.extend(fit.export_rows);
         fpha_deviation_point_rows.extend(fit.deviation_point_rows);
@@ -245,6 +254,13 @@ struct PerHydroFit {
     deviation_point_rows: Vec<FphaDeviationPointRow>,
 }
 
+/// At or below this turbine capacity the fitting grid's flow axis collapses onto
+/// `q = 0` and no plane survives, so a computed-FPHA plant resolves to zero
+/// productivity instead. A zero MW capacity alone is NOT degenerate: fitting
+/// drops a non-positive ceiling and the generation column's own bound holds
+/// output at zero.
+const MIN_FITTABLE_MAX_TURBINED_M3S: f64 = 1e-9;
+
 /// Resolve every study-stage production model for ONE hydro, returning the
 /// per-hydro result by value with no shared `&mut` capture.
 ///
@@ -273,6 +289,22 @@ fn fit_one_hydro(
     let config_entry = config_map.get(&hydro.id).copied();
 
     let source = determine_source(hydro, config_entry)?;
+
+    if source == ProductionModelSource::ComputedFromGeometry
+        && hydro.max_turbined_m3s <= MIN_FITTABLE_MAX_TURBINED_M3S
+    {
+        validate_computed_prerequisites(hydro, geometry_map)?;
+        return Ok(PerHydroFit {
+            stage_models: vec![
+                ResolvedProductionModel::ConstantProductivity { productivity: 0.0 };
+                n_stages
+            ],
+            provenance: (hydro.id, ProductionModelSource::NoTurbineCapacity),
+            export_rows: Vec::new(),
+            fpha_deviations: Vec::new(),
+            deviation_point_rows: Vec::new(),
+        });
+    }
 
     let mut export_rows: Vec<FphaHyperplaneRow> = Vec::new();
     let mut fpha_deviations: Vec<FphaDeviationDiagnostic> = Vec::new();
