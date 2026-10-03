@@ -30,8 +30,8 @@ def write_policy_checkpoint(
 
     Omitted, the checkpoint carries the absent descriptor (cycle_code=255).
 
-    The checkpoint always records the running cobre version; a "cobre_version"
-    key in metadata is ignored.
+    The checkpoint always records the running software and version; "software",
+    "software_version" or "cobre_version" keys in metadata are ignored.
     """
     ...
 

@@ -11,6 +11,7 @@ use super::manifest::{
     MetadataProblemDimensions, MetadataRowPool, MetadataScenarios, OutputContext,
     SimulationMetadata, TrainingMetadata, write_simulation_metadata, write_training_metadata,
 };
+use super::software::{SOFTWARE_NAME, SOFTWARE_VERSION};
 use super::training_writer::TrainingParquetWriter;
 use super::{SimulationOutput, TrainingOutput};
 use crate::Config;
@@ -48,7 +49,8 @@ pub fn write_training_results(
     let max_iterations = extract_max_iterations(config);
 
     let metadata = TrainingMetadata {
-        cobre_version: env!("CARGO_PKG_VERSION").to_string(),
+        software: SOFTWARE_NAME.to_string(),
+        software_version: SOFTWARE_VERSION.to_string(),
         hostname: ctx.hostname.clone(),
         solver: ctx.solver.clone(),
         solver_version: ctx.solver_version.clone(),
@@ -126,7 +128,8 @@ pub fn write_simulation_results(
     ctx: &OutputContext,
 ) -> Result<(), OutputError> {
     let metadata = SimulationMetadata {
-        cobre_version: env!("CARGO_PKG_VERSION").to_string(),
+        software: SOFTWARE_NAME.to_string(),
+        software_version: SOFTWARE_VERSION.to_string(),
         hostname: ctx.hostname.clone(),
         solver: ctx.solver.clone(),
         solver_version: ctx.solver_version.clone(),

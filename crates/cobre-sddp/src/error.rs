@@ -1,8 +1,8 @@
 //! Error types for the `cobre-sddp` crate.
 
 use cobre_comm::CommError;
-use cobre_io::LoadError;
 use cobre_io::scenarios::estimation::EstimationError;
+use cobre_io::{LoadError, SOFTWARE_NAME, SOFTWARE_VERSION};
 use cobre_solver::SolverError;
 use cobre_stochastic::StochasticError;
 
@@ -98,16 +98,18 @@ pub enum SddpError {
         expected: u32,
     },
 
-    /// A policy checkpoint was written by a different cobre version than the
-    /// running one; only same-version policies load.
+    /// A policy checkpoint was not written by this build: only checkpoints from
+    /// the same software at the same version load.
     #[error(
-        "policy was written by cobre {policy_version}, but this is cobre {running}; a policy \
-         loads only in the cobre version that wrote it: retrain it, or re-export it, with \
-         cobre {running}",
-        running = crate::POLICY_COBRE_VERSION
+        "policy was written by {writer}, but this is {SOFTWARE_NAME} {SOFTWARE_VERSION}; a \
+         policy loads only in the software and version that wrote it: retrain it, or re-export \
+         it, with {SOFTWARE_NAME} {SOFTWARE_VERSION}",
+        writer = describe_writer(.policy_software.as_deref(), .policy_version)
     )]
-    PolicyVersionMismatch {
-        /// The `cobre_version` the checkpoint's manifest records.
+    PolicySoftwareMismatch {
+        /// The `software` the checkpoint's manifest records, if any.
+        policy_software: Option<String>,
+        /// The `software_version` the checkpoint's manifest records.
         policy_version: String,
     },
 
@@ -134,6 +136,13 @@ pub enum SddpError {
     },
 }
 
+fn describe_writer(software: Option<&str>, version: &str) -> String {
+    match software {
+        Some(name) => format!("{name} {version}"),
+        None => format!("software that recorded no name, version {version}"),
+    }
+}
+
 impl From<EstimationError> for SddpError {
     fn from(err: EstimationError) -> Self {
         match err {
@@ -156,7 +165,7 @@ impl From<FphaFittingError> for SddpError {
 mod tests {
     use super::SddpError;
     use cobre_comm::CommError;
-    use cobre_io::LoadError;
+    use cobre_io::{LoadError, SOFTWARE_NAME, SOFTWARE_VERSION};
     use cobre_solver::SolverError;
     use cobre_stochastic::StochasticError;
     use std::path::PathBuf;
@@ -241,13 +250,27 @@ mod tests {
     }
 
     #[test]
-    fn display_policy_version_mismatch_names_both_versions() {
-        let err = SddpError::PolicyVersionMismatch {
+    fn display_policy_software_mismatch_names_both_writers() {
+        let err = SddpError::PolicySoftwareMismatch {
+            policy_software: Some("another-program".to_string()),
             policy_version: "0.0.1".to_string(),
         };
         let msg = err.to_string();
-        assert!(msg.contains("0.0.1"), "{msg}");
-        assert!(msg.contains(crate::POLICY_COBRE_VERSION), "{msg}");
+        assert!(msg.contains("another-program 0.0.1"), "{msg}");
+        assert!(
+            msg.contains(&format!("{SOFTWARE_NAME} {SOFTWARE_VERSION}")),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn display_policy_software_mismatch_without_a_recorded_name() {
+        let err = SddpError::PolicySoftwareMismatch {
+            policy_software: None,
+            policy_version: "0.0.1".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("recorded no name, version 0.0.1"), "{msg}");
     }
 
     #[test]
@@ -344,7 +367,8 @@ mod tests {
                 encoded: 0,
                 expected: 1,
             },
-            SddpError::PolicyVersionMismatch {
+            SddpError::PolicySoftwareMismatch {
+                policy_software: None,
                 policy_version: "0.0.1".to_string(),
             },
             SddpError::StoredBasisDimensionMismatch {
@@ -384,7 +408,8 @@ mod tests {
                 encoded: 0,
                 expected: 1,
             },
-            SddpError::PolicyVersionMismatch {
+            SddpError::PolicySoftwareMismatch {
+                policy_software: None,
                 policy_version: "0.0.1".to_string(),
             },
             SddpError::StoredBasisDimensionMismatch {

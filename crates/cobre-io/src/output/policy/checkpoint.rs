@@ -250,7 +250,7 @@ fn bin_file_name(id: u32) -> String {
 /// use cobre_io::{
 ///     write_policy_checkpoint, FORMAT_VERSION, GraphManifest, PolicyBasisRecord,
 ///     CheckpointManifest, PolicyCutRecord, ProducerBlock, SeasonManifest,
-///     STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, StageCutsPayload,
+///     SOFTWARE_NAME, SOFTWARE_VERSION, STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, StageCutsPayload,
 /// };
 /// use std::path::Path;
 ///
@@ -281,7 +281,8 @@ fn bin_file_name(id: u32) -> String {
 /// }];
 /// let metadata = CheckpointManifest {
 ///     format_version: FORMAT_VERSION,
-///     cobre_version: env!("CARGO_PKG_VERSION").to_string(),
+///     software: Some(SOFTWARE_NAME.to_string()),
+///     software_version: SOFTWARE_VERSION.to_string(),
 ///     created_at: "2026-03-08T00:00:00Z".to_string(),
 ///     num_stages: 1,
 ///     graph_manifest: GraphManifest::default(),

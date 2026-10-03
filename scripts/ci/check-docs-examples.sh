@@ -36,7 +36,8 @@ readonly TEMPLATE="1dtoy"
 # the routing decision, warm_start_* belong to the policy checkpoint's
 # manifest.bin, NOT here.
 readonly TRAINING_METADATA_KEYS=(
-  cobre_version
+  software
+  software_version
   hostname
   solver
   solver_version
@@ -57,7 +58,8 @@ readonly TRAINING_METADATA_KEYS=(
 # Expected top-level keys of simulation/metadata.json. Source of truth is the
 # SimulationMetadata struct's serde field names.
 readonly SIMULATION_METADATA_KEYS=(
-  cobre_version
+  software
+  software_version
   hostname
   solver
   solver_version

@@ -9,6 +9,8 @@
 
 use chrono::{Datelike, NaiveDate};
 
+use crate::output::SoftwareIdentity;
+
 /// Current on-disk value-function artifact format version.
 ///
 /// [`CheckpointManifest::format_version`] must equal this;
@@ -421,6 +423,17 @@ pub struct SeasonManifest {
     pub hydro_orders: Vec<HydroSeasonOrders>,
 }
 
+impl CheckpointManifest {
+    /// The software this checkpoint records as its writer.
+    #[must_use]
+    pub fn written_by(&self) -> SoftwareIdentity<'_> {
+        SoftwareIdentity {
+            name: self.software.as_deref(),
+            version: &self.software_version,
+        }
+    }
+}
+
 impl Default for SeasonManifest {
     /// The absent descriptor: [`SEASON_CYCLE_CODE_ABSENT`], zero seasons, no
     /// hydros — what a pre-`id:19` buffer decodes to.
@@ -485,8 +498,9 @@ pub struct ProducerBlock {
 
 /// Study-global checkpoint metadata carried on the `FlatBuffers`
 /// `CheckpointManifest` root at `manifest.bin`: the neutral core
-/// (`format_version`, `cobre_version`, `created_at`, `num_stages`, the
-/// [`GraphManifest`] descriptors) plus the namespaced [`ProducerBlock`]. Read
+/// (`format_version`, `software`, `software_version`, `created_at`,
+/// `num_stages`, the [`GraphManifest`] descriptors) plus the namespaced
+/// [`ProducerBlock`]. Read
 /// first by [`crate::read_policy_checkpoint`], whose version gate rejects a
 /// stale `format_version` before any payload is parsed.
 ///
@@ -499,8 +513,11 @@ pub struct ProducerBlock {
 pub struct CheckpointManifest {
     /// On-disk format version; must equal [`FORMAT_VERSION`] on read.
     pub format_version: u32,
-    /// Cobre crate version that wrote this checkpoint.
-    pub cobre_version: String,
+    /// Name of the software that wrote this checkpoint; `None` for a buffer
+    /// older than the field.
+    pub software: Option<String>,
+    /// Version of the software that wrote this checkpoint.
+    pub software_version: String,
     /// ISO 8601 timestamp when the checkpoint was written.
     pub created_at: String,
     /// Number of stages the graph manifest spans.

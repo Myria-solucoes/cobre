@@ -93,7 +93,8 @@ def test_training_manifest_structure(run_output: pathlib.Path) -> None:
     """metadata.json has expected top-level keys."""
     manifest = json.loads((run_output / "training" / "metadata.json").read_text())
     assert isinstance(manifest, dict)
-    assert "cobre_version" in manifest
+    assert manifest["software"] == "cobre"
+    assert "software_version" in manifest
     assert "status" in manifest
     assert "convergence" in manifest
 

@@ -350,8 +350,8 @@ table CheckpointManifest {
   /// On-disk artifact format version; a reader rejects any other value.
   format_version:uint32 (id: 0);
 
-  /// Producer crate version that wrote this checkpoint.
-  cobre_version:string (id: 1);
+  /// Version of the software that wrote this checkpoint.
+  software_version:string (id: 1);
 
   /// ISO 8601 timestamp when the checkpoint was written.
   created_at:string (id: 2);
@@ -408,4 +408,8 @@ table CheckpointManifest {
   /// yields the absent descriptor (`SeasonManifest.cycle_code == 255`) for a
   /// pre-`id:19` buffer.
   season_manifest:SeasonManifest (id: 19);
+
+  /// Name of the software that wrote this checkpoint; absent in a buffer older
+  /// than this field.
+  software:string (id: 20);
 }

@@ -773,9 +773,10 @@ fn metadata_to_py<'py>(
 ) -> PyResult<Bound<'py, PyDict>> {
     let dict = PyDict::new(py);
     dict.set_item("format_version", into_py(py, metadata.format_version)?)?;
+    dict.set_item("software", into_py(py, metadata.software.as_deref())?)?;
     dict.set_item(
-        "cobre_version",
-        into_py(py, metadata.cobre_version.as_str())?,
+        "software_version",
+        into_py(py, metadata.software_version.as_str())?,
     )?;
     dict.set_item("created_at", into_py(py, metadata.created_at.as_str())?)?;
     dict.set_item("num_stages", into_py(py, metadata.num_stages)?)?;
@@ -1320,7 +1321,8 @@ pub fn load_simulation_arrow(
 /// {
 ///     "metadata": {
 ///         "format_version": 2,
-///         "cobre_version": "1.0.0",
+///         "software": "cobre",
+///         "software_version": "1.0.0",
 ///         "created_at": "2026-01-15T12:00:00Z",
 ///         "num_stages": 60,
 ///         "graph_manifest": { "n_pools": 60, "nodes": [ ... ], "edges": [ ... ] },

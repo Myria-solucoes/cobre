@@ -992,6 +992,28 @@ fn warm_start_refuses_a_policy_written_by_another_version() {
         )));
 }
 
+/// A checkpoint written by another program at this build's exact version is
+/// refused at warm-start load, naming that program.
+#[test]
+fn warm_start_refuses_a_policy_written_by_other_software() {
+    let dir = TempDir::new().unwrap();
+    write_boundary_case(dir.path(), 0);
+    run_case(dir.path());
+    append_warm_start_policy(dir.path());
+
+    common::restamp_policy_software(&dir.path().join("output/policy"), "another-program");
+
+    cobre()
+        .args(["run", dir.path().to_str().unwrap()])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains(format!(
+            "written by another-program {}",
+            env!("CARGO_PKG_VERSION")
+        )));
+}
+
 /// A boundary source written by another cobre version is refused at run,
 /// naming both versions.
 #[test]

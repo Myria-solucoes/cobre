@@ -25,7 +25,8 @@ use cobre_io::{
 /// Legacy `training/metadata.json` without the `bounds`, `solve_stats`, and
 /// `distribution.hosts` fields.
 const LEGACY_TRAINING_JSON: &str = r#"{
-  "cobre_version": "0.1.0",
+  "software": "cobre",
+  "software_version": "0.1.0",
   "hostname": "legacy-host",
   "solver": "highs",
   "solver_version": "1.8.0",
@@ -73,7 +74,8 @@ const LEGACY_TRAINING_JSON: &str = r#"{
 /// Legacy `simulation/metadata.json` without the `cost`, `solve_stats`, and
 /// `distribution.hosts` fields.
 const LEGACY_SIM_JSON: &str = r#"{
-  "cobre_version": "0.1.0",
+  "software": "cobre",
+  "software_version": "0.1.0",
   "hostname": "legacy-host",
   "solver": "highs",
   "solver_version": "1.8.0",
@@ -249,7 +251,8 @@ fn fully_populated_distribution() -> DistributionInfo {
 
 fn fully_populated_training_metadata() -> TrainingMetadata {
     TrainingMetadata {
-        cobre_version: "0.1.6".to_string(),
+        software: "cobre".to_string(),
+        software_version: "0.1.6".to_string(),
         hostname: "node01".to_string(),
         solver: "highs".to_string(),
         solver_version: Some("1.8.0".to_string()),
@@ -325,7 +328,8 @@ fn fully_populated_training_metadata() -> TrainingMetadata {
 
 fn fully_populated_simulation_metadata() -> SimulationMetadata {
     SimulationMetadata {
-        cobre_version: "0.1.6".to_string(),
+        software: "cobre".to_string(),
+        software_version: "0.1.6".to_string(),
         hostname: "node01".to_string(),
         solver: "highs".to_string(),
         solver_version: Some("1.8.0".to_string()),
@@ -459,4 +463,21 @@ fn simulation_metadata_new_fields_survive_write_read_roundtrip() {
     assert_eq!(decoded.distribution.hosts[0].ranks, vec![0, 1, 2, 3]);
     assert_eq!(decoded.distribution.hosts[1].hostname, "node02");
     assert_eq!(decoded.distribution.hosts[1].ranks, vec![4, 5, 6, 7]);
+}
+
+// ── Clean break: the product-named version key is not read ──────────────────────
+
+#[test]
+fn product_named_version_key_is_a_deserialize_error() {
+    let mut training = serde_json::to_value(fully_populated_training_metadata()).unwrap();
+    let mut simulation = serde_json::to_value(fully_populated_simulation_metadata()).unwrap();
+    for value in [&mut training, &mut simulation] {
+        let object = value.as_object_mut().unwrap();
+        object.remove("software");
+        let version = object.remove("software_version").unwrap();
+        object.insert("cobre_version".to_string(), version);
+    }
+
+    assert!(serde_json::from_value::<TrainingMetadata>(training).is_err());
+    assert!(serde_json::from_value::<SimulationMetadata>(simulation).is_err());
 }

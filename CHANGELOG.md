@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING — `metadata.json` names the software that wrote it as `software`
+  and `software_version`.** `training/metadata.json` and
+  `simulation/metadata.json` replace the `cobre_version` key with this pair.
+
+- **BREAKING — a policy loads only in the software that wrote it, at the same
+  version.** Policy checkpoints now record the name of the software that wrote
+  them. Warm-start, resume, simulation-only and boundary-cut loads refuse a
+  checkpoint written by a different program even when its version string
+  matches, and refuse one that recorded no software name. The error names both
+  programs and versions; retrain the policy, or re-export the boundary policy,
+  with the running version.
+
 ## [0.17.0] - 2026-10-01
 
 ### Changed

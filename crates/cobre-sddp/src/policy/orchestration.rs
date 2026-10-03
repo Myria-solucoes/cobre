@@ -10,7 +10,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use chrono::NaiveDate;
-use cobre_io::EntitySlot;
 use cobre_io::output::policy::{
     CheckpointManifest, FORMAT_VERSION, HydroSeasonOrders, ProducerBlock, SEASON_CYCLE_CODE_ABSENT,
     SEASON_CYCLE_CODE_CUSTOM, SEASON_CYCLE_CODE_MONTHLY, SEASON_CYCLE_CODE_WEEKLY, SeasonManifest,
@@ -24,9 +23,9 @@ use cobre_io::output::{
 use cobre_io::scenarios::LoadSeasonalStatsRow;
 use cobre_io::scenarios::estimation::EstimationReport;
 use cobre_io::scenarios::resolve_model_stage_seasons;
+use cobre_io::{EntitySlot, SOFTWARE_NAME, SOFTWARE_VERSION};
 use cobre_stochastic::StochasticContext;
 
-use crate::POLICY_COBRE_VERSION;
 use crate::TrainingResult;
 use crate::policy_export::{
     borrow_cut_records, build_active_indices, build_stage_basis_records, build_stage_cut_records,
@@ -319,7 +318,8 @@ pub fn write_checkpoint(
 
     let metadata = CheckpointManifest {
         format_version: FORMAT_VERSION,
-        cobre_version: POLICY_COBRE_VERSION.to_string(),
+        software: Some(SOFTWARE_NAME.to_string()),
+        software_version: SOFTWARE_VERSION.to_string(),
         created_at: cobre_io::now_iso8601(),
         num_stages: n_stages as u32,
         graph_manifest: setup.build_graph_manifest(),

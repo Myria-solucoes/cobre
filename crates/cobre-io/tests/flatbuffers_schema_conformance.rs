@@ -855,7 +855,8 @@ table StageStates {
 fn conformance_manifest_value() -> CheckpointManifest {
     CheckpointManifest {
         format_version: FORMAT_VERSION,
-        cobre_version: "9.9.9".to_string(),
+        software: Some("cobre".to_string()),
+        software_version: "9.9.9".to_string(),
         created_at: "2026-08-23T12:00:00Z".to_string(),
         num_stages: 60,
         graph_manifest: GraphManifest {
@@ -914,7 +915,8 @@ fn conformance_manifest_value() -> CheckpointManifest {
 
 fn assert_manifest_eq(actual: &CheckpointManifest, expected: &CheckpointManifest) {
     assert_eq!(actual.format_version, expected.format_version);
-    assert_eq!(actual.cobre_version, expected.cobre_version);
+    assert_eq!(actual.software, expected.software);
+    assert_eq!(actual.software_version, expected.software_version);
     assert_eq!(actual.created_at, expected.created_at);
     assert_eq!(actual.num_stages, expected.num_stages);
 
@@ -1002,7 +1004,8 @@ fn checkpoint_manifest_round_trip() {
 
     let json = flatc_decode(&buf, "CheckpointManifest");
     assert_eq!(as_u64(&json, "format_version"), u64::from(FORMAT_VERSION));
-    assert_eq!(get(&json, "cobre_version").as_str().unwrap(), "9.9.9");
+    assert_eq!(get(&json, "software").as_str().unwrap(), "cobre");
+    assert_eq!(get(&json, "software_version").as_str().unwrap(), "9.9.9");
     assert_eq!(
         get(&json, "created_at").as_str().unwrap(),
         "2026-08-23T12:00:00Z"
@@ -1066,7 +1069,8 @@ fn checkpoint_manifest_round_trip() {
 
     let document = json!({
         "format_version": FORMAT_VERSION,
-        "cobre_version": "9.9.9",
+        "software": "cobre",
+        "software_version": "9.9.9",
         "created_at": "2026-08-23T12:00:00Z",
         "num_stages": 60,
         "n_pools": 3,

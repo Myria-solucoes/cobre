@@ -95,9 +95,9 @@ pub use generic_constraint_echo::build_generic_constraint_echo_rows;
 pub use lp::builder::StageTemplates;
 pub use policy::policy_export::{ReservedInflowLagLayout, reserve_boundary_inflow_lag_slots};
 pub use policy::policy_load::{
-    BoundaryInjection, BoundaryLoadRequest, FullFcf, LEGACY_COST_SCALE_FACTOR,
-    POLICY_COBRE_VERSION, PolicyLoadKind, PolicyLoadProof, PolicyStageManifest,
-    ValidatedBoundaryCuts, boundary_policy_required_lag_depth, build_basis_cache_from_checkpoint,
+    BoundaryInjection, BoundaryLoadRequest, FullFcf, LEGACY_COST_SCALE_FACTOR, PolicyLoadKind,
+    PolicyLoadProof, PolicyStageManifest, ValidatedBoundaryCuts,
+    boundary_policy_required_lag_depth, build_basis_cache_from_checkpoint,
     checkpoint_terminal_cost_scale_factor, compare_manifest_slot_identity, inject_boundary_cuts,
     load_boundary_cuts, rescale_checkpoint_cuts_for_load, resolve_boundary_state_requirements,
     validate_policy_load,

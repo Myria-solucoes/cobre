@@ -870,12 +870,12 @@ fn setup_error_message(err: SddpError, phase_prefix: Option<&str>) -> String {
     }
 }
 
-/// Maps a boundary-cut load error to its message prefix: [`SddpError::PolicyVersionMismatch`]
+/// Maps a boundary-cut load error to its message prefix: [`SddpError::PolicySoftwareMismatch`]
 /// gets [`POLICY_VALIDATION_ERROR_PREFIX`] (so it raises `PolicyIncompatibleError`), every
 /// other boundary-load error keeps [`BOUNDARY_CUT_ERROR_PREFIX`].
 #[allow(clippy::needless_pass_by_value)]
 fn boundary_cut_error_message(err: SddpError) -> String {
-    let prefix = if matches!(err, SddpError::PolicyVersionMismatch { .. }) {
+    let prefix = if matches!(err, SddpError::PolicySoftwareMismatch { .. }) {
         POLICY_VALIDATION_ERROR_PREFIX
     } else {
         BOUNDARY_CUT_ERROR_PREFIX
@@ -1130,7 +1130,7 @@ fn validate_loaded_policy(
         slots: &current_manifest,
         graph: &current_graph,
     };
-    let proof = validate_policy_load::<FullFcf>(&checkpoint.metadata.cobre_version, &source, &current)
+    let proof = validate_policy_load::<FullFcf>(checkpoint.metadata.written_by(), &source, &current)
         .map_err(|e| format!("{POLICY_VALIDATION_ERROR_PREFIX}: {e}"))?;
 
     for msg in &proof.warnings {

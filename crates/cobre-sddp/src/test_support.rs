@@ -37,7 +37,8 @@ use cobre_io::config::{
 };
 use cobre_io::{
     EntitySlot, GraphManifest, ManifestEdge, ManifestNode, PolicyCutRecord, ProducerBlock,
-    StageCutsPayload, decode_slot_date, encode_slot_date, write_policy_checkpoint,
+    SOFTWARE_NAME, SOFTWARE_VERSION, SoftwareIdentity, StageCutsPayload, decode_slot_date,
+    encode_slot_date, write_policy_checkpoint,
 };
 use cobre_stochastic::par::precompute::PrecomputedPar;
 use cobre_stochastic::{
@@ -68,7 +69,7 @@ use crate::lp::indexer::{
 };
 use crate::noise::{DownstreamAccumState, LagAccumState};
 use crate::policy::policy_load::{
-    FullFcf, POLICY_COBRE_VERSION, PolicyLoadProof, PolicyStageManifest, validate_policy_load,
+    FullFcf, PolicyLoadProof, PolicyStageManifest, validate_policy_load,
 };
 use crate::risk_measure::BackwardOutcome;
 use crate::setup::node_graph::{
@@ -1326,12 +1327,12 @@ pub fn trivial_full_fcf_proof(state_dimension: u32, num_stages: u32) -> PolicyLo
         slots: &[],
         graph: &graph,
     };
-    validate_policy_load::<FullFcf>(POLICY_COBRE_VERSION, &manifest, &manifest)
+    validate_policy_load::<FullFcf>(SoftwareIdentity::THIS_BUILD, &manifest, &manifest)
         .expect("trivial matching manifest cannot fail validate_policy_load")
 }
 
 /// Assemble the [`CheckpointManifest`] for a checkpoint fixture: the three
-/// invariant fields (`format_version` = [`FORMAT_VERSION`], `cobre_version`
+/// invariant fields (`format_version` = [`FORMAT_VERSION`], the software identity
 /// matching the production writer, a fixed `created_at` no consumer reads) are
 /// filled here — the sole owner of the manifest literal for `cobre-sddp`
 /// tests. `season_manifest` defaults absent; a caller exercising the
@@ -1349,7 +1350,8 @@ pub fn checkpoint_metadata(
 ) -> cobre_io::CheckpointManifest {
     cobre_io::CheckpointManifest {
         format_version: cobre_io::FORMAT_VERSION,
-        cobre_version: POLICY_COBRE_VERSION.to_string(),
+        software: Some(SOFTWARE_NAME.to_string()),
+        software_version: SOFTWARE_VERSION.to_string(),
         created_at: "2026-01-01T00:00:00Z".to_string(),
         num_stages,
         graph_manifest,

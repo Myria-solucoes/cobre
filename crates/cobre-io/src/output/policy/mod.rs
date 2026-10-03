@@ -265,7 +265,8 @@ mod tests {
     fn make_metadata(num_stages: u32, _state_dimension: u32) -> CheckpointManifest {
         CheckpointManifest {
             format_version: FORMAT_VERSION,
-            cobre_version: "0.0.1".to_string(),
+            software: Some("cobre".to_string()),
+            software_version: "0.0.1".to_string(),
             created_at: "2026-03-08T00:00:00Z".to_string(),
             num_stages,
             graph_manifest: chain_manifest(num_stages),

@@ -93,7 +93,7 @@ fn load_and_validate_checkpoint(
         graph: &current_graph,
     };
     let proof =
-        validate_policy_load::<FullFcf>(&checkpoint.metadata.cobre_version, &source, &current)
+        validate_policy_load::<FullFcf>(checkpoint.metadata.written_by(), &source, &current)
             .map_err(CliError::from)?;
 
     if ctx.is_root && !ctx.quiet {

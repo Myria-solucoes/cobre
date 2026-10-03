@@ -100,12 +100,28 @@ const DEFAULT_LINES_JSON: &str = r#"{ "lines": [] }"#;
 const DEFAULT_HYDROS_JSON: &str = r#"{ "hydros": [] }"#;
 const DEFAULT_THERMALS_JSON: &str = r#"{ "thermals": [] }"#;
 
-/// Rewrites the cobre version recorded in `policy_dir/manifest.bin`.
+/// Rewrites the software version recorded in `policy_dir/manifest.bin`.
 pub fn restamp_policy_version(policy_dir: &Path, version: &str) {
+    restamp_policy_manifest(policy_dir, |manifest| {
+        manifest.software_version = version.to_string();
+    });
+}
+
+/// Rewrites the software name recorded in `policy_dir/manifest.bin`.
+pub fn restamp_policy_software(policy_dir: &Path, software: &str) {
+    restamp_policy_manifest(policy_dir, |manifest| {
+        manifest.software = Some(software.to_string());
+    });
+}
+
+fn restamp_policy_manifest(
+    policy_dir: &Path,
+    edit: impl FnOnce(&mut cobre_io::CheckpointManifest),
+) {
     let path = policy_dir.join("manifest.bin");
     let mut manifest =
         cobre_io::deserialize_checkpoint_manifest(&fs::read(&path).unwrap()).unwrap();
-    manifest.cobre_version = version.to_string();
+    edit(&mut manifest);
     fs::write(&path, cobre_io::serialize_checkpoint_manifest(&manifest)).unwrap();
 }
 

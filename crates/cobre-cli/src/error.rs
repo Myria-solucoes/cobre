@@ -21,7 +21,7 @@ use cobre_sddp::SddpError::BasisShapeMismatch;
 use cobre_sddp::SddpError::Communication;
 use cobre_sddp::SddpError::Infeasible;
 use cobre_sddp::SddpError::Io;
-use cobre_sddp::SddpError::PolicyVersionMismatch;
+use cobre_sddp::SddpError::PolicySoftwareMismatch;
 use cobre_sddp::SddpError::Simulation;
 use cobre_sddp::SddpError::Solver;
 use cobre_sddp::SddpError::Stochastic;
@@ -252,9 +252,9 @@ impl From<cobre_sddp::SddpError> for CliError {
             ref shape_mismatch @ BasisShapeMismatch { .. } => Self::Internal {
                 message: shape_mismatch.to_string(),
             },
-            ref mismatch @ (PolicyVersionMismatch { .. } | StoredBasisDimensionMismatch { .. }) => {
+            ref refused @ (PolicySoftwareMismatch { .. } | StoredBasisDimensionMismatch { .. }) => {
                 Self::Validation {
-                    report: mismatch.to_string(),
+                    report: refused.to_string(),
                     already_rendered: false,
                 }
             }
@@ -519,24 +519,22 @@ mod tests {
     }
 
     #[test]
-    fn from_sddp_error_policy_version_mismatch_maps_to_validation() {
-        let sddp_err = PolicyVersionMismatch {
+    fn from_sddp_error_policy_software_mismatch_maps_to_validation() {
+        let sddp_err = PolicySoftwareMismatch {
+            policy_software: Some("cobre".to_string()),
             policy_version: "0.0.1".to_string(),
         };
         let cli_err = CliError::from(sddp_err);
         assert!(
             matches!(cli_err, CliError::Validation { .. }),
-            "SddpError::PolicyVersionMismatch must map to CliError::Validation, got: {cli_err:?}"
+            "SddpError::PolicySoftwareMismatch must map to CliError::Validation, got: {cli_err:?}"
         );
         assert_eq!(cli_err.exit_code(), 1);
         let CliError::Validation { report, .. } = cli_err else {
             unreachable!("checked above")
         };
         assert!(report.contains("0.0.1"), "{report}");
-        assert!(
-            report.contains(cobre_sddp::POLICY_COBRE_VERSION),
-            "{report}"
-        );
+        assert!(report.contains(cobre_io::SOFTWARE_VERSION), "{report}");
     }
 
     #[test]
