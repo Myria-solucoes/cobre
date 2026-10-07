@@ -56,7 +56,7 @@ use std::path::Path;
 use super::parse_operational_start_date;
 use crate::LoadError;
 
-/// Top-level intermediate type for `lines.json` (serde only, not re-exported).
+/// Root object of `lines.json`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -68,7 +68,7 @@ pub(crate) struct RawLineFile {
     lines: Vec<RawLine>,
 }
 
-/// Intermediate type for a single line entry.
+/// A single line entry.
 #[derive(Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -91,8 +91,8 @@ pub(crate) struct RawLine {
     exit_stage_id: Option<i32>,
     /// Nested capacity object with direct and reverse MW limits.
     capacity: RawLineCapacity,
-    /// Optional entity-level exchange cost override \[$/`MWh`\].
-    /// When absent, falls back to global `line_exchange_cost`.
+    /// Optional entity-level exchange cost override ($/`MWh`).
+    /// When absent, falls back to `line.exchange_cost` in `penalties.json`.
     #[serde(default)]
     exchange_cost: Option<f64>,
     /// Transmission losses as percentage. Defaults to 0.0 when absent.
@@ -100,14 +100,14 @@ pub(crate) struct RawLine {
     losses_percent: f64,
 }
 
-/// Intermediate type for the nested capacity sub-object.
+/// The nested capacity sub-object.
 #[derive(Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawLineCapacity {
-    /// Maximum flow from source to target \[MW\].
+    /// Maximum flow from source to target (MW).
     direct_mw: f64,
-    /// Maximum flow from target to source \[MW\].
+    /// Maximum flow from target to source (MW).
     reverse_mw: f64,
 }
 

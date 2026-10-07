@@ -1,5 +1,7 @@
 //! Accessor methods and context builders for [`StudySetup`].
 
+use std::path::Path;
+
 use cobre_core::AnticipatedCommitmentHistory;
 use cobre_core::System;
 #[cfg(any(test, feature = "test-support"))]
@@ -16,6 +18,7 @@ use crate::{
     cut::FutureCostFunction,
     energy_conversion::EnergyConversionSet,
     indexer::StateSpace,
+    policy::orchestration::{CheckpointLayout, CheckpointParams, PeriodicCheckpoint},
     simulation::SimulationConfig,
     workspace::CapturedBasis,
 };
@@ -38,9 +41,11 @@ impl StudySetup {
         &self.boundary_requirements
     }
 
-    /// Set the starting iteration for resumed training.
-    pub fn set_start_iteration(&mut self, iteration: u64) {
-        self.loop_params.start_iteration = iteration;
+    /// Set the resume point: the iterations the earlier run completed and the
+    /// lower bound it recorded for each of them.
+    pub fn set_resume_point(&mut self, completed_iterations: u64, lower_bound_history: Vec<f64>) {
+        self.loop_params.start_iteration = completed_iterations;
+        self.loop_params.resume_lower_bound_history = lower_bound_history;
     }
 
     /// Seed the per-stage warm-start basis cache for warm-start / resume
@@ -56,6 +61,34 @@ impl StudySetup {
     /// Enable state archiving for export.
     pub fn set_export_states(&mut self, export: bool) {
         self.events.export_states = export;
+    }
+
+    /// Have every later [`Self::train`] write a checkpoint to
+    /// `output_dir.join(&self.policy_path)` on the iterations the
+    /// `policy.checkpointing` schedule fires; does nothing when it is off.
+    ///
+    /// Call it on every rank: each rank evaluates the schedule and joins the
+    /// write's error agreement, and rank 0 writes. `system` is passed explicitly
+    /// because [`StudySetup`] does not own it.
+    pub fn enable_periodic_checkpoints(&mut self, system: &System, output_dir: &Path) {
+        let Some(schedule) = self.events.checkpoint_schedule else {
+            return;
+        };
+        let layout = CheckpointLayout::new(
+            self,
+            system,
+            CheckpointParams {
+                max_iterations: self.loop_params.max_iterations,
+                forward_passes: self.loop_params.forward_passes,
+                seed: self.loop_params.seed,
+                export_states: self.events.export_states,
+            },
+        );
+        self.periodic_checkpoint = Some(PeriodicCheckpoint::new(
+            schedule,
+            output_dir.join(&self.policy_path),
+            layout,
+        ));
     }
 
     /// Test-support hook: override the per-stage backward-pass risk measures

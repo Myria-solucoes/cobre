@@ -106,8 +106,7 @@ use crate::windowed_history::{WindowedRecord, parse_iso_date, validate_windowed_
 
 // ── Intermediate serde types ──────────────────────────────────────────────────
 
-/// Intermediate serde type for `initial_conditions.json`, deserialized then
-/// validated before conversion to [`InitialConditions`].
+/// Root object of `initial_conditions.json`.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -116,15 +115,15 @@ pub(crate) struct RawInitialConditions {
     #[serde(rename = "$schema")]
     _schema: Option<String>,
 
-    /// Initial reservoir volumes for operating hydros \[hm³\].
+    /// Initial reservoir volumes for operating hydros (hm³).
     storage: Vec<RawHydroStorage>,
 
-    /// Initial reservoir volumes for filling hydros \[hm³\].
+    /// Initial reservoir volumes for filling hydros (hm³).
     /// A filling hydro may not also appear in `storage`.
     filling_storage: Vec<RawHydroStorage>,
 
     /// Observed inflow data for partial periods before the study start
-    /// [m³/s per date range per hydro]. Used to seed the lag accumulator when
+    /// (m³/s per date range per hydro). Used to seed the lag accumulator when
     /// a study begins mid-season. Date ranges for the same hydro must not
     /// overlap; adjacent ranges (start == previous end) are accepted.
     /// Optional; defaults to empty.
@@ -139,7 +138,7 @@ pub(crate) struct RawInitialConditions {
     #[serde(default)]
     past_anticipated_commitments: Vec<RawAnticipatedCommitmentHistory>,
 
-    /// Past defluence (release) windows per arc [m³/s per date range], keyed by
+    /// Past defluence (release) windows per arc (m³/s per date range), keyed by
     /// the upstream hydro whose release feeds the arc. Each entry is a
     /// self-describing `[start_date, end_date)` window on the pre-study calendar.
     /// Windows for the same hydro must not overlap; adjacent ranges
@@ -155,14 +154,15 @@ pub(crate) struct RawInitialConditions {
 struct RawHydroStorage {
     /// Hydro plant identifier. Must be unique within its array.
     hydro_id: i32,
-    /// Reservoir volume \[hm³\]. Must be >= 0.0.
+    /// Reservoir volume (hm³). Must be >= 0.0.
     value_hm3: f64,
 }
 
 /// Past defluence (release) for the arc fed by a single upstream hydro over a
 /// specific date range.
 ///
-/// Mirrors [`RawRecentObservation`]: a self-describing `[start_date, end_date)`
+/// Same window form as a `recent_observations` entry: a self-describing
+/// `[start_date, end_date)`
 /// window (ISO 8601, `end_date` exclusive and after `start_date`) carrying the
 /// average release rate over the window. Multiple windows per hydro are allowed;
 /// date ranges for the same hydro must not overlap, though adjacent ranges
@@ -179,7 +179,7 @@ struct RawHydroPastDefluence {
     /// End of the release window (exclusive), as an ISO 8601 date (YYYY-MM-DD).
     /// Must be after `start_date`.
     end_date: String,
-    /// Average release rate over the window [m³/s]. Must be finite and
+    /// Average release rate over the window (m³/s). Must be finite and
     /// non-negative.
     value_m3s: f64,
 }
@@ -202,7 +202,7 @@ struct RawRecentObservation {
     /// End of the observation period (exclusive), as an ISO 8601 date
     /// (YYYY-MM-DD). Must be after `start_date`.
     end_date: String,
-    /// Average inflow observed during the period [m³/s]. Must be finite;
+    /// Average inflow observed during the period (m³/s). Must be finite;
     /// negative values are accepted (the quantity is incremental inflow).
     value_m3s: f64,
 }

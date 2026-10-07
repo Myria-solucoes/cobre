@@ -26,7 +26,9 @@
 //!
 //! ```text
 //! relation   ::= side (('<=' | '>=' | '==') side)?
-//! side       ::= term (('+' | '-') term)*
+//! side       ::= side_term (('+' | '-') side_term)*
+//! side_term  ::= term
+//!              | coefficient                             (only in a relation with an operator)
 //! term       ::= coefficient '*' '@' name '*' variable   (parameter coefficient, scaled)
 //!              | '@' name '*' variable                   (parameter coefficient)
 //!              | coefficient '*' '@' name                (named-expression reference, scaled)
@@ -35,7 +37,6 @@
 //!              | coefficient '*' group
 //!              | group
 //!              | variable
-//!              | coefficient                             (relational side only)
 //! group      ::= '(' term (('+' | '-') term)* ')'
 //! variable   ::= var_name '(' entity_id (',' block_id)? (',' 'bus' '=' bus_id)? ')'
 //! ```
@@ -51,13 +52,14 @@
 //! A `group` — bare, or scaled by a leading literal `coefficient '*'` — distributes
 //! that coefficient into every inner term's scale at parse time (nesting to
 //! arbitrary depth), yielding the same flat term list as the hand-expanded form; a
-//! `group` may itself contain any `term` form, including nested groups. Only a
-//! literal coefficient may scale a `group` — `@param * (...)` is rejected for the
-//! same reason as `@param * @name`.
+//! `group` may contain any `term` form, including nested groups, but not a bare
+//! `coefficient`; a constant inside a group is rejected on either side of an
+//! operator. Only a literal coefficient may scale a `group` — `@param * (...)` is
+//! rejected for the same reason as `@param * @name`.
 //!
 //! A bare `coefficient` — a standalone numeric literal with no trailing `*` — is
-//! valid only on a relational side; it has no linear-core representation, so an
-//! operator-free `expression` rejects it.
+//! valid only as a `side_term` of a relation with an operator, outside every group;
+//! it has no linear-core representation, so an operator-free `expression` rejects it.
 //! At most one top-level relational operator (`<=`, `>=`, `==`, outside any
 //! parenthesis or variable argument list) is accepted; a second one is a
 //! descriptive error — an inline double-relational range (`LI <= expr <= LS`) is
@@ -129,9 +131,7 @@ use cobre_core::AffineBound;
 
 // ── Intermediate serde types ──────────────────────────────────────────────────
 
-/// Top-level intermediate type for `generic_constraints.json`.
-///
-/// Private — only used during deserialization. Not re-exported.
+/// Root object of `generic_constraints.json`.
 #[derive(Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -149,7 +149,7 @@ pub(crate) struct RawGenericConstraintsFile {
     expressions: Vec<RawNamedExpression>,
 }
 
-/// Intermediate type for a single constraint entry.
+/// A single constraint entry.
 #[derive(Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -175,7 +175,7 @@ struct RawConstraint {
     slack: RawSlackConfig,
 }
 
-/// Intermediate type for the slack configuration.
+/// The slack configuration.
 #[derive(Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -187,7 +187,7 @@ struct RawSlackConfig {
     penalty: Option<f64>,
 }
 
-/// Intermediate type for a named linear-expression declaration.
+/// A named linear-expression declaration.
 #[derive(Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -1352,6 +1352,11 @@ fn parse_variable_ref(
                         if seen_bus {
                             return Err(format!(
                                 "positional block argument must precede the named \"bus=\" argument in variable \"{var_name}\""
+                            ));
+                        }
+                        if block_id.is_some() {
+                            return Err(format!(
+                                "repeated block argument in variable \"{var_name}\""
                             ));
                         }
                         let b_usize = token_f64_to_usize(*b).ok_or_else(|| {
@@ -2631,6 +2636,21 @@ mod tests {
         );
     }
 
+    /// A bare numeric constant inside a group is rejected, scaled or not.
+    #[test]
+    fn test_expr_constant_inside_group_is_rejected() {
+        for expr in [
+            "hydro_generation(0) + (hydro_generation(1) + 5)",
+            "2 * (hydro_generation(1) - 3)",
+        ] {
+            let err = parse_expression(expr, &HashMap::new()).unwrap_err();
+            assert!(
+                err.contains("expected '*' after coefficient"),
+                "expected constant-inside-group error for {expr:?}, got: {err}"
+            );
+        }
+    }
+
     /// An unterminated group (no closing `)`) is rejected.
     #[test]
     fn test_expr_unterminated_group_is_rejected() {
@@ -2915,6 +2935,64 @@ mod tests {
             !err.contains("bus selector"),
             "an unknown variable must not be reported as a bus-selector error, got: {err}"
         );
+    }
+
+    /// A second positional block argument is refused, equal or not, with or without `bus=`.
+    #[test]
+    fn test_expr_repeated_block_argument_is_rejected() {
+        for expr in [
+            "hydro_turbined(5, 0, 0)",
+            "hydro_turbined(5, 0, 1)",
+            "hydro_generation(5, 1, 2, bus=3)",
+            "thermal_generation(0, 0, 0)",
+            "2 * (hydro_turbined(5, 0, 1))",
+        ] {
+            let err = parse_expression(expr, &HashMap::new()).expect_err(expr);
+            assert!(
+                err.contains("repeated block argument in variable"),
+                "expected the repeated-block message for \"{expr}\", got: {err}"
+            );
+        }
+
+        let err = parse_expression("hydro_turbined(5, 0, 1)", &HashMap::new()).unwrap_err();
+        assert!(
+            err.contains("\"hydro_turbined\""),
+            "expected the variable name in the message, got: {err}"
+        );
+    }
+
+    /// One block argument per variable stays accepted, including across separate terms.
+    #[test]
+    fn test_expr_single_block_argument_per_variable_is_accepted() {
+        for expr in ["hydro_turbined(5, 1)", "hydro_turbined(5, 1, bus=2)"] {
+            let parsed = parse_expression(expr, &HashMap::new());
+            assert!(
+                parsed.is_ok(),
+                "expected Ok for \"{expr}\", got: {parsed:?}"
+            );
+        }
+
+        for (expr, expected) in [
+            (
+                "hydro_turbined(5, 0) + hydro_turbined(5, 1)",
+                [Some(0), Some(1)],
+            ),
+            (
+                "hydro_turbined(5, 0) + hydro_turbined(5, 0)",
+                [Some(0), Some(0)],
+            ),
+        ] {
+            let parsed = parse_expression(expr, &HashMap::new()).unwrap();
+            let blocks: Vec<Option<usize>> = parsed
+                .terms
+                .iter()
+                .map(|term| match term.variable {
+                    VariableRef::HydroTurbined { block_id, .. } => block_id,
+                    ref other => panic!("expected HydroTurbined for \"{expr}\", got {other:?}"),
+                })
+                .collect();
+            assert_eq!(blocks, expected, "for \"{expr}\"");
+        }
     }
 
     // ── Line bus-pair addressing unit tests ────────────────────────────────────
@@ -3538,6 +3616,82 @@ mod tests {
                 assert!(
                     message.contains("unknown variable"),
                     "message should contain 'unknown variable', got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    /// A repeated block argument → SchemaError on the constraint and on the named-expression field.
+    #[test]
+    fn parse_generic_constraints_repeated_block_argument_is_schema_error() {
+        let in_constraint = r#"{
+  "constraints": [
+    { "id": 0, "name": "bad", "expression": "thermal_generation(0, 0, 1) <= 10", "slack": { "enabled": false } }
+  ]
+}"#;
+        let f = write_json(in_constraint);
+        let err =
+            parse_generic_constraints(f.path(), &HashMap::new(), &LineBusPairIndex::default())
+                .unwrap_err();
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert_eq!(field, "constraints[0].expression");
+                assert!(
+                    message.contains("repeated block argument in variable \"thermal_generation\""),
+                    "message should name the repeated block argument, got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+
+        let in_named_expression = r#"{
+  "expressions": [
+    { "name": "e", "expression": "hydro_turbined(5, 0, 1)" }
+  ],
+  "constraints": [
+    { "id": 0, "name": "c0", "expression": "@e <= 10", "slack": { "enabled": false } }
+  ]
+}"#;
+        let f = write_json(in_named_expression);
+        let err =
+            parse_generic_constraints(f.path(), &HashMap::new(), &LineBusPairIndex::default())
+                .unwrap_err();
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert_eq!(field, "expressions[0].expression");
+                assert!(
+                    message.contains("repeated block argument in variable \"hydro_turbined\""),
+                    "message should name the repeated block argument, got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    /// A constant inside a group on a relational side → SchemaError on the expression field.
+    #[test]
+    fn parse_generic_constraints_relational_constant_inside_group_is_schema_error() {
+        let json = r#"{
+  "constraints": [
+    {
+      "id": 0,
+      "name": "bad",
+      "expression": "thermal_generation(5) <= 2 * (hydro_generation(140) + 73)",
+      "slack": { "enabled": false }
+    }
+  ]
+}"#;
+        let f = write_json(json);
+        let err =
+            parse_generic_constraints(f.path(), &HashMap::new(), &LineBusPairIndex::default())
+                .unwrap_err();
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert_eq!(field, "constraints[0].expression");
+                assert!(
+                    message.contains("expected '*' after coefficient 73"),
+                    "message should name the rejected constant, got: {message}"
                 );
             }
             other => panic!("expected SchemaError, got: {other:?}"),

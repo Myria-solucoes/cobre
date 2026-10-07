@@ -109,6 +109,73 @@ pub fn quarterly_season_map() -> SeasonMap {
     }
 }
 
+/// A sparse-id ring [`SeasonMap`] (`Custom`): ids `0` Jan, `1` Feb, `2` Mar,
+/// `12` Apr-Jun, `13` Jul-Sep.
+#[must_use]
+pub fn sparse_ring_season_map() -> SeasonMap {
+    let def = |id: usize, month_start: u32, month_end: Option<u32>| SeasonDefinition {
+        id,
+        label: format!("S{id}"),
+        month_start,
+        day_start: None,
+        month_end,
+        day_end: None,
+    };
+    SeasonMap {
+        cycle_type: SeasonCycleType::Custom,
+        seasons: vec![
+            def(0, 1, None),
+            def(1, 2, None),
+            def(2, 3, None),
+            def(12, 4, Some(6)),
+            def(13, 7, Some(9)),
+        ],
+    }
+}
+
+/// D30's layered `Custom` [`SeasonMap`]: months 0–11, then Q3 = 12, Q4 = 13, Q1 = 14, Q2 = 15.
+#[must_use]
+pub fn monthly_quarterly_season_map() -> SeasonMap {
+    const MONTHS: [(&str, u32); 12] = [
+        ("January", 31),
+        ("February", 28),
+        ("March", 31),
+        ("April", 30),
+        ("May", 31),
+        ("June", 30),
+        ("July", 31),
+        ("August", 31),
+        ("September", 30),
+        ("October", 31),
+        ("November", 30),
+        ("December", 31),
+    ];
+    let def =
+        |id: usize, label: &str, month_start: u32, month_end: u32, day_end: u32| SeasonDefinition {
+            id,
+            label: label.to_string(),
+            month_start,
+            day_start: Some(1),
+            month_end: Some(month_end),
+            day_end: Some(day_end),
+        };
+    let months = MONTHS
+        .into_iter()
+        .zip(1_u32..)
+        .enumerate()
+        .map(|(id, ((label, day_end), month))| def(id, label, month, month, day_end));
+    let quarters = [
+        def(12, "Q3", 7, 9, 30),
+        def(13, "Q4", 10, 12, 31),
+        def(14, "Q1", 1, 3, 31),
+        def(15, "Q2", 4, 6, 30),
+    ];
+    SeasonMap {
+        cycle_type: SeasonCycleType::Custom,
+        seasons: months.chain(quarters).collect(),
+    }
+}
+
 /// A weekly [`SeasonMap`] (52 seasons, `Week1`..`Week52`,
 /// [`SeasonCycleType::Weekly`]).
 #[must_use]

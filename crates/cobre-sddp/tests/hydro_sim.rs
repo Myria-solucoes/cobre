@@ -123,11 +123,10 @@ mod simulation_only {
             &stage_manifests,
         );
 
-        let (basis_col_u8, basis_row_u8) = convert_basis_cache(&training_result);
+        let (basis_col_u8, basis_row_u8) = convert_basis_cache(&training_result.basis_cache);
         let stage_bases = build_stage_basis_records(
-            fcf,
-            &training_result,
-            &setup.inputs.node_graph,
+            &training_result.basis_cache,
+            training_result.iterations,
             &basis_col_u8,
             &basis_row_u8,
         );
@@ -149,6 +148,7 @@ mod simulation_only {
                 training_block_mode: "parallel".to_string(),
                 training_block_mode_per_stage: vec![],
                 cost_scale_factor: None,
+                lower_bound_history: Vec::new(),
             },
         );
 
@@ -198,12 +198,16 @@ mod simulation_only {
             );
         }
 
-        let loaded_basis_cache = build_basis_cache_from_checkpoint(
+        let load = build_basis_cache_from_checkpoint(
             &checkpoint.stage_bases,
             &checkpoint.stage_cuts,
             &setup,
-        )
-        .expect("a current-build checkpoint must load without a dimension mismatch");
+        );
+        assert!(
+            load.unused.is_none(),
+            "every stored basis of a current-build checkpoint fits its own study"
+        );
+        let loaded_basis_cache = load.cache;
         assert_eq!(
             loaded_basis_cache.len(),
             n_stages,
@@ -1045,11 +1049,10 @@ mod decomp_integration {
             &stage_active_indices,
             stage_manifests,
         );
-        let (basis_col, basis_row) = convert_basis_cache(result);
+        let (basis_col, basis_row) = convert_basis_cache(&result.basis_cache);
         let stage_bases = build_stage_basis_records(
-            fcf,
-            result,
-            &setup.inputs.node_graph,
+            &result.basis_cache,
+            result.iterations,
             &basis_col,
             &basis_row,
         );
@@ -1070,6 +1073,7 @@ mod decomp_integration {
                 training_block_mode: "parallel".to_string(),
                 training_block_mode_per_stage: vec![],
                 cost_scale_factor: None,
+                lower_bound_history: Vec::new(),
             },
         );
         write_policy_checkpoint(policy_dir, &stage_cuts, &stage_bases, &metadata, &[])

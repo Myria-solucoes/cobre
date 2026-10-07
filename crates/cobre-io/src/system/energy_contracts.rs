@@ -65,7 +65,7 @@ use std::path::Path;
 use super::parse_operational_start_date;
 use crate::LoadError;
 
-/// Top-level intermediate type for `energy_contracts.json` (serde only, not re-exported).
+/// Root object of `energy_contracts.json`.
 #[derive(Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -77,7 +77,7 @@ pub(crate) struct RawContractFile {
     contracts: Vec<RawContract>,
 }
 
-/// Intermediate type for a single energy contract entry.
+/// A single energy contract entry.
 #[derive(Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -90,8 +90,7 @@ pub(crate) struct RawContract {
     operational_start_date: String,
     /// Bus at which the contracted power is injected or withdrawn.
     bus_id: i32,
-    /// Direction of energy flow. Uses `#[serde(rename = "type")]` since `type`
-    /// is a Rust keyword.
+    /// Direction of energy flow.
     #[serde(rename = "type")]
     contract_type: RawContractType,
     /// Stage index when the contract enters service. Absent or null = always active.
@@ -100,17 +99,14 @@ pub(crate) struct RawContract {
     /// Stage index when the contract expires. Absent or null = never expires.
     #[serde(default)]
     exit_stage_id: Option<i32>,
-    /// Contract price per `MWh`. May be negative for export revenue \[$/`MWh`\].
+    /// Contract price per `MWh`. May be negative for export revenue ($/`MWh`).
     price_per_mwh: f64,
     /// Nested limits object with min and max MW bounds.
     limits: RawContractLimits,
 }
 
-/// Raw intermediate enum for contract direction.
-///
-/// Uses `#[serde(rename_all = "snake_case")]` to map JSON `"import"`/`"export"`
-/// to Rust `Import`/`Export` variants. The core `ContractType` enum does not
-/// carry `rename_all`, so we use this intermediate.
+// cobre_core::ContractType has no snake_case rename, so the input needs its own enum.
+/// Direction of energy flow of a contract.
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -121,14 +117,14 @@ pub(crate) enum RawContractType {
     Export,
 }
 
-/// Intermediate type for the nested limits sub-object.
+/// The nested limits sub-object.
 #[derive(Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawContractLimits {
-    /// Minimum contracted power \[MW\].
+    /// Minimum contracted power (MW).
     min_mw: f64,
-    /// Maximum contracted power \[MW\].
+    /// Maximum contracted power (MW).
     max_mw: f64,
 }
 

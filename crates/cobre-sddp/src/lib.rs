@@ -83,24 +83,27 @@ pub use cobre_io::scenarios::estimation::{
 pub use config::TrainingConfig;
 pub use convergence::convergence::ConvergenceMonitor;
 pub use convergence::risk_measure::{BackwardOutcome, RiskMeasure};
-pub use convergence::stopping_rule::{MonitorState, StoppingMode, StoppingRule, StoppingRuleSet};
+pub use convergence::stopping_rule::{
+    MonitorState, StopDecision, StopMask, StoppingMode, StoppingRule, StoppingRuleSet,
+};
 pub use cut::cut_selection::CutSelectionStrategy;
 pub use cut::cut_sync::CutSyncBuffers;
 pub use cut::row::build_cut_row_batch_into;
 pub use cut::wire::{CutWireHeader, cut_wire_size, deserialize_cut, serialize_cut};
 pub use cut::{CutPool, FutureCostFunction};
-pub use error::SddpError;
+pub use error::{ErrorClass, SddpError};
 pub use fixed_delivery_echo::build_fixed_delivery_rows;
 pub use generic_constraint_echo::build_generic_constraint_echo_rows;
 pub use lp::builder::StageTemplates;
 pub use policy::policy_export::{ReservedInflowLagLayout, reserve_boundary_inflow_lag_slots};
 pub use policy::policy_load::{
-    BoundaryInjection, BoundaryLoadRequest, FullFcf, LEGACY_COST_SCALE_FACTOR, PolicyLoadKind,
-    PolicyLoadProof, PolicyStageManifest, ValidatedBoundaryCuts,
+    BoundaryInjection, BoundaryLoadRequest, BoundaryReconciliation, FullFcf,
+    LEGACY_COST_SCALE_FACTOR, PolicyLoadKind, PolicyLoadProof, PolicyStageManifest,
+    StoredBasisLoad, StoredBasisMisfit, UnusedStoredBases, ValidatedBoundaryCuts,
     boundary_policy_required_lag_depth, build_basis_cache_from_checkpoint,
     checkpoint_terminal_cost_scale_factor, compare_manifest_slot_identity, inject_boundary_cuts,
-    load_boundary_cuts, rescale_checkpoint_cuts_for_load, resolve_boundary_state_requirements,
-    validate_policy_load,
+    load_boundary_cuts, reconcile_boundary_policy, rescale_checkpoint_cuts_for_load,
+    resolve_boundary_state_requirements, validate_policy_load,
 };
 pub use policy::provenance::{
     HydroProductionProvenance, InflowProvenance, ModelProvenanceReport, ProvenanceSource,
@@ -115,15 +118,16 @@ pub use policy::resolved_parameters::{
 pub use production::energy_conversion::{EnergyConversionSet, HydroEnergyProductivityOverride};
 pub use production::hydro_models::{
     FphaFitDeviationEntry, FphaHydroDetail, HydroFitTimings, HydroModelSummary,
-    PrepareHydroModelsResult, ProductionModelSource, build_deviation_summary,
-    build_evaporation_model_rows, build_hydro_model_summary, prepare_hydro_models,
+    NoTurbineCapacityHydro, PrepareHydroModelsResult, ProductionModelSource,
+    build_deviation_summary, build_evaporation_model_rows, build_hydro_model_summary,
+    prepare_hydro_models,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use setup::lp_build_inputs::build_stage_templates_resolving_layout;
 pub use setup::{
-    BoundaryStateRequirements, DEFAULT_COST_SCALE_FACTOR, DEFAULT_MAX_ITERATIONS, DEFAULT_SEED,
-    PrepareStochasticResult, StudyParams, StudySetup, build_stochastic_context_for_study,
-    prepare_stochastic, study_horizon_end, validate_generic_constraint_parameters,
+    BoundaryStateRequirements, DEFAULT_COST_SCALE_FACTOR, DEFAULT_SEED, PrepareStochasticResult,
+    StudyParams, StudySetup, build_stochastic_context_for_study, prepare_stochastic,
+    study_horizon_end, validate_generic_constraint_parameters,
 };
 pub use simulation::{
     ScenarioCategoryCosts, SimulationError, SimulationHydroResult, SimulationScenarioResult,

@@ -202,7 +202,12 @@ def test_setup_validation_failure_raises_validation_error(tmp_path: pathlib.Path
     if not case_dir.exists():
         pytest.skip(f"examples/1dtoy not found at {case_dir}")
 
-    overrides = {"training.stopping_rules": [{"type": "gap", "tolerance": 1000.0}]}
+    overrides = {
+        "training.stopping_rules": [
+            {"type": "iteration_limit", "limit": 1},
+            {"type": "gap", "tolerance": 1000.0},
+        ]
+    }
 
     with pytest.raises(cobre.errors.ValidationError, match="gap stopping rule is inadmissible"):
         cobre.run.run(str(case_dir), output_dir=str(tmp_path), config_overrides=overrides)
@@ -213,7 +218,7 @@ def test_setup_validation_failure_raises_validation_error(tmp_path: pathlib.Path
 
 
 def test_preprocessing_validation_failure_raises_validation_error(tmp_path: pathlib.Path) -> None:
-    """An FPHA hyperplane with a non-positive gamma_q is a preprocessing-phase
+    """Every FPHA hyperplane of a stage with gamma_q = 0 is a preprocessing-phase
     validation failure and raises ValidationError, not SolverError.
     """
     import cobre.errors  # noqa: PLC0415
@@ -241,5 +246,5 @@ def test_preprocessing_validation_failure_raises_validation_error(tmp_path: path
     )
     pq.write_table(table, hyperplanes_path, compression="zstd")
 
-    with pytest.raises(cobre.errors.ValidationError, match="gamma_q must be > 0"):
+    with pytest.raises(cobre.errors.ValidationError, match="no hyperplane has gamma_q > 0"):
         cobre.run.run(str(case_dir), output_dir=str(tmp_path / "out"))

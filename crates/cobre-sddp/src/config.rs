@@ -23,22 +23,24 @@
 //!         ..CutManagementConfig::default()
 //!     },
 //!     events: EventConfig {
-//!         checkpoint_interval: Some(50),
+//!         export_states: true,
 //!         ..EventConfig::default()
 //!     },
 //! };
 //! assert_eq!(config.loop_config.forward_passes, 10);
 //! assert_eq!(config.loop_config.max_iterations, 200);
-//! assert_eq!(config.events.checkpoint_interval, Some(50));
+//! assert!(config.events.export_states);
 //! ```
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc::Sender;
 
 use cobre_core::TrainingEvent;
+use cobre_io::config::CheckpointSchedule;
 
 use crate::cut_selection::CutSelectionStrategy;
+use crate::policy::orchestration::PeriodicCheckpoint;
 use crate::risk_measure::RiskMeasure;
 use crate::stopping_rule::{StoppingMode, StoppingRule, StoppingRuleSet};
 
@@ -60,6 +62,8 @@ pub struct LoopParams {
     pub max_iterations: u64,
     /// Starting iteration offset for resumed training runs.
     pub(crate) start_iteration: u64,
+    /// Lower bounds of the resumed run's recorded iterations.
+    pub(crate) resume_lower_bound_history: Vec<f64>,
     /// Stopping rules controlling convergence.
     pub(crate) stopping_rules: StoppingRuleSet,
 }
@@ -92,6 +96,10 @@ pub struct LoopConfig {
     /// the loop runs `start_iteration + 1` through `max_iterations`. Default `0`.
     pub start_iteration: u64,
 
+    /// Lower bounds of the resumed run's recorded iterations, oldest first,
+    /// restored with `start_iteration`. Default empty.
+    pub resume_lower_bound_history: Vec<f64>,
+
     /// Number of rayon threads for forward-pass parallelism; `1` is single-threaded.
     pub n_fwd_threads: usize,
 
@@ -106,6 +114,7 @@ impl Default for LoopConfig {
             training_enumerated: false,
             max_iterations: 1,
             start_iteration: 0,
+            resume_lower_bound_history: Vec::new(),
             n_fwd_threads: 1,
             stopping_rules: StoppingRuleSet {
                 rules: vec![StoppingRule::IterationLimit { limit: 1 }],
@@ -159,8 +168,8 @@ impl Default for CutManagementConfig {
 /// ```rust
 /// use cobre_sddp::config::EventConfig;
 ///
-/// let cfg = EventConfig { checkpoint_interval: Some(10), ..EventConfig::default() };
-/// assert_eq!(cfg.checkpoint_interval, Some(10));
+/// let cfg = EventConfig { export_states: true, ..EventConfig::default() };
+/// assert!(cfg.periodic_checkpoint.is_none());
 /// ```
 #[derive(Debug, Default)]
 pub struct EventConfig {
@@ -168,11 +177,18 @@ pub struct EventConfig {
     /// The receiver must be drained on another thread or it blocks the loop.
     pub event_sender: Option<Sender<TrainingEvent>>,
 
-    /// Iterations between checkpoint writes (`iteration % n == 0`); `None` writes none.
-    pub checkpoint_interval: Option<u64>,
+    /// The periodic checkpoint the writing rank commits on scheduled non-stop
+    /// iterations; `None` writes none. Built by
+    /// [`StudySetup::enable_periodic_checkpoints`](crate::setup::StudySetup::enable_periodic_checkpoints).
+    pub periodic_checkpoint: Option<PeriodicCheckpoint>,
 
-    /// Shutdown signal checked (`load(Relaxed)`) at each iteration boundary for early exit.
-    pub shutdown_flag: Option<Arc<AtomicBool>>,
+    /// Shutdown request, read once per iteration just before the stop decision.
+    ///
+    /// `0` means no request; otherwise the value is the [`ShutdownSource::level`]
+    /// of the strongest request. Writers only raise it (`fetch_max`, or
+    /// signal-hook's `register_usize` with the signal level) and never lower it,
+    /// and a cooperative writer never stores the signal level.
+    pub shutdown_flag: Option<Arc<AtomicUsize>>,
 
     /// Allocate the visited-states archive for state export. Also forced on when any
     /// [`CutSelectionStrategy`] is enabled — the value-evaluation kernel scores every
@@ -180,15 +196,47 @@ pub struct EventConfig {
     pub export_states: bool,
 }
 
+/// Where a shutdown request came from, ordered from weakest to strongest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ShutdownSource {
+    /// A request from the embedding program, such as a progress callback.
+    Cooperative,
+    /// A process signal.
+    Signal,
+}
+
+impl ShutdownSource {
+    /// The value this source stores in [`EventConfig::shutdown_flag`].
+    #[must_use]
+    pub const fn level(self) -> usize {
+        match self {
+            Self::Cooperative => 1,
+            Self::Signal => 2,
+        }
+    }
+
+    /// The source a stored level stands for; `0` is no request, and a level
+    /// above the signal's reads as a signal.
+    pub(crate) const fn from_level(level: usize) -> Option<Self> {
+        match level {
+            0 => None,
+            1 => Some(Self::Cooperative),
+            _ => Some(Self::Signal),
+        }
+    }
+}
+
 /// Pure-data event parameters stored on [`crate::setup::StudySetup`].
 ///
 /// Projection of [`EventConfig`] to the fields stable across invocations and
-/// safe to persist; the runtime handles (`event_sender`, `shutdown_flag`) and
-/// `checkpoint_interval` are excluded.
+/// safe to persist; the runtime handles (`event_sender`, `shutdown_flag`) are
+/// excluded, and the periodic checkpoint is kept as its schedule.
 #[derive(Debug)]
 pub(crate) struct EventParams {
     /// See [`EventConfig::export_states`].
     pub(crate) export_states: bool,
+    /// `policy.checkpointing`'s resolved schedule; `None` when off.
+    pub(crate) checkpoint_schedule: Option<CheckpointSchedule>,
 }
 
 /// Parameters controlling the SDDP training loop.
@@ -246,34 +294,6 @@ mod tests {
         };
         assert_eq!(config.loop_config.forward_passes, 10);
         assert_eq!(config.loop_config.max_iterations, 100);
-    }
-
-    #[test]
-    fn checkpoint_interval_none_and_some() {
-        let config_none = TrainingConfig {
-            loop_config: LoopConfig {
-                forward_passes: 5,
-                max_iterations: 50,
-                ..LoopConfig::default()
-            },
-            cut_management: CutManagementConfig::default(),
-            events: EventConfig::default(),
-        };
-        assert!(config_none.events.checkpoint_interval.is_none());
-
-        let config_some = TrainingConfig {
-            loop_config: LoopConfig {
-                forward_passes: 5,
-                max_iterations: 50,
-                ..LoopConfig::default()
-            },
-            cut_management: CutManagementConfig::default(),
-            events: EventConfig {
-                checkpoint_interval: Some(10),
-                ..EventConfig::default()
-            },
-        };
-        assert_eq!(config_some.events.checkpoint_interval, Some(10));
     }
 
     // ── Event sender ─────────────────────────────────────────────────────────

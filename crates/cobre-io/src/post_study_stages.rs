@@ -48,8 +48,7 @@ use crate::windowed_history::parse_iso_date;
 
 // ── Intermediate serde types ──────────────────────────────────────────────────
 
-/// Intermediate serde type for `post_study_stages.json`, deserialized then
-/// validated before conversion to [`PostStudyStages`].
+/// Root object of `post_study_stages.json`.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -73,7 +72,7 @@ pub(crate) struct RawPostStudyStagesFile {
 struct RawPostStudyStage {
     /// Stage start date (inclusive), as an ISO 8601 date (YYYY-MM-DD).
     start_date: String,
-    /// Stage duration \[h\]. Must be finite and `> 0.0`.
+    /// Stage duration (h). Must be finite and `> 0.0`.
     duration_hours: f64,
 }
 

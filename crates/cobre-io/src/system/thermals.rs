@@ -54,7 +54,7 @@ use std::path::Path;
 use super::parse_operational_start_date;
 use crate::LoadError;
 
-/// Top-level intermediate type for `thermals.json` (serde only, not re-exported).
+/// Root object of `thermals.json`.
 #[derive(Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -66,7 +66,7 @@ pub(crate) struct RawThermalFile {
     thermals: Vec<RawThermal>,
 }
 
-/// Intermediate type for a single thermal plant entry.
+/// A single thermal plant entry.
 #[derive(Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -85,7 +85,7 @@ pub(crate) struct RawThermal {
     /// Stage index when the plant is decommissioned. Absent or null = never.
     #[serde(default)]
     exit_stage_id: Option<i32>,
-    /// Marginal cost of generation \[$/`MWh`\]. Must be ≥ 0.0.
+    /// Marginal cost of generation ($/`MWh`). Must be ≥ 0.0.
     cost_per_mwh: f64,
     /// Generation bounds.
     generation: RawThermalGeneration,
@@ -94,33 +94,29 @@ pub(crate) struct RawThermal {
     anticipated_config: Option<RawAnticipatedConfig>,
 }
 
-/// Intermediate type for the generation bounds sub-object.
+/// The generation bounds sub-object.
 #[derive(Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawThermalGeneration {
-    /// Minimum generation (minimum stable load) \[MW\].
+    /// Minimum generation (minimum stable load) (MW).
     min_mw: f64,
-    /// Maximum generation (installed capacity) \[MW\].
+    /// Maximum generation (installed capacity) (MW).
     max_mw: f64,
 }
 
-/// Intermediate type for anticipated dispatch configuration.
-///
-/// Untagged with per-variant `deny_unknown_fields`: the `{"lead_stages": N}` /
-/// `{"lead_time_hours": H}` object shapes and the structural mutual-exclusion
-/// between them live here; `cobre_core::AnticipatedConfig` keeps a plain
-/// (non-`untagged`) derive so it stays postcard-broadcast-safe.
+// The untagged shape lives here: cobre_core::AnticipatedConfig keeps a plain
+// derive so it stays postcard-broadcast-safe.
+/// Anticipated dispatch configuration: `{"lead_stages": N}` or
+/// `{"lead_time_hours": H}`, never both.
 #[derive(Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(untagged, deny_unknown_fields)]
 pub(crate) enum RawAnticipatedConfig {
     /// Stage-count lead; the calendar is never consulted. Must be ≥ 1.
     LeadStages {
-        /// Number of stages of dispatch anticipation. Must be ≥ 1.
-        ///
-        /// Using `u32` here causes serde to reject negative JSON literals with a
-        /// `ParseError` before validation runs.
+        /// Number of stages of dispatch anticipation. Must be ≥ 1; a negative value
+        /// is a parse error.
         lead_stages: u32,
     },
     /// Physical lead time in hours, delivery-anchored. Must be finite and > 0.0.

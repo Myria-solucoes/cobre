@@ -17,6 +17,11 @@ use super::atomic::write_parquet_atomic;
 use super::error::OutputError;
 use super::schemas::{retry_histogram_schema, solver_iterations_schema};
 
+pub(crate) const TRAINING_SOLVER_DIR: &str = "training/solver";
+pub(crate) const SIMULATION_SOLVER_DIR: &str = "simulation/solver";
+pub(crate) const SOLVER_ITERATIONS_FILE: &str = "iterations.parquet";
+pub(crate) const SOLVER_RETRY_HISTOGRAM_FILE: &str = "retry_histogram.parquet";
+
 /// A single row in the solver statistics Parquet file.
 #[derive(Debug, Clone)]
 pub struct SolverStatsRow {
@@ -74,7 +79,7 @@ pub struct SolverStatsRow {
 ///
 /// Returns [`OutputError`] on filesystem or serialization failures.
 pub fn write_solver_stats(output_dir: &Path, rows: &[SolverStatsRow]) -> Result<(), OutputError> {
-    write_solver_stats_to(&output_dir.join("training/solver"), rows)
+    write_solver_stats_to(&output_dir.join(TRAINING_SOLVER_DIR), rows)
 }
 
 /// Write simulation solver statistics to `simulation/solver/iterations.parquet`.
@@ -86,7 +91,7 @@ pub fn write_simulation_solver_stats(
     output_dir: &Path,
     rows: &[SolverStatsRow],
 ) -> Result<(), OutputError> {
-    write_solver_stats_to(&output_dir.join("simulation/solver"), rows)
+    write_solver_stats_to(&output_dir.join(SIMULATION_SOLVER_DIR), rows)
 }
 
 /// Build Arrow column arrays for `iterations.parquet` (scalar metrics only).
@@ -228,10 +233,10 @@ fn write_solver_stats_to(dir: &Path, rows: &[SolverStatsRow]) -> Result<(), Outp
     let columns = build_iterations_columns(rows);
     let iter_batch = RecordBatch::try_new(Arc::clone(&iter_schema), columns)
         .map_err(|e| OutputError::serialization("solver_stats", format!("RecordBatch: {e}")))?;
-    write_parquet_atomic(&dir.join("iterations.parquet"), &iter_batch)?;
+    write_parquet_atomic(&dir.join(SOLVER_ITERATIONS_FILE), &iter_batch)?;
 
     let hist_batch = build_retry_histogram_batch(rows)?;
-    write_parquet_atomic(&dir.join("retry_histogram.parquet"), &hist_batch)?;
+    write_parquet_atomic(&dir.join(SOLVER_RETRY_HISTOGRAM_FILE), &hist_batch)?;
 
     Ok(())
 }

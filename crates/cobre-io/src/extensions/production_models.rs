@@ -326,7 +326,7 @@ struct RawStageRange {
     /// hm³) or `percentile` (`[0.0, 1.0]`). Absent or null = no reference volume
     /// declared.
     reference_volume: Option<RawReferenceVolume>,
-    /// Per-stage productivity coefficient [MW/(m³/s)]. Optional for
+    /// Per-stage productivity coefficient (MW/(m³/s)). Optional for
     /// `"constant_productivity"` and `"linearized_head"` models; when absent or
     /// null the value is expected from `system/hydro_energy_productivity.parquet`.
     /// When present must be `> 0.0` and finite. Must be absent or null for `"fpha"`.
@@ -350,7 +350,7 @@ struct RawSeasonConfig {
     /// `percentile` (`[0.0, 1.0]`). Absent or null = no reference volume
     /// declared.
     reference_volume: Option<RawReferenceVolume>,
-    /// Per-season productivity coefficient [MW/(m³/s)]. Optional for
+    /// Per-season productivity coefficient (MW/(m³/s)). Optional for
     /// `"constant_productivity"` and `"linearized_head"` models; when absent or
     /// null the value is expected from `system/hydro_energy_productivity.parquet`.
     /// When present must be `> 0.0` and finite. Must be absent or null for `"fpha"`.
@@ -382,15 +382,13 @@ struct RawFphaColumnLayout {
     fitting_window: Option<RawFittingWindow>,
 }
 
-/// File-level FPHA plane-reduction block, discriminated by the `method` JSON
-/// field.
+/// File-level FPHA plane-reduction block, selected by the `method` key.
 ///
-/// An internally-tagged union: `{ "method": "angle", "tolerance_deg": <f64> }`
-/// merges planes whose normals are within `tolerance_deg` degrees, while
-/// `{ "method": "distance", "tolerance_pct": <f64>, "n_samples": <u32> }` merges
-/// planes whose sampled mean-squared distance stays within `tolerance_pct`. The
-/// tag selects exactly one method; `deny_unknown_fields` rejects a tolerance
-/// field belonging to the other method.
+/// `{ "method": "angle", "tolerance_deg": <number> }` merges planes whose
+/// normals are within `tolerance_deg` degrees, while
+/// `{ "method": "distance", "tolerance_pct": <number>, "n_samples": <integer> }`
+/// merges planes whose sampled mean-squared distance stays within
+/// `tolerance_pct`. A tolerance key that belongs to the other method is rejected.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Deserialize)]
 #[serde(tag = "method", rename_all = "snake_case", deny_unknown_fields)]
@@ -424,10 +422,10 @@ enum RawPlaneReductionConfig {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawFittingWindow {
-    /// Explicit minimum volume for fitting \[hm³\]. Mutually exclusive with
+    /// Explicit minimum volume for fitting (hm³). Mutually exclusive with
     /// `volume_min_percentile`.
     volume_min_hm3: Option<f64>,
-    /// Explicit maximum volume for fitting \[hm³\]. Mutually exclusive with
+    /// Explicit maximum volume for fitting (hm³). Mutually exclusive with
     /// `volume_max_percentile`.
     volume_max_hm3: Option<f64>,
     /// Minimum as a percentile of the operating range. Mutually exclusive
@@ -447,7 +445,7 @@ struct RawFittingWindow {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawReferenceVolume {
-    /// Absolute reference volume \[hm³\]. Mutually exclusive with `percentile`.
+    /// Absolute reference volume (hm³). Mutually exclusive with `percentile`.
     /// When present must be finite and `> 0.0`.
     volume_hm3: Option<f64>,
     /// Reference volume as a percentile of the operating range. Mutually

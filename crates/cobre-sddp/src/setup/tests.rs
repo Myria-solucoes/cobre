@@ -547,10 +547,14 @@ fn minimal_config_with_schemes(
     load_scheme: Option<RawSamplingScheme>,
     ncs_scheme: Option<RawSamplingScheme>,
 ) -> Config {
-    // A seed is required when any class uses a non-in-sample scheme.
-    let needs_seed = inflow_scheme.is_some_and(|s| s != RawSamplingScheme::InSample)
-        || load_scheme.is_some_and(|s| s != RawSamplingScheme::InSample)
-        || ncs_scheme.is_some_and(|s| s != RawSamplingScheme::InSample);
+    let needs_seed = [inflow_scheme, load_scheme, ncs_scheme]
+        .into_iter()
+        .any(|scheme| {
+            matches!(
+                scheme,
+                Some(RawSamplingScheme::OutOfSample | RawSamplingScheme::External)
+            )
+        });
     let scenario_source = RawScenarioSourceConfig {
         seed: if needs_seed { Some(42) } else { None },
         historical_years: None,
@@ -1544,7 +1548,7 @@ fn study_params_from_config_defaults() {
         training: TrainingConfig {
             enabled: true,
             tree_seed: None,
-            stopping_rules: None,
+            stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 7 }]),
             stopping_mode: cobre_io::config::StoppingMode::Any,
             cut_selection: RowSelectionConfig::default(),
             solver: TrainingSolverConfig::default(),
@@ -1569,17 +1573,13 @@ fn study_params_from_config_defaults() {
         params.forward_passes, DEFAULT_FORWARD_PASSES,
         "forward_passes should default to DEFAULT_FORWARD_PASSES"
     );
-    assert_eq!(
-        params.stopping_rule_set.rules.len(),
-        1,
-        "expected exactly 1 default stopping rule"
-    );
     assert!(
         matches!(
-            params.stopping_rule_set.rules[0],
-            StoppingRule::IterationLimit { .. }
+            params.stopping_rule_set.rules.as_slice(),
+            [StoppingRule::IterationLimit { limit: 7 }]
         ),
-        "default rule should be IterationLimit"
+        "expected exactly the configured IterationLimit rule: {:?}",
+        params.stopping_rule_set.rules
     );
     assert!(
         matches!(params.stopping_rule_set.mode, StoppingMode::Any),
@@ -1593,6 +1593,42 @@ fn study_params_from_config_defaults() {
         params.cut_selection.is_none(),
         "cut_selection should be None by default"
     );
+}
+
+#[test]
+fn iteration_budget_is_the_largest_iteration_limit_rule() {
+    use crate::stopping_rule::{StoppingMode, StoppingRule, StoppingRuleSet};
+
+    for mode in [StoppingMode::Any, StoppingMode::All] {
+        let rules = StoppingRuleSet {
+            rules: vec![
+                StoppingRule::IterationLimit { limit: 30 },
+                StoppingRule::TimeLimit { seconds: 60.0 },
+                StoppingRule::IterationLimit { limit: 80 },
+            ],
+            mode,
+        };
+        let budget = super::max_iterations_from_rules(&rules);
+        assert!(matches!(budget, Ok(80)), "mode {mode:?}: {budget:?}");
+    }
+}
+
+#[test]
+fn rule_set_without_an_iteration_limit_rule_has_no_iteration_budget() {
+    use crate::stopping_rule::{StoppingMode, StoppingRule, StoppingRuleSet};
+
+    for rules in [vec![], vec![StoppingRule::TimeLimit { seconds: 60.0 }]] {
+        let rules = StoppingRuleSet {
+            rules,
+            mode: StoppingMode::Any,
+        };
+        match super::max_iterations_from_rules(&rules) {
+            Err(SddpError::Validation(msg)) => {
+                assert!(msg.contains("iteration_limit"), "message: {msg}");
+            }
+            other => panic!("expected SddpError::Validation, got {other:?}"),
+        }
+    }
 }
 
 #[test]
@@ -6690,6 +6726,49 @@ fn test_simulate_uses_simulation_scheme() {
 }
 
 #[test]
+fn simulation_config_carries_the_simulation_sources_forward_seed() {
+    let system = minimal_system(2);
+    let simulation_forward_seed = |simulation_seed: Option<i64>| {
+        let mut config = minimal_config(1, 5);
+        config.simulation.scenario_source = simulation_seed.map(|seed| RawScenarioSourceConfig {
+            seed: Some(seed),
+            inflow: Some(RawClassConfigEntry {
+                scheme: RawSamplingScheme::OutOfSample,
+            }),
+            ..Default::default()
+        });
+        let stochastic = build_stochastic_context(
+            &system,
+            42,
+            None,
+            &[],
+            &[],
+            OpeningTreeInputs::default(),
+            ClassSchemes {
+                inflow: Some(SamplingScheme::InSample),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+        )
+        .expect("stochastic context");
+        StudySetup::new(
+            &system,
+            &config,
+            stochastic,
+            PrepareHydroModelsResult::default_from_system(&system),
+            Vec::new(),
+        )
+        .expect("setup")
+        .simulation_config()
+        .forward_seed
+    };
+
+    assert_eq!(simulation_forward_seed(Some(99)), Some(99));
+    assert_eq!(simulation_forward_seed(Some(-99)), Some(99));
+    assert_eq!(simulation_forward_seed(None), None);
+}
+
+#[test]
 fn test_sim_historical_library_built_when_sim_scheme_is_historical() {
     let system = system_with_historical_inflow(2);
 
@@ -10556,7 +10635,6 @@ fn admission_gate_predicates_destructure_exhaustively() {
         tolerance: 0.1,
         iterations: 1,
     }));
-    assert!(!super::rule_is_gap(&StoppingRule::GracefulShutdown));
 }
 
 // ---------------------------------------------------------------------------

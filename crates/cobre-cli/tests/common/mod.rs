@@ -33,6 +33,21 @@ pub fn write_file(root: &Path, relative: &str, content: &str) {
     fs::write(&full, content).unwrap();
 }
 
+/// Recursively copies `src` into `dst` without following symlinks.
+pub fn copy_dir_recursive(src: &Path, dst: &Path) {
+    fs::create_dir_all(dst).unwrap();
+    for entry in fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir_recursive(&from, &to);
+        } else {
+            fs::copy(&from, &to).unwrap();
+        }
+    }
+}
+
 /// Penalty config shared by every programmatically-built case fixture.
 pub const PENALTIES_JSON: &str = r#"{
     "bus": {
@@ -158,4 +173,56 @@ pub fn make_valid_case(
         "system/thermals.json",
         thermals_json.unwrap_or(DEFAULT_THERMALS_JSON),
     );
+}
+
+/// Builds a case under `case` whose stages sample `historical_residuals` and
+/// whose `{source: file}` opening tree is the one a first run exported, over a
+/// 1dtoy that carries no inflow history.
+pub fn write_supplied_opening_tree_case(case: &Path) {
+    copy_dir_recursive(&case_dir("1dtoy"), case);
+    let mut config = serde_json::json!({
+        "training": {
+            "selection": { "method": "sampled", "forward_passes": 1 },
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 1 }],
+            "scenario_source": {
+                "seed": 42,
+                "inflow": { "scheme": "in_sample" },
+                "load": { "scheme": "in_sample" },
+                "ncs": { "scheme": "in_sample" }
+            }
+        },
+        "simulation": { "enabled": false },
+        "modeling": { "inflow_non_negativity": { "method": "none" } },
+        "exports": { "stochastic": true }
+    });
+    write_file(case, "config.json", &config.to_string());
+
+    let export = tempfile::TempDir::new().unwrap();
+    let run = cobre()
+        .args(["run", case.to_str().unwrap()])
+        .args(["--output", export.path().to_str().unwrap(), "--quiet"])
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "the export run must succeed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    fs::copy(
+        export.path().join("stochastic/noise_openings.parquet"),
+        case.join("scenarios/noise_openings.parquet"),
+    )
+    .unwrap();
+
+    let stages = fs::read_to_string(case.join("stages.json")).unwrap();
+    let stages = stages.replace(
+        "\"num_openings\": 10",
+        "\"num_openings\": 10, \"sampling_method\": \"historical_residuals\"",
+    );
+    assert_eq!(stages.matches("historical_residuals").count(), 4);
+    write_file(case, "stages.json", &stages);
+
+    config.as_object_mut().unwrap().remove("exports");
+    config["training"]["scenario_source"]["openings"] = serde_json::json!({ "source": "file" });
+    write_file(case, "config.json", &config.to_string());
 }

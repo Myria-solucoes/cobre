@@ -160,7 +160,12 @@ pub struct MetadataIterations {
 /// Convergence summary embedded in [`TrainingMetadata`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetadataConvergence {
-    /// Whether a convergence-oriented stopping rule triggered termination.
+    /// `true` when training stopped because its configured stopping rules were
+    /// met and a `gap` or `bound_stalling` rule was among the rules triggered at
+    /// that iteration. `false` when only `iteration_limit` or `time_limit`
+    /// triggered, and when the iteration limit ran out, a shutdown request ended
+    /// training, or training ended on an error before the configured rules were
+    /// met.
     pub achieved: bool,
     /// Final optimality gap in percent (`null` when upper bound evaluation is disabled).
     pub final_gap_percent: Option<f64>,
@@ -370,6 +375,16 @@ pub struct MetadataSimulationSolveStats {
     pub parallelism: Option<u32>,
 }
 
+/// How a phase ended, recorded as `status` in its metadata file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunStatus {
+    /// Every other ending, including one that ended on an error.
+    Complete,
+    /// A shutdown request ended the phase early.
+    Partial,
+}
+
 // ── TrainingMetadata ─────────────────────────────────────────────────────────
 
 /// Merged metadata for the training output directory (`training/metadata.json`).
@@ -395,8 +410,8 @@ pub struct TrainingMetadata {
     pub completed_at: String,
     /// Total training wall-clock duration in seconds.
     pub duration_seconds: f64,
-    /// Run status: `"complete"` or `"partial"`.
-    pub status: String,
+    /// How the phase ended; see [`RunStatus`].
+    pub status: RunStatus,
     /// Snapshot of key configuration fields.
     pub configuration: MetadataConfiguration,
     /// Problem size dimensions.
@@ -448,8 +463,8 @@ pub struct SimulationMetadata {
     pub completed_at: String,
     /// Total simulation wall-clock duration in seconds.
     pub duration_seconds: f64,
-    /// Run status: `"complete"` or `"partial"`.
-    pub status: String,
+    /// How the phase ended; see [`RunStatus`].
+    pub status: RunStatus,
     /// Scenario completion counts.
     pub scenarios: MetadataScenarios,
     /// Aggregate cost statistics (`null` when cost was not persisted).
@@ -578,7 +593,7 @@ mod tests {
             started_at: "2026-01-17T08:00:00Z".to_string(),
             completed_at: "2026-01-17T12:30:00Z".to_string(),
             duration_seconds: 16_200.0,
-            status: "complete".to_string(),
+            status: RunStatus::Complete,
             configuration: MetadataConfiguration {
                 seed: Some(42),
                 max_iterations: Some(100),
@@ -643,7 +658,7 @@ mod tests {
             started_at: "2026-01-17T13:00:00Z".to_string(),
             completed_at: "2026-01-17T13:15:00Z".to_string(),
             duration_seconds: 900.0,
-            status: "complete".to_string(),
+            status: RunStatus::Complete,
             scenarios: MetadataScenarios {
                 total: 100,
                 completed: 100,
@@ -722,6 +737,22 @@ mod tests {
             decoded.distribution.world_size,
             original.distribution.world_size
         );
+    }
+
+    #[test]
+    fn run_status_serializes_as_a_closed_snake_case_set() {
+        assert_eq!(
+            serde_json::to_string(&RunStatus::Complete).unwrap(),
+            r#""complete""#
+        );
+        assert_eq!(
+            serde_json::to_string(&RunStatus::Partial).unwrap(),
+            r#""partial""#
+        );
+
+        let mut json = serde_json::to_value(make_training_metadata()).unwrap();
+        json["status"] = serde_json::Value::from("unknown");
+        assert!(serde_json::from_str::<TrainingMetadata>(&json.to_string()).is_err());
     }
 
     #[test]

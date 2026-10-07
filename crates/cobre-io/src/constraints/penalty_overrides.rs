@@ -31,22 +31,22 @@
 //! | --------------------------------- | ------ | -------- | ------------------------------------ |
 //! | `hydro_id`                        | INT32  | Yes      | Hydro plant ID                       |
 //! | `stage_id`                        | INT32  | Yes      | Stage ID                             |
-//! | `spillage_cost`                   | DOUBLE | No       | Spillage penalty (USD/m³/s)          |
-//! | `turbined_cost`                   | DOUBLE | No       | Turbined regularization cost (USD/MWh) |
-//! | `diversion_cost`                  | DOUBLE | No       | Diversion penalty (USD/m³/s)         |
+//! | `spillage_cost`                   | DOUBLE | No       | Spillage penalty (USD/(m³/s·h))          |
+//! | `turbined_cost`                   | DOUBLE | No       | Turbined regularization cost (USD/(m³/s·h)) |
+//! | `diversion_cost`                  | DOUBLE | No       | Diversion penalty (USD/(m³/s·h))         |
 //! | `storage_violation_below_cost`    | DOUBLE | No       | Storage below-min violation (USD/hm³)|
 //! | `filling_target_violation_cost`   | DOUBLE | No       | Filling target violation (USD/hm³)   |
-//! | `turbined_violation_below_cost`   | DOUBLE | No       | Turbined below-min violation (USD/m³/s)|
-//! | `outflow_violation_below_cost`    | DOUBLE | No       | Outflow below-min violation (USD/m³/s)|
-//! | `outflow_violation_above_cost`    | DOUBLE | No       | Outflow above-max violation (USD/m³/s)|
-//! | `generation_violation_below_cost` | DOUBLE | No       | Generation below-min violation (USD/MW)|
-//! | `evaporation_violation_cost`                 | DOUBLE | No       | Evaporation violation (USD/m³/s)             |
-//! | `water_withdrawal_violation_cost`            | DOUBLE | No       | Water withdrawal violation (USD/m³/s)        |
-//! | `water_withdrawal_violation_pos_cost`        | DOUBLE | No       | Over-withdrawal violation (USD/m³/s)         |
-//! | `water_withdrawal_violation_neg_cost`        | DOUBLE | No       | Under-withdrawal violation (USD/m³/s)        |
-//! | `evaporation_violation_pos_cost`             | DOUBLE | No       | Over-evaporation violation (USD/m³/s)        |
-//! | `evaporation_violation_neg_cost`             | DOUBLE | No       | Under-evaporation violation (USD/m³/s)       |
-//! | `inflow_nonnegativity_cost`                  | DOUBLE | No       | Inflow non-negativity cost (USD/m³/s)        |
+//! | `turbined_violation_below_cost`   | DOUBLE | No       | Turbined below-min violation (USD/(m³/s·h))|
+//! | `outflow_violation_below_cost`    | DOUBLE | No       | Outflow below-min violation (USD/(m³/s·h))|
+//! | `outflow_violation_above_cost`    | DOUBLE | No       | Outflow above-max violation (USD/(m³/s·h))|
+//! | `generation_violation_below_cost` | DOUBLE | No       | Generation below-min violation (USD/`MWh`)|
+//! | `evaporation_violation_cost`                 | DOUBLE | No       | Evaporation violation (USD/(m³/s·h))             |
+//! | `water_withdrawal_violation_cost`            | DOUBLE | No       | Water withdrawal violation (USD/(m³/s·h))        |
+//! | `water_withdrawal_violation_pos_cost`        | DOUBLE | No       | Over-withdrawal violation (USD/(m³/s·h))         |
+//! | `water_withdrawal_violation_neg_cost`        | DOUBLE | No       | Under-withdrawal violation (USD/(m³/s·h))        |
+//! | `evaporation_violation_pos_cost`             | DOUBLE | No       | Over-evaporation violation (USD/(m³/s·h))        |
+//! | `evaporation_violation_neg_cost`             | DOUBLE | No       | Under-evaporation violation (USD/(m³/s·h))       |
+//! | `inflow_nonnegativity_cost`                  | DOUBLE | No       | Inflow non-negativity cost (USD/(m³/s·h))        |
 //!
 //! ### `penalty_overrides_ncs`
 //!
@@ -155,8 +155,10 @@ pub struct LinePenaltyOverrideRow {
 /// A single row from `constraints/penalty_overrides_hydro.parquet`.
 ///
 /// Carries stage-varying penalty cost overrides for a hydro plant. All sixteen
-/// penalty columns are optional; absent or null means "use entity-level or
-/// global default".
+/// penalty columns are optional. An absent or null directional evaporation or
+/// withdrawal column takes the row's symmetric cost when the row sets it (see
+/// [`resolve_penalties`](crate::resolution::resolve_penalties)); any other absent or
+/// null column means "use entity-level or global default".
 ///
 /// # Examples
 ///

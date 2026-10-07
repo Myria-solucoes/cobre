@@ -425,19 +425,37 @@ fn validation_rejects_gamma_s_positive() {
 }
 
 #[test]
-fn validation_rejects_gamma_q_nonpositive() {
+fn validation_rejects_gamma_q_negative() {
     let hydro = make_hydro(0, HydroGenerationModel::Fpha);
     let stage = make_stage(0);
 
-    let mut row = valid_row(0, None, 0);
-    row.gamma_q = 0.0;
+    for gamma_q in [-0.1, -1e-12] {
+        let mut row = valid_row(0, None, 0);
+        row.gamma_q = gamma_q;
 
-    let err = validate_hyperplane_row(&hydro, &stage, &row).expect_err("should fail");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("gamma_q"),
-        "error must mention gamma_q, got: {msg}"
-    );
+        let err = validate_hyperplane_row(&hydro, &stage, &row).expect_err("should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("gamma_q must be >= 0"),
+            "gamma_q = {gamma_q}: error must say gamma_q must be >= 0, got: {msg}"
+        );
+    }
+}
+
+#[test]
+fn validation_accepts_gamma_q_zero() {
+    let hydro = make_hydro(0, HydroGenerationModel::Fpha);
+    let stage = make_stage(0);
+
+    for (gamma_v, gamma_q) in [(-0.0, -0.0), (0.0, 0.0), (0.002, 0.0)] {
+        let mut row = valid_row(0, None, 0);
+        row.gamma_v = gamma_v;
+        row.gamma_q = gamma_q;
+
+        validate_hyperplane_row(&hydro, &stage, &row).unwrap_or_else(|e| {
+            panic!("gamma_v = {gamma_v}, gamma_q = {gamma_q} must be valid, got: {e}")
+        });
+    }
 }
 
 #[test]
@@ -601,6 +619,50 @@ fn zero_hyperplanes_for_stage_returns_validation_error() {
     assert!(
         matches!(err, SddpError::Validation(_)),
         "expected Validation error, got {err:?}"
+    );
+}
+
+#[test]
+fn precomputed_stage_needs_a_flow_dependent_plane() {
+    let hydro = make_hydro(0, HydroGenerationModel::Fpha);
+    let stage = make_stage(0);
+
+    let rising = valid_row(0, None, 0);
+    let cap = FphaHyperplaneRow {
+        plane_id: 1,
+        gamma_0: 999.668,
+        gamma_v: -0.0,
+        gamma_q: -0.0,
+        gamma_s: -0.0045,
+        ..valid_row(0, None, 1)
+    };
+    let build = |rows: Vec<&FphaHyperplaneRow>| {
+        let map = HashMap::from([((EntityId::from(0), None::<i32>), rows)]);
+        build_fpha_model(
+            &hydro,
+            &stage,
+            ProductionModelSource::PrecomputedHyperplanes,
+            &map,
+        )
+    };
+
+    for rows in [vec![&rising, &cap], vec![&cap, &rising]] {
+        let Ok(ResolvedProductionModel::Fpha { planes }) = build(rows) else {
+            panic!("a flat plane next to a rising plane must build");
+        };
+        assert_eq!(planes.len(), 2);
+        let built_cap = planes
+            .iter()
+            .find(|p| p.gamma_q == 0.0)
+            .expect("the cap plane is kept");
+        assert_eq!(built_cap.gamma_q.to_bits(), (-0.0_f64).to_bits());
+    }
+
+    let err = build(vec![&cap]).expect_err("a stage with only flat planes must be refused");
+    assert!(
+        matches!(&err, SddpError::Validation(msg)
+            if msg.contains("no hyperplane has gamma_q > 0") && msg.contains("stage 0")),
+        "got: {err}"
     );
 }
 
@@ -2865,4 +2927,184 @@ fn computed_fpha_without_turbine_capacity_still_requires_its_prerequisites() {
     let err = super::resolve_production_models_from_artifacts(&system, &artifacts, false)
         .expect_err("a missing tailrace must still be rejected");
     assert!(err.to_string().contains("tailrace"), "got: {err}");
+}
+
+#[test]
+fn precomputed_round_trip_keeps_a_zero_capacity_plant_at_zero_productivity() {
+    let mut uncapped = make_sobradinho_computed_hydro(0);
+    uncapped.max_generation_mw = 10_000.0;
+    let mut capacity_less = make_sobradinho_computed_hydro(1);
+    capacity_less.max_turbined_m3s = 0.0;
+    let system = SystemBuilder::new()
+        .buses(vec![make_bus()])
+        .hydros(vec![uncapped, capacity_less])
+        .stages(vec![make_stage(0), make_stage(1)])
+        .build()
+        .expect("two-hydro computed-FPHA system builds");
+    let computed_artifacts = cobre_io::CaseArtifacts {
+        production_models: vec![computed_fpha_config(0), computed_fpha_config(1)],
+        hydro_geometry: [
+            make_sobradinho_geometry_rows(0),
+            make_sobradinho_geometry_rows(1),
+        ]
+        .concat(),
+        ..Default::default()
+    };
+    let (computed_set, _, _, export_rows, _, _, _) =
+        super::resolve_production_models_from_artifacts(&system, &computed_artifacts, false)
+            .expect("computed resolve must succeed");
+
+    let precomputed_artifacts = cobre_io::CaseArtifacts {
+        production_models: vec![precomputed_fpha_config(0), precomputed_fpha_config(1)],
+        fpha_hyperplanes: export_rows,
+        ..Default::default()
+    };
+    let (set, _, provenance, _, _, _, _) =
+        super::resolve_production_models_from_artifacts(&system, &precomputed_artifacts, false)
+            .expect("the exported hyperplanes must resolve as precomputed");
+
+    let plane_count = |set: &ProductionModelSet, stage_idx: usize| match set.model(0, stage_idx) {
+        ResolvedProductionModel::Fpha { planes } => planes.len(),
+        other => panic!("hydro 0 stage {stage_idx}: expected Fpha, got {other:?}"),
+    };
+    for stage_idx in 0..2 {
+        assert_eq!(
+            plane_count(&set, stage_idx),
+            plane_count(&computed_set, stage_idx),
+            "stage {stage_idx}: precomputed plane count must match the computed fit"
+        );
+        assert!(
+            matches!(
+                set.model(1, stage_idx),
+                ResolvedProductionModel::ConstantProductivity { productivity } if *productivity == 0.0
+            ),
+            "hydro 1 stage {stage_idx}: got {:?}",
+            set.model(1, stage_idx)
+        );
+    }
+    assert_eq!(
+        provenance,
+        vec![
+            (
+                EntityId::from(0),
+                ProductionModelSource::PrecomputedHyperplanes
+            ),
+            (EntityId::from(1), ProductionModelSource::NoTurbineCapacity),
+        ]
+    );
+}
+
+fn resolve_single_precomputed_hydro(
+    hydro: Hydro,
+    fpha_hyperplanes: Vec<FphaHyperplaneRow>,
+) -> Result<ResolveProductionResult, SddpError> {
+    let artifacts = cobre_io::CaseArtifacts {
+        production_models: vec![precomputed_fpha_config(0)],
+        fpha_hyperplanes,
+        ..Default::default()
+    };
+    let system = SystemBuilder::new()
+        .buses(vec![make_bus()])
+        .hydros(vec![hydro])
+        .stages(vec![make_stage(0)])
+        .build()
+        .expect("precomputed-FPHA system builds");
+    super::resolve_production_models_from_artifacts(&system, &artifacts, false)
+}
+
+#[test]
+fn precomputed_fpha_without_planes_is_exempt_only_for_zero_capacity() {
+    let with_capacity = make_hydro(0, HydroGenerationModel::Fpha);
+    assert!(with_capacity.has_turbine_capacity());
+    let err = resolve_single_precomputed_hydro(with_capacity, Vec::new())
+        .expect_err("a plant with turbine capacity still needs its hyperplane rows");
+    assert!(
+        matches!(&err, SddpError::Validation(msg) if msg.contains("no hyperplane rows")),
+        "got: {err}"
+    );
+
+    let mut capacity_less = make_hydro(0, HydroGenerationModel::Fpha);
+    capacity_less.max_turbined_m3s = 0.0;
+    let (set, _, provenance, _, _, _, _) = resolve_single_precomputed_hydro(
+        capacity_less,
+        vec![valid_row(0, None, 0), valid_row(0, None, 1)],
+    )
+    .expect("a capacity-less plant with rows keeps its precomputed planes");
+    assert!(
+        matches!(
+            set.model(0, 0),
+            ResolvedProductionModel::Fpha { planes } if planes.len() == 2
+        ),
+        "got {:?}",
+        set.model(0, 0)
+    );
+    assert_eq!(
+        provenance,
+        vec![(
+            EntityId::from(0),
+            ProductionModelSource::PrecomputedHyperplanes
+        )]
+    );
+}
+
+#[test]
+fn precomputed_round_trip_reproduces_the_capped_computed_fit() {
+    fn planes(set: &ProductionModelSet, stage_idx: usize) -> &[FphaPlane] {
+        match set.model(0, stage_idx) {
+            ResolvedProductionModel::Fpha { planes } => planes,
+            other => panic!("stage {stage_idx}: expected Fpha, got {other:?}"),
+        }
+    }
+
+    let system = SystemBuilder::new()
+        .buses(vec![make_bus()])
+        .hydros(vec![make_sobradinho_computed_hydro(0)])
+        .stages(vec![make_stage(0), make_stage(1)])
+        .build()
+        .expect("computed-FPHA system builds");
+    let computed_artifacts = cobre_io::CaseArtifacts {
+        production_models: vec![computed_fpha_config(0)],
+        hydro_geometry: make_sobradinho_geometry_rows(0),
+        ..Default::default()
+    };
+    let (computed_set, _, _, export_rows, _, _, _) =
+        super::resolve_production_models_from_artifacts(&system, &computed_artifacts, false)
+            .expect("computed resolve must succeed");
+    for stage_id in 0..2 {
+        assert!(
+            export_rows.iter().any(|row| row.stage_id == Some(stage_id)
+                && row.gamma_q == 0.0
+                && row.gamma_v == 0.0),
+            "stage {stage_id}: the binding ceiling must export a flat cap plane"
+        );
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("fpha_hyperplanes.parquet");
+    write_fpha_hyperplanes(&path, &export_rows).expect("write_fpha_hyperplanes must succeed");
+    let precomputed_artifacts = cobre_io::CaseArtifacts {
+        production_models: vec![precomputed_fpha_config(0)],
+        fpha_hyperplanes: parse_fpha_hyperplanes(&path).expect("re-read must succeed"),
+        ..Default::default()
+    };
+    let (set, _, provenance, _, _, _, _) =
+        super::resolve_production_models_from_artifacts(&system, &precomputed_artifacts, false)
+            .expect("the exported hyperplanes must resolve as precomputed");
+
+    assert_eq!(
+        provenance,
+        vec![(
+            EntityId::from(0),
+            ProductionModelSource::PrecomputedHyperplanes
+        )]
+    );
+    for stage_idx in 0..2 {
+        let (got, want) = (planes(&set, stage_idx), planes(&computed_set, stage_idx));
+        assert_eq!(got.len(), want.len(), "stage {stage_idx}: plane count");
+        for (k, (g, w)) in got.iter().zip(want).enumerate() {
+            let bits =
+                |p: &FphaPlane| [p.intercept, p.gamma_v, p.gamma_q, p.gamma_s].map(f64::to_bits);
+            assert_eq!(bits(g), bits(w), "stage {stage_idx} plane {k}");
+        }
+    }
 }

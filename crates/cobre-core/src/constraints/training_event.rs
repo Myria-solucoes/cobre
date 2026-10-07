@@ -1,7 +1,7 @@
 //! Typed event system for iterative optimization training loops and simulation runners.
 //!
-//! This module defines the [`TrainingEvent`] enum and its companion [`StoppingRuleResult`]
-//! struct. Events are emitted at each step of the iterative optimization lifecycle
+//! This module defines the [`TrainingEvent`] enum. Events are emitted at each step
+//! of the iterative optimization lifecycle
 //! (forward pass, backward pass, convergence update, etc.) and consumed by runtime
 //! observers: text loggers, JSON-lines writers, TUI renderers, MCP progress
 //! notifications, and Parquet convergence writers.
@@ -33,8 +33,6 @@
 //! ```
 //!
 //! See [`TrainingEvent`] for the full variant catalogue.
-
-use std::borrow::Cow;
 
 /// Phase discriminant for [`TrainingEvent::WorkerTiming`].
 #[derive(Clone, Debug)]
@@ -85,22 +83,6 @@ pub struct WorkerPhaseTimings {
     pub scoring_ms: f64,
 }
 
-/// Result of evaluating a single stopping rule at a given iteration.
-///
-/// [`TrainingEvent::ConvergenceUpdate`] carries one per configured rule.
-#[derive(Clone, Debug)]
-pub struct StoppingRuleResult {
-    /// Rule identifier matching the variant name in the stopping rules config
-    /// (e.g. `"gap_tolerance"`, `"iteration_limit"`). `&'static` to avoid a
-    /// hot-path allocation.
-    pub rule_name: &'static str,
-    /// Whether this rule's condition is satisfied at the current iteration.
-    pub triggered: bool,
-    /// Human-readable description of the rule's current state
-    /// (e.g. `"gap 0.42% <= 1.00%"`).
-    pub detail: Cow<'static, str>,
-}
-
 /// Per-stage row-selection statistics for one iteration.
 ///
 /// The two `Option` fields are `None` when budget enforcement is disabled.
@@ -147,8 +129,8 @@ pub struct StageRowSelectionRecord {
 /// | 4b   | [`Self::PolicyBudgetEnforcementComplete`] | Budget cap enforcement done (every iteration when budget is set) |
 /// | 4c   | [`Self::PolicyTemplateFreezeComplete`] | Per-stage frozen template rebuild done (every iteration) |
 /// | 5    | [`Self::ConvergenceUpdate`]    | Stopping rules evaluated                               |
-/// | 6    | [`Self::CheckpointComplete`]   | Checkpoint written (conditional on checkpoint interval)|
-/// | 7    | [`Self::IterationSummary`]     | End-of-iteration aggregated summary                    |
+/// | 6    | [`Self::IterationSummary`]     | End-of-iteration aggregated summary                    |
+/// | 7    | [`Self::CheckpointComplete`]   | Periodic checkpoint committed (scheduled iterations)   |
 /// | pw   | [`Self::WorkerTiming`]         | Per-worker timing (2 × n\_workers per iteration)       |
 ///
 /// ## Lifecycle events
@@ -296,13 +278,9 @@ pub enum TrainingEvent {
         upper_bound_std: f64,
         /// Relative optimality gap: `(upper_bound - lower_bound) / |upper_bound|`.
         gap: f64,
-        /// Evaluation result for each configured stopping rule.
-        rules_evaluated: Vec<StoppingRuleResult>,
     },
 
-    /// Checkpoint written.
-    ///
-    /// Only emitted when `iteration % checkpoint_interval == 0`.
+    /// Emitted by the writing rank after each periodic checkpoint is committed.
     CheckpointComplete {
         /// Iteration number.
         iteration: u64,
@@ -312,8 +290,8 @@ pub enum TrainingEvent {
         elapsed_ms: u64,
     },
 
-    /// Full iteration summary with aggregated timings, emitted as the final
-    /// per-iteration event.
+    /// Full iteration summary with aggregated timings; within an iteration only
+    /// [`Self::CheckpointComplete`] follows it.
     IterationSummary {
         /// Iteration number.
         iteration: u64,
@@ -475,12 +453,7 @@ pub enum TrainingEvent {
 
 #[cfg(test)]
 mod tests {
-    use std::borrow::Cow;
-
-    use super::{
-        StageRowSelectionRecord, StoppingRuleResult, TrainingEvent, WorkerPhaseTimings,
-        WorkerTimingPhase,
-    };
+    use super::{StageRowSelectionRecord, TrainingEvent, WorkerPhaseTimings, WorkerTimingPhase};
 
     fn make_all_variants() -> Vec<TrainingEvent> {
         vec![
@@ -541,11 +514,6 @@ mod tests {
                 upper_bound: 110.0,
                 upper_bound_std: 5.0,
                 gap: 0.0909,
-                rules_evaluated: vec![StoppingRuleResult {
-                    rule_name: "gap_tolerance",
-                    triggered: false,
-                    detail: Cow::Borrowed("gap 9.09% > 1.00%"),
-                }],
             },
             TrainingEvent::CheckpointComplete {
                 iteration: 5,
@@ -669,66 +637,6 @@ mod tests {
         assert!((ub_mean - 210.0).abs() < f64::EPSILON);
         assert!((ub_std - 3.5).abs() < f64::EPSILON);
         assert_eq!(elapsed_ms, 55);
-    }
-
-    #[test]
-    fn convergence_update_rules_evaluated_field() {
-        let rules = vec![
-            StoppingRuleResult {
-                rule_name: "gap_tolerance",
-                triggered: true,
-                detail: Cow::Borrowed("gap 0.42% <= 1.00%"),
-            },
-            StoppingRuleResult {
-                rule_name: "iteration_limit",
-                triggered: false,
-                detail: Cow::Borrowed("iteration 10/100"),
-            },
-        ];
-        let event = TrainingEvent::ConvergenceUpdate {
-            iteration: 10,
-            lower_bound: 99.0,
-            upper_bound: 100.0,
-            upper_bound_std: 0.5,
-            gap: 0.0042,
-            rules_evaluated: rules.clone(),
-        };
-        let TrainingEvent::ConvergenceUpdate {
-            rules_evaluated, ..
-        } = event
-        else {
-            panic!("wrong variant")
-        };
-        assert_eq!(rules_evaluated.len(), 2);
-        assert_eq!(rules_evaluated[0].rule_name, "gap_tolerance");
-        assert!(rules_evaluated[0].triggered);
-        assert_eq!(rules_evaluated[1].rule_name, "iteration_limit");
-        assert!(!rules_evaluated[1].triggered);
-    }
-
-    #[test]
-    fn stopping_rule_result_fields_accessible() {
-        let r = StoppingRuleResult {
-            rule_name: "bound_stalling",
-            triggered: false,
-            detail: Cow::Borrowed("LB stable for 8/10 iterations"),
-        };
-        let cloned = r.clone();
-        assert_eq!(cloned.rule_name, "bound_stalling");
-        assert!(!cloned.triggered);
-        assert_eq!(cloned.detail, "LB stable for 8/10 iterations");
-    }
-
-    #[test]
-    fn stopping_rule_result_debug_non_empty() {
-        let r = StoppingRuleResult {
-            rule_name: "time_limit",
-            triggered: true,
-            detail: Cow::Borrowed("elapsed 3602s > 3600s limit"),
-        };
-        let debug = format!("{r:?}");
-        assert!(!debug.is_empty());
-        assert!(debug.contains("time_limit"));
     }
 
     #[test]

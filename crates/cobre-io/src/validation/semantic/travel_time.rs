@@ -4,25 +4,14 @@
 //! history before the arc is sized into any solver-side state. Runtime
 //! conservation checks and recourse-feasibility rows live downstream, not here.
 //!
-//! | # | Rule                                                                    | `ErrorKind`               |
-//! |---|--------------------------------------------------------------------------|---------------------------|
-//! | 1 | `travel_time_hours` negative or non-finite                              | `InvalidValue`            |
-//! | 2 | `travel_time_hours == 0.0` — treated as undeclared, no arc created      | `ModelQuality` (warning)  |
-//! | 3 | `max_t(t_v / h_t)` below [`NEGLIGIBLE_RATIO_THRESHOLD`]                  | `ModelQuality` (warning)  |
-//! | 4 | `t_v` exceeds the remaining study horizon at some stage                 | `ModelQuality` (warning)  |
-//! | 5 | `past_defluences` windows do not cover the arc's in-transit span `[start_0 − t_v, start_0)` (gap or no windows) | `BusinessRuleViolation` |
-//! | 5b | A `past_defluences` window ends after `start_0` (future-dated) | `InvalidValue` |
-//! | 6 | Chronological confluence: 2+ declared arcs into one downstream plant with differing `travel_time_hours`, while any study stage is chronological | `NotImplemented` |
-//! | 11 | A declared arc's downstream `exit_stage_id` falls inside the arrival window of a release whose own stage is still Operating | `ModelQuality` (warning) |
-//! | 12 | A declared arc releases at a stage where its downstream has not yet reached Operating status (`PreFilling`/`Filling`, or before `entry_stage_id`) | `BusinessRuleViolation` |
-//! | 13 | *(retired — number never reused)* | |
+//! Its rules are the `travel_time.*` entries of [`RULES`](crate::validation::rules::RULES).
 
 use chrono::NaiveDate;
 use cobre_core::{
     BlockMode, EntityId, Hydro, Stage, window_period_reach_depth, window_reaches_any_period,
 };
 
-use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
+use super::super::{ValidationContext, rules, schema::ParsedData};
 
 /// Below this `max_t(t_v/h_t)` ratio, cross-stage transport carries a
 /// mass-fraction small enough to treat as negligible.
@@ -39,8 +28,8 @@ pub(super) fn validate_travel_time(data: &ParsedData, ctx: &mut ValidationContex
         let hydro_id = hydro.id.0;
 
         if !t.is_finite() || t < 0.0 {
-            ctx.add_error(
-                ErrorKind::InvalidValue,
+            ctx.emit(
+                &rules::TRAVEL_TIME_INVALID,
                 "system/hydros.json",
                 Some(format!("Hydro {hydro_id}")),
                 format!("Hydro {hydro_id}: travel_time_hours must be finite and >= 0.0, got {t}"),
@@ -49,8 +38,8 @@ pub(super) fn validate_travel_time(data: &ParsedData, ctx: &mut ValidationContex
         }
 
         if t == 0.0 {
-            ctx.add_warning(
-                ErrorKind::ModelQuality,
+            ctx.emit(
+                &rules::TRAVEL_TIME_ZERO,
                 "system/hydros.json",
                 Some(format!("Hydro {hydro_id}")),
                 format!(
@@ -70,7 +59,6 @@ pub(super) fn validate_travel_time(data: &ParsedData, ctx: &mut ValidationContex
 
     check_chronological_confluence_heterogeneous_travel_time(data, ctx);
     check_recourse_downstream_not_operating(data, &study_durations, ctx);
-    check_recourse_downstream_exit_within_window(data, &study_durations, ctx);
 }
 
 /// Whether `hydro` has not reached full commissioning at `stage_id` for a
@@ -78,9 +66,9 @@ pub(super) fn validate_travel_time(data: &ParsedData, ctx: &mut ValidationContex
 /// sub-phase, still `Filling` (short of `entry_stage_id`), or (a non-filling
 /// hydro) still short of `entry_stage_id`. A hydro past its `exit_stage_id`
 /// (which always exceeds `entry_stage_id`, `check_lifecycle_consistency`)
-/// returns `false` here — that reversion is row 11's territory, never row
-/// 12's, since a filling hydro never carries `exit_stage_id`
-/// (`check_filling_guards` guard 5).
+/// returns `false` here: a delivery maturing after the exit is carried on to
+/// the next operating plant downstream, not rejected (a filling hydro never
+/// carries `exit_stage_id`, `check_filling_guards` guard 5).
 fn hydro_not_yet_entered(hydro: &Hydro, stage_id: i32) -> bool {
     if let Some(filling) = &hydro.filling
         && filling.start_stage_id > 0
@@ -100,13 +88,13 @@ fn arrival_depth(t: f64, anchor: usize, study_durations: &[f64]) -> usize {
     window_period_reach_depth(t, future[0], future)
 }
 
-/// Row 12: rejects a declared arc that releases while its downstream has not
+/// Rejects a declared arc that releases while its downstream has not
 /// yet entered — the `PreFilling` short-circuit is same-stage and cannot
 /// carry a delayed delivery into an absent balance row, and a `Filling`
 /// downstream's sufficiency budget does not model bucket-borne arrivals.
 /// Checking only the release (anchor) stage suffices: a
 /// downstream's phase never reverts to non-Operating except via
-/// `exit_stage_id`, which [`hydro_not_yet_entered`] excludes and row 11 owns.
+/// `exit_stage_id`, which [`hydro_not_yet_entered`] excludes.
 fn check_recourse_downstream_not_operating(
     data: &ParsedData,
     study_durations: &[f64],
@@ -129,8 +117,8 @@ fn check_recourse_downstream_not_operating(
                 continue;
             }
             let window_end = anchor + arrival_depth(t, anchor, study_durations);
-            ctx.add_error(
-                ErrorKind::BusinessRuleViolation,
+            ctx.emit(
+                &rules::TRAVEL_TIME_DOWNSTREAM_NOT_OPERATING,
                 "system/hydros.json",
                 Some(format!("Hydro {}", downstream_id.0)),
                 format!(
@@ -147,59 +135,7 @@ fn check_recourse_downstream_not_operating(
     }
 }
 
-/// Row 11: a declared arc whose release stage is Operating, but whose
-/// downstream's `exit_stage_id` falls at or before the arrival window's far
-/// stage, delivers into a plant that has since reverted to `PreFilling` —
-/// the maturing delivery past `exit_stage_id` is silently dropped (no
-/// consuming term on the frozen balance row), mirroring the terminal-drop
-/// convention: an advisory, never an error.
-fn check_recourse_downstream_exit_within_window(
-    data: &ParsedData,
-    study_durations: &[f64],
-    ctx: &mut ValidationContext,
-) {
-    for hydro in &data.hydros {
-        let Some(t) = hydro.travel_time_hours.filter(|&t| t > 0.0) else {
-            continue;
-        };
-        let Some(downstream_id) = hydro.downstream_id else {
-            continue;
-        };
-        let Some(downstream) = data.hydros.iter().find(|h| h.id == downstream_id) else {
-            continue;
-        };
-        let Some(exit) = downstream.exit_stage_id else {
-            continue;
-        };
-
-        for anchor in 0..study_durations.len() {
-            let anchor_id = i32::try_from(anchor).unwrap_or(i32::MAX);
-            if hydro_not_yet_entered(downstream, anchor_id) {
-                continue;
-            }
-            let window_end = anchor + arrival_depth(t, anchor, study_durations);
-            let window_end_id = i32::try_from(window_end).unwrap_or(i32::MAX);
-            if exit > window_end_id {
-                continue;
-            }
-            ctx.add_warning(
-                ErrorKind::ModelQuality,
-                "system/hydros.json",
-                Some(format!("Hydro {}", downstream_id.0)),
-                format!(
-                    "Hydro {}: declared arc from hydro {} (travel_time_hours={t}) released at \
-                     stage {anchor} carries a delivery into arrival window [stage {anchor}, \
-                     stage {window_end}] that reaches or crosses hydro {}'s exit_stage_id \
-                     ({exit}); the maturing delivery past exit is dropped, not consumed",
-                    downstream_id.0, hydro.id.0, downstream_id.0
-                ),
-            );
-            break;
-        }
-    }
-}
-
-/// Row 6: rejects a superset of the true heterogeneous-confluence cases (any
+/// Rejects a superset of the true heterogeneous-confluence cases (any
 /// chronological study stage, not only the ones whose per-stage-pair spread
 /// resolution actually disagrees) — this infrastructure crate has no access
 /// to that downstream, per-arc computation and must not reproduce it.
@@ -249,8 +185,8 @@ fn check_chronological_confluence_heterogeneous_travel_time(
             .map(|(id, t)| format!("hydro {id} (travel_time_hours={t})"))
             .collect::<Vec<_>>()
             .join(", ");
-        ctx.add_error(
-            ErrorKind::NotImplemented,
+        ctx.emit(
+            &rules::TRAVEL_TIME_HETEROGENEOUS_CONFLUENCE,
             "system/hydros.json",
             Some(format!("Hydro {downstream_id}")),
             format!(
@@ -286,7 +222,7 @@ fn study_start_date(data: &ParsedData) -> Option<NaiveDate> {
         .map(|s| s.start_date)
 }
 
-/// Row 3: `max_t(t_v/h_t)` below [`NEGLIGIBLE_RATIO_THRESHOLD`] is an advisory
+/// A `max_t(t_v/h_t)` below [`NEGLIGIBLE_RATIO_THRESHOLD`] is an advisory
 /// ("consider not declaring"), never a silent fold.
 fn check_negligible_ratio(
     hydro_id: i32,
@@ -303,8 +239,8 @@ fn check_negligible_ratio(
     if max_ratio >= NEGLIGIBLE_RATIO_THRESHOLD {
         return;
     }
-    ctx.add_warning(
-        ErrorKind::ModelQuality,
+    ctx.emit(
+        &rules::TRAVEL_TIME_NEGLIGIBLE,
         "system/hydros.json",
         Some(format!("Hydro {hydro_id}")),
         format!(
@@ -315,7 +251,7 @@ fn check_negligible_ratio(
     );
 }
 
-/// Row 4: `t_v` exceeding the remaining study horizon at some stage — the
+/// A `t_v` exceeding the remaining study horizon at some stage — the
 /// arc's release never arrives before the horizon ends from that stage
 /// onward. Routed through [`window_reaches_any_period`] (sharing the same
 /// overlap sweep [`arrival_depth`] reuses via [`window_period_reach_depth`])
@@ -334,8 +270,8 @@ fn check_horizon_inertness(
         if window_reaches_any_period(t, future[0], future) {
             continue;
         }
-        ctx.add_warning(
-            ErrorKind::ModelQuality,
+        ctx.emit(
+            &rules::TRAVEL_TIME_BEYOND_HORIZON,
             "system/hydros.json",
             Some(format!("Hydro {hydro_id}")),
             format!(
@@ -361,7 +297,7 @@ fn hours_before(start_0: NaiveDate, date: NaiveDate) -> f64 {
     (start_0 - date).num_hours() as f64
 }
 
-/// Row 5: a declared arc's `past_defluences` windows must cover the in-transit
+/// A declared arc's `past_defluences` windows must cover the in-transit
 /// span `(0, t_v]` hours before the first study stage's start (`start_0`).
 ///
 /// Each window `[start_date, end_date)` maps to the hours-before-`start_0`
@@ -393,8 +329,8 @@ fn check_defluence_coverage(
         .filter(|e| e.hydro_id.0 == hydro_id)
     {
         if w.end_date > start_0 {
-            ctx.add_error(
-                ErrorKind::InvalidValue,
+            ctx.emit(
+                &rules::TRAVEL_TIME_DEFLUENCE_FUTURE_DATED,
                 "initial_conditions.json",
                 Some(format!("Hydro {hydro_id}")),
                 format!(
@@ -425,8 +361,8 @@ fn check_defluence_coverage(
         return;
     }
 
-    ctx.add_error(
-        ErrorKind::BusinessRuleViolation,
+    ctx.emit(
+        &rules::TRAVEL_TIME_DEFLUENCES_UNCOVERED,
         "initial_conditions.json",
         Some(format!("Hydro {hydro_id}")),
         format!(
@@ -452,6 +388,7 @@ mod tests {
     use super::*;
     use crate::stages::StagesData;
     use crate::test_support::*;
+    use crate::validation::ErrorKind;
     use cobre_core::entities::Hydro;
     use cobre_core::temporal::{Block, PolicyGraphType, Stage};
     use cobre_core::{EntityId, HorizonGraph, HydroPastDefluence};
@@ -965,56 +902,31 @@ mod tests {
         );
     }
 
-    // ── Row 11: downstream exit inside the arrival window -- advisory ────────
-
-    /// A declared arc whose downstream exits inside the arrival window drops
-    /// the maturing delivery with an advisory; setup proceeds (no error).
+    /// Topology of the `exited_plant_transit` deck: the middle plant exits
+    /// inside the arrival window of the upstream release.
     #[test]
-    fn test_row11_downstream_exit_inside_window_is_advisory_setup_proceeds() {
-        let up = make_hydro_with_travel_time(1, 2, Some(800.0));
-        let mut down = make_hydro(2, None);
-        down.exit_stage_id = Some(2);
-        let stages = make_stages_with_pre_study(4, 720.0, 1, 720.0);
-        let mut data = make_data(vec![up, down], vec![], vec![], stages, vec![], vec![]);
-        data.initial_conditions.past_defluences = covering_defluences(1, 800.0);
+    fn downstream_exit_inside_an_arrival_window_is_accepted_without_a_warning() {
+        let up = make_hydro_with_travel_time(1, 2, Some(360.0));
+        let mut mid = make_hydro(2, Some(3));
+        mid.exit_stage_id = Some(1);
+        let down = make_hydro(3, None);
+        let stages = make_stages_with_pre_study(2, 720.0, 1, 720.0);
+        let mut data = make_data(vec![up, mid, down], vec![], vec![], stages, vec![], vec![]);
+        data.initial_conditions.past_defluences = covering_defluences(1, 360.0);
 
         let mut ctx = ValidationContext::new();
         validate_travel_time(&data, &mut ctx);
 
         assert!(
             !ctx.has_errors(),
-            "downstream exit inside the arrival window must not hard-error, got: {:?}",
+            "a downstream exit inside the arrival window must not hard-error, got: {:?}",
             ctx.errors()
         );
-        assert!(
-            ctx.warnings()
-                .iter()
-                .any(|w| w.kind == ErrorKind::ModelQuality
-                    && w.message.contains("Hydro 2")
-                    && w.message.contains("exit_stage_id")),
-            "expected an advisory naming the downstream plant and exit_stage_id, got: {:?}",
-            ctx.warnings()
-        );
-    }
-
-    /// The same arc into a downstream with no `exit_stage_id` must never
-    /// trigger row 11.
-    #[test]
-    fn test_row11_no_exit_stage_id_no_advisory() {
-        let up = make_hydro_with_travel_time(1, 2, Some(800.0));
-        let down = make_hydro(2, None);
-        let stages = make_stages_with_pre_study(4, 720.0, 1, 720.0);
-        let mut data = make_data(vec![up, down], vec![], vec![], stages, vec![], vec![]);
-        data.initial_conditions.past_defluences = covering_defluences(1, 800.0);
-
-        let mut ctx = ValidationContext::new();
-        validate_travel_time(&data, &mut ctx);
-
         assert!(
             !ctx.warnings()
                 .iter()
                 .any(|w| w.message.contains("exit_stage_id")),
-            "no exit_stage_id must never emit a row-11 advisory, got: {:?}",
+            "a downstream exit inside the arrival window must not warn, got: {:?}",
             ctx.warnings()
         );
     }

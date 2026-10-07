@@ -5,7 +5,7 @@
       "description": "One post-horizon calendar stage: a `[start_date, start_date + duration_hours)`\nsegment. `end_date` is not declared; it is derived downstream.",
       "properties": {
         "duration_hours": {
-          "description": "Stage duration \\[h\\]. Must be finite and `> 0.0`.",
+          "description": "Stage duration (h). Must be finite and `> 0.0`.",
           "format": "double",
           "type": "number"
         },
@@ -63,7 +63,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Intermediate serde type for `post_study_stages.json`, deserialized then\nvalidated before conversion to [`PostStudyStages`].",
+  "description": "Root object of `post_study_stages.json`.",
   "properties": {
     "$schema": {
       "description": "JSON schema URI — informational, not validated.",

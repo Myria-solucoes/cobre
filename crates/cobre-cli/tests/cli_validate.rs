@@ -2,8 +2,9 @@
 
 #![allow(clippy::unwrap_used)]
 
+use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use assert_cmd::prelude::*;
@@ -11,7 +12,7 @@ use predicates::prelude::*;
 use tempfile::TempDir;
 
 mod common;
-use common::PENALTIES_JSON;
+use common::{PENALTIES_JSON, copy_dir_recursive, write_supplied_opening_tree_case};
 
 // ── fixture helpers ───────────────────────────────────────────────────────────
 
@@ -49,6 +50,13 @@ const STAGES_JSON: &str = r#"{
             "start_date": "2024-01-01",
             "end_date": "2024-02-01",
             "blocks": [{ "id": 0, "name": "FLAT", "hours": 744.0 }],
+            "num_openings": 50
+        },
+        {
+            "id": 1,
+            "start_date": "2024-02-01",
+            "end_date": "2024-03-01",
+            "blocks": [{ "id": 0, "name": "FLAT", "hours": 696.0 }],
             "num_openings": 50
         }
     ]
@@ -367,6 +375,64 @@ fn invalid_simulation_scenario_source_fails_validate_and_run() {
         .stderr(predicate::str::contains(MSG));
 }
 
+#[test]
+fn simulation_out_of_sample_with_its_own_seed_passes_validate_and_run() {
+    let dir = TempDir::new().unwrap();
+    copy_dir_recursive(
+        &common::case_dir("deterministic/d29-weekly-par-noise-sharing"),
+        dir.path(),
+    );
+    let config_path = dir.path().join("config.json");
+    let mut config: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+    config["training"]["scenario_source"] =
+        serde_json::json!({ "inflow": { "scheme": "in_sample" } });
+    config["training"]["stopping_rules"] =
+        serde_json::json!([{ "type": "iteration_limit", "limit": 3 }]);
+    config["simulation"] = serde_json::json!({
+        "enabled": true,
+        "selection": { "method": "sampled", "num_scenarios": 2 },
+        "scenario_source": { "seed": 42, "inflow": { "scheme": "out_of_sample" } }
+    });
+    fs::write(&config_path, config.to_string()).unwrap();
+
+    cobre()
+        .args(["validate", dir.path().to_str().unwrap()])
+        .assert()
+        .success();
+
+    let output = TempDir::new().unwrap();
+    cobre()
+        .args([
+            "run",
+            dir.path().to_str().unwrap(),
+            "--output",
+            output.path().to_str().unwrap(),
+            "--quiet",
+        ])
+        .assert()
+        .success();
+}
+
+#[test]
+fn checkpointing_enabled_without_interval_exits_1() {
+    let dir = TempDir::new().unwrap();
+    make_valid_case(&dir);
+
+    let mut config: serde_json::Value = serde_json::from_str(CONFIG_JSON).unwrap();
+    config["policy"] = serde_json::json!({ "checkpointing": { "enabled": true } });
+    write_file(dir.path(), "config.json", &config.to_string());
+
+    cobre()
+        .args(["validate", dir.path().to_str().unwrap()])
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "policy.checkpointing.interval_iterations",
+        ));
+}
+
 /// An FPHA hydro with no `hydro_production_models.json` entry slips past the
 /// IO pipeline (the Layer-4 dimensional check skips FPHA hydros when
 /// `fpha_hyperplanes.parquet` is absent) and is rejected only at Phase 10 by
@@ -632,22 +698,76 @@ fn append_boundary_policy_with_strict(dir: &Path, boundary_policy_dir: &Path, st
     write_file(dir, "config.json", &config);
 }
 
-/// Rewrites `config.json` to warm-start training from the case's own
-/// just-produced checkpoint at the default `output/policy` path.
+/// Rewrites `config.json` to train with `policy.mode = mode` (`warm_start` or
+/// `resume`) from the case's own just-produced checkpoint at the default
+/// `output/policy` path.
+fn append_policy_mode(dir: &Path, mode: &str) {
+    let config = format!(
+        r#"{{
+            "training": {{
+                "selection": {{ "method": "sampled", "forward_passes": 1 }},
+                "stopping_rules": [{{ "type": "iteration_limit", "limit": 1 }}]
+            }},
+            "simulation": {{ "enabled": false }},
+            "modeling": {{ "inflow_non_negativity": {{ "method": "none" }} }},
+            "policy": {{ "mode": "{mode}" }}
+        }}"#
+    );
+    write_file(dir, "config.json", &config);
+}
+
 fn append_warm_start_policy(dir: &Path) {
+    append_policy_mode(dir, "warm_start");
+}
+
+fn append_resume_policy(dir: &Path) {
+    append_policy_mode(dir, "resume");
+}
+
+/// Rewrites `config.json` to simulate from the case's own just-produced
+/// checkpoint at the default `output/policy` path, without training.
+fn append_simulation_only_policy(dir: &Path) {
     write_file(
         dir,
         "config.json",
         r#"{
             "training": {
+                "enabled": false,
                 "selection": { "method": "sampled", "forward_passes": 1 },
                 "stopping_rules": [{ "type": "iteration_limit", "limit": 1 }]
             },
-            "simulation": { "enabled": false },
-            "modeling": { "inflow_non_negativity": { "method": "none" } },
-            "policy": { "mode": "warm_start" }
+            "simulation": { "enabled": true, "selection": { "method": "sampled", "num_scenarios": 1 } },
+            "modeling": { "inflow_non_negativity": { "method": "none" } }
         }"#,
     );
+}
+
+/// Every file under `dir` keyed by its path relative to `dir`, with its bytes:
+/// two equal snapshots hold the same relative paths, lengths and contents.
+fn snapshot_files(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    fn walk(root: &Path, dir: &Path, files: &mut BTreeMap<PathBuf, Vec<u8>>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                walk(root, &path, files);
+            } else {
+                let relative = path.strip_prefix(root).unwrap().to_path_buf();
+                files.insert(relative, fs::read(&path).unwrap());
+            }
+        }
+    }
+    let mut files = BTreeMap::new();
+    walk(dir, dir, &mut files);
+    files
+}
+
+fn validate_json(dir: &Path) -> (std::process::Output, serde_json::Value) {
+    let output = cobre()
+        .args(["validate", dir.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    let value = serde_json::from_slice(&output.stdout).unwrap();
+    (output, value)
 }
 
 /// A compatible boundary (the case's own just-produced checkpoint) prints the
@@ -897,20 +1017,6 @@ fn fpha_hydro_without_production_models_json_stdout_mentions_file() {
 
 // ── non-boundary scalar-parameter presence guard ───────────────────────────────
 
-fn copy_dir_recursive(src: &Path, dst: &Path) {
-    fs::create_dir_all(dst).unwrap();
-    for entry in fs::read_dir(src).unwrap() {
-        let entry = entry.unwrap();
-        let from = entry.path();
-        let to = dst.join(entry.file_name());
-        if entry.file_type().unwrap().is_dir() {
-            copy_dir_recursive(&from, &to);
-        } else {
-            fs::copy(&from, &to).unwrap();
-        }
-    }
-}
-
 /// A non-boundary deck whose scalar-parameter table has a resolution gap (a
 /// `seasonal` param with no entry for the resolved season) exits 1, honoring
 /// the module contract that a clean `validate` implies a clean pre-solver `run`.
@@ -965,7 +1071,7 @@ fn non_boundary_resolved_scalar_parameter_validates() {
 }
 
 /// A checkpoint written by another cobre version is refused at warm-start
-/// load, naming both versions.
+/// load, naming both versions and ending with the re-run remedy.
 #[test]
 fn warm_start_refuses_a_policy_written_by_another_version() {
     let dir = TempDir::new().unwrap();
@@ -989,7 +1095,14 @@ fn warm_start_refuses_a_policy_written_by_another_version() {
         .stderr(predicate::str::contains(format!(
             "this is cobre {}",
             env!("CARGO_PKG_VERSION")
-        )));
+        )))
+        .stderr(predicate::str::contains(
+            "re-run the program that produced it with cobre",
+        ))
+        .stderr(predicate::str::contains(
+            "for a converted boundary policy, convert it again",
+        ))
+        .stderr(predicate::str::contains("re-export").not());
 }
 
 /// A checkpoint written by another program at this build's exact version is
@@ -1051,4 +1164,296 @@ fn boundary_policy_written_by_another_version_is_refused_at_run() {
             "this is cobre {}",
             env!("CARGO_PKG_VERSION")
         )));
+}
+
+/// A policy stamped by another program is refused by `cobre run`, and `cobre
+/// validate` reproduces the refusal without touching the policy directory.
+#[test]
+fn validate_refuses_a_warm_start_policy_written_by_other_software() {
+    let dir = TempDir::new().unwrap();
+    write_boundary_case(dir.path(), 0);
+    run_case(dir.path());
+    append_warm_start_policy(dir.path());
+    common::restamp_policy_software(&dir.path().join("output/policy"), "another-program");
+
+    cobre()
+        .args(["run", dir.path().to_str().unwrap()])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("written by another-program"))
+        .stderr(predicate::str::contains("run `cobre validate <CASE_DIR>`"));
+
+    let before = snapshot_files(&dir.path().join("output/policy"));
+    let (output, value) = validate_json(dir.path());
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(value["error"]["phase"], "WarmStartIncompatible");
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("written by another-program"),
+        "got: {value}"
+    );
+    assert_eq!(snapshot_files(&dir.path().join("output/policy")), before);
+}
+
+/// A checkpoint written by another cobre version is refused by `validate` at
+/// resume load, under the resume kind.
+#[test]
+fn validate_refuses_a_resume_policy_written_by_another_version() {
+    let dir = TempDir::new().unwrap();
+    write_boundary_case(dir.path(), 0);
+    run_case(dir.path());
+    append_resume_policy(dir.path());
+    common::restamp_policy_version(&dir.path().join("output/policy"), "0.0.1");
+
+    let (output, value) = validate_json(dir.path());
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(value["error"]["phase"], "ResumeIncompatible");
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("written by cobre 0.0.1"),
+        "got: {value}"
+    );
+}
+
+/// A simulation-only load shares the warm-start kind: there is no third kind.
+#[test]
+fn validate_refuses_a_simulation_only_policy_under_the_warm_start_kind() {
+    let dir = TempDir::new().unwrap();
+    write_boundary_case(dir.path(), 0);
+    run_case(dir.path());
+    append_simulation_only_policy(dir.path());
+    common::restamp_policy_version(&dir.path().join("output/policy"), "0.0.1");
+
+    let (output, value) = validate_json(dir.path());
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(value["error"]["phase"], "WarmStartIncompatible");
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("written by cobre 0.0.1"),
+        "got: {value}"
+    );
+}
+
+#[test]
+fn validate_refuses_a_missing_policy_directory_without_creating_it() {
+    let dir = TempDir::new().unwrap();
+    write_boundary_case(dir.path(), 0);
+    append_warm_start_policy(dir.path());
+
+    let (output, value) = validate_json(dir.path());
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(value["error"]["phase"], "WarmStartIncompatible");
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Policy directory not found"),
+        "got: {value}"
+    );
+    assert!(!dir.path().join("output").exists());
+}
+
+/// A policy file the process cannot open is an OS failure, not a refusal of the
+/// case: exit 2 under the `IoError` phase.
+#[cfg(unix)]
+#[test]
+fn validate_reports_an_unreadable_policy_manifest_as_an_io_error() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = TempDir::new().unwrap();
+    write_boundary_case(dir.path(), 0);
+    run_case(dir.path());
+    append_warm_start_policy(dir.path());
+    let manifest = dir.path().join("output/policy/manifest.bin");
+    fs::set_permissions(&manifest, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read(&manifest).is_ok() {
+        return;
+    }
+
+    let (output, value) = validate_json(dir.path());
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(value["error"]["phase"], "IoError");
+}
+
+#[test]
+fn validate_json_has_no_policy_load_without_a_configured_policy() {
+    let dir = TempDir::new().unwrap();
+    make_valid_case(&dir);
+
+    let (output, value) = validate_json(dir.path());
+    assert_eq!(output.status.code(), Some(0));
+    assert!(!value.as_object().unwrap().contains_key("policy_load"));
+}
+
+/// An accepted warm-start or resume policy reports its mode and no unused bases.
+#[test]
+fn validate_json_reports_the_accepted_policy_load_mode() {
+    let dir = TempDir::new().unwrap();
+    write_boundary_case(dir.path(), 0);
+    run_case(dir.path());
+
+    for mode in ["warm_start", "resume"] {
+        append_policy_mode(dir.path(), mode);
+        let (output, value) = validate_json(dir.path());
+        assert_eq!(output.status.code(), Some(0), "{mode}: {value}");
+        assert_eq!(
+            value["policy_load"],
+            serde_json::json!({ "mode": mode, "unused_stored_bases": 0 }),
+            "{mode}"
+        );
+    }
+}
+
+/// A study that supplies its opening tree from a file validates although its
+/// `historical_residuals` stages have no inflow history to build a library from.
+#[test]
+fn validate_accepts_a_supplied_opening_tree_with_historical_residuals_stages() {
+    let case = TempDir::new().unwrap();
+    write_supplied_opening_tree_case(case.path());
+
+    cobre()
+        .args(["validate", case.path().to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("historical windows").not())
+        .stdout(predicate::str::contains("V2.").not())
+        .stderr(predicate::str::contains("historical windows").not())
+        .stderr(predicate::str::contains("V2.").not());
+}
+
+/// `cobre validate --output <DIR>` checks the policy `cobre run --output <DIR>`
+/// loads, where the default `<CASE_DIR>/output/` holds none.
+#[test]
+fn validate_output_flag_checks_the_policy_run_loads_from_that_directory() {
+    let dir = TempDir::new().unwrap();
+    let case = dir.path().to_str().unwrap();
+    let custom = dir.path().join("custom");
+    write_boundary_case(dir.path(), 0);
+    cobre()
+        .args(["run", case, "--output", custom.to_str().unwrap()])
+        .assert()
+        .success();
+    append_warm_start_policy(dir.path());
+    common::restamp_policy_software(&custom.join("policy"), "another-program");
+
+    cobre()
+        .args(["run", case, "--output", custom.to_str().unwrap()])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("written by another-program"));
+
+    let output = cobre()
+        .args([
+            "validate",
+            case,
+            "--output",
+            custom.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(value["error"]["phase"], "WarmStartIncompatible");
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("written by another-program"),
+        "got: {value}"
+    );
+
+    let (output, value) = validate_json(dir.path());
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Policy directory not found"),
+        "got: {value}"
+    );
+}
+
+/// Validate reads `--output` and never creates it, whether or not a policy load
+/// is configured.
+#[test]
+fn validate_output_flag_never_creates_the_directory() {
+    let dir = TempDir::new().unwrap();
+    make_valid_case(&dir);
+    let absent = dir.path().join("absent");
+
+    cobre()
+        .args([
+            "validate",
+            dir.path().to_str().unwrap(),
+            "--output",
+            absent.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    assert!(!absent.exists());
+
+    append_warm_start_policy(dir.path());
+    cobre()
+        .args([
+            "validate",
+            dir.path().to_str().unwrap(),
+            "--output",
+            absent.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(predicate::str::contains("Policy directory not found"));
+    assert!(!absent.exists());
+}
+
+/// A relative `--output` resolves against the working directory in `validate`,
+/// exactly as in `run`.
+#[test]
+fn validate_output_relative_path_resolves_against_the_working_directory() {
+    let case = TempDir::new().unwrap();
+    let cwd = TempDir::new().unwrap();
+    let case_arg = case.path().to_str().unwrap();
+    write_boundary_case(case.path(), 0);
+    cobre()
+        .current_dir(cwd.path())
+        .args(["run", case_arg, "--output", "rel_out"])
+        .assert()
+        .success();
+    append_warm_start_policy(case.path());
+    common::restamp_policy_software(&cwd.path().join("rel_out/policy"), "another-program");
+
+    let output = cobre()
+        .current_dir(cwd.path())
+        .args(["validate", case_arg, "--output", "rel_out", "--json"])
+        .output()
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("written by another-program"),
+        "got: {value}"
+    );
+}
+
+#[test]
+fn validate_help_lists_the_output_flag() {
+    cobre()
+        .args(["validate", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--output"))
+        .stdout(predicate::str::contains("<DIR>"));
 }

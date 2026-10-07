@@ -56,39 +56,41 @@ pub struct FillingConfig {
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct HydroPenalties {
-    /// Penalty per m³/s of water spilled over the spillway \[$/m³/s\].
+    /// Penalty on water spilled over the spillway ($/(m³/s·h)).
     pub spillage_cost: f64,
-    /// Penalty per m³/s of water diverted beyond diversion channel limits \[$/m³/s\].
+    /// Penalty on water diverted through the diversion channel ($/(m³/s·h)).
     pub diversion_cost: f64,
-    /// Penalty per `MWh` of turbined generation \[$/`MWh`\]. For FPHA hydros,
+    /// Regularization cost on turbined flow ($/(m³/s·h)). For FPHA hydros,
     /// should exceed `spillage_cost` to avoid interior solutions; not enforced
     /// by validation.
     pub turbined_cost: f64,
-    /// Penalty per hm³ of storage below minimum bound \[$/hm³\].
+    /// Penalty per hm³ of storage below minimum bound ($/hm³).
     pub storage_violation_below_cost: f64,
-    /// Penalty per hm³ of storage below filling target \[$/hm³\].
+    /// Penalty per hm³ of storage below filling target ($/hm³).
     pub filling_target_violation_cost: f64,
-    /// Penalty per m³/s of turbined flow below minimum bound \[$/m³/s\].
+    /// Penalty on turbined flow below minimum bound ($/(m³/s·h)).
     pub turbined_violation_below_cost: f64,
-    /// Penalty per m³/s of non-diverted outflow below minimum bound \[$/m³/s\].
+    /// Penalty on non-diverted outflow below minimum bound ($/(m³/s·h)).
     pub outflow_violation_below_cost: f64,
-    /// Penalty per m³/s of non-diverted outflow above maximum bound \[$/m³/s\].
+    /// Penalty on non-diverted outflow above maximum bound ($/(m³/s·h)).
     pub outflow_violation_above_cost: f64,
-    /// Penalty per MW of generation below minimum bound \[$/MW\].
+    /// Penalty per `MWh` of generation below minimum bound ($/`MWh`).
     pub generation_violation_below_cost: f64,
-    /// Penalty per mm of evaporation constraint violation \[$/mm\].
+    /// Symmetric evaporation violation penalty, the default of both directional
+    /// evaporation costs ($/(m³/s·h)).
     pub evaporation_violation_cost: f64,
-    /// Penalty per m³/s of water withdrawal constraint violation \[$/m³/s\].
+    /// Symmetric water withdrawal violation penalty, the default of both
+    /// directional withdrawal costs ($/(m³/s·h)).
     pub water_withdrawal_violation_cost: f64,
-    /// Penalty per m³/s of over-withdrawal (withdrew more than target) \[$/m³/s\].
+    /// Penalty on over-withdrawal, withdrawing more than the target ($/(m³/s·h)).
     pub water_withdrawal_violation_pos_cost: f64,
-    /// Penalty per m³/s of under-withdrawal (withdrew less than target) \[$/m³/s\].
+    /// Penalty on under-withdrawal, withdrawing less than the target ($/(m³/s·h)).
     pub water_withdrawal_violation_neg_cost: f64,
-    /// Penalty per mm of over-evaporation \[$/mm\].
+    /// Penalty on over-evaporation ($/(m³/s·h)).
     pub evaporation_violation_pos_cost: f64,
-    /// Penalty per mm of under-evaporation \[$/mm\].
+    /// Penalty on under-evaporation ($/(m³/s·h)).
     pub evaporation_violation_neg_cost: f64,
-    /// Penalty per m³/s of inflow non-negativity slack activation \[$/m³/s\].
+    /// Penalty on the inflow non-negativity slack ($/(m³/s·h)).
     /// Used by the LP builder when the inflow non-negativity method is `Penalty`.
     pub inflow_nonnegativity_cost: f64,
 }
@@ -294,6 +296,18 @@ impl Hydro {
     /// declaration order.
     pub fn sort_unit_groups(&mut self) {
         self.unit_groups.sort_by_key(|g| g.id.0);
+    }
+
+    /// Whether the plant can turbine any flow: `max_turbined_m3s` above 1e-9 m³/s.
+    ///
+    /// At or below that threshold an FPHA fit's flow axis collapses onto `q = 0`
+    /// and no plane survives, so the plant is modeled at zero productivity. A zero
+    /// `max_generation_mw` alone does not make a plant capacity-less: fitting
+    /// drops a non-positive ceiling and the generation column's own bound holds
+    /// output at zero.
+    #[must_use]
+    pub fn has_turbine_capacity(&self) -> bool {
+        self.max_turbined_m3s > 1e-9
     }
 
     /// Test-only fixture helper: mirrors this plant into a single unit group

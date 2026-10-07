@@ -7,15 +7,19 @@
 //! result tables, the training dictionaries, and the training/simulation
 //! completion metadata. It does not write the simulation scenario Parquet
 //! data, the policy checkpoint, provenance, hydro-model exports, stochastic
-//! echoes, or solver-stats sidecars — each caller writes those directly
-//! through the individual writer modules in this crate, and the CLI and the
-//! Python bindings must stay in parity on the full artifact set.
+//! echoes, solver-stats sidecars, or the `_SUCCESS` phase markers — each
+//! caller writes those directly through the individual writer modules in this
+//! crate, and the CLI and the Python bindings must stay in parity on the full
+//! artifact set.
+
+use std::path::{Path, PathBuf};
 
 use chrono::{Datelike, NaiveDate};
 
 pub(crate) mod atomic;
 pub mod dictionary;
 pub mod error;
+pub(crate) mod file_registry;
 pub mod fixed_delivery;
 pub mod generic_constraints_echo;
 pub mod hydro_models;
@@ -35,8 +39,11 @@ pub mod training_writer;
 pub use dictionary::write_dictionaries;
 pub use error::OutputError;
 pub use fixed_delivery::{FixedDeliveryRow, write_fixed_delivery};
-pub use generic_constraints_echo::{GenericConstraintEchoRow, write_generic_constraint_echo};
+pub use generic_constraints_echo::{
+    GENERIC_CONSTRAINT_ECHO_FILE, GenericConstraintEchoRow, write_generic_constraint_echo,
+};
 pub use hydro_models::{
+    EVAPORATION_MODELS_FILE, FPHA_DEVIATION_POINTS_FILE, FPHA_HYPERPLANES_FILE,
     write_evaporation_models, write_fpha_deviation_points, write_fpha_hyperplanes,
     write_hydro_model_summary,
 };
@@ -44,22 +51,72 @@ pub use manifest::{
     DeviationSummary, DeviationWorstEntry, DistributionInfo, HostLayout, MetadataBounds,
     MetadataConfiguration, MetadataConvergence, MetadataCost, MetadataIterations,
     MetadataProblemDimensions, MetadataRowPool, MetadataScenarios, MetadataSimulationSolveStats,
-    MetadataTrainingSolveStats, OutputContext, SetupTimings, SimulationMetadata, TrainingMetadata,
-    get_hostname, now_iso8601, read_simulation_metadata, read_training_metadata,
+    MetadataTrainingSolveStats, OutputContext, RunStatus, SetupTimings, SimulationMetadata,
+    TrainingMetadata, get_hostname, now_iso8601, read_simulation_metadata, read_training_metadata,
     write_simulation_metadata, write_training_metadata,
 };
 pub use provenance::write_provenance_report;
-pub use results_writer::{write_results, write_simulation_results, write_training_results};
+pub use results_writer::{
+    remove_success_marker, write_results, write_simulation_results,
+    write_skipped_simulation_results, write_success_marker, write_training_results,
+};
 pub use scaling_report::write_scaling_report;
-pub use simulation_writer::{SimulationParquetWriter, simulation_family_subpaths};
-pub use software::{SOFTWARE_NAME, SOFTWARE_VERSION, SoftwareIdentity};
+pub use simulation_writer::{
+    SimulationParquetWriter, remove_simulation_outputs, simulation_family_subpaths,
+};
+pub use software::{SOFTWARE_NAME, SOFTWARE_VERSION, SoftwareIdentity, policy_checkpoint_remedy};
 pub use solver_stats_writer::{SolverStatsRow, write_simulation_solver_stats, write_solver_stats};
 pub use stochastic::{
     FittingReductionEntry, FittingReport, HydroFittingEntry, write_correlation_json,
     write_fitting_report, write_inflow_annual_component, write_inflow_ar_coefficients,
     write_inflow_seasonal_stats, write_load_seasonal_stats, write_noise_openings,
 };
-pub use training_writer::{TrainingParquetWriter, write_row_selection_records};
+pub use training_writer::{
+    TrainingParquetWriter, remove_conditional_training_outputs, write_row_selection_records,
+};
+
+use fixed_delivery::FIXED_DELIVERIES_FILE;
+use solver_stats_writer::{SIMULATION_SOLVER_DIR, TRAINING_SOLVER_DIR};
+use training_writer::CUT_SELECTION_FILE;
+
+/// How a run clears an output directory before writing its outputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Clearing {
+    /// The run removes the directory and everything inside it.
+    WholeTree,
+    /// The run removes only the files it writes there, and the directory only
+    /// if that leaves it empty.
+    NamedFiles,
+}
+
+/// The output subdirectories, relative to the output directory, that a run
+/// clears before writing its outputs, and how.
+pub(crate) fn cleared_output_dirs() -> Vec<(PathBuf, Clearing)> {
+    let family_trees = simulation_family_subpaths()
+        .map(|subpath| (Path::new("simulation").join(subpath), Clearing::WholeTree));
+    let solver_dirs = [SIMULATION_SOLVER_DIR, TRAINING_SOLVER_DIR]
+        .into_iter()
+        .map(|dir| (PathBuf::from(dir), Clearing::NamedFiles));
+    let named_file_dirs = [
+        CUT_SELECTION_FILE,
+        FIXED_DELIVERIES_FILE,
+        FPHA_HYPERPLANES_FILE,
+        EVAPORATION_MODELS_FILE,
+        FPHA_DEVIATION_POINTS_FILE,
+        GENERIC_CONSTRAINT_ECHO_FILE,
+    ]
+    .into_iter()
+    .filter_map(|file| Path::new(file).parent())
+    .map(|dir| (dir.to_path_buf(), Clearing::NamedFiles));
+
+    let mut cleared: Vec<(PathBuf, Clearing)> = Vec::new();
+    for (dir, clearing) in family_trees.chain(solver_dirs).chain(named_file_dirs) {
+        if cleared.iter().all(|(listed, _)| *listed != dir) {
+            cleared.push((dir, clearing));
+        }
+    }
+    cleared
+}
 
 /// Arrow `Date32`'s native representation (days since the Unix epoch,
 /// 1970-01-01) for one calendar date.
@@ -310,6 +367,9 @@ pub struct TrainingOutput {
     /// Human-readable description of the rule that terminated training.
     pub termination_reason: String,
 
+    /// The phase status written to `training/metadata.json`.
+    pub status: RunStatus,
+
     /// Total elapsed wall-clock time for the entire training run (ms).
     pub total_time_ms: u64,
 
@@ -490,6 +550,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cleared_output_dirs_lists_each_directory_once() {
+        let cleared = cleared_output_dirs();
+
+        let mut paths: Vec<&Path> = cleared.iter().map(|(dir, _)| dir.as_path()).collect();
+        paths.sort_unstable();
+        paths.dedup();
+        assert_eq!(
+            paths.len(),
+            cleared.len(),
+            "a path is listed twice: {cleared:?}"
+        );
+
+        let whole_trees: Vec<&Path> = cleared
+            .iter()
+            .filter(|(_, clearing)| *clearing == Clearing::WholeTree)
+            .map(|(dir, _)| dir.as_path())
+            .collect();
+        let family_trees: Vec<PathBuf> = simulation_family_subpaths()
+            .map(|subpath| Path::new("simulation").join(subpath))
+            .collect();
+        assert_eq!(whole_trees, family_trees);
+
+        for dir in [
+            "simulation/solver",
+            "training/solver",
+            "training/cut_selection",
+            "anticipated",
+            "hydro_models",
+            "generic_constraints",
+        ] {
+            assert!(
+                cleared.contains(&(PathBuf::from(dir), Clearing::NamedFiles)),
+                "{dir} must be cleared file by file: {cleared:?}"
+            );
+        }
+        for dir in ["simulation", "training", "stochastic"] {
+            assert!(
+                cleared.iter().all(|(listed, _)| listed != Path::new(dir)),
+                "{dir} must not be a cleared directory: {cleared:?}"
+            );
+        }
+    }
+
+    #[test]
     fn training_output_construction_and_field_access() {
         let records: Vec<IterationRecord> = (1..=5)
             .map(|i| IterationRecord {
@@ -533,6 +637,7 @@ mod tests {
             iterations_completed: 5,
             converged: true,
             termination_reason: "relative gap < 1%".to_string(),
+            status: RunStatus::Complete,
             total_time_ms: 12_000,
             cut_stats: RowPoolStatistics {
                 total_generated: 300,

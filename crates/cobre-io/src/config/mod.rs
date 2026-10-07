@@ -36,7 +36,10 @@ pub mod training;
 pub use estimation::{EstimationConfig, OrderSelectionMethod};
 pub use exports::ExportsConfig;
 pub use modeling::{InflowNonNegativityConfig, InflowNonNegativityMethod, ModelingConfig};
-pub use policy::{BoundaryPolicy, CheckpointingConfig, PolicyConfig, PolicyMode};
+pub use policy::{
+    BoundaryPolicy, CheckpointSchedule, CheckpointingConfig, PolicyConfig, PolicyDirIntent,
+    PolicyMode,
+};
 pub use scenario_source::{
     HistoricalYearRange, Openings, RawClassConfigEntry, RawHistoricalYearsConfig,
     RawSamplingScheme, RawScenarioSourceConfig,
@@ -55,12 +58,12 @@ use cobre_core::scenario::{HistoricalYears, SamplingScheme, ScenarioSource};
 
 use crate::LoadError;
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
-/// Top-level deserialized representation of `config.json`.
+/// Root object of `config.json`.
 ///
-/// All sections except `training` are optional; their defaults are applied by
-/// serde when the section is absent from the JSON.
+/// Every section except `training` is optional; an absent section takes its defaults.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -105,13 +108,14 @@ pub struct Config {
 ///
 /// # Errors
 ///
-/// | Condition                         | Error variant                 |
-/// | --------------------------------- | ----------------------------- |
-/// | File not found / read failure     | [`LoadError::IoError`]        |
-/// | Invalid JSON syntax               | [`LoadError::ParseError`]     |
-/// | `training.selection` missing      | [`LoadError::SchemaError`]    |
-/// | `training.stopping_rules` missing | [`LoadError::SchemaError`]    |
-/// | Unknown stopping rule `"type"`    | [`LoadError::SchemaError`]    |
+/// | Condition                                              | Error variant              |
+/// | ------------------------------------------------------ | -------------------------- |
+/// | File not found / read failure                          | [`LoadError::IoError`]     |
+/// | Invalid JSON syntax                                    | [`LoadError::ParseError`]  |
+/// | `training.selection` missing                           | [`LoadError::SchemaError`] |
+/// | `training.stopping_rules` missing                      | [`LoadError::SchemaError`] |
+/// | No `iteration_limit` rule in `training.stopping_rules` | [`LoadError::SchemaError`] |
+/// | Unknown stopping rule `"type"`                         | [`LoadError::SchemaError`] |
 ///
 /// # Examples
 ///
@@ -154,8 +158,9 @@ fn extract_field_from_serde_msg(msg: &str) -> String {
     "<unknown>".to_string()
 }
 
-/// Post-deserialization validation that the mandatory `forward_passes` and
-/// `stopping_rules` fields are present.
+/// Post-deserialization validation that `training.selection` resolves a
+/// forward-pass count and `training.stopping_rules` is present and holds an
+/// `iteration_limit` rule.
 pub(crate) fn validate_config(config: &Config, path: &Path) -> Result<(), LoadError> {
     if config.resolve_forward_passes().is_none() {
         return Err(LoadError::SchemaError {
@@ -165,16 +170,29 @@ pub(crate) fn validate_config(config: &Config, path: &Path) -> Result<(), LoadEr
         });
     }
 
-    if config.training.stopping_rules.is_none() {
+    let Some(rules) = &config.training.stopping_rules else {
         return Err(LoadError::SchemaError {
             path: path.to_path_buf(),
             field: "training.stopping_rules".to_string(),
             message: "required field is missing".to_string(),
         });
+    };
+
+    if !rules
+        .iter()
+        .any(|r| matches!(r, StoppingRuleConfig::IterationLimit { .. }))
+    {
+        return Err(LoadError::SchemaError {
+            path: path.to_path_buf(),
+            field: "training.stopping_rules".to_string(),
+            message: "must contain an iteration_limit rule".to_string(),
+        });
     }
 
     config.training_scenario_source(path)?;
     config.simulation_scenario_source(path)?;
+    config.checkpoint_schedule(path)?;
+    config.policy.check_path(path)?;
 
     Ok(())
 }
@@ -294,16 +312,20 @@ fn validate_scenario_source_cfg(
         });
     }
 
-    let all_in_sample = source.inflow_scheme == SamplingScheme::InSample
-        && source.load_scheme == SamplingScheme::InSample
-        && source.ncs_scheme == SamplingScheme::InSample;
-    if !all_in_sample && source.seed.is_none() {
+    let requires_seed = [source.inflow_scheme, source.load_scheme, source.ncs_scheme]
+        .into_iter()
+        .any(|scheme| {
+            matches!(
+                scheme,
+                SamplingScheme::OutOfSample | SamplingScheme::External
+            )
+        });
+    if requires_seed && source.seed.is_none() {
         return Err(LoadError::SchemaError {
             path: path.to_path_buf(),
             field: format!("{section}.scenario_source.seed"),
-            message:
-                "seed is required when any class uses out_of_sample, historical, or external scheme"
-                    .to_string(),
+            message: "seed is required when any class uses out_of_sample or external scheme"
+                .to_string(),
         });
     }
 
@@ -386,6 +408,53 @@ impl Config {
             )
         } else {
             self.training_scenario_source(path)
+        }
+    }
+
+    /// Resolve the periodic checkpoint schedule from `policy.checkpointing`, or
+    /// `None` unless `enabled` is `true`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LoadError::SchemaError`] when `enabled` is `true` and
+    /// `interval_iterations` is absent or `0`.
+    pub fn checkpoint_schedule(
+        &self,
+        path: &Path,
+    ) -> Result<Option<CheckpointSchedule>, LoadError> {
+        let checkpointing = &self.policy.checkpointing;
+        if checkpointing.enabled != Some(true) {
+            return Ok(None);
+        }
+
+        let refuse_interval = |found: &str| LoadError::SchemaError {
+            path: path.to_path_buf(),
+            field: "policy.checkpointing.interval_iterations".to_string(),
+            message: format!(
+                "must be at least 1 when policy.checkpointing.enabled is true; got {found}"
+            ),
+        };
+        let Some(n) = checkpointing.interval_iterations else {
+            return Err(refuse_interval("no value"));
+        };
+        let Some(interval) = NonZeroU64::new(u64::from(n)) else {
+            return Err(refuse_interval("0"));
+        };
+
+        Ok(Some(CheckpointSchedule {
+            first_iteration: u64::from(checkpointing.initial_iteration.unwrap_or(n)),
+            interval,
+        }))
+    }
+
+    /// What the run does with its policy directory: a training run always
+    /// writes its final checkpoint there.
+    #[must_use]
+    pub fn policy_dir_intent(&self) -> PolicyDirIntent {
+        if self.training.enabled {
+            PolicyDirIntent::Replace
+        } else {
+            PolicyDirIntent::Read
         }
     }
 
@@ -626,6 +695,70 @@ mod tests {
         }
     }
 
+    #[test]
+    fn null_selection_or_stopping_rules_is_rejected_at_load() {
+        for (training, expected_field) in [
+            (
+                r#"{"selection": null, "stopping_rules": [{"type": "iteration_limit", "limit": 1}]}"#,
+                "training.selection",
+            ),
+            (
+                r#"{"selection": {"method": "sampled", "forward_passes": 1}, "stopping_rules": null}"#,
+                "training.stopping_rules",
+            ),
+        ] {
+            let f = write_config(&format!(r#"{{"training": {training}}}"#));
+            let err = parse_config(f.path()).unwrap_err();
+            match &err {
+                LoadError::SchemaError { field, .. } => {
+                    assert_eq!(field, expected_field, "training: {training}");
+                }
+                other => panic!("expected SchemaError for training {training}, got: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn stopping_rules_without_an_iteration_limit_rule_are_rejected_at_load() {
+        fn assert_refused(result: Result<Config, LoadError>, case: &str) {
+            match result {
+                Err(LoadError::SchemaError { field, message, .. }) => {
+                    assert_eq!(field, "training.stopping_rules", "case: {case}");
+                    assert!(
+                        message.contains("iteration_limit"),
+                        "case {case}: message should name iteration_limit, got: {message}"
+                    );
+                }
+                other => panic!("case {case}: expected SchemaError, got: {other:?}"),
+            }
+        }
+
+        for rules in [
+            r#"[{"type": "time_limit", "seconds": 60.0}]"#,
+            "[]",
+            r#"[{"type": "gap", "tolerance": 1.0}, {"type": "bound_stalling", "iterations": 5, "tolerance": 0.01}]"#,
+        ] {
+            let f = write_config(&format!(
+                r#"{{"training": {{"selection": {{"method": "sampled", "forward_passes": 1}}, "stopping_rules": {rules}}}}}"#
+            ));
+            assert_refused(parse_config(f.path()), rules);
+        }
+
+        let overrides = override_map(&[("training.stopping_rules", serde_json::json!([]))]);
+        assert_refused(
+            Config::with_overrides(&base_value(OVERRIDE_BASE_CONFIG), &overrides),
+            "override to []",
+        );
+    }
+
+    #[test]
+    fn stopping_rules_with_an_iteration_limit_rule_in_any_position_load() {
+        let f = write_config(
+            r#"{"training": {"selection": {"method": "sampled", "forward_passes": 1}, "stopping_rules": [{"type": "time_limit", "seconds": 60.0}, {"type": "iteration_limit", "limit": 3}]}}"#,
+        );
+        parse_config(f.path()).unwrap();
+    }
+
     /// Nonexistent file → IoError with matching path.
     #[test]
     fn test_nonexistent_file() {
@@ -745,9 +878,6 @@ mod tests {
     }
 
     /// All 4 JSON-configurable stopping rule variants deserialize correctly.
-    ///
-    /// The `GracefulShutdown` variant is runtime-only and has no JSON representation
-    /// per the stopping-rule-trait spec (SS4.1).
     #[test]
     fn test_stopping_rule_variants() {
         let json = r#"{
@@ -1299,6 +1429,55 @@ mod tests {
         }
     }
 
+    #[test]
+    fn historical_inflow_scenario_source_accepts_an_absent_seed() {
+        let f = write_with_training_scenario_source(r#"{"inflow": {"scheme": "historical"}}"#);
+        let cfg = parse_config(f.path()).unwrap();
+        let source = cfg.training_scenario_source(f.path()).unwrap();
+        assert_eq!(source.inflow_scheme, SamplingScheme::Historical);
+        assert_eq!(source.seed, None);
+    }
+
+    #[test]
+    fn simulation_historical_scenario_source_accepts_an_absent_seed() {
+        let f = write_config(&format!(
+            r#"{{"training": {MINIMAL_TRAINING}, "simulation": {{"scenario_source": {{"inflow": {{"scheme": "historical"}}}}}}}}"#
+        ));
+        let cfg = parse_config(f.path()).unwrap();
+        let source = cfg.simulation_scenario_source(f.path()).unwrap();
+        assert_eq!(source.seed, None);
+    }
+
+    #[test]
+    fn historical_inflow_with_out_of_sample_load_still_requires_the_seed() {
+        let f = write_with_training_scenario_source(
+            r#"{"inflow": {"scheme": "historical"}, "load": {"scheme": "out_of_sample"}}"#,
+        );
+        let err = parse_config(f.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { message, field, .. } => {
+                assert_eq!(field, "training.scenario_source.seed");
+                assert!(
+                    message.contains("out_of_sample or external"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn external_scheme_still_requires_the_seed() {
+        let f = write_with_training_scenario_source(r#"{"inflow": {"scheme": "external"}}"#);
+        let err = parse_config(f.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { field, .. } => {
+                assert_eq!(field, "training.scenario_source.seed");
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
     /// Range form of `historical_years` parses correctly.
     #[test]
     fn test_scenario_source_historical_years_range() {
@@ -1775,7 +1954,7 @@ mod tests {
         "stopping_mode": "any"
       },
       "policy": {
-        "checkpointing": {"enabled": true}
+        "checkpointing": {"enabled": true, "interval_iterations": 5}
       }
     }"#;
 
@@ -1959,6 +2138,424 @@ mod tests {
             }
             other => panic!("expected SchemaError, got: {other:?}"),
         }
+    }
+
+    // ── policy.checkpointing schedule ─────────────────────────────────────────
+
+    fn with_checkpointing(checkpointing: serde_json::Value) -> Result<Config, LoadError> {
+        let overrides = override_map(&[("policy.checkpointing", checkpointing)]);
+        Config::with_overrides(&base_value(OVERRIDE_BASE_CONFIG), &overrides)
+    }
+
+    fn assert_interval_refused(checkpointing: serde_json::Value, found: &str) {
+        let via_overrides = with_checkpointing(checkpointing.clone()).unwrap_err();
+        let mut merged = base_value(OVERRIDE_BASE_CONFIG);
+        merged["policy"]["checkpointing"] = checkpointing;
+        let f = write_config(&merged.to_string());
+        let via_file = parse_config(f.path()).unwrap_err();
+
+        for err in [via_overrides, via_file] {
+            match &err {
+                LoadError::SchemaError { field, message, .. } => {
+                    assert_eq!(field, "policy.checkpointing.interval_iterations");
+                    assert_eq!(
+                        message,
+                        &format!(
+                            "must be at least 1 when policy.checkpointing.enabled is true; \
+                             got {found}"
+                        )
+                    );
+                }
+                other => panic!("expected SchemaError, got: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn checkpointing_enabled_without_interval_is_rejected() {
+        assert_interval_refused(serde_json::json!({"enabled": true}), "no value");
+    }
+
+    #[test]
+    fn checkpointing_enabled_with_zero_interval_is_rejected() {
+        assert_interval_refused(
+            serde_json::json!({"enabled": true, "interval_iterations": 0}),
+            "0",
+        );
+    }
+
+    #[test]
+    fn checkpointing_initial_iteration_defaults_to_the_interval() {
+        let cfg =
+            with_checkpointing(serde_json::json!({"enabled": true, "interval_iterations": 4}))
+                .unwrap();
+        let schedule = cfg
+            .checkpoint_schedule(Path::new("config.json"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(schedule.first_iteration(), 4);
+        assert_eq!(schedule.interval().get(), 4);
+    }
+
+    #[test]
+    fn checkpointing_explicit_initial_iteration_is_kept_even_when_zero() {
+        let cfg = with_checkpointing(serde_json::json!({
+            "enabled": true, "initial_iteration": 0, "interval_iterations": 3
+        }))
+        .unwrap();
+        let schedule = cfg
+            .checkpoint_schedule(Path::new("config.json"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(schedule.first_iteration(), 0);
+        assert_eq!(schedule.interval().get(), 3);
+    }
+
+    #[test]
+    fn checkpointing_absent_or_disabled_resolves_no_schedule() {
+        let mut without_policy = base_value(OVERRIDE_BASE_CONFIG);
+        without_policy.as_object_mut().unwrap().remove("policy");
+        let configs = [
+            Config::with_overrides(&without_policy, &serde_json::Map::new()).unwrap(),
+            with_checkpointing(serde_json::json!({"enabled": false, "interval_iterations": 0}))
+                .unwrap(),
+            with_checkpointing(serde_json::json!({"interval_iterations": 3})).unwrap(),
+        ];
+        for cfg in &configs {
+            assert_eq!(
+                cfg.checkpoint_schedule(Path::new("config.json")).unwrap(),
+                None
+            );
+        }
+    }
+
+    // ── policy.path ───────────────────────────────────────────────────────────
+
+    fn parse_with_policy_path(policy_path: &str) -> Result<Config, LoadError> {
+        let mut config = base_value(OVERRIDE_BASE_CONFIG);
+        config["policy"]["path"] = serde_json::json!(policy_path);
+        parse_config(write_config(&config.to_string()).path())
+    }
+
+    #[test]
+    fn policy_path_naming_the_output_directory_or_above_is_refused_at_config_load() {
+        for policy_path in ["", ".", "./", "..", "../..", "a/..", "/"] {
+            match parse_with_policy_path(policy_path) {
+                Err(LoadError::SchemaError { field, message, .. }) => {
+                    assert_eq!(field, "policy.path");
+                    assert_eq!(
+                        message,
+                        format!(
+                            "{policy_path:?} names the output directory or one of its \
+                             ancestors, which a checkpoint write would replace; choose another \
+                             directory, such as \"./policy\""
+                        )
+                    );
+                }
+                other => panic!("expected SchemaError for {policy_path:?}, got: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn policy_path_inside_the_output_directory_is_accepted_at_config_load() {
+        for policy_path in [
+            "./policy",
+            "policy",
+            "a/../policy",
+            "../elsewhere",
+            "/data/pol",
+        ] {
+            let cfg = parse_with_policy_path(policy_path)
+                .unwrap_or_else(|e| panic!("{policy_path:?} must load, got: {e:?}"));
+            assert_eq!(cfg.policy.path, policy_path);
+        }
+    }
+
+    #[test]
+    fn policy_path_override_naming_the_output_directory_is_refused() {
+        let overrides = override_map(&[("policy.path", serde_json::json!("."))]);
+        match Config::with_overrides(&base_value(OVERRIDE_BASE_CONFIG), &overrides) {
+            Err(LoadError::SchemaError { path, field, .. }) => {
+                assert_eq!(field, "policy.path");
+                assert_eq!(path, Path::new("<config_overrides>"));
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    // ── policy directory against the output directory ─────────────────────────
+
+    const BOTH_INTENTS: [PolicyDirIntent; 2] = [PolicyDirIntent::Read, PolicyDirIntent::Replace];
+
+    fn check_policy_dir(
+        policy_path: &str,
+        output_dir: &Path,
+        intent: PolicyDirIntent,
+    ) -> Result<(), LoadError> {
+        let policy = PolicyConfig {
+            path: policy_path.to_string(),
+            ..PolicyConfig::default()
+        };
+        policy.check_dir(Path::new("config.json"), output_dir, intent)
+    }
+
+    fn policy_dir_refusal(policy_path: &str, output_dir: &Path, intent: PolicyDirIntent) -> String {
+        match check_policy_dir(policy_path, output_dir, intent) {
+            Err(LoadError::SchemaError {
+                path,
+                field,
+                message,
+            }) => {
+                assert_eq!(path, Path::new("config.json"));
+                assert_eq!(field, "policy.path");
+                message
+            }
+            other => panic!("expected a policy.path refusal for {policy_path:?}, got: {other:?}"),
+        }
+    }
+
+    fn output_dir_refusal_text(value: &str) -> String {
+        format!(
+            "{value:?} names the output directory or one of its ancestors, which a checkpoint \
+             write would replace; choose another directory, such as \"./policy\""
+        )
+    }
+
+    fn cleared_dir_refusal_text(
+        value: &str,
+        relation: &str,
+        cleared_dir: &str,
+        clearing: crate::output::Clearing,
+    ) -> String {
+        match clearing {
+            crate::output::Clearing::WholeTree => format!(
+                "{value:?} {relation} {cleared_dir}, which a run removes whole before writing \
+                 its outputs; choose a directory that neither contains nor lies inside it, \
+                 such as \"./policy\""
+            ),
+            crate::output::Clearing::NamedFiles => format!(
+                "{value:?} {relation} {cleared_dir}, which holds files a run writes and a \
+                 checkpoint write would replace; choose a directory that neither names nor \
+                 contains it, such as \"./policy\""
+            ),
+        }
+    }
+
+    #[test]
+    fn policy_dir_at_or_above_the_output_directory_is_refused() {
+        for policy_path in ["../out", "/r/out", "/r"] {
+            for intent in BOTH_INTENTS {
+                assert_eq!(
+                    policy_dir_refusal(policy_path, Path::new("/r/out"), intent),
+                    output_dir_refusal_text(policy_path),
+                    "{policy_path:?} with {intent:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn policy_path_naming_a_cleared_directory_or_inside_a_removed_tree_is_refused() {
+        let out = Path::new("/r/out");
+        for (cleared_dir, clearing) in crate::output::cleared_output_dirs() {
+            let cleared = cleared_dir.to_str().unwrap();
+            let mut refused = vec![(cleared.to_string(), "names")];
+            if clearing == crate::output::Clearing::WholeTree {
+                refused.push((format!("{cleared}/policy"), "lies inside"));
+                refused.push((
+                    out.join(cleared).join("p").display().to_string(),
+                    "lies inside",
+                ));
+            }
+            for (policy_path, relation) in refused {
+                for intent in BOTH_INTENTS {
+                    assert_eq!(
+                        policy_dir_refusal(&policy_path, out, intent),
+                        cleared_dir_refusal_text(&policy_path, relation, cleared, clearing),
+                        "{policy_path:?} with {intent:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn policy_path_naming_an_ancestor_of_a_cleared_directory_is_refused() {
+        use crate::output::Clearing::{NamedFiles, WholeTree};
+        for (policy_path, first_cleared, clearing) in [
+            ("simulation", "simulation/costs", WholeTree),
+            (
+                "simulation/violations",
+                "simulation/violations/generic",
+                WholeTree,
+            ),
+            ("training", "training/solver", NamedFiles),
+        ] {
+            for intent in BOTH_INTENTS {
+                assert_eq!(
+                    policy_dir_refusal(policy_path, Path::new("/r/out"), intent),
+                    cleared_dir_refusal_text(policy_path, "contains", first_cleared, clearing),
+                    "{policy_path:?} with {intent:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn policy_paths_the_run_clearing_leaves_alone_are_accepted() {
+        let out = tempfile::TempDir::new().unwrap();
+        let named_file_dirs = crate::output::cleared_output_dirs()
+            .into_iter()
+            .filter(|(_, clearing)| *clearing == crate::output::Clearing::NamedFiles)
+            .map(|(dir, _)| format!("{}/policy", dir.display()));
+        let accepted: Vec<String> = [
+            "simulation_policy",
+            "training_policy",
+            "simulation/policy",
+            "training/policy",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .chain(named_file_dirs)
+        .collect();
+        assert!(accepted.contains(&"training/solver/policy".to_string()));
+        for policy_path in &accepted {
+            for intent in BOTH_INTENTS {
+                check_policy_dir(policy_path, out.path(), intent).unwrap_or_else(|e| {
+                    panic!("{policy_path:?} with {intent:?} must be accepted, got: {e:?}")
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn policy_dir_holding_an_unrecognized_entry_is_refused_only_for_replace() {
+        let foreign_entry_text = |dir: PathBuf, entry: PathBuf| {
+            crate::output::OutputError::ForeignEntry { dir, entry }.to_string()
+        };
+
+        let out = tempfile::TempDir::new().unwrap();
+        let policy_dir = out.path().join("policy");
+        std::fs::create_dir(&policy_dir).unwrap();
+        std::fs::write(policy_dir.join("notes.txt"), "user notes").unwrap();
+        assert_eq!(
+            policy_dir_refusal("policy", out.path(), PolicyDirIntent::Replace),
+            foreign_entry_text(policy_dir.clone(), policy_dir.join("notes.txt"))
+        );
+        check_policy_dir("policy", out.path(), PolicyDirIntent::Read).unwrap();
+
+        let out = tempfile::TempDir::new().unwrap();
+        let previous_dir = out.path().join("policy.previous");
+        std::fs::create_dir(&previous_dir).unwrap();
+        std::fs::write(previous_dir.join("notes.txt"), "user notes").unwrap();
+        assert_eq!(
+            policy_dir_refusal("policy", out.path(), PolicyDirIntent::Replace),
+            foreign_entry_text(previous_dir.clone(), previous_dir.join("notes.txt"))
+        );
+
+        let out = tempfile::TempDir::new().unwrap();
+        let policy_file = out.path().join("policy");
+        std::fs::write(&policy_file, "not a directory").unwrap();
+        assert_eq!(
+            policy_dir_refusal("policy", out.path(), PolicyDirIntent::Replace),
+            foreign_entry_text(out.path().to_path_buf(), policy_file)
+        );
+        check_policy_dir("policy", out.path(), PolicyDirIntent::Read).unwrap();
+    }
+
+    #[test]
+    fn policy_dir_holding_an_earlier_release_metadata_file_is_accepted_for_replace() {
+        let out = tempfile::TempDir::new().unwrap();
+        let policy_dir = out.path().join("policy");
+        std::fs::create_dir_all(policy_dir.join("cuts")).unwrap();
+        std::fs::write(policy_dir.join("manifest.bin"), b"manifest").unwrap();
+        std::fs::write(policy_dir.join("cuts/000.bin"), b"cuts").unwrap();
+        std::fs::write(policy_dir.join("metadata.json"), "{}").unwrap();
+
+        check_policy_dir("./policy", out.path(), PolicyDirIntent::Replace).unwrap();
+    }
+
+    #[test]
+    fn policy_dir_intent_follows_training_enabled() {
+        let training =
+            Config::with_overrides(&base_value(OVERRIDE_BASE_CONFIG), &override_map(&[])).unwrap();
+        assert_eq!(training.policy_dir_intent(), PolicyDirIntent::Replace);
+
+        let overrides = override_map(&[("training.enabled", serde_json::json!(false))]);
+        let simulation_only =
+            Config::with_overrides(&base_value(OVERRIDE_BASE_CONFIG), &overrides).unwrap();
+        assert_eq!(simulation_only.policy_dir_intent(), PolicyDirIntent::Read);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn policy_path_link_is_checked_at_its_target() {
+        let root = tempfile::TempDir::new().unwrap();
+        let out = root.path().join("out");
+        std::fs::create_dir(&out).unwrap();
+        let link = out.join("policy");
+
+        let empty_elsewhere = root.path().join("empty");
+        std::fs::create_dir(&empty_elsewhere).unwrap();
+        let foreign_elsewhere = root.path().join("foreign");
+        std::fs::create_dir(&foreign_elsewhere).unwrap();
+        std::fs::write(foreign_elsewhere.join("notes.txt"), "user notes").unwrap();
+        let removed_tree_child = out.join("simulation/costs/p");
+        let missing = root.path().join("missing");
+
+        let check_through_link = |target: &Path, intent: PolicyDirIntent| {
+            let _ = std::fs::remove_file(&link);
+            std::os::unix::fs::symlink(target, &link).unwrap();
+            let result = check_policy_dir("./policy", &out, intent);
+            assert_eq!(std::fs::read_link(&link).unwrap(), target);
+            result
+        };
+        let refusal_through_link =
+            |target: &Path, intent: PolicyDirIntent| match check_through_link(target, intent) {
+                Err(LoadError::SchemaError { field, message, .. }) => {
+                    assert_eq!(field, "policy.path");
+                    message
+                }
+                other => panic!("expected a policy.path refusal through {target:?}, got {other:?}"),
+            };
+
+        for intent in BOTH_INTENTS {
+            assert_eq!(
+                refusal_through_link(&out, intent),
+                output_dir_refusal_text(&format!("./policy -> {}", out.display())),
+                "link to the output directory with {intent:?}"
+            );
+            assert_eq!(
+                refusal_through_link(&removed_tree_child, intent),
+                cleared_dir_refusal_text(
+                    &format!("./policy -> {}", removed_tree_child.display()),
+                    "lies inside",
+                    "simulation/costs",
+                    crate::output::Clearing::WholeTree,
+                ),
+                "link into a removed tree with {intent:?}"
+            );
+            check_through_link(&empty_elsewhere, intent).unwrap_or_else(|e| {
+                panic!("a link to an empty directory elsewhere with {intent:?}, got: {e:?}")
+            });
+        }
+
+        assert_eq!(
+            refusal_through_link(&foreign_elsewhere, PolicyDirIntent::Replace),
+            crate::output::OutputError::ForeignEntry {
+                dir: foreign_elsewhere.clone(),
+                entry: foreign_elsewhere.join("notes.txt"),
+            }
+            .to_string()
+        );
+        check_through_link(&foreign_elsewhere, PolicyDirIntent::Read).unwrap();
+
+        assert!(
+            refusal_through_link(&missing, PolicyDirIntent::Replace)
+                .contains("is not part of a checkpoint")
+        );
+        check_through_link(&missing, PolicyDirIntent::Read).unwrap();
     }
 
     /// A stray key in the `historical_years` range form is a deserialize

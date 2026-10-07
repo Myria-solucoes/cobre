@@ -11,10 +11,11 @@
 //! the raising paths. It accepts a concrete [`ErrorSource`] enum (never a
 //! `Box<dyn Trait>`) so the match is exhaustive: a newly added `LoadError` /
 //! `OutputError` variant fails the build, surfacing the need to map it. The
-//! `SddpError` match keeps explicit `Infeasible`/`Simulation` arms plus the
-//! documented total `other => SolverError(None)` fallthrough (every other
-//! `SddpError` reaches this site only through the training/simulation phase
-//! helpers, whose failures are `RuntimeError`-shaped).
+//! `SddpError` match keeps explicit `Infeasible`/`Simulation` arms and a
+//! `CheckpointWrite` arm raising its `OutputError`'s class. Every other
+//! `SddpError`, and every `FullFcfLoadError`, takes its class from
+//! [`cobre_sddp::ErrorClass`] through `exception_for_class`, the classification
+//! `cobre run` derives its exit code from.
 //!
 //! The `cobre.io.validate` data-report `kind` field is intentionally NOT routed
 //! here — it is a stable data contract decoupled from these class names.
@@ -25,7 +26,8 @@ use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyTuple, PyType};
 
 use cobre_io::{LoadError, OutputError};
-use cobre_sddp::SddpError;
+use cobre_sddp::policy::full_fcf_load::{FullFcfLoadError, FullFcfLoadKind};
+use cobre_sddp::{ErrorClass, SddpError};
 
 pyo3::create_exception!(
     errors,
@@ -167,13 +169,16 @@ pub(crate) enum ErrorSource<'a> {
     /// descriptive message that today's string path would have produced.
     ///
     /// `message` preserves the exact text (so `match=` assertions pass); the
-    /// [`SddpError`] supplies the structured fields (e.g. `Infeasible`).
+    /// [`SddpError`] supplies the class and the structured fields (e.g.
+    /// `Infeasible`).
     Sddp {
         /// The typed SDDP error (borrowed; `Send + Sync + 'static`).
         error: &'a SddpError,
         /// The verbatim descriptive message.
         message: String,
     },
+    /// A full-FCF policy-load failure (warm-start, resume or simulation-only).
+    PolicyLoad(&'a FullFcfLoadError),
     /// A string-prefixed message from run/study with no typed source.
     Message(String),
 }
@@ -222,24 +227,8 @@ fn convert_error_with(py: Python<'_>, source: ErrorSource<'_>) -> PyErr {
             LoadError::ParseError { .. }
             | LoadError::SchemaError { .. }
             | LoadError::ConstraintError { .. } => validation_error(py, &err.to_string()),
-            LoadError::PolicyIncompatible { .. } => {
-                new_leaf_err(py, &POLICY_INCOMPATIBLE_ERROR, &err.to_string())
-            }
         },
-        ErrorSource::Output(err) => match err {
-            // A NotFound I/O error maps to the builtin FileNotFoundError (no typed
-            // class for it).
-            OutputError::IoError { source, .. }
-                if source.kind() == std::io::ErrorKind::NotFound =>
-            {
-                PyFileNotFoundError::new_err(err.to_string())
-            }
-            OutputError::IoError { .. } => case_io_error(py, &err.to_string()),
-            OutputError::SerializationError { .. } | OutputError::SchemaError { .. } => {
-                new_leaf_err(py, &OUTPUT_ERROR, &err.to_string())
-            }
-            OutputError::ManifestError { .. } => validation_error(py, &err.to_string()),
-        },
+        ErrorSource::Output(err) => output_error(py, err, &err.to_string()),
         ErrorSource::Sddp { error, message } => match error {
             SddpError::Infeasible {
                 stage,
@@ -247,9 +236,59 @@ fn convert_error_with(py: Python<'_>, source: ErrorSource<'_>) -> PyErr {
                 scenario,
             } => solver_error_infeasible(py, &message, *stage, *iteration, *scenario),
             SddpError::Simulation(_) => new_leaf_err(py, &SIMULATION_ERROR, &message),
-            _other => solver_error_plain(py, &message),
+            SddpError::CheckpointWrite { source, .. } => {
+                output_error(py, source, &error.to_string())
+            }
+            other => exception_for_class(py, other.class(), &message),
         },
+        ErrorSource::PolicyLoad(err) => {
+            let message = match err {
+                FullFcfLoadError::MissingPolicyDirectory { .. } | FullFcfLoadError::Read { .. } => {
+                    err.to_string()
+                }
+                FullFcfLoadError::Refused(source) => {
+                    format!("{POLICY_VALIDATION_ERROR_PREFIX}: {source}")
+                }
+                FullFcfLoadError::FcfConstruction { kind, source } => {
+                    let label = match kind {
+                        FullFcfLoadKind::WarmStart => "warm-start FCF construction error",
+                        FullFcfLoadKind::Resume => "resume FCF construction error",
+                        FullFcfLoadKind::SimulationOnly => "FCF reconstruction error",
+                    };
+                    format!("{label}: {source}")
+                }
+            };
+            exception_for_class(py, err.class(), &message)
+        }
         ErrorSource::Message(msg) => message_prefix_to_pyerr(py, &msg),
+    }
+}
+
+fn exception_for_class(py: Python<'_>, class: ErrorClass, message: &str) -> PyErr {
+    match class {
+        ErrorClass::InvalidInput => validation_error(py, message),
+        ErrorClass::IncompatiblePolicy => new_leaf_err(py, &POLICY_INCOMPATIBLE_ERROR, message),
+        ErrorClass::Io => case_io_error(py, message),
+        // Internal keeps SolverError: InternalError would change a public class.
+        ErrorClass::Solver | ErrorClass::Internal => solver_error_plain(py, message),
+    }
+}
+
+/// The class an [`OutputError`] raises as, carrying `message`.
+fn output_error(py: Python<'_>, err: &OutputError, message: &str) -> PyErr {
+    match err {
+        // A NotFound I/O error maps to the builtin FileNotFoundError (no typed
+        // class for it).
+        OutputError::IoError { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
+            PyFileNotFoundError::new_err(message.to_string())
+        }
+        OutputError::IoError { .. } => case_io_error(py, message),
+        OutputError::SerializationError { .. } | OutputError::SchemaError { .. } => {
+            new_leaf_err(py, &OUTPUT_ERROR, message)
+        }
+        OutputError::ManifestError { .. } | OutputError::ForeignEntry { .. } => {
+            validation_error(py, message)
+        }
     }
 }
 
@@ -268,8 +307,8 @@ pub(crate) const CONFIG_PARSE_ERROR_PREFIX: &str = "config parse error";
 /// Prefix minted for config file read failures (classified as `ValidationError`).
 pub(crate) const CONFIG_READ_ERROR_PREFIX: &str = "config read error";
 
-/// Prefix minted for study-setup configuration-validation failures (classified
-/// as `ValidationError`).
+/// Prefix minted for study-setup configuration-validation failures. Message
+/// text only: the class comes from the typed error.
 pub(crate) const SETUP_VALIDATION_ERROR_PREFIX: &str = "setup validation error";
 
 /// Prefix minted for warm-start/resume policy validation failures (classified
@@ -282,11 +321,11 @@ pub(crate) const SIMULATION_ERROR_PREFIX: &str = "simulation error";
 /// Prefix minted for internal software/environment faults (classified as `InternalError`).
 pub(crate) const INTERNAL_ERROR_PREFIX: &str = "internal error";
 
-/// Prefix minted for training-phase failures. Unrecognized by the classifier
-/// below (it falls through to `SolverError`, same as today); named here so the
-/// run-path minter shares one owning constant with the other prefixes. The
-/// remaining run-path phase prefixes below are classifier-unrecognized for the
-/// same reason and are named on the same rationale.
+/// Prefix minted for training-phase failures, named here so the run-path minter
+/// shares one owning constant with the other prefixes. Message text only: the
+/// classifier below does not recognise it, and a typed error takes its class
+/// from [`ErrorClass`]. The remaining run-path phase prefixes below are named on
+/// the same rationale.
 pub(crate) const TRAINING_ERROR_PREFIX: &str = "training error";
 
 /// Prefix minted for simulation-writer initialisation failures.
@@ -313,7 +352,6 @@ fn message_prefix_to_pyerr(py: Python<'_>, msg: &str) -> PyErr {
     } else if msg.starts_with(CONFIG_OVERRIDE_ERROR_PREFIX)
         || msg.starts_with(CONFIG_PARSE_ERROR_PREFIX)
         || msg.starts_with(CONFIG_READ_ERROR_PREFIX)
-        || msg.starts_with(SETUP_VALIDATION_ERROR_PREFIX)
     {
         validation_error(py, msg)
     } else if msg.starts_with(POLICY_VALIDATION_ERROR_PREFIX) {
@@ -323,8 +361,8 @@ fn message_prefix_to_pyerr(py: Python<'_>, msg: &str) -> PyErr {
     } else if msg.starts_with(INTERNAL_ERROR_PREFIX) {
         new_leaf_err(py, &INTERNAL_ERROR, msg)
     } else {
-        // Unrecognized prefix (e.g. "training error" / "training failed after")
-        // falls through to SolverError.
+        // Unrecognized prefix (e.g. "scenario source error") falls through to
+        // SolverError.
         solver_error_plain(py, msg)
     }
 }
@@ -413,10 +451,16 @@ pub(crate) fn register_errors(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ErrorSource, INTERNAL_ERROR, LeafClass, SIMULATION_ERROR, SOLVER_ERROR, VALIDATION_ERROR,
-        convert_error_with,
+        CASE_IO_ERROR, ErrorSource, INTERNAL_ERROR, LeafClass, OUTPUT_ERROR,
+        POLICY_INCOMPATIBLE_ERROR, POLICY_VALIDATION_ERROR_PREFIX, SIMULATION_ERROR, SOLVER_ERROR,
+        VALIDATION_ERROR, convert_error_with,
     };
+    use cobre_comm::CommError;
+    use cobre_io::{LoadError, OutputError};
     use cobre_sddp::SddpError;
+    use cobre_sddp::policy::full_fcf_load::{FullFcfLoadError, FullFcfLoadKind};
+    use cobre_solver::SolverError;
+    use cobre_stochastic::StochasticError;
     use pyo3::prelude::*;
 
     /// Assert the bound `PyErr` value is an instance of the supplied leaf class
@@ -498,7 +542,7 @@ mod tests {
             let solver_err = convert_error_with(
                 py,
                 ErrorSource::Sddp {
-                    error: &SddpError::Validation("numerical failure".to_string()),
+                    error: &SddpError::Solver(SolverError::Unbounded),
                     message: solver_msg.clone(),
                 },
             );
@@ -509,6 +553,46 @@ mod tests {
             assert!(value.getattr("scenario").unwrap().is_none());
             let solver_rendered: String = value.str().unwrap().extract().unwrap();
             assert_eq!(solver_rendered, solver_msg);
+        });
+    }
+
+    /// A failed checkpoint write raises its `OutputError`'s class, with the SDDP
+    /// error's own text as the message.
+    #[test]
+    fn convert_error_checkpoint_write_raises_its_output_error_class() {
+        Python::initialize();
+        Python::attach(|py| {
+            for (source, leaf) in [
+                (
+                    OutputError::IoError {
+                        path: std::path::PathBuf::from("out/policy.staging"),
+                        source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+                    },
+                    &CASE_IO_ERROR,
+                ),
+                (
+                    OutputError::SerializationError {
+                        entity: "stage_cuts".to_string(),
+                        message: "buffer too large".to_string(),
+                    },
+                    &OUTPUT_ERROR,
+                ),
+            ] {
+                let error = SddpError::CheckpointWrite {
+                    iteration: 2,
+                    source,
+                };
+                let err = convert_error_with(
+                    py,
+                    ErrorSource::Sddp {
+                        error: &error,
+                        message: format!("training failed after 2 iterations: {error}"),
+                    },
+                );
+                assert_leaf(py, &err, leaf);
+                let rendered: String = err.value(py).str().unwrap().extract().unwrap();
+                assert_eq!(rendered, error.to_string());
+            }
         });
     }
 
@@ -525,54 +609,177 @@ mod tests {
         });
     }
 
-    /// A "setup validation error: " prefixed message maps to `ValidationError`.
+    /// Every `SddpError` other than the ones with a dedicated arm raises the
+    /// class of its `ErrorClass`, whatever prefix its message carries.
     #[test]
-    fn convert_error_setup_validation_prefix() {
+    fn convert_error_sddp_follows_the_error_class() {
+        let cases = [
+            (
+                SddpError::Stochastic(StochasticError::InsufficientData {
+                    context: "no valid historical windows found".to_string(),
+                }),
+                "stochastic preprocessing error",
+                &VALIDATION_ERROR,
+            ),
+            (
+                SddpError::Validation("x".to_string()),
+                "setup validation error",
+                &VALIDATION_ERROR,
+            ),
+            (
+                SddpError::Validation("x".to_string()),
+                "training error",
+                &VALIDATION_ERROR,
+            ),
+            (
+                SddpError::Io(LoadError::IoError {
+                    path: "case/config.json".into(),
+                    source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+                }),
+                "hydro model preprocessing error",
+                &CASE_IO_ERROR,
+            ),
+            (
+                SddpError::Io(LoadError::ParseError {
+                    path: "case/config.json".into(),
+                    message: "unexpected token".to_string(),
+                }),
+                "hydro model preprocessing error",
+                &VALIDATION_ERROR,
+            ),
+            (
+                SddpError::PolicySoftwareMismatch {
+                    policy_software: Some("another-program".to_string()),
+                    policy_version: "0.0.1".to_string(),
+                },
+                "policy validation error",
+                &POLICY_INCOMPATIBLE_ERROR,
+            ),
+            (
+                SddpError::Communication(CommError::InvalidCommunicator),
+                "training error",
+                &SOLVER_ERROR,
+            ),
+            (
+                SddpError::WireVersionMismatch {
+                    encoded: 1,
+                    expected: 2,
+                },
+                "training error",
+                &SOLVER_ERROR,
+            ),
+        ];
         Python::initialize();
         Python::attach(|py| {
-            let msg = "setup validation error: configuration validation error: x".to_string();
+            for (error, prefix, leaf) in cases {
+                let message = format!("{prefix}: {error}");
+                let err = convert_error_with(
+                    py,
+                    ErrorSource::Sddp {
+                        error: &error,
+                        message: message.clone(),
+                    },
+                );
+                assert_leaf(py, &err, leaf);
+                let value = err.value(py);
+                let rendered: String = value.str().unwrap().extract().unwrap();
+                assert_eq!(rendered, message);
+                if leaf.name == SOLVER_ERROR.name {
+                    assert!(value.getattr("stage").unwrap().is_none());
+                    assert!(value.getattr("iteration").unwrap().is_none());
+                    assert!(value.getattr("scenario").unwrap().is_none());
+                }
+            }
+        });
+    }
+
+    /// A phase prefix with no recognised wrapper falls through to `SolverError`.
+    #[test]
+    fn unrecognised_message_prefix_falls_through_to_solver_error() {
+        Python::initialize();
+        Python::attach(|py| {
+            let msg = "hydro model preprocessing error: solver error: x".to_string();
             let err = convert_error_with(py, ErrorSource::Message(msg.clone()));
-            assert_leaf(py, &err, &VALIDATION_ERROR);
+            assert_leaf(py, &err, &SOLVER_ERROR);
             let rendered: String = err.value(py).str().unwrap().extract().unwrap();
             assert_eq!(rendered, msg);
         });
     }
 
-    /// The outermost "setup validation error: " prefix wins over a nested phase
-    /// prefix; a phase prefix with no setup-validation wrapper still falls
-    /// through to `SolverError`; and a training-phase `Validation` error (routed
-    /// through `ErrorSource::Sddp`, never through this string-prefix path) stays
-    /// `SolverError`.
+    /// Every policy-load failure raises the class of its `ErrorClass`, with the
+    /// inner error's text read from its own `Display`.
     #[test]
-    fn setup_validation_prefix_beats_nested_phase_prefix() {
+    fn convert_error_policy_load_follows_each_failure_class() {
+        let kinds = [
+            (
+                FullFcfLoadKind::WarmStart,
+                "warm-start FCF construction error",
+            ),
+            (FullFcfLoadKind::Resume, "resume FCF construction error"),
+            (FullFcfLoadKind::SimulationOnly, "FCF reconstruction error"),
+        ];
         Python::initialize();
         Python::attach(|py| {
-            let setup_msg = "setup validation error: hydro model preprocessing error: \
-                              configuration validation error: x"
-                .to_string();
-            let setup_err = convert_error_with(py, ErrorSource::Message(setup_msg.clone()));
-            assert_leaf(py, &setup_err, &VALIDATION_ERROR);
-            let setup_rendered: String = setup_err.value(py).str().unwrap().extract().unwrap();
-            assert_eq!(setup_rendered, setup_msg);
+            let check = |err: &FullFcfLoadError, leaf: &LeafClass, expected: &str| {
+                let converted = convert_error_with(py, ErrorSource::PolicyLoad(err));
+                assert_leaf(py, &converted, leaf);
+                let rendered: String = converted.value(py).str().unwrap().extract().unwrap();
+                assert_eq!(rendered, expected);
+            };
 
-            let nested_msg = "hydro model preprocessing error: solver error: x".to_string();
-            let nested_err = convert_error_with(py, ErrorSource::Message(nested_msg.clone()));
-            assert_leaf(py, &nested_err, &SOLVER_ERROR);
-            let nested_rendered: String = nested_err.value(py).str().unwrap().extract().unwrap();
-            assert_eq!(nested_rendered, nested_msg);
+            for (kind, _) in kinds {
+                let err = FullFcfLoadError::MissingPolicyDirectory {
+                    kind,
+                    path: "/study/policy".into(),
+                };
+                let expected = err.to_string();
+                assert!(expected.starts_with("Policy directory not found: /study/policy. "));
+                check(&err, &VALIDATION_ERROR, &expected);
+            }
 
-            let training_msg = "training error: configuration validation error: x".to_string();
-            let training_err = convert_error_with(
-                py,
-                ErrorSource::Sddp {
-                    error: &SddpError::Validation("x".to_string()),
-                    message: training_msg.clone(),
+            let empty = tempfile::tempdir().expect("temp dir");
+            let read_failure = cobre_io::read_policy_checkpoint(empty.path())
+                .expect_err("an empty directory holds no checkpoint");
+            let expected = format!("failed to read policy checkpoint: {read_failure}");
+            check(
+                &FullFcfLoadError::Read {
+                    source: read_failure,
                 },
+                &POLICY_INCOMPATIBLE_ERROR,
+                &expected,
             );
-            assert_leaf(py, &training_err, &SOLVER_ERROR);
-            let training_rendered: String =
-                training_err.value(py).str().unwrap().extract().unwrap();
-            assert_eq!(training_rendered, training_msg);
+
+            let unreadable = OutputError::IoError {
+                path: "policy/manifest.bin".into(),
+                source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            };
+            let expected = format!("failed to read policy checkpoint: {unreadable}");
+            check(
+                &FullFcfLoadError::Read { source: unreadable },
+                &CASE_IO_ERROR,
+                &expected,
+            );
+
+            let mismatch = SddpError::PolicySoftwareMismatch {
+                policy_software: Some("another-program".to_string()),
+                policy_version: "0.0.1".to_string(),
+            };
+            let expected = format!("{POLICY_VALIDATION_ERROR_PREFIX}: {mismatch}");
+            check(
+                &FullFcfLoadError::Refused(mismatch),
+                &POLICY_INCOMPATIBLE_ERROR,
+                &expected,
+            );
+
+            for (kind, label) in kinds {
+                let source = SddpError::Validation("malformed cuts".to_string());
+                let expected = format!("{label}: {source}");
+                check(
+                    &FullFcfLoadError::FcfConstruction { kind, source },
+                    &POLICY_INCOMPATIBLE_ERROR,
+                    &expected,
+                );
+            }
         });
     }
 }

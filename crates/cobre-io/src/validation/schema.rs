@@ -55,7 +55,7 @@ use crate::{
         parse_hydros, parse_lines, parse_thermals,
     },
     validation::{
-        ErrorKind, ValidationContext,
+        ValidationContext, rules,
         structural::{FileManifest, InputFile},
     },
 };
@@ -171,35 +171,35 @@ pub(crate) struct ParsedData {
 fn map_load_error(err: &LoadError, relative_path: &str, ctx: &mut ValidationContext) {
     match err {
         LoadError::IoError { source, .. } => {
-            ctx.add_error(
-                ErrorKind::FileNotFound,
+            ctx.emit(
+                &rules::SCHEMA_FILE_UNREADABLE,
                 relative_path,
                 None::<&str>,
                 source.to_string(),
             );
         }
         LoadError::ParseError { message, .. } => {
-            ctx.add_error(
-                ErrorKind::ParseError,
+            ctx.emit(
+                &rules::SCHEMA_FILE_UNPARSABLE,
                 relative_path,
                 None::<&str>,
                 format!("parse error: {message}"),
             );
         }
         LoadError::SchemaError { field, message, .. } => {
-            ctx.add_error(
-                ErrorKind::SchemaViolation,
+            ctx.emit(
+                &rules::SCHEMA_FILE_NONCONFORMING,
                 relative_path,
                 None::<&str>,
                 format!("field {field}: {message}"),
             );
         }
-        _ => {
-            // Layer-2 parsers should not produce these variants; map conservatively.
-            // Unlike the arms above, these do not embed `relative_path`, so their full
+        LoadError::ConstraintError { .. } => {
+            // Layer-2 parsers should not produce this variant; map conservatively.
+            // Unlike the arms above, it does not embed `relative_path`, so its full
             // Display is safe (no path duplication).
-            ctx.add_error(
-                ErrorKind::SchemaViolation,
+            ctx.emit(
+                &rules::SCHEMA_FILE_NONCONFORMING,
                 relative_path,
                 None::<&str>,
                 err.to_string(),

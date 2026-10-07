@@ -48,7 +48,7 @@ use std::path::Path;
 use super::parse_operational_start_date;
 use crate::LoadError;
 
-/// Top-level intermediate type for `pumping_stations.json` (serde only, not re-exported).
+/// Root object of `pumping_stations.json`.
 #[derive(Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -60,7 +60,7 @@ pub(crate) struct RawPumpingFile {
     pumping_stations: Vec<RawPumpingStation>,
 }
 
-/// Intermediate type for a single pumping station entry.
+/// A single pumping station entry.
 #[derive(Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -83,20 +83,20 @@ pub(crate) struct RawPumpingStation {
     /// Stage index when the station is decommissioned. Absent or null = never.
     #[serde(default)]
     exit_stage_id: Option<i32>,
-    /// Power consumption rate per unit of pumped flow [MW/(m³/s)].
+    /// Power consumption rate per unit of pumped flow (MW/(m³/s)).
     consumption_mw_per_m3s: f64,
     /// Nested flow bounds object.
     flow: RawPumpingFlow,
 }
 
-/// Intermediate type for the nested flow bounds sub-object.
+/// The nested flow bounds sub-object.
 #[derive(Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawPumpingFlow {
-    /// Minimum pumped flow [m³/s].
+    /// Minimum pumped flow (m³/s).
     min_m3s: f64,
-    /// Maximum pumped flow [m³/s].
+    /// Maximum pumped flow (m³/s).
     max_m3s: f64,
 }
 

@@ -1,7 +1,7 @@
 //! Orchestration methods: train, simulate, and workspace pool construction.
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc::{Sender, SyncSender};
 
 use cobre_comm::Communicator;
@@ -45,7 +45,7 @@ impl StudySetup {
         n_threads: usize,
         solver_factory: impl Fn() -> Result<S, SolverError>,
         event_sender: Option<Sender<TrainingEvent>>,
-        shutdown_flag: Option<&Arc<AtomicBool>>,
+        shutdown_flag: Option<&Arc<AtomicUsize>>,
     ) -> Result<TrainingOutcome, SddpError>
     where
         S: SolverInterface<Profile = ActiveProfile> + Send,
@@ -107,7 +107,7 @@ impl StudySetup {
         n_threads: usize,
         solver_factory: impl Fn() -> Result<S, SolverError>,
         event_sender: Option<Sender<TrainingEvent>>,
-        shutdown_flag: Option<&Arc<AtomicBool>>,
+        shutdown_flag: Option<&Arc<AtomicUsize>>,
         solver_profiles: SolverProfiles,
     ) -> Result<TrainingOutcome, SddpError>
     where
@@ -119,6 +119,7 @@ impl StudySetup {
                 training_enumerated: self.loop_params.training_enumerated,
                 max_iterations: self.loop_params.max_iterations,
                 start_iteration: self.loop_params.start_iteration,
+                resume_lower_bound_history: self.loop_params.resume_lower_bound_history.clone(),
                 n_fwd_threads: n_threads,
                 stopping_rules: self.loop_params.stopping_rules.clone(),
             },
@@ -130,7 +131,7 @@ impl StudySetup {
             },
             events: EventConfig {
                 event_sender,
-                checkpoint_interval: None,
+                periodic_checkpoint: self.periodic_checkpoint.clone(),
                 shutdown_flag: shutdown_flag.map(Arc::clone),
                 export_states: self.events.export_states,
             },

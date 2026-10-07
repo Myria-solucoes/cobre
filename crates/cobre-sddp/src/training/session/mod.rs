@@ -26,7 +26,6 @@ use self::rank_distribution::RankDistribution;
 use self::results::TrainingResults;
 use self::runtime::RuntimeHandles;
 
-use std::sync::atomic::Ordering;
 use std::sync::mpsc::Sender;
 use std::time::Instant;
 
@@ -48,7 +47,8 @@ use crate::{
     forward_pass_state::{ForwardPassInputs, ForwardPassState},
     lower_bound::LbEvalScratchBundle,
     lower_bound::evaluate_lower_bound,
-    rank_reconcile::{reconcile_error_flag, reconcile_result},
+    policy::orchestration::CheckpointState,
+    rank_reconcile::{StopInputs, agree_stop_inputs, reconcile_error_flag, reconcile_result},
     risk_measure::{RiskMeasure, uniform_effective_measure},
     setup::NodeGraph,
     setup::node_graph::{NodePos, StageIdx, Traversal, enumerated_requires_state_exchange},
@@ -57,7 +57,7 @@ use crate::{
         aggregate_solver_statistics, pack_delta_scalars, unpack_delta_scalars,
     },
     state_exchange::ExchangeBuffers,
-    stopping_rule::RULE_GRACEFUL_SHUTDOWN,
+    training::training::rank_local_basis_cache,
     training::{TrainingOutcome, TrainingResult, broadcast_basis_cache},
     workspace::{BasisStore, NoisePreallocation, WorkspacePool, WorkspaceSizing},
 };
@@ -86,9 +86,10 @@ fn emit(sender: Option<&Sender<TrainingEvent>>, event: TrainingEvent) {
 pub(crate) enum IterationOutcome {
     /// The iteration completed normally; the loop should continue.
     Continue,
-    /// A stopping rule triggered; the loop should break.
+    /// A configured stop was met or the iteration budget ran out; the loop
+    /// should break.
     Converged,
-    /// An external shutdown flag was observed; the loop should break.
+    /// A shutdown request ended training with neither; the loop should break.
     Shutdown,
 }
 
@@ -267,10 +268,17 @@ where
         // stored by value; `export_states` is Copy and read directly.
         let event_sender = config.events.event_sender.take();
         let shutdown_flag = config.events.shutdown_flag.take();
+        let periodic_checkpoint = config.events.periodic_checkpoint.take();
         let export_states = config.events.export_states;
 
-        let convergence_monitor =
-            ConvergenceMonitor::new(config.loop_config.stopping_rules.clone());
+        let mut convergence_monitor = ConvergenceMonitor::with_iteration_budget(
+            config.loop_config.stopping_rules.clone(),
+            config.loop_config.max_iterations,
+        );
+        convergence_monitor.resume_at(
+            config.loop_config.start_iteration,
+            &config.loop_config.resume_lower_bound_history,
+        );
 
         // Emit before the locals move into RuntimeHandles, while `event_sender`
         // is still bound here.
@@ -288,7 +296,12 @@ where
             },
         );
 
-        let runtime = RuntimeHandles::new(event_sender, shutdown_flag, export_states);
+        let runtime = RuntimeHandles::new(
+            event_sender,
+            shutdown_flag,
+            export_states,
+            periodic_checkpoint,
+        );
 
         let results = TrainingResults::new(config.loop_config.start_iteration);
 
@@ -428,12 +441,6 @@ where
     /// Propagates `SddpError` from forward pass, sync, backward pass, or lower
     /// bound evaluation failures.
     pub(crate) fn run_iteration(&mut self, iteration: u64) -> Result<IterationOutcome, SddpError> {
-        if let Some(flag) = self.runtime.shutdown_flag.as_ref()
-            && flag.load(Ordering::Relaxed)
-        {
-            self.convergence_monitor.set_shutdown();
-        }
-
         let iter_start = Instant::now();
 
         // Snapshot before this iteration's solves so the post-backward delta
@@ -487,7 +494,17 @@ where
 
         let (lb, lb_lp_solves, lb_wall_ms, lb_solve_time_ms) = self.run_lower_bound(iteration)?;
 
-        let (should_stop, rule_results) = self.convergence_monitor.update(lb, &sync_result);
+        let local = StopInputs {
+            shutdown: self.runtime.shutdown_requested(),
+            wall_time_seconds: self.results.start_time.elapsed().as_secs_f64(),
+        };
+        let agreed = agree_stop_inputs(local, self.comm).map_err(SddpError::Communication)?;
+        if let Some(source) = agreed.shutdown {
+            self.convergence_monitor.set_shutdown(source);
+        }
+        let decision = self
+            .convergence_monitor
+            .update(lb, &sync_result, agreed.wall_time_seconds);
 
         self.results.final_lb = self.convergence_monitor.lower_bound();
         self.results.final_ub = self.convergence_monitor.upper_bound();
@@ -502,7 +519,6 @@ where
                 upper_bound: self.results.final_ub,
                 upper_bound_std: self.results.final_ub_std,
                 gap: self.results.final_gap,
-                rules_evaluated: rule_results.clone(),
             },
         );
 
@@ -553,19 +569,71 @@ where
 
         self.results.completed_iterations = iteration;
 
-        if should_stop {
-            self.results.termination_reason = rule_results
-                .iter()
-                .find(|r| r.triggered)
-                .map_or_else(|| "unknown".to_string(), |r| r.rule_name.to_string());
+        if let Some(reason) = decision.termination_reason() {
+            self.results.stop_decision = decision;
+            self.results.termination_reason = reason.to_string();
 
-            if self.results.termination_reason == RULE_GRACEFUL_SHUTDOWN {
+            if decision.ended_by_shutdown() {
                 return Ok(IterationOutcome::Shutdown);
             }
             return Ok(IterationOutcome::Converged);
         }
 
+        self.write_periodic_checkpoint(iteration)?;
+
         Ok(IterationOutcome::Continue)
+    }
+
+    /// Rank 0 writes the periodic checkpoint when the schedule fires at
+    /// `iteration`; every rank then agrees on the write's outcome, so a failed
+    /// write ends training on every rank at this iteration.
+    ///
+    /// # Errors
+    ///
+    /// [`SddpError::CheckpointWrite`] on rank 0 when the write fails, the peer
+    /// failure from [`reconcile_error_flag`] on every other rank.
+    fn write_periodic_checkpoint(&mut self, iteration: u64) -> Result<(), SddpError> {
+        let Some(periodic) = self.runtime.periodic_checkpoint() else {
+            return Ok(());
+        };
+        if !periodic.fires_at(iteration) {
+            return Ok(());
+        }
+
+        let start = Instant::now();
+        let local = if self.comm.rank() == 0 {
+            let basis_cache = rank_local_basis_cache(&self.basis_store);
+            periodic
+                .write(
+                    self.fcf,
+                    self.training_ctx.node_graph,
+                    CheckpointState {
+                        iterations: iteration,
+                        final_lb: self.results.final_lb,
+                        final_ub: self.results.final_ub,
+                        basis_cache: &basis_cache,
+                        visited_archive: self.visited_archive.as_ref(),
+                        lower_bound_history: self.convergence_monitor.lower_bound_history(),
+                    },
+                )
+                .map_err(|source| SddpError::CheckpointWrite { iteration, source })
+        } else {
+            Ok(())
+        };
+        let elapsed_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+        reconcile_error_flag(local, self.comm, &mut self.fwd_state.reconcile_scratch)?;
+
+        if self.comm.rank() == 0 {
+            emit(
+                self.runtime.event_sender(),
+                TrainingEvent::CheckpointComplete {
+                    iteration,
+                    checkpoint_path: periodic.policy_dir().display().to_string(),
+                    elapsed_ms,
+                },
+            );
+        }
+        Ok(())
     }
 
     /// Assemble and return the successful `TrainingOutcome`.
@@ -596,6 +664,7 @@ where
             final_gap,
             completed_iterations,
             termination_reason,
+            stop_decision,
             solver_stats_log,
             ..
         } = self.results;
@@ -615,20 +684,25 @@ where
 
         let basis_cache = broadcast_basis_cache(&self.basis_store, self.comm)?;
 
+        let mut result = TrainingResult::new(
+            final_lb,
+            final_ub,
+            final_ub_std,
+            final_gap,
+            completed_iterations,
+            termination_reason,
+            total_time_ms,
+            basis_cache,
+            solver_stats_log,
+            visited_archive,
+            Some(frozen_templates),
+        );
+        result.stop_decision = stop_decision;
+        result.lower_bound_history =
+            committed_lower_bound_history(&self.convergence_monitor, completed_iterations).to_vec();
+
         Ok(TrainingOutcome {
-            result: TrainingResult::new(
-                final_lb,
-                final_ub,
-                final_ub_std,
-                final_gap,
-                completed_iterations,
-                termination_reason,
-                total_time_ms,
-                basis_cache,
-                solver_stats_log,
-                visited_archive,
-                Some(frozen_templates),
-            ),
+            result,
             error: None,
         })
     }
@@ -688,20 +762,24 @@ where
             },
         );
 
+        let mut result = TrainingResult::new(
+            final_lb,
+            final_ub,
+            final_ub_std,
+            final_gap,
+            completed_iterations,
+            reason.to_string(),
+            total_time_ms,
+            Vec::new(),
+            solver_stats_log,
+            visited_archive,
+            Some(frozen_templates),
+        );
+        result.lower_bound_history =
+            committed_lower_bound_history(&self.convergence_monitor, completed_iterations).to_vec();
+
         TrainingOutcome {
-            result: TrainingResult::new(
-                final_lb,
-                final_ub,
-                final_ub_std,
-                final_gap,
-                completed_iterations,
-                reason.to_string(),
-                total_time_ms,
-                Vec::new(),
-                solver_stats_log,
-                visited_archive,
-                Some(frozen_templates),
-            ),
+            result,
             error: Some(err),
         }
     }
@@ -901,6 +979,7 @@ where
                         cumulative_discounts: self.stage_ctx.cumulative_discount_factors,
                         risk_measure: ub_measure,
                         num_stages,
+                        scratch: &mut self.scratch.nested_ub,
                     },
                 )
             }
@@ -1408,6 +1487,19 @@ where
     }
 }
 
+/// The monitor's lower-bound series without the trailing entries of iterations
+/// the run did not commit: a failed collective after the stop decision leaves
+/// the monitor one iteration ahead of `completed_iterations`.
+fn committed_lower_bound_history(
+    monitor: &ConvergenceMonitor,
+    completed_iterations: u64,
+) -> &[f64] {
+    let history = monitor.lower_bound_history();
+    let uncommitted =
+        usize::try_from(monitor.iteration_count() - completed_iterations).unwrap_or(usize::MAX);
+    &history[..history.len().saturating_sub(uncommitted)]
+}
+
 /// Pool → per-iteration selection-record index, in the order
 /// [`TrainingSession::run_cut_management`] emits `per_stage`: the root pool's
 /// record first (index 0), then each interior cut-generating node's pool in
@@ -1876,6 +1968,7 @@ mod tests {
                 training_enumerated: false,
                 max_iterations,
                 start_iteration: 0,
+                resume_lower_bound_history: Vec::new(),
                 n_fwd_threads: 1,
                 stopping_rules: iteration_limit_rules(limit),
             },
@@ -1887,7 +1980,7 @@ mod tests {
             },
             events: EventConfig {
                 event_sender: None,
-                checkpoint_interval: None,
+                periodic_checkpoint: None,
                 shutdown_flag: None,
                 export_states: false,
             },

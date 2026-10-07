@@ -85,15 +85,14 @@ water-value _function_, not a single water-value _number_. For the supported
 single-boundary-policy input this is the correct representation, not a limitation: one
 shared static terminal template, baked once and evaluated at each leaf's own state,
 with the terminal boundary future cost booked in the reported cost
-(`terminal_has_boundary_cuts`; see the "Terminal boundary FCF" contract in
-`.claude/rules/sddp.md`).
+(`CutPool::has_warm_start_cuts` on the terminal stage's pool; see the "Terminal boundary
+FCF" contract in `.claude/rules/sddp.md`).
 
 A distinct future-cost _function_ per leaf — different `α/β`, say one water-value
 function for a wet-basin ending and another for a dry-basin ending — is a different
 model. It requires more than one boundary policy on input, one per terminal regime,
 which is a reserved future feature (per-leaf boundary input), not a fix to the
-single-policy path. That seam is tracked with the boundary-policy source-node entry in
-[`reserved-seams-and-deferred-debt.md`](reserved-seams-and-deferred-debt.md).
+single-policy path.
 
 The shared stage template across leaves is correct while a state affects only the
 inflow realization, not the LP structure — which holds for the hydrothermal model.
@@ -232,10 +231,10 @@ Their intent survives as standing engine behavior, not as re-added validation:
   (rule 40), not a rejection. `check_node_graph`'s surviving structural rules
   (well-formedness, every edge `t → t+1`, the pointer bound) are the whole gate.
 
-Retired rule numbers in the Layer-5b catalog
-(`crates/cobre-io/src/validation/semantic/mod.rs`) are **never reused** — a
-retired number is marked as retired and left unoccupied, so a rule number always
-denotes the same behavior across the project's life.
+Retired rule ids in the cobre-io validation rule table
+(`crates/cobre-io/src/validation/rules.rs`) are **never reused** — a retired
+id is listed as never assignable, so a rule id always denotes the same
+behavior across the project's life.
 
 ## References
 

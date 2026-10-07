@@ -16,9 +16,9 @@ use crate::output::SoftwareIdentity;
 /// [`CheckpointManifest::format_version`] must equal this;
 /// [`crate::read_policy_checkpoint`] rejects any other value — and absence —
 /// with a named error before parsing any payload, so a pre-marker artifact is
-/// cleanly rejected, never read positionally. Version 2 is the first fully
-/// dated, self-describing format.
-pub const FORMAT_VERSION: u32 = 2;
+/// cleanly rejected, never read positionally. Version 3 records
+/// `StageBasis.num_cut_rows` as the basis's own trailing affine-piece row count.
+pub const FORMAT_VERSION: u32 = 3;
 
 /// Sentinel [`EntitySlot`] date-field value — [`EntitySlot::reference_date`],
 /// [`EntitySlot::interval_start`], and [`EntitySlot::interval_end`] all
@@ -494,6 +494,13 @@ pub struct ProducerBlock {
     /// scaled-at-`1_000_000.0`, the constant every unmarked artifact was
     /// unconditionally written under.
     pub cost_scale_factor: Option<f64>,
+    /// Lower bound after each recorded iteration, oldest first; the last entry
+    /// is iteration [`completed_iterations`]. A writer records every completed
+    /// iteration it has; an empty vector means none was recorded, and is what a
+    /// buffer without the field reads as.
+    ///
+    /// [`completed_iterations`]: Self::completed_iterations
+    pub lower_bound_history: Vec<f64>,
 }
 
 /// Study-global checkpoint metadata carried on the `FlatBuffers`

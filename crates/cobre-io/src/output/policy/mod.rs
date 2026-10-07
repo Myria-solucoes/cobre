@@ -16,7 +16,10 @@ pub mod checkpoint;
 pub mod codec;
 pub mod records;
 
-pub use checkpoint::{read_policy_checkpoint, write_policy_checkpoint};
+pub use checkpoint::{
+    ResolvedCheckpoint, read_policy_checkpoint, resolve_policy_checkpoint, write_policy_checkpoint,
+};
+pub(crate) use checkpoint::{check_checkpoint_replaceable, checkpoint_target};
 pub use codec::{deserialize_stage_basis, deserialize_stage_cuts, deserialize_stage_states};
 pub use codec::{serialize_stage_basis, serialize_stage_cuts, serialize_stage_states};
 pub use records::{
@@ -38,7 +41,12 @@ pub use records::{
     clippy::unreadable_literal
 )]
 mod tests {
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+
     use super::super::error::OutputError;
+    use super::super::software::policy_checkpoint_remedy;
+    use super::checkpoint::finish_interrupted_swap;
     use super::*;
 
     fn make_cut_record(
@@ -283,6 +291,7 @@ mod tests {
                 training_block_mode: "parallel".to_string(),
                 training_block_mode_per_stage: vec![],
                 cost_scale_factor: None,
+                lower_bound_history: Vec::new(),
             },
             season_manifest: SeasonManifest::default(),
         }
@@ -1234,55 +1243,34 @@ mod tests {
         assert_eq!(checkpoint.stage_states[0].stage_id, 0);
     }
 
+    #[cfg(unix)]
     #[test]
-    fn interrupted_rewrite_never_pairs_an_old_manifest_with_new_payloads() {
+    fn interrupted_rewrite_keeps_a_loadable_checkpoint() {
+        use std::os::unix::fs::PermissionsExt;
         if is_root() {
             return;
         }
 
         let tmp = tempfile::tempdir().unwrap();
+        let policy = tmp.path().join("policy");
+        write_copy(&policy, OLDER);
+        // A read-only `cuts/` in A lets the swap finish but stops its removal.
+        std::fs::set_permissions(policy.join("cuts"), std::fs::Permissions::from_mode(0o555))
+            .unwrap();
 
-        let a0 = [1.0_f64, 2.0, 3.0];
-        let cuts_a = [make_cut_record(1, 0, 1, &a0)];
-        let stage_cuts_a = [make_stage_cuts_payload(0, &cuts_a, &[0], 3)];
-        let metadata_a = make_metadata(1, 3);
+        let result = try_write_copy(&policy, NEWER);
 
-        write_policy_checkpoint(tmp.path(), &stage_cuts_a, &[], &metadata_a, &[])
-            .expect("write of checkpoint A must succeed");
-
-        // Make cuts/ unwritable so the rewrite fails right after the manifest
-        // removal, at the stale-payload sweep, before any payload write.
-        let cuts_dir = tmp.path().join("cuts");
-        let mut perms = std::fs::metadata(&cuts_dir).unwrap().permissions();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o555);
-        std::fs::set_permissions(&cuts_dir, perms).unwrap();
-
-        let b0 = [40.0_f64, 50.0, 60.0];
-        let cuts_b = [make_cut_record(2, 0, 5, &b0)];
-        let stage_cuts_b = [make_stage_cuts_payload(0, &cuts_b, &[0], 3)];
-        let metadata_b = make_metadata(1, 3);
-
-        let result = write_policy_checkpoint(tmp.path(), &stage_cuts_b, &[], &metadata_b, &[]);
-
-        // Restore permissions so the tempdir can be cleaned up.
-        let mut perms2 = std::fs::metadata(&cuts_dir).unwrap().permissions();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut perms2, 0o755);
-        std::fs::set_permissions(&cuts_dir, perms2).unwrap();
-
+        let previous = tmp.path().join("policy.previous");
+        std::fs::set_permissions(
+            previous.join("cuts"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
         assert!(
-            matches!(result, Err(OutputError::IoError { .. })),
-            "the interrupted rewrite must surface an IoError, got: {result:?}"
+            matches!(&result, Err(OutputError::IoError { path, .. }) if *path == previous),
+            "the removal of the replaced copy must fail with IoError, got {result:?}"
         );
-        assert!(
-            !tmp.path().join("manifest.bin").exists(),
-            "manifest.bin must stay absent after an interrupted rewrite"
-        );
-
-        let read_result = read_policy_checkpoint(tmp.path());
-        assert!(
-            matches!(read_result, Err(OutputError::IoError { .. })),
-            "read_policy_checkpoint must reject the directory as not-a-checkpoint, got: {read_result:?}"
-        );
+        assert_eq!(read_iterations(&policy).unwrap(), NEWER);
     }
 
     #[test]
@@ -1483,7 +1471,7 @@ mod tests {
 
     /// The older-version mirror of the test above: a manifest predating
     /// [`FORMAT_VERSION`] is rejected on the same version marker BEFORE any
-    /// payload is parsed, naming both versions and instructing a re-export.
+    /// payload is parsed, naming both versions and ending with the shared remedy.
     #[test]
     fn read_policy_checkpoint_rejects_older_manifest_version() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1509,8 +1497,8 @@ mod tests {
             msg.contains("format_version")
                 && msg.contains(&(FORMAT_VERSION - 1).to_string())
                 && msg.contains(&FORMAT_VERSION.to_string())
-                && msg.contains("re-export"),
-            "must name both versions and instruct a re-export, not surface the corrupt payload: {msg}"
+                && msg.ends_with(&policy_checkpoint_remedy()),
+            "must name both versions and end with the shared remedy, not surface the corrupt payload: {msg}"
         );
     }
 
@@ -1614,5 +1602,643 @@ mod tests {
             k as usize,
             "all K leaf nodes must be present in the manifest"
         );
+    }
+
+    // ── checkpoint resolution tests ───────────────────────────────────────────
+
+    const OLDER: u32 = 1;
+    const NEWER: u32 = 2;
+    const NEWEST: u32 = 3;
+
+    fn try_write_copy(dir: &Path, completed_iterations: u32) -> Result<(), OutputError> {
+        let coefficients = [1.0_f64];
+        let cuts = [make_cut_record(1, 0, 1, &coefficients)];
+        let stage_cuts = [make_stage_cuts_payload(0, &cuts, &[0], 1)];
+        let mut metadata = make_metadata(1, 1);
+        metadata.producer.completed_iterations = completed_iterations;
+        write_policy_checkpoint(dir, &stage_cuts, &[make_basis_record(0)], &metadata, &[])
+    }
+
+    fn write_copy(dir: &Path, completed_iterations: u32) {
+        try_write_copy(dir, completed_iterations).unwrap();
+    }
+
+    fn read_iterations(path: &Path) -> Result<u32, OutputError> {
+        read_policy_checkpoint(path).map(|c| c.metadata.producer.completed_iterations)
+    }
+
+    /// What a run killed while committing a checkpoint can leave beside it.
+    #[derive(Debug, Clone, Copy)]
+    enum CrashState {
+        StagingCutOff,
+        StagingComplete,
+        BetweenRenames,
+        AfterRenames,
+        PreviousPartlyRemoved,
+        StagingWithoutManifest,
+    }
+
+    const CRASH_STATES: [CrashState; 6] = [
+        CrashState::StagingCutOff,
+        CrashState::StagingComplete,
+        CrashState::BetweenRenames,
+        CrashState::AfterRenames,
+        CrashState::PreviousPartlyRemoved,
+        CrashState::StagingWithoutManifest,
+    ];
+
+    impl CrashState {
+        /// The directory a reader must resolve, and its `completed_iterations`.
+        fn resolved_copy(self) -> (&'static str, u32) {
+            match self {
+                Self::StagingCutOff | Self::StagingComplete => ("policy", OLDER),
+                Self::BetweenRenames => ("policy.staging", NEWER),
+                Self::AfterRenames | Self::PreviousPartlyRemoved => ("policy", NEWER),
+                Self::StagingWithoutManifest => ("policy.previous", OLDER),
+            }
+        }
+    }
+
+    /// Build `state` at `root/policy` from copies written under `root/scratch`
+    /// and renamed into place, and return `root/policy`.
+    fn build_crash_state(root: &Path, state: CrashState) -> PathBuf {
+        let policy = root.join("policy");
+        let staging = root.join("policy.staging");
+        let previous = root.join("policy.previous");
+        let older = root.join("scratch/older");
+        let newer = root.join("scratch/newer");
+        write_copy(&older, OLDER);
+        write_copy(&newer, NEWER);
+        let (older_at, newer_at) = match state {
+            CrashState::StagingCutOff => {
+                std::fs::rename(newer.join("manifest.bin"), newer.join("manifest.bin.tmp"))
+                    .unwrap();
+                (&policy, &staging)
+            }
+            CrashState::StagingComplete => (&policy, &staging),
+            CrashState::BetweenRenames => (&previous, &staging),
+            CrashState::AfterRenames => (&previous, &policy),
+            CrashState::PreviousPartlyRemoved => {
+                std::fs::remove_dir_all(older.join("cuts")).unwrap();
+                (&previous, &policy)
+            }
+            CrashState::StagingWithoutManifest => {
+                std::fs::remove_file(newer.join("manifest.bin")).unwrap();
+                (&previous, &staging)
+            }
+        };
+        std::fs::rename(&older, older_at).unwrap();
+        std::fs::rename(&newer, newer_at).unwrap();
+        policy
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum SnapshotEntry {
+        Dir,
+        File(Vec<u8>),
+        Link(PathBuf),
+    }
+
+    /// Every entry under `root` by relative path, recording a link's target
+    /// without following it.
+    fn tree_snapshot(root: &Path) -> BTreeMap<PathBuf, SnapshotEntry> {
+        let mut snapshot = BTreeMap::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                let file_type = std::fs::symlink_metadata(&path).unwrap().file_type();
+                let recorded = if file_type.is_symlink() {
+                    SnapshotEntry::Link(std::fs::read_link(&path).unwrap())
+                } else if file_type.is_dir() {
+                    pending.push(path.clone());
+                    SnapshotEntry::Dir
+                } else {
+                    SnapshotEntry::File(std::fs::read(&path).unwrap())
+                };
+                snapshot.insert(path.strip_prefix(root).unwrap().to_path_buf(), recorded);
+            }
+        }
+        snapshot
+    }
+
+    /// Resolve and read `policy` in `state`, and describe every way the answer
+    /// differs from `state`'s copy (`is_copy` judges a resolved directory) or
+    /// the disk under `root` changed.
+    fn crash_state_failures(
+        state: CrashState,
+        root: &Path,
+        policy: &Path,
+        is_copy: impl Fn(&Path) -> bool,
+    ) -> Vec<String> {
+        let (_, completed_iterations) = state.resolved_copy();
+        let before = tree_snapshot(root);
+        let resolved = resolve_policy_checkpoint(policy);
+        let read = read_policy_checkpoint(policy).map(|c| c.metadata.producer.completed_iterations);
+        let mut failures = Vec::new();
+        if !matches!(&resolved, Ok(ResolvedCheckpoint::Found(dir)) if is_copy(dir)) {
+            failures.push(format!("{state:?}: resolved {resolved:?}"));
+        }
+        if !matches!(&read, Ok(n) if *n == completed_iterations) {
+            failures.push(format!(
+                "{state:?}: read {read:?}, expected {completed_iterations}"
+            ));
+        }
+        if tree_snapshot(root) != before {
+            failures.push(format!("{state:?}: the disk changed"));
+        }
+        failures
+    }
+
+    #[test]
+    fn readers_resolve_one_copy_per_crash_state_without_changing_the_disk() {
+        let failures: Vec<String> = CRASH_STATES
+            .into_iter()
+            .flat_map(|state| {
+                let tmp = tempfile::tempdir().unwrap();
+                let policy = build_crash_state(tmp.path(), state);
+                let copy = tmp.path().join(state.resolved_copy().0);
+                crash_state_failures(state, tmp.path(), &policy, |dir| dir == copy)
+            })
+            .collect();
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    /// Link `root/out/policy` to `../real/policy` and return the link.
+    #[cfg(unix)]
+    fn link_to_real_policy(root: &Path) -> PathBuf {
+        std::fs::create_dir_all(root.join("real")).unwrap();
+        std::fs::create_dir(root.join("out")).unwrap();
+        let link = root.join("out/policy");
+        std::os::unix::fs::symlink("../real/policy", &link).unwrap();
+        link
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn readers_resolve_one_copy_per_crash_state_through_a_linked_policy_directory() {
+        let failures: Vec<String> = CRASH_STATES
+            .into_iter()
+            .flat_map(|state| {
+                let tmp = tempfile::tempdir().unwrap();
+                build_crash_state(&tmp.path().join("real"), state);
+                let link = link_to_real_policy(tmp.path());
+                let copy =
+                    std::fs::canonicalize(tmp.path().join("real").join(state.resolved_copy().0))
+                        .unwrap();
+                crash_state_failures(state, tmp.path(), &link, |dir| {
+                    std::fs::canonicalize(dir).is_ok_and(|dir| dir == copy)
+                })
+            })
+            .collect();
+        assert!(failures.is_empty(), "{failures:#?}");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let link = link_to_real_policy(tmp.path());
+        let resolve_without_changing_the_disk = || {
+            let before = tree_snapshot(tmp.path());
+            let resolved = resolve_policy_checkpoint(&link).unwrap();
+            assert_eq!(tree_snapshot(tmp.path()), before);
+            resolved
+        };
+        assert_eq!(
+            resolve_without_changing_the_disk(),
+            ResolvedCheckpoint::NoDirectory
+        );
+        std::fs::create_dir(tmp.path().join("real/policy")).unwrap();
+        assert_eq!(
+            resolve_without_changing_the_disk(),
+            ResolvedCheckpoint::NoManifest
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reads_a_staged_copy_from_a_read_only_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        if is_root() {
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let policy = build_crash_state(tmp.path(), CrashState::BetweenRenames);
+        let read_only = [
+            tmp.path().to_path_buf(),
+            tmp.path().join("policy.staging"),
+            tmp.path().join("policy.previous"),
+        ];
+        for dir in &read_only {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        }
+
+        let read =
+            read_policy_checkpoint(&policy).map(|c| c.metadata.producer.completed_iterations);
+
+        for dir in &read_only {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert_eq!(read.unwrap(), NEWER);
+    }
+
+    #[test]
+    fn resolver_tells_a_missing_directory_from_a_missing_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let policy = tmp.path().join("policy");
+        assert_eq!(
+            resolve_policy_checkpoint(&policy).unwrap(),
+            ResolvedCheckpoint::NoDirectory
+        );
+
+        std::fs::create_dir(tmp.path().join("policy.staging")).unwrap();
+        assert_eq!(
+            resolve_policy_checkpoint(&policy).unwrap(),
+            ResolvedCheckpoint::NoDirectory
+        );
+
+        std::fs::create_dir(&policy).unwrap();
+        assert_eq!(
+            resolve_policy_checkpoint(&policy).unwrap(),
+            ResolvedCheckpoint::NoManifest
+        );
+
+        assert_eq!(
+            resolve_policy_checkpoint(Path::new("/nonexistent-root-for-test/..")).unwrap(),
+            ResolvedCheckpoint::NoDirectory
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolver_reports_an_unreadable_candidate_as_an_io_error() {
+        use std::os::unix::fs::PermissionsExt;
+        if is_root() {
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let policy = tmp.path().join("policy");
+        std::fs::create_dir(&policy).unwrap();
+        std::fs::set_permissions(&policy, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let resolved = resolve_policy_checkpoint(&policy);
+
+        std::fs::set_permissions(&policy, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            matches!(
+                &resolved,
+                Err(OutputError::IoError { path, source })
+                    if path.ends_with("policy/manifest.bin")
+                        && source.kind() == std::io::ErrorKind::PermissionDenied
+            ),
+            "expected a permission IoError on policy/manifest.bin, got {resolved:?}"
+        );
+    }
+
+    // ── checkpoint commit tests ───────────────────────────────────────────────
+
+    fn refused_entry(result: &Result<(), OutputError>) -> Option<(&Path, &Path)> {
+        match result {
+            Err(OutputError::ForeignEntry { dir, entry }) => Some((dir, entry)),
+            _ => None,
+        }
+    }
+
+    fn leftover_siblings(policy: &Path) -> Vec<PathBuf> {
+        [".staging", ".previous"]
+            .into_iter()
+            .map(|suffix| {
+                let mut name = policy.as_os_str().to_os_string();
+                name.push(suffix);
+                PathBuf::from(name)
+            })
+            .filter(|sibling| std::fs::symlink_metadata(sibling).is_ok())
+            .collect()
+    }
+
+    #[test]
+    fn interrupted_swap_completion_keeps_the_copy_readers_resolve() {
+        let failures: Vec<String> = CRASH_STATES
+            .into_iter()
+            .flat_map(|state| {
+                let tmp = tempfile::tempdir().unwrap();
+                let policy = build_crash_state(tmp.path(), state);
+                let resolved = resolve_policy_checkpoint(&policy);
+                let Ok(ResolvedCheckpoint::Found(copy)) = resolved else {
+                    return vec![format!("{state:?}: resolved {resolved:?}")];
+                };
+                let completed_iterations = read_iterations(&copy).unwrap();
+
+                let mut failures = Vec::new();
+                if let Err(e) = finish_interrupted_swap(&policy) {
+                    failures.push(format!("{state:?}: finish {e:?}"));
+                }
+                match read_iterations(&policy) {
+                    Ok(n) if n == completed_iterations => {}
+                    read => failures.push(format!(
+                        "{state:?}: read {read:?}, expected {completed_iterations}"
+                    )),
+                }
+                match resolve_policy_checkpoint(&policy) {
+                    Ok(ResolvedCheckpoint::Found(dir)) if dir == policy => {}
+                    resolved => failures.push(format!("{state:?}: resolved {resolved:?}")),
+                }
+                let siblings = leftover_siblings(&policy);
+                if !siblings.is_empty() {
+                    failures.push(format!("{state:?}: finish left {siblings:?}"));
+                }
+
+                if let Err(e) = try_write_copy(&policy, NEWEST) {
+                    failures.push(format!("{state:?}: write {e:?}"));
+                }
+                match read_iterations(&policy) {
+                    Ok(NEWEST) => {}
+                    read => failures.push(format!("{state:?}: read {read:?}, expected {NEWEST}")),
+                }
+                let siblings = leftover_siblings(&policy);
+                if !siblings.is_empty() {
+                    failures.push(format!("{state:?}: write left {siblings:?}"));
+                }
+                failures
+            })
+            .collect();
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    #[test]
+    fn first_write_creates_the_directory_and_leaves_no_siblings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let policy = tmp.path().join("out/policy");
+
+        try_write_copy(&policy, OLDER).unwrap();
+
+        assert_eq!(read_iterations(&policy).unwrap(), OLDER);
+        assert_eq!(leftover_siblings(&policy), Vec::<PathBuf>::new());
+        let mut entries: Vec<_> = std::fs::read_dir(&policy)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        entries.sort();
+        assert_eq!(entries, ["basis", "cuts", "manifest.bin"]);
+    }
+
+    #[test]
+    fn write_refuses_a_path_without_a_file_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let before = tree_snapshot(tmp.path());
+
+        let result = try_write_copy(&tmp.path().join("a/.."), OLDER);
+
+        assert!(
+            matches!(
+                &result,
+                Err(OutputError::IoError { source, .. })
+                    if source.kind() == std::io::ErrorKind::InvalidInput
+            ),
+            "a path without a file name must fail with InvalidInput, got {result:?}"
+        );
+        assert_eq!(tree_snapshot(tmp.path()), before);
+    }
+
+    #[test]
+    fn rewrite_refuses_a_leftover_sibling_holding_an_unrecognized_entry() {
+        let cases = [
+            ("policy.staging", true, "notes.txt"),
+            ("policy.previous", true, "cuts/README"),
+            ("policy.previous", false, "notes.txt"),
+        ];
+
+        let failures: Vec<String> = cases
+            .into_iter()
+            .flat_map(|(sibling, with_policy, name)| {
+                let tmp = tempfile::tempdir().unwrap();
+                let policy = tmp.path().join("policy");
+                if with_policy {
+                    write_copy(&policy, OLDER);
+                }
+                let leftover = tmp.path().join(sibling);
+                write_copy(&leftover, NEWER);
+                std::fs::write(leftover.join(name), b"user data").unwrap();
+                let before = tree_snapshot(tmp.path());
+
+                let result = try_write_copy(&policy, NEWEST);
+
+                let mut failures = Vec::new();
+                if !refused_entry(&result)
+                    .is_some_and(|(dir, entry)| dir == leftover && entry == leftover.join(name))
+                {
+                    failures.push(format!("{sibling}/{name}: {result:?}"));
+                }
+                if tree_snapshot(tmp.path()) != before {
+                    failures.push(format!("{sibling}/{name}: the disk changed"));
+                }
+                failures
+            })
+            .collect();
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rewrite_that_cannot_stage_keeps_the_previous_checkpoint() {
+        use std::os::unix::fs::PermissionsExt;
+        if is_root() {
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let policy = tmp.path().join("policy");
+        write_copy(&policy, OLDER);
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let result = try_write_copy(&policy, NEWER);
+
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            matches!(result, Err(OutputError::IoError { .. })),
+            "a rewrite that cannot stage must fail with IoError, got {result:?}"
+        );
+        assert_eq!(read_iterations(&policy).unwrap(), OLDER);
+    }
+
+    #[test]
+    fn rewrite_refuses_a_directory_holding_an_unrecognized_entry() {
+        type AddEntry = fn(&Path);
+        let add_file = |path: &Path| std::fs::write(path, b"user data").unwrap();
+        let add_dir = |path: &Path| std::fs::create_dir(path).unwrap();
+        let cases: [(&str, AddEntry); 4] = [
+            ("notes.txt", add_file),
+            ("cuts/README", add_file),
+            ("cuts/metadata.json", add_file),
+            ("metadata.json", add_dir),
+        ];
+
+        let failures: Vec<String> = cases
+            .into_iter()
+            .flat_map(|(name, add)| {
+                let tmp = tempfile::tempdir().unwrap();
+                let policy = tmp.path().join("policy");
+                write_copy(&policy, OLDER);
+                add(&policy.join(name));
+                let before = tree_snapshot(tmp.path());
+
+                let result = try_write_copy(&policy, NEWER);
+
+                let mut failures = Vec::new();
+                if !refused_entry(&result)
+                    .is_some_and(|(dir, entry)| dir == policy && entry.ends_with(name))
+                {
+                    failures.push(format!("{name}: {result:?}"));
+                }
+                if tree_snapshot(tmp.path()) != before {
+                    failures.push(format!("{name}: the disk changed"));
+                }
+                failures
+            })
+            .collect();
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rewrite_refuses_a_policy_path_that_is_not_a_directory() {
+        use std::os::unix::fs::symlink;
+        type BuildRefusedPath = fn(&Path) -> PathBuf;
+
+        let file_at_policy = |root: &Path| {
+            std::fs::write(root.join("policy"), b"not a directory").unwrap();
+            root.join("policy")
+        };
+        let file_at_staging = |root: &Path| {
+            write_copy(&root.join("policy"), OLDER);
+            std::fs::write(root.join("policy.staging"), b"not a directory").unwrap();
+            root.join("policy.staging")
+        };
+        let link_at_previous = |root: &Path| {
+            write_copy(&root.join("policy"), OLDER);
+            std::fs::create_dir(root.join("elsewhere")).unwrap();
+            symlink("elsewhere", root.join("policy.previous")).unwrap();
+            root.join("policy.previous")
+        };
+        let link_to_a_file = |root: &Path| {
+            std::fs::write(root.join("file.txt"), b"not a directory").unwrap();
+            symlink("file.txt", root.join("policy")).unwrap();
+            root.join("policy")
+        };
+        let link_to_a_link = |root: &Path| {
+            std::fs::create_dir(root.join("real")).unwrap();
+            symlink("real", root.join("hop")).unwrap();
+            symlink("hop", root.join("policy")).unwrap();
+            root.join("policy")
+        };
+        let link_to_nothing = |root: &Path| {
+            symlink("missing", root.join("policy")).unwrap();
+            root.join("policy")
+        };
+        let cases: [(&str, BuildRefusedPath); 6] = [
+            ("file at policy", file_at_policy),
+            ("file at policy.staging", file_at_staging),
+            ("link at policy.previous", link_at_previous),
+            ("link to a file", link_to_a_file),
+            ("link to a link", link_to_a_link),
+            ("link to nothing", link_to_nothing),
+        ];
+
+        let failures: Vec<String> = cases
+            .into_iter()
+            .flat_map(|(case, build)| {
+                let tmp = tempfile::tempdir().unwrap();
+                let refused = build(tmp.path());
+                let before = tree_snapshot(tmp.path());
+
+                let result = try_write_copy(&tmp.path().join("policy"), NEWER);
+
+                let mut failures = Vec::new();
+                if !refused_entry(&result)
+                    .is_some_and(|(dir, entry)| dir == tmp.path() && entry == refused)
+                {
+                    failures.push(format!("{case}: {result:?}"));
+                }
+                if tree_snapshot(tmp.path()) != before {
+                    failures.push(format!("{case}: the disk changed"));
+                }
+                failures
+            })
+            .collect();
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_through_a_linked_policy_directory_replaces_the_target_and_keeps_the_link() {
+        let write_failures = |label: String, root: &Path, link: &Path| {
+            let result = try_write_copy(link, NEWEST);
+            let real_policy = root.join("real/policy");
+            let mut failures = Vec::new();
+            if let Err(e) = result {
+                failures.push(format!("{label}: write {e:?}"));
+            }
+            match read_iterations(link) {
+                Ok(NEWEST) => {}
+                read => failures.push(format!("{label}: read {read:?}, expected {NEWEST}")),
+            }
+            match std::fs::read_link(link) {
+                Ok(target) if target == Path::new("../real/policy") => {}
+                target => failures.push(format!("{label}: link reads {target:?}")),
+            }
+            if !std::fs::symlink_metadata(&real_policy).is_ok_and(|m| m.is_dir()) {
+                failures.push(format!("{label}: the link's target is not a directory"));
+            }
+            let siblings = leftover_siblings(&real_policy);
+            if !siblings.is_empty() {
+                failures.push(format!("{label}: left {siblings:?}"));
+            }
+            let out: Vec<_> = std::fs::read_dir(root.join("out"))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            if out != ["policy"] {
+                failures.push(format!("{label}: out/ lists {out:?}"));
+            }
+            failures
+        };
+
+        let mut failures: Vec<String> = CRASH_STATES
+            .into_iter()
+            .flat_map(|state| {
+                let tmp = tempfile::tempdir().unwrap();
+                build_crash_state(&tmp.path().join("real"), state);
+                let link = link_to_real_policy(tmp.path());
+                write_failures(format!("{state:?}"), tmp.path(), &link)
+            })
+            .collect();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let link = link_to_real_policy(tmp.path());
+        std::fs::create_dir(tmp.path().join("real/policy")).unwrap();
+        failures.extend(write_failures(
+            "empty target".to_string(),
+            tmp.path(),
+            &link,
+        ));
+
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    #[test]
+    fn rewrite_discards_the_metadata_file_earlier_releases_left() {
+        let tmp = tempfile::tempdir().unwrap();
+        let policy = tmp.path().join("policy");
+        write_copy(&policy, OLDER);
+        std::fs::write(policy.join("metadata.json"), b"{}").unwrap();
+
+        let result = try_write_copy(&policy, NEWER);
+
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(read_iterations(&policy).unwrap(), NEWER);
+        assert!(
+            !policy.join("metadata.json").exists(),
+            "the earlier release's metadata.json must go with the replaced copy"
+        );
+        assert_eq!(leftover_siblings(&policy), Vec::<PathBuf>::new());
     }
 }
