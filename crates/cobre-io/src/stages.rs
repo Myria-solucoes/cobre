@@ -47,8 +47,9 @@
 use chrono::{Datelike, NaiveDate};
 use cobre_core::HorizonGraph;
 use cobre_core::temporal::{
-    Block, BlockMode, Node, NoiseMethod, PolicyGraphType, ScenarioSourceConfig, SeasonCycleType,
-    SeasonDefinition, SeasonMap, Stage, StageRiskConfig, StageStateConfig, Transition,
+    Block, BlockMode, Node, NoiseMethod, PolicyGraphType, SUB_PERIOD_TOLERANCE_DAYS,
+    ScenarioSourceConfig, SeasonCycleType, SeasonCycles, SeasonDefinition, SeasonMap, Stage,
+    StageRiskConfig, StageStateConfig, Transition,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, HashSet};
@@ -58,9 +59,7 @@ use crate::LoadError;
 
 // ── Intermediate serde types ──────────────────────────────────────────────────
 
-/// Top-level intermediate type for `stages.json`.
-///
-/// Private — only used during deserialization. Not re-exported.
+/// Root object of `stages.json`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -79,6 +78,7 @@ pub(crate) struct RawStagesFile {
     /// Detection field: present when a `stages.json` still contains the old
     /// `scenario_source` key. `parse_stages` rejects it with a clear migration
     /// error directing the user to move the field to `config.json`.
+    #[cfg_attr(feature = "schema", schemars(skip))]
     #[serde(default)]
     scenario_source: Option<serde_json::Value>,
 
@@ -90,7 +90,7 @@ pub(crate) struct RawStagesFile {
     stages: Vec<RawStage>,
 }
 
-/// Intermediate type for the `season_definitions` sub-object.
+/// The `season_definitions` sub-object.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -101,7 +101,7 @@ pub(crate) struct RawSeasonDefinitions {
     seasons: Vec<RawSeasonEntry>,
 }
 
-/// Intermediate type for one season entry.
+/// One season entry.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -123,7 +123,7 @@ pub(crate) struct RawSeasonEntry {
     day_end: Option<u32>,
 }
 
-/// Intermediate type for the `policy_graph` sub-object.
+/// The `policy_graph` sub-object.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -143,7 +143,7 @@ pub(crate) struct RawPolicyGraph {
     nodes: Vec<RawNode>,
 }
 
-/// Intermediate type for one policy graph transition.
+/// One policy graph transition.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -159,7 +159,7 @@ pub(crate) struct RawTransition {
     annual_discount_rate_override: Option<f64>,
 }
 
-/// Intermediate type for one policy-graph node.
+/// One policy-graph node.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -180,7 +180,7 @@ pub(crate) struct RawNode {
     label: Option<String>,
 }
 
-/// Intermediate type for a study stage entry.
+/// A study stage entry.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -218,11 +218,11 @@ pub(crate) struct RawStage {
     annual_discount_rate_override: Option<f64>,
 }
 
+// Both variants parse, so conversion rejects `cyclic` with the reserved message
+// instead of serde's unknown-variant error.
 /// Horizon type discriminator (`stages.json` `policy_graph.type`).
 ///
-/// Both variants parse; `cyclic` is rejected as reserved during conversion
-/// (see [`convert_policy_graph_type`]), never at parse, so the reserved message
-/// fires rather than a generic unknown-variant error.
+/// `cyclic` is reserved: the loader rejects it with a message that says so.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -319,7 +319,7 @@ impl<'de> Deserialize<'de> for RawNoiseMethod {
     }
 }
 
-/// Intermediate type for a pre-study stage entry (negative IDs).
+/// A pre-study stage entry (negative IDs).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -335,7 +335,7 @@ pub(crate) struct RawPreStudyStage {
     season_id: Option<usize>,
 }
 
-/// Intermediate type for one load block.
+/// One load block.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -348,7 +348,7 @@ pub(crate) struct RawBlock {
     hours: f64,
 }
 
-/// Intermediate type for the `state_variables` sub-object.
+/// The `state_variables` sub-object.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -361,19 +361,14 @@ pub(crate) struct RawStateVariables {
     inflow_lags: bool,
 }
 
-/// Intermediate untagged union for the `risk_measure` field.
-///
-/// The JSON value can be:
-/// - A string: `"expectation"`
-/// - An object: `{"cvar": {"alpha": 0.95, "lambda": 0.5}}`
-///
-/// `#[serde(untagged)]` tries each variant in declaration order.
-/// The `Expectation` string variant must come first so it is tried before
-/// the `CVaR` object variant.
+/// The `risk_measure` value, one of:
+/// - the string `"expectation"`;
+/// - an object such as `{"cvar": {"alpha": 0.95, "lambda": 0.5}}`.
 #[derive(Deserialize)]
 #[serde(untagged)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) enum RawRiskMeasure {
+    // Untagged: variants are tried in declaration order; the string form stays first.
     /// String variant: any string (canonically `"expectation"`).
     // Rationale: serde's `#[serde(untagged)]` matches this variant by attempting to deserialize
     // the JSON value as a `String`; the inner field is structurally required for that match to
@@ -1061,10 +1056,22 @@ fn convert_season_definitions(
                 })
                 .collect();
             seasons.sort_by_key(|s| s.id);
-            Ok(Some(SeasonMap {
+            let season_map = SeasonMap {
                 cycle_type,
                 seasons,
-            }))
+            };
+            if let Some((a, b)) = SeasonCycles::new(&season_map).overlapping_pair() {
+                return Err(LoadError::SchemaError {
+                    path: path.to_path_buf(),
+                    field: "season_definitions.seasons".into(),
+                    message: format!(
+                        "seasons {a} and {b} overlap within one resolution level; \
+                         seasons whose spans differ by at most {SUB_PERIOD_TOLERANCE_DAYS} days \
+                         form one level and must not share a calendar day"
+                    ),
+                });
+            }
+            Ok(Some(season_map))
         }
     }
 }
@@ -1148,19 +1155,6 @@ fn resolve_or_validate_season_id(
         ),
     })
 }
-
-/// Tolerance (days) shared with the semantic layer's season-duration-spread
-/// check (`validation::semantic::season::check_season_id_consistency`, rule
-/// 29): stages sharing a `season_id` are treated as one resolution when their
-/// durations are within this many days of each other. Applied here: a stage
-/// counts as a sub-period of its resolved season — and its declared
-/// `season_id` is trusted as an operator grouping label rather than
-/// cross-checked against the calendar — only when its own duration sits more
-/// than this tolerance below the resolved season's full period width.
-///
-/// `pub(crate)` so Rule 29 reads the same literal rather than forking a
-/// second `7`.
-pub(crate) const SUB_PERIOD_TOLERANCE_DAYS: i64 = 7;
 
 /// Calendar width, in days, of the period identified by `season_id` under
 /// `season_map`'s cycle: the specific month's length for `Monthly` (leap-aware,
@@ -1373,8 +1367,7 @@ mod tests {
 
     /// Given a `stages.json` with `"scenario_source": {"seed": 42}`,
     /// `parse_stages` returns `Err(LoadError::SchemaError)` with field
-    /// `"scenario_source"` and a message containing "moved from stages.json to
-    /// config.json".
+    /// `"scenario_source"` and the full migration message naming `config.json`.
     #[test]
     fn test_stages_with_scenario_source_rejected() {
         let json = r#"{
@@ -1395,9 +1388,11 @@ mod tests {
                     field, "scenario_source",
                     "field should be 'scenario_source', got: {field}"
                 );
-                assert!(
-                    message.contains("moved from stages.json to config.json"),
-                    "message should contain 'moved from stages.json to config.json', got: {message}"
+                assert_eq!(
+                    message,
+                    "the 'scenario_source' field has moved from stages.json to config.json \
+                     (training.scenario_source / simulation.scenario_source). \
+                     Remove it from stages.json."
                 );
             }
             other => panic!("expected SchemaError, got: {other:?}"),
@@ -1691,6 +1686,46 @@ mod tests {
                 assert!(
                     message.contains("multi-resolution") && message.contains("explicit"),
                     "message should instruct declaring an explicit season_id, got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    /// Given the d30-shaped map plus a second January (`id` 16) that shares
+    /// every day of monthly season 0, when `parse_stages` runs, it returns a
+    /// `SchemaError` naming both seasons.
+    #[test]
+    fn test_overlapping_same_level_seasons_rejected() {
+        let mut season_definitions: serde_json::Value =
+            serde_json::from_str(D30_SHAPED_SEASON_DEFINITIONS).unwrap();
+        season_definitions["seasons"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": 16, "month_start": 1, "day_start": 1,
+                "month_end": 1, "day_end": 31, "label": "January bis"
+            }));
+        let json = format!(
+            r#"{{
+              "policy_graph": {{ "type": "finite_horizon", "annual_discount_rate": 0.0, "transitions": [] }},
+              "season_definitions": {season_definitions},
+              "stages": [{{
+                "id": 6, "start_date": "2024-07-01", "end_date": "2024-10-01",
+                "season_id": 12,
+                "blocks": [{{ "id": 0, "name": "SINGLE", "hours": 2208.0 }}], "num_openings": 1
+              }}]
+            }}"#
+        );
+        let f = write_json(&json);
+        let err = parse_stages(f.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert_eq!(field, "season_definitions.seasons");
+                assert!(
+                    message.contains("overlap within one resolution level")
+                        && message.contains("seasons 0 and 16"),
+                    "message should name both overlapping seasons, got: {message}"
                 );
             }
             other => panic!("expected SchemaError, got: {other:?}"),

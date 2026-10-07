@@ -52,7 +52,7 @@ use std::path::Path;
 use super::parse_operational_start_date;
 use crate::LoadError;
 
-/// Top-level intermediate type for `buses.json` (serde only, not re-exported).
+/// Root object of `buses.json`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -64,7 +64,7 @@ pub(crate) struct RawBusFile {
     buses: Vec<RawBus>,
 }
 
-/// Intermediate type for a single bus entry.
+/// A single bus entry.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -76,18 +76,18 @@ pub(crate) struct RawBus {
     /// Date the entity enters service (ISO 8601 `YYYY-MM-DD`).
     operational_start_date: String,
     /// Optional entity-level deficit segment overrides.
-    /// When absent, the global defaults from `penalties.json` are used.
+    /// When absent, falls back to `bus.deficit_segments` in `penalties.json`.
     deficit_segments: Option<Vec<RawDeficitSegment>>,
 }
 
-/// Intermediate type for a single deficit segment entry.
+/// A single deficit segment entry.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawDeficitSegment {
     /// MW depth of this segment. `null` means unbounded (last segment only).
     depth_mw: Option<f64>,
-    /// Cost per `MWh` of deficit in this segment \[$/`MWh`\].
+    /// Cost per `MWh` of deficit in this segment ($/`MWh`).
     cost: f64,
 }
 

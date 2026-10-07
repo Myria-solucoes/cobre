@@ -1,5 +1,6 @@
 //! Simulation phase for `cobre run`.
 
+use std::path::Path;
 use std::sync::mpsc;
 
 use console::Term;
@@ -14,6 +15,8 @@ use cobre_io::now_iso8601;
 use cobre_io::output::simulation_writer::ScenarioWritePayload;
 use cobre_io::output::simulation_writer::SimulationParquetWriter;
 use cobre_io::output::simulation_writer::SimulationPathRecord;
+use cobre_io::write_skipped_simulation_results;
+use cobre_io::write_success_marker;
 use cobre_sddp::SOLVER_STATS_DELTA_SCALAR_FIELDS;
 use cobre_sddp::SimulationWeighting;
 use cobre_sddp::SolverStatsDelta;
@@ -223,27 +226,55 @@ fn write_sim_outputs_on_root(
     global_path_rows: &[SimulationPathRecord],
     gathered_scenario_costs: &[(u32, f64, Option<f64>)],
 ) -> Result<(), CliError> {
-    let mpi_world_size = u32::try_from(ctx.topology.world_size).unwrap_or(u32::MAX);
-    let sim_ctx = OutputContext {
-        hostname: hostname.to_string(),
-        solver: active_solver_metadata_id().to_string(),
-        solver_version: Some(ctx.solver_version.clone()),
-        started_at: sim_started_at,
-        completed_at: now_iso8601(),
-        distribution: build_distribution_info(&ctx.topology, ctx.n_threads, mpi_world_size),
-        setup: None,
-        production_fit_deviation: None,
-    };
     write_simulation_outputs(&WriteSimulationArgs {
         output_dir: &ctx.output_dir,
         sim_output: merged_sim_output,
         sim_solver_stats: global_scenario_stats,
         sim_path_rows: global_path_rows,
         sim_scenario_costs: gathered_scenario_costs,
-        output_ctx: &sim_ctx,
+        output_ctx: &simulation_output_context(ctx, hostname, sim_started_at),
         quiet: ctx.quiet,
         stderr: &ctx.stderr,
     })
+}
+
+fn simulation_output_context(
+    ctx: &RunContext<impl Communicator>,
+    hostname: &str,
+    started_at: String,
+) -> OutputContext {
+    let mpi_world_size = u32::try_from(ctx.topology.world_size).unwrap_or(u32::MAX);
+    OutputContext {
+        hostname: hostname.to_string(),
+        solver: active_solver_metadata_id().to_string(),
+        solver_version: Some(ctx.solver_version.clone()),
+        started_at,
+        completed_at: now_iso8601(),
+        distribution: build_distribution_info(&ctx.topology, ctx.n_threads, mpi_world_size),
+        setup: None,
+        production_fit_deviation: None,
+    }
+}
+
+/// Write the skipped simulation's outputs on rank 0, in place of
+/// [`run_simulation_phase`]; no rank runs a scenario.
+pub(super) fn skip_simulation_phase(
+    ctx: &RunContext<impl Communicator>,
+    hostname: &str,
+    n_scenarios: u32,
+) -> Result<(), CliError> {
+    let sim_ctx = simulation_output_context(ctx, hostname, now_iso8601());
+    write_skipped_simulation_outputs(&ctx.output_dir, n_scenarios, &sim_ctx)
+}
+
+fn write_skipped_simulation_outputs(
+    output_dir: &Path,
+    n_scenarios: u32,
+    output_ctx: &OutputContext,
+) -> Result<(), CliError> {
+    write_skipped_simulation_results(output_dir, n_scenarios, output_ctx)
+        .map_err(CliError::from)?;
+    write_success_marker(&output_dir.join("simulation")).map_err(CliError::from)
 }
 
 /// Print the simulation summary from aggregated solver stats and cost statistics.
@@ -410,11 +441,239 @@ fn aggregate_simulation_solver_stats<C: Communicator>(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
 mod tests {
+    use std::any::Any;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use console::Term;
+    use tempfile::TempDir;
+
+    use cobre_comm::{
+        BackendKind, CommData, CommError, Communicator, ExecutionTopology, HostInfo, LocalBackend,
+        ReduceOp,
+    };
+    use cobre_io::{
+        DistributionInfo, HostLayout, OutputContext, RunStatus, read_simulation_metadata,
+    };
     use cobre_sddp::SimulationWeighting;
     use cobre_sddp::setup::{
         NodeGraph, NodeId, NodeOpenings, NodeRuntime, OpeningSource, StageIdx, Traversal,
     };
+
+    use super::{run_simulation_phase, write_skipped_simulation_outputs};
+    use crate::commands::run::setup::broadcast_and_build_setup;
+    use crate::commands::run::training::run_training_phase;
+    use crate::commands::run::{CommBackendArg, RunArgs, RunContext};
+    use crate::error::CliError;
+    use crate::progress::RenderMode;
+
+    #[derive(Default)]
+    struct PeerFailedComm {
+        collective_calls: AtomicUsize,
+    }
+
+    impl PeerFailedComm {
+        fn collective_calls(&self) -> usize {
+            self.collective_calls.load(Ordering::SeqCst)
+        }
+
+        fn refuse(&self, operation: &'static str) -> CommError {
+            self.collective_calls.fetch_add(1, Ordering::SeqCst);
+            CommError::CollectiveFailed {
+                operation,
+                mpi_error_code: 0,
+                message: "only the reconcile flag is answered".to_string(),
+            }
+        }
+    }
+
+    impl Communicator for PeerFailedComm {
+        fn allgatherv<T: CommData>(
+            &self,
+            _send: &[T],
+            _recv: &mut [T],
+            _counts: &[usize],
+            _displs: &[usize],
+        ) -> Result<(), CommError> {
+            Err(self.refuse("allgatherv"))
+        }
+
+        fn allreduce<T: CommData>(
+            &self,
+            send: &[T],
+            recv: &mut [T],
+            op: ReduceOp,
+        ) -> Result<(), CommError> {
+            if op == ReduceOp::Max
+                && send.len() == 1
+                && let Some(flag) = recv
+                    .first_mut()
+                    .and_then(|r| (r as &mut dyn Any).downcast_mut::<i32>())
+            {
+                self.collective_calls.fetch_add(1, Ordering::SeqCst);
+                *flag = 1;
+                return Ok(());
+            }
+            Err(self.refuse("allreduce"))
+        }
+
+        fn broadcast<T: CommData>(&self, _buf: &mut [T], _root: usize) -> Result<(), CommError> {
+            Err(self.refuse("broadcast"))
+        }
+
+        fn barrier(&self) -> Result<(), CommError> {
+            Err(self.refuse("barrier"))
+        }
+
+        fn rank(&self) -> usize {
+            0
+        }
+
+        fn size(&self) -> usize {
+            2
+        }
+
+        fn abort(&self, error_code: i32) -> ! {
+            panic!("PeerFailedComm::abort({error_code})")
+        }
+    }
+
+    fn test_run_context<C: Communicator>(
+        comm: C,
+        world_size: usize,
+        case_dir: &Path,
+        output_dir: &Path,
+    ) -> RunContext<C> {
+        RunContext {
+            comm,
+            is_root: true,
+            quiet: true,
+            n_threads: 1,
+            output_dir: output_dir.to_path_buf(),
+            case_dir: case_dir.to_path_buf(),
+            term_width: 80,
+            stderr: Term::stderr(),
+            render_mode: RenderMode::auto(),
+            topology: ExecutionTopology {
+                backend: BackendKind::Local,
+                world_size,
+                hosts: vec![HostInfo {
+                    hostname: "localhost".to_string(),
+                    ranks: (0..world_size).collect(),
+                }],
+                mpi: None,
+                slurm: None,
+            },
+            solver_version: String::new(),
+        }
+    }
+
+    #[test]
+    fn simulation_writes_no_marker_when_a_peer_rank_fails() {
+        let case_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/1dtoy");
+        let output = TempDir::new().expect("output tempdir must be creatable");
+        let output_dir = output.path().to_path_buf();
+        let args = RunArgs {
+            case_dir: case_dir.clone(),
+            output: Some(output_dir.clone()),
+            quiet: true,
+            threads: Some(1),
+            comm_backend: CommBackendArg::Local,
+        };
+
+        let local = test_run_context(LocalBackend, 1, &case_dir, &output_dir);
+        let mut loaded = broadcast_and_build_setup(&local, &args)
+            .expect("1dtoy must load and build its study setup");
+        let training =
+            run_training_phase(&local, &mut loaded.setup, &Arc::new(AtomicUsize::new(0)))
+                .expect("1dtoy must train under the local backend");
+        assert!(
+            training.error.is_none(),
+            "1dtoy training must finish without a mid-iteration error: {:?}",
+            training.error
+        );
+
+        let peer = test_run_context(PeerFailedComm::default(), 2, &case_dir, &output_dir);
+        let outcome = run_simulation_phase(
+            &peer,
+            &loaded.system,
+            &mut loaded.setup,
+            &training.result,
+            "localhost",
+        );
+
+        match outcome {
+            Err(CliError::Internal { message }) => assert!(
+                message.contains("a peer rank failed simulation"),
+                "expected the peer-failure lockstep error, got: {message}"
+            ),
+            other => panic!("expected the peer-failure lockstep error, got {other:?}"),
+        }
+        assert_eq!(
+            peer.comm.collective_calls(),
+            1,
+            "the reconcile must be the only collective entered"
+        );
+
+        let sim_dir = output_dir.join("simulation");
+        assert!(
+            !sim_dir.join("_SUCCESS").exists(),
+            "a peer failure must leave no simulation/_SUCCESS"
+        );
+        assert!(
+            !sim_dir.join("metadata.json").exists(),
+            "a peer failure must leave no simulation/metadata.json"
+        );
+        assert!(
+            sim_dir
+                .join("costs/scenario_id=0000/data.parquet")
+                .is_file(),
+            "rank 0 must have written its own partitions before the reconcile"
+        );
+    }
+
+    #[test]
+    fn skipped_simulation_outputs_write_partial_metadata_then_the_marker() {
+        let output = TempDir::new().expect("output tempdir must be creatable");
+        let output_ctx = OutputContext {
+            hostname: "localhost".to_string(),
+            solver: "highs".to_string(),
+            solver_version: None,
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            completed_at: "2026-01-01T00:00:00Z".to_string(),
+            distribution: DistributionInfo {
+                backend: "local".to_string(),
+                world_size: 1,
+                ranks_participated: 1,
+                num_hosts: 1,
+                threads_per_rank: 1,
+                mpi_library: None,
+                mpi_standard: None,
+                thread_level: None,
+                slurm_job_id: None,
+                hosts: vec![HostLayout {
+                    hostname: "localhost".to_string(),
+                    ranks: vec![0],
+                }],
+            },
+            setup: None,
+            production_fit_deviation: None,
+        };
+
+        write_skipped_simulation_outputs(output.path(), 100, &output_ctx)
+            .expect("the skipped-simulation writer must succeed");
+
+        let sim_dir = output.path().join("simulation");
+        let metadata = read_simulation_metadata(&sim_dir.join("metadata.json"))
+            .expect("simulation/metadata.json must decode");
+        assert_eq!(metadata.status, RunStatus::Partial);
+        assert_eq!(metadata.scenarios.total, 100);
+        assert_eq!(metadata.scenarios.completed, 0);
+        assert!(sim_dir.join("_SUCCESS").is_file());
+    }
 
     /// A single-node, single-leaf graph — enough to resolve a `Traversal` in
     /// either axis without a full `StudySetup`.

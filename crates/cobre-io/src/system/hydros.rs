@@ -70,9 +70,7 @@ use crate::LoadError;
 
 // ── Intermediate serde types ──────────────────────────────────────────────────
 
-/// Top-level intermediate type for `hydros.json`.
-///
-/// Private — only used during deserialization. Not re-exported.
+/// Root object of `hydros.json`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -85,7 +83,7 @@ pub(crate) struct RawHydroFile {
     hydros: Vec<RawHydro>,
 }
 
-/// Intermediate type for a single hydro plant entry.
+/// A single hydro plant entry.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -98,7 +96,7 @@ pub(crate) struct RawHydro {
     operational_start_date: String,
     /// Downstream hydro plant in the cascade. `null` = no downstream.
     downstream_id: Option<i32>,
-    /// Travel time on the cascade arc to `downstream_id` \[hours\]. Absent or
+    /// Travel time on the cascade arc to `downstream_id` (hours). Absent or
     /// null = instantaneous (v1 excludes diversion and pumping arcs).
     #[serde(default)]
     travel_time_hours: Option<f64>,
@@ -138,7 +136,7 @@ pub(crate) struct RawHydro {
     /// rejected.
     #[cfg_attr(feature = "schema", schemars(required))]
     unit_groups: Option<Vec<RawUnitGroup>>,
-    /// Specific productivity `ρ_esp` \[MW / ((m³/s) · m)\].
+    /// Specific productivity `ρ_esp` (MW / ((m³/s) · m)).
     ///
     /// **Resolution cascade** (first source that supplies a non-`null` value wins):
     ///
@@ -152,38 +150,37 @@ pub(crate) struct RawHydro {
     /// explicit error.
     #[serde(default)]
     specific_productivity_mw_per_m3s_per_m: Option<f64>,
-    /// Entity-level penalty overrides. Absent = all penalties use global defaults.
+    /// Entity-level penalty overrides. When absent, every penalty uses the `hydro` section of `penalties.json`.
     #[serde(default)]
     penalties: Option<RawHydroPenaltyOverrides>,
 }
 
-/// Intermediate type for the `reservoir` sub-object.
+/// The `reservoir` sub-object.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawReservoir {
-    /// Minimum operational storage (dead volume) \[hm³\].
+    /// Minimum operational storage (dead volume) (hm³).
     min_storage_hm3: f64,
-    /// Maximum operational storage \[hm³\].
+    /// Maximum operational storage (hm³).
     max_storage_hm3: f64,
 }
 
-/// Intermediate type for the `outflow` sub-object.
+/// The `outflow` sub-object.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawOutflow {
-    /// Minimum total outflow [m³/s].
+    /// Minimum total outflow (m³/s).
     min_outflow_m3s: f64,
-    /// Maximum total outflow [m³/s]. `null` = no upper bound.
+    /// Maximum total outflow (m³/s). `null` = no upper bound.
     max_outflow_m3s: Option<f64>,
 }
 
-/// Tagged-union intermediate type for the `generation` sub-object.
+/// The `generation` sub-object.
 ///
-/// Uses `#[serde(tag = "model")]` (internally-tagged) to dispatch on the
-/// `"model"` field value. Each variant carries only the fields relevant to
-/// that model. The `productivity_mw_per_m3s` field is NOT accepted here —
+/// The `model` key selects the production model, and each model accepts only
+/// its own fields. The `productivity_mw_per_m3s` field is NOT accepted here —
 /// productivity coefficients are read from `system/hydro_production_models.json`
 /// and are associated per `(hydro, stage)` outside this file.
 /// A `hydros.json` input that includes `productivity_mw_per_m3s` in its
@@ -199,13 +196,13 @@ pub(crate) enum RawGeneration {
     /// accepted in `hydros.json`; supplying `productivity_mw_per_m3s` here
     /// produces a hard parse error.
     ConstantProductivity {
-        /// Minimum turbined flow [m³/s].
+        /// Minimum turbined flow (m³/s).
         min_turbined_m3s: f64,
-        /// Maximum turbined flow [m³/s].
+        /// Maximum turbined flow (m³/s).
         max_turbined_m3s: f64,
-        /// Minimum electrical generation \[MW\].
+        /// Minimum electrical generation (MW).
         min_generation_mw: f64,
-        /// Maximum electrical generation \[MW\].
+        /// Maximum electrical generation (MW).
         max_generation_mw: f64,
     },
     /// Head-dependent productivity linearized around an operating point.
@@ -215,13 +212,13 @@ pub(crate) enum RawGeneration {
     /// accepted in `hydros.json`; supplying `productivity_mw_per_m3s` here
     /// produces a hard parse error.
     LinearizedHead {
-        /// Minimum turbined flow [m³/s].
+        /// Minimum turbined flow (m³/s).
         min_turbined_m3s: f64,
-        /// Maximum turbined flow [m³/s].
+        /// Maximum turbined flow (m³/s).
         max_turbined_m3s: f64,
-        /// Minimum electrical generation \[MW\].
+        /// Minimum electrical generation (MW).
         min_generation_mw: f64,
-        /// Maximum electrical generation \[MW\].
+        /// Maximum electrical generation (MW).
         max_generation_mw: f64,
     },
     /// Full production function with head-area-productivity tables (FPHA model).
@@ -230,13 +227,13 @@ pub(crate) enum RawGeneration {
     /// `system/hydro_production_models.json`. The `productivity_mw_per_m3s`
     /// field is not accepted here or in any other `generation` variant.
     Fpha {
-        /// Minimum turbined flow [m³/s].
+        /// Minimum turbined flow (m³/s).
         min_turbined_m3s: f64,
-        /// Maximum turbined flow [m³/s].
+        /// Maximum turbined flow (m³/s).
         max_turbined_m3s: f64,
-        /// Minimum electrical generation \[MW\].
+        /// Minimum electrical generation (MW).
         min_generation_mw: f64,
-        /// Maximum electrical generation \[MW\].
+        /// Maximum electrical generation (MW).
         max_generation_mw: f64,
     },
 }
@@ -272,9 +269,7 @@ impl RawGeneration {
     }
 }
 
-/// Tagged-union intermediate type for the `tailrace` sub-object.
-///
-/// Uses `#[serde(tag = "type")]` internally-tagged on the `"type"` field.
+/// The `tailrace` sub-object. The `type` key selects the tailrace model.
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -291,18 +286,18 @@ pub(crate) enum RawTailrace {
     },
 }
 
-/// Intermediate type for a single piecewise tailrace breakpoint.
+/// A single piecewise tailrace breakpoint.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawTailracePoint {
-    /// Total outflow at this point [m³/s].
+    /// Total outflow at this point (m³/s).
     outflow_m3s: f64,
-    /// Downstream water level (tailrace height) at this outflow \[m\].
+    /// Downstream water level (tailrace height) at this outflow (m).
     height_m: f64,
 }
 
-/// Tagged-union intermediate type for the `hydraulic_losses` sub-object.
+/// The `hydraulic_losses` sub-object.
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -314,12 +309,12 @@ pub(crate) enum RawHydraulicLosses {
     },
     /// Constant head loss independent of flow or head.
     Constant {
-        /// Fixed head loss \[m\].
+        /// Fixed head loss (m).
         value_m: f64,
     },
 }
 
-/// Tagged-union intermediate type for the `efficiency` sub-object.
+/// The `efficiency` sub-object.
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -331,15 +326,15 @@ pub(crate) enum RawEfficiency {
     },
 }
 
-/// Intermediate type for the `evaporation` sub-object.
+/// The `evaporation` sub-object.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawEvaporation {
-    /// Monthly evaporation coefficients [mm/month], one per calendar month.
+    /// Monthly evaporation coefficients (mm/month), one per calendar month.
     /// Index 0 = January, index 11 = December.
     coefficients_mm: Vec<f64>,
-    /// Monthly reservoir reference volumes \[hm³\] used as the linearization
+    /// Monthly reservoir reference volumes (hm³) used as the linearization
     /// reference point for evaporation, one per calendar month.
     /// Index 0 = January, index 11 = December.
     /// Absent = no reference volume override; the calling algorithm uses its
@@ -348,31 +343,31 @@ pub(crate) struct RawEvaporation {
     reference_volumes_hm3: Option<Vec<f64>>,
 }
 
-/// Intermediate type for the `diversion` sub-object.
+/// The `diversion` sub-object.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawDiversionChannel {
     /// Identifier of the downstream hydro plant receiving diverted water.
     downstream_id: i32,
-    /// Maximum diversion flow capacity [m³/s].
+    /// Maximum diversion flow capacity (m³/s).
     max_flow_m3s: f64,
 }
 
-/// Intermediate type for the `filling` sub-object.
+/// The `filling` sub-object.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawFillingConfig {
     /// Stage index at which filling begins (inclusive).
     start_stage_id: i32,
-    /// Minimum accumulation rate applied during filling [m³/s].
+    /// Minimum accumulation rate applied during filling (m³/s).
     /// Absent = passive filling (no minimum rate, defaults to 0.0 per spec).
     #[serde(default)]
     filling_min_rate_m3s: f64,
 }
 
-/// Intermediate type for a single declared entry in the `unit_groups` array.
+/// A single declared entry in the `unit_groups` array.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -383,49 +378,60 @@ pub(crate) struct RawUnitGroup {
     name: String,
     /// Bus to which this group's generation is injected.
     bus_id: i32,
-    /// Minimum electrical generation \[MW\].
+    /// Minimum electrical generation (MW).
     min_generation_mw: f64,
-    /// Maximum electrical generation \[MW\].
+    /// Maximum electrical generation (MW).
     max_generation_mw: f64,
-    /// Minimum turbined flow [m³/s].
+    /// Minimum turbined flow (m³/s).
     min_turbined_m3s: f64,
-    /// Maximum turbined flow [m³/s].
+    /// Maximum turbined flow (m³/s).
     max_turbined_m3s: f64,
 }
 
-/// Intermediate type for entity-level hydro penalty overrides.
+/// Entity-level hydro penalty overrides.
 ///
-/// All 11 fields are `Option<f64>`. Absent fields default to `None`,
-/// meaning the global default for that penalty is used.
-///
-/// JSON field names mirror `HydroPenalties` and `HydroPenaltyOverrides` field names.
+/// Each field is named after a field of the `hydro` section of `penalties.json`; an absent field falls back to that section's value.
 #[allow(clippy::struct_field_names)]
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawHydroPenaltyOverrides {
+    /// Spillage penalty ($/(m³/s·h)).
     #[serde(default)]
     spillage_cost: Option<f64>,
+    /// Diversion flow penalty ($/(m³/s·h)).
     #[serde(default)]
     diversion_cost: Option<f64>,
+    /// Turbined-flow regularization cost ($/(m³/s·h)).
     #[serde(default)]
     turbined_cost: Option<f64>,
+    /// Storage below-minimum violation penalty ($/hm³).
     #[serde(default)]
     storage_violation_below_cost: Option<f64>,
+    /// Filling-target violation penalty ($/hm³).
     #[serde(default)]
     filling_target_violation_cost: Option<f64>,
+    /// Turbined-flow below-minimum violation penalty ($/(m³/s·h)).
     #[serde(default)]
     turbined_violation_below_cost: Option<f64>,
+    /// Outflow below-minimum violation penalty ($/(m³/s·h)).
     #[serde(default)]
     outflow_violation_below_cost: Option<f64>,
+    /// Outflow above-maximum violation penalty ($/(m³/s·h)).
     #[serde(default)]
     outflow_violation_above_cost: Option<f64>,
+    /// Generation below-minimum violation penalty ($/`MWh`).
     #[serde(default)]
     generation_violation_below_cost: Option<f64>,
+    /// Symmetric evaporation violation penalty of this plant, applied in both
+    /// directions ($/(m³/s·h)).
     #[serde(default)]
     evaporation_violation_cost: Option<f64>,
+    /// Symmetric water withdrawal violation penalty of this plant, applied in
+    /// both directions ($/(m³/s·h)).
     #[serde(default)]
     water_withdrawal_violation_cost: Option<f64>,
+    /// Inflow non-negativity penalty ($/(m³/s·h)).
     #[serde(default)]
     inflow_nonnegativity_cost: Option<f64>,
 }
@@ -921,10 +927,10 @@ fn convert_penalty_overrides(raw: RawHydroPenaltyOverrides) -> HydroPenaltyOverr
         generation_violation_below_cost: raw.generation_violation_below_cost,
         evaporation_violation_cost: raw.evaporation_violation_cost,
         water_withdrawal_violation_cost: raw.water_withdrawal_violation_cost,
-        water_withdrawal_violation_pos_cost: raw.water_withdrawal_violation_cost,
-        water_withdrawal_violation_neg_cost: raw.water_withdrawal_violation_cost,
-        evaporation_violation_pos_cost: raw.evaporation_violation_cost,
-        evaporation_violation_neg_cost: raw.evaporation_violation_cost,
+        water_withdrawal_violation_pos_cost: None,
+        water_withdrawal_violation_neg_cost: None,
+        evaporation_violation_pos_cost: None,
+        evaporation_violation_neg_cost: None,
         inflow_nonnegativity_cost: raw.inflow_nonnegativity_cost,
     }
 }
@@ -1297,6 +1303,86 @@ mod tests {
             (hydros[0].penalties.storage_violation_below_cost - 10_000.0).abs() < f64::EPSILON,
             "storage_violation_below_cost should be 10_000.0 (global default)"
         );
+    }
+
+    fn make_global_with_directional_costs() -> GlobalPenaltyDefaults {
+        let mut global = make_global();
+        global.hydro.water_withdrawal_violation_pos_cost = 1_100.0;
+        global.hydro.water_withdrawal_violation_neg_cost = 1_200.0;
+        global.hydro.evaporation_violation_pos_cost = 5_100.0;
+        global.hydro.evaporation_violation_neg_cost = 5_200.0;
+        global
+    }
+
+    #[test]
+    fn plant_penalties_block_without_symmetric_cost_keeps_global_directional_costs() {
+        let json = r#"{
+          "hydros": [{
+            "id": 0, "name": "Override",
+            "operational_start_date": "2024-01-01",
+            "downstream_id": null,
+            "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 1000.0 },
+            "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
+            "generation": {
+              "model": "constant_productivity",
+              "min_turbined_m3s": 0.0,
+              "max_turbined_m3s": 500.0,
+              "min_generation_mw": 0.0,
+              "max_generation_mw": 250.0
+            },
+            "penalties": { "spillage_cost": 0.05 },
+            "unit_groups": [
+              { "id": 0, "name": "Override", "bus_id": 0,
+                "min_generation_mw": 0.0, "max_generation_mw": 250.0,
+                "min_turbined_m3s": 0.0, "max_turbined_m3s": 500.0 }
+            ]
+          }]
+        }"#;
+        let f = write_json(json);
+        let global = make_global_with_directional_costs();
+        let hydros = parse_hydros(f.path(), &global).unwrap();
+
+        let p = &hydros[0].penalties;
+        assert!((p.water_withdrawal_violation_pos_cost - 1_100.0).abs() < f64::EPSILON);
+        assert!((p.water_withdrawal_violation_neg_cost - 1_200.0).abs() < f64::EPSILON);
+        assert!((p.evaporation_violation_pos_cost - 5_100.0).abs() < f64::EPSILON);
+        assert!((p.evaporation_violation_neg_cost - 5_200.0).abs() < f64::EPSILON);
+        assert!((p.spillage_cost - 0.05).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn plant_symmetric_penalty_sets_both_directions() {
+        let json = r#"{
+          "hydros": [{
+            "id": 0, "name": "Override",
+            "operational_start_date": "2024-01-01",
+            "downstream_id": null,
+            "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 1000.0 },
+            "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
+            "generation": {
+              "model": "constant_productivity",
+              "min_turbined_m3s": 0.0,
+              "max_turbined_m3s": 500.0,
+              "min_generation_mw": 0.0,
+              "max_generation_mw": 250.0
+            },
+            "penalties": { "water_withdrawal_violation_cost": 2000.0, "evaporation_violation_cost": 6000.0 },
+            "unit_groups": [
+              { "id": 0, "name": "Override", "bus_id": 0,
+                "min_generation_mw": 0.0, "max_generation_mw": 250.0,
+                "min_turbined_m3s": 0.0, "max_turbined_m3s": 500.0 }
+            ]
+          }]
+        }"#;
+        let f = write_json(json);
+        let global = make_global_with_directional_costs();
+        let hydros = parse_hydros(f.path(), &global).unwrap();
+
+        let p = &hydros[0].penalties;
+        assert!((p.water_withdrawal_violation_pos_cost - 2_000.0).abs() < f64::EPSILON);
+        assert!((p.water_withdrawal_violation_neg_cost - 2_000.0).abs() < f64::EPSILON);
+        assert!((p.evaporation_violation_pos_cost - 6_000.0).abs() < f64::EPSILON);
+        assert!((p.evaporation_violation_neg_cost - 6_000.0).abs() < f64::EPSILON);
     }
 
     // ── AC: entity-level penalty all-default (no penalties block) ─────────────

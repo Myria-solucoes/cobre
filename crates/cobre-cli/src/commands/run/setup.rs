@@ -7,7 +7,7 @@
 //! non-root ranks independently re-read the case directory from disk
 //! (`prepare_hydro_models`), relying on a shared filesystem instead.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use console::Term;
 
@@ -20,6 +20,9 @@ use cobre_io::PolicyMode;
 use cobre_io::SetupTimings;
 use cobre_io::load_case_with_artifacts;
 use cobre_io::parse_config;
+use cobre_io::remove_conditional_training_outputs;
+use cobre_io::remove_simulation_outputs;
+use cobre_io::remove_success_marker;
 use cobre_io::write_hydro_model_summary;
 use cobre_io::write_provenance_report;
 use cobre_io::write_scaling_report;
@@ -45,6 +48,7 @@ use crate::error::CliError;
 use crate::commands::broadcast::{
     BroadcastConfig, BroadcastOpeningTree, broadcast_value, stopping_rules_from_broadcast,
 };
+use crate::commands::resolve_output_dir;
 
 use super::{RunArgs, RunContext};
 use crate::banner::print_banner;
@@ -77,6 +81,7 @@ type LoadedCase = (
 /// Load case and config on rank 0, capturing errors for MPI collective participation.
 fn load_case_and_config(
     args: &RunArgs,
+    output_dir: &Path,
     quiet: bool,
     stderr: &Term,
 ) -> Result<LoadedCase, CliError> {
@@ -98,6 +103,9 @@ fn load_case_and_config(
     let cobre_io::LoadedCase { system, artifacts } = load_case_with_artifacts(&args.case_dir)?;
     let config_path = args.case_dir.join("config.json");
     let config = parse_config(&config_path)?;
+    config
+        .policy
+        .check_dir(&config_path, output_dir, config.policy_dir_intent())?;
     timings.load_seconds = load_start.elapsed().as_secs_f64();
 
     // Resolve the boundary-derived state requirements once (rank 0, the sole
@@ -217,10 +225,7 @@ pub(super) fn setup_communicator(
         );
     }
 
-    let output_dir: PathBuf = args
-        .output
-        .clone()
-        .unwrap_or_else(|| args.case_dir.join("output"));
+    let output_dir = resolve_output_dir(&args.case_dir, args.output.as_deref());
     let term_width = resolve_term_width();
     let render_mode = RenderMode::auto();
 
@@ -262,7 +267,7 @@ pub(super) fn broadcast_and_build_setup(
         raw_scalar_parameters,
         load_err,
     ) = if ctx.is_root {
-        match load_case_and_config(args, ctx.quiet, &ctx.stderr) {
+        match load_case_and_config(args, &ctx.output_dir, ctx.quiet, &ctx.stderr) {
             Ok((prepared, hydro_models, bcast, config, scalar_parameters, timings)) => {
                 root_setup_timings = Some(timings);
                 let bcast_tree = if prepared.stochastic.provenance().opening_tree
@@ -446,6 +451,7 @@ fn build_study_setup(
         cut_activity_tolerance: bcast_config.cut_activity_tolerance,
         budget: bcast_config.budget,
         export_states: bcast_config.export_states,
+        checkpoint_schedule: bcast_config.checkpoint_schedule,
         scalar_parameters,
         training_solver_backward,
         training_solver_forward,
@@ -517,9 +523,12 @@ pub(super) fn run_pre_training(
     Ok(())
 }
 
-/// Rank-0 pre-training export writes: hydro model summary, provenance report,
-/// stochastic artifacts (non-fatal), and scaling report. Called only on rank 0;
-/// the returned `Result` is reconciled across ranks before the post-export barrier.
+/// Rank-0 pre-training exports: removes the stale `_SUCCESS` of each planned
+/// phase, an earlier run's simulation outputs when simulation is planned and an
+/// earlier run's conditional training outputs when training is planned, then
+/// writes the hydro model summary, provenance report, stochastic artifacts
+/// (non-fatal), and scaling report. Called only on rank 0; the returned
+/// `Result` is reconciled across ranks before the post-export barrier.
 fn run_root_exports(
     ctx: &RunContext<impl Communicator>,
     system: &System,
@@ -528,6 +537,17 @@ fn run_root_exports(
     root_estimation_report: Option<&EstimationReport>,
     root_estimation_path: Option<EstimationPath>,
 ) -> Result<(), CliError> {
+    if root_config.is_some_and(|c| c.training.enabled) {
+        remove_success_marker(&ctx.output_dir.join("training")).map_err(CliError::from)?;
+    }
+    if setup.simulation_config.n_scenarios > 0 {
+        remove_success_marker(&ctx.output_dir.join("simulation")).map_err(CliError::from)?;
+        remove_simulation_outputs(&ctx.output_dir).map_err(CliError::from)?;
+    }
+    if root_config.is_some_and(|c| c.training.enabled) {
+        remove_conditional_training_outputs(&ctx.output_dir).map_err(CliError::from)?;
+    }
+
     // Built regardless of `quiet`: it feeds the `training/hydro_models.json`
     // output file, not just the optional print.
     let hydro_summary = build_hydro_model_summary(&setup.hydro_models, system);
@@ -617,6 +637,7 @@ mod tests {
 
     use super::{build_study_setup, load_case_and_config, reconstruct_stochastic_context_non_root};
     use crate::commands::broadcast::BroadcastOpeningTree;
+    use crate::commands::resolve_output_dir;
     use crate::commands::run::{CommBackendArg, RunArgs};
     use crate::error::CliError;
 
@@ -639,9 +660,13 @@ mod tests {
             threads: None,
             comm_backend: CommBackendArg::Local,
         };
-        let (prepared, _hydro_models, bcast, _config, _scalars, _timings) =
-            load_case_and_config(&args, true, &Term::stderr())
-                .expect("D29 must load and prepare stochastic context on rank 0");
+        let (prepared, _hydro_models, bcast, _config, _scalars, _timings) = load_case_and_config(
+            &args,
+            &resolve_output_dir(&args.case_dir, None),
+            true,
+            &Term::stderr(),
+        )
+        .expect("D29 must load and prepare stochastic context on rank 0");
 
         let ids = study_stage_noise_group_ids(&prepared.system);
         assert!(
@@ -705,7 +730,12 @@ mod tests {
                 comm_backend: CommBackendArg::Local,
             };
             let (prepared, hydro_models, mut bcast, _config, scalars, _timings) =
-                load_case_and_config(&args, true, &Term::stderr())?;
+                load_case_and_config(
+                    &args,
+                    &resolve_output_dir(&args.case_dir, None),
+                    true,
+                    &Term::stderr(),
+                )?;
 
             let bcast_tree = if prepared.stochastic.provenance().opening_tree
                 == ComponentProvenance::UserSupplied

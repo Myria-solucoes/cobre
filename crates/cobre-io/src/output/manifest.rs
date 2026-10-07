@@ -160,7 +160,12 @@ pub struct MetadataIterations {
 /// Convergence summary embedded in [`TrainingMetadata`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetadataConvergence {
-    /// Whether a convergence-oriented stopping rule triggered termination.
+    /// `true` when training stopped because its configured stopping rules were
+    /// met and a `gap` or `bound_stalling` rule was among the rules triggered at
+    /// that iteration. `false` when only `iteration_limit` or `time_limit`
+    /// triggered, and when the iteration limit ran out, a shutdown request ended
+    /// training, or training ended on an error before the configured rules were
+    /// met.
     pub achieved: bool,
     /// Final optimality gap in percent (`null` when upper bound evaluation is disabled).
     pub final_gap_percent: Option<f64>,
@@ -370,6 +375,16 @@ pub struct MetadataSimulationSolveStats {
     pub parallelism: Option<u32>,
 }
 
+/// How a phase ended, recorded as `status` in its metadata file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunStatus {
+    /// Every other ending, including one that ended on an error.
+    Complete,
+    /// A shutdown request ended the phase early.
+    Partial,
+}
+
 // ── TrainingMetadata ─────────────────────────────────────────────────────────
 
 /// Merged metadata for the training output directory (`training/metadata.json`).
@@ -378,8 +393,10 @@ pub struct MetadataSimulationSolveStats {
 /// configuration, and environment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrainingMetadata {
-    /// Version of the cobre crate that produced this output.
-    pub cobre_version: String,
+    /// Name of the software that produced this output.
+    pub software: String,
+    /// Version of the software that produced this output.
+    pub software_version: String,
     /// Hostname of the machine that ran training.
     pub hostname: String,
     /// LP solver backend name (e.g. `"highs"` or `"clp"`).
@@ -393,8 +410,8 @@ pub struct TrainingMetadata {
     pub completed_at: String,
     /// Total training wall-clock duration in seconds.
     pub duration_seconds: f64,
-    /// Run status: `"complete"` or `"partial"`.
-    pub status: String,
+    /// How the phase ended; see [`RunStatus`].
+    pub status: RunStatus,
     /// Snapshot of key configuration fields.
     pub configuration: MetadataConfiguration,
     /// Problem size dimensions.
@@ -429,8 +446,10 @@ pub struct TrainingMetadata {
 /// Metadata for the simulation output directory (`simulation/metadata.json`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SimulationMetadata {
-    /// Version of the cobre crate that produced this output.
-    pub cobre_version: String,
+    /// Name of the software that produced this output.
+    pub software: String,
+    /// Version of the software that produced this output.
+    pub software_version: String,
     /// Hostname of the machine that ran simulation.
     pub hostname: String,
     /// LP solver backend name (e.g. `"highs"` or `"clp"`).
@@ -444,8 +463,8 @@ pub struct SimulationMetadata {
     pub completed_at: String,
     /// Total simulation wall-clock duration in seconds.
     pub duration_seconds: f64,
-    /// Run status: `"complete"` or `"partial"`.
-    pub status: String,
+    /// How the phase ended; see [`RunStatus`].
+    pub status: RunStatus,
     /// Scenario completion counts.
     pub scenarios: MetadataScenarios,
     /// Aggregate cost statistics (`null` when cost was not persisted).
@@ -544,6 +563,7 @@ fn write_json_atomic<T: Serialize>(
 )]
 mod tests {
     use super::*;
+    use crate::output::{SOFTWARE_NAME, SOFTWARE_VERSION};
     use tempfile::tempdir;
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -565,14 +585,15 @@ mod tests {
 
     fn make_training_metadata() -> TrainingMetadata {
         TrainingMetadata {
-            cobre_version: env!("CARGO_PKG_VERSION").to_string(),
+            software: SOFTWARE_NAME.to_string(),
+            software_version: SOFTWARE_VERSION.to_string(),
             hostname: "test-host".to_string(),
             solver: "highs".to_string(),
             solver_version: Some("1.8.0".to_string()),
             started_at: "2026-01-17T08:00:00Z".to_string(),
             completed_at: "2026-01-17T12:30:00Z".to_string(),
             duration_seconds: 16_200.0,
-            status: "complete".to_string(),
+            status: RunStatus::Complete,
             configuration: MetadataConfiguration {
                 seed: Some(42),
                 max_iterations: Some(100),
@@ -629,14 +650,15 @@ mod tests {
 
     fn make_simulation_metadata() -> SimulationMetadata {
         SimulationMetadata {
-            cobre_version: env!("CARGO_PKG_VERSION").to_string(),
+            software: SOFTWARE_NAME.to_string(),
+            software_version: SOFTWARE_VERSION.to_string(),
             hostname: "test-host".to_string(),
             solver: "highs".to_string(),
             solver_version: Some("1.8.0".to_string()),
             started_at: "2026-01-17T13:00:00Z".to_string(),
             completed_at: "2026-01-17T13:15:00Z".to_string(),
             duration_seconds: 900.0,
-            status: "complete".to_string(),
+            status: RunStatus::Complete,
             scenarios: MetadataScenarios {
                 total: 100,
                 completed: 100,
@@ -666,7 +688,8 @@ mod tests {
         let json = serde_json::to_string_pretty(&original).unwrap();
         let decoded: TrainingMetadata = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(decoded.cobre_version, original.cobre_version);
+        assert_eq!(decoded.software, original.software);
+        assert_eq!(decoded.software_version, original.software_version);
         assert_eq!(decoded.hostname, original.hostname);
         assert_eq!(decoded.solver, original.solver);
         assert_eq!(decoded.started_at, original.started_at);
@@ -704,7 +727,8 @@ mod tests {
         let json = serde_json::to_string_pretty(&original).unwrap();
         let decoded: SimulationMetadata = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(decoded.cobre_version, original.cobre_version);
+        assert_eq!(decoded.software, original.software);
+        assert_eq!(decoded.software_version, original.software_version);
         assert_eq!(decoded.status, original.status);
         assert_eq!(decoded.scenarios.total, original.scenarios.total);
         assert_eq!(decoded.scenarios.completed, original.scenarios.completed);
@@ -713,6 +737,22 @@ mod tests {
             decoded.distribution.world_size,
             original.distribution.world_size
         );
+    }
+
+    #[test]
+    fn run_status_serializes_as_a_closed_snake_case_set() {
+        assert_eq!(
+            serde_json::to_string(&RunStatus::Complete).unwrap(),
+            r#""complete""#
+        );
+        assert_eq!(
+            serde_json::to_string(&RunStatus::Partial).unwrap(),
+            r#""partial""#
+        );
+
+        let mut json = serde_json::to_value(make_training_metadata()).unwrap();
+        json["status"] = serde_json::Value::from("unknown");
+        assert!(serde_json::from_str::<TrainingMetadata>(&json.to_string()).is_err());
     }
 
     #[test]
@@ -771,7 +811,8 @@ mod tests {
     #[test]
     fn simulation_metadata_back_compat_without_cost_or_solve_stats() {
         let legacy = r#"{
-            "cobre_version": "0.0.0",
+            "software": "cobre",
+            "software_version": "0.0.0",
             "hostname": "legacy-host",
             "solver": "highs",
             "started_at": "2026-01-17T13:00:00Z",
@@ -907,7 +948,8 @@ mod tests {
     #[test]
     fn training_metadata_back_compat_without_bounds_or_solve_stats() {
         let legacy = r#"{
-            "cobre_version": "0.0.0",
+            "software": "cobre",
+            "software_version": "0.0.0",
             "hostname": "legacy-host",
             "solver": "highs",
             "started_at": "2026-01-17T08:00:00Z",
@@ -988,7 +1030,8 @@ mod tests {
     #[test]
     fn training_metadata_without_setup_reads_as_none() {
         let without_setup = r#"{
-            "cobre_version": "0.0.0",
+            "software": "cobre",
+            "software_version": "0.0.0",
             "hostname": "legacy-host",
             "solver": "highs",
             "started_at": "2026-01-17T08:00:00Z",
@@ -1096,7 +1139,8 @@ mod tests {
     #[test]
     fn training_metadata_without_deviation_reads_as_none() {
         let without_deviation = r#"{
-            "cobre_version": "0.0.0",
+            "software": "cobre",
+            "software_version": "0.0.0",
             "hostname": "legacy-host",
             "solver": "highs",
             "started_at": "2026-01-17T08:00:00Z",
@@ -1278,23 +1322,23 @@ mod tests {
         assert!(path.exists(), "the target file must exist");
     }
 
-    // ── cobre_version ────────────────────────────────────────────────────────
+    // ── software identity ────────────────────────────────────────────────────
 
     #[test]
-    fn training_metadata_cobre_version_matches_cargo_pkg_version() {
+    fn metadata_records_this_software_under_neutral_keys() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("metadata.json");
-        let metadata = make_training_metadata();
+        let training_path = dir.path().join("training.json");
+        let simulation_path = dir.path().join("simulation.json");
+        write_training_metadata(&training_path, &make_training_metadata()).unwrap();
+        write_simulation_metadata(&simulation_path, &make_simulation_metadata()).unwrap();
 
-        write_training_metadata(&path, &metadata).expect("write must succeed");
-
-        let content = std::fs::read_to_string(&path).unwrap();
-        let value: serde_json::Value = serde_json::from_str(&content).unwrap();
-
-        let version = value["cobre_version"]
-            .as_str()
-            .expect("cobre_version must be a string");
-        assert_eq!(version, env!("CARGO_PKG_VERSION"));
+        for path in [training_path, simulation_path] {
+            let value: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(value["software"], SOFTWARE_NAME);
+            assert_eq!(value["software_version"], SOFTWARE_VERSION);
+            assert!(value.get("cobre_version").is_none(), "{value}");
+        }
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────

@@ -22,6 +22,7 @@ use crate::{
     cut::fcf::FutureCostFunction,
     setup::NodePos,
     solver_stats::SolverStatsLogEntry,
+    stopping_rule::StopDecision,
     training_session::{IterationOutcome, TrainingSession},
     workspace::CapturedBasis,
 };
@@ -54,6 +55,11 @@ pub struct TrainingResult {
     /// Final lower bound at termination.
     pub final_lb: f64,
 
+    /// The lower bound of each completed iteration the run or its resumed
+    /// checkpoint recorded, oldest first; empty when the result was not
+    /// produced by a training loop.
+    pub lower_bound_history: Vec<f64>,
+
     /// Final upper bound mean at termination.
     pub final_ub: f64,
 
@@ -68,6 +74,11 @@ pub struct TrainingResult {
 
     /// Human-readable termination reason (e.g., `"iteration_limit"`, `"graceful_shutdown"`).
     pub reason: String,
+
+    /// The stop decision of the iteration where training stopped; the default
+    /// (nothing triggered) when training ended otherwise or the result was not
+    /// produced by a training loop.
+    pub stop_decision: StopDecision,
 
     /// Total wall-clock time for the training run, in milliseconds.
     pub total_time_ms: u64,
@@ -116,11 +127,13 @@ impl TrainingResult {
     ) -> Self {
         Self {
             final_lb,
+            lower_bound_history: Vec::new(),
             final_ub,
             final_ub_std,
             final_gap,
             iterations,
             reason,
+            stop_decision: StopDecision::default(),
             total_time_ms,
             basis_cache,
             solver_stats_log,
@@ -150,6 +163,16 @@ fn checked_broadcast_len(len: usize, operation: &'static str) -> Result<i32, Sdd
     })
 }
 
+/// This rank's local scenario-0 basis at every node, metadata included
+/// (`cut_row_slots`, `state_at_capture`, `base_row_count`), so a reconstruction
+/// from it keeps full slot identity. On rank 0 it is what
+/// [`broadcast_basis_cache`] delivers to every rank.
+pub(crate) fn rank_local_basis_cache(basis_store: &BasisStore) -> Vec<Option<CapturedBasis>> {
+    (0..basis_store.num_nodes())
+        .map(|t| basis_store.get(0, NodePos(t)).cloned())
+        .collect()
+}
+
 /// Build a `basis_cache` from global scenario 0, broadcasting rank 0's bases to
 /// all ranks so every rank starts simulation from an identical warm-start vertex.
 ///
@@ -163,8 +186,8 @@ fn checked_broadcast_len(len: usize, operation: &'static str) -> Result<i32, Sdd
 /// /
 /// [`try_from_broadcast_payload`](crate::workspace::CapturedBasis::try_from_broadcast_payload);
 /// this function only sequences the four MPI broadcasts (length then payload,
-/// for the i32 and f64 buffers). Single-rank runs skip the broadcast and clone
-/// local scenario 0 directly.
+/// for the i32 and f64 buffers). Single-rank runs skip the broadcast and return
+/// [`rank_local_basis_cache`].
 ///
 /// Each reconstructed basis's `node_id` now rides the wire payload
 /// (`try_from_broadcast_payload` reads it), so no out-of-band fill from a
@@ -185,15 +208,8 @@ pub(crate) fn broadcast_basis_cache<C: Communicator>(
     comm: &C,
 ) -> Result<Vec<Option<CapturedBasis>>, SddpError> {
     let num_nodes = basis_store.num_nodes();
-    // Single-rank fast path: no communication needed — clone the full
-    // CapturedBasis including metadata (cut_row_slots, state_at_capture,
-    // base_row_count) so that simulation reconstruction has full slot
-    // identity on single-rank runs.
     if comm.size() == 1 {
-        let cache = (0..num_nodes)
-            .map(|t| basis_store.get(0, NodePos(t)).cloned())
-            .collect();
-        return Ok(cache);
+        return Ok(rank_local_basis_cache(basis_store));
     }
 
     // Multi-rank path: pack rank 0's scenario-0 full CapturedBasis into two

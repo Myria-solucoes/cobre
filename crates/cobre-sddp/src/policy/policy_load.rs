@@ -3,7 +3,7 @@
 //! [`validate_policy_load`] is the single entry point for compatibility
 //! validation; every load path (full-FCF warm-start/resume/simulation-only and
 //! boundary-cut injection) routes through it, which first refuses a policy
-//! written by another Cobre version, and returns a [`PolicyLoadProof`]
+//! not written by this build, and returns a [`PolicyLoadProof`]
 //! kind-typed to [`FullFcf`] or [`BoundaryInjection`] — the only way to obtain
 //! one, so [`FutureCostFunction::new_with_warm_start`],
 //! [`FutureCostFunction::from_deserialized`], and [`inject_boundary_cuts`]
@@ -15,6 +15,8 @@
 
 use chrono::NaiveDate;
 use cobre_core::AnticipatedCommitmentHistory;
+use cobre_core::System;
+use cobre_io::BoundaryPolicy;
 use cobre_io::Config;
 use cobre_io::EntitySlot;
 use cobre_io::GraphManifest;
@@ -31,28 +33,28 @@ use cobre_io::SeasonManifest;
 use cobre_io::StageCutsReadResult;
 use cobre_io::decode_slot_date;
 use cobre_io::encode_slot_date;
+use cobre_io::policy_checkpoint_remedy;
 use cobre_io::read_policy_checkpoint;
 use cobre_solver::{Basis, BasisStatus};
 
 use crate::SddpError;
 use crate::cut::pool::CutPool;
-use crate::policy::orchestration::StudySeasonManifest;
+use crate::policy::orchestration::{StudySeasonManifest, build_season_manifest};
 use crate::policy::reconcile::{
     BoundaryReconciliationReport, SlotKey, build_boundary_fold, build_identity_index, build_rebind,
     build_reconciliation_report, build_source_interval_index, rebind_cut,
 };
-use crate::setup::{BoundaryStateRequirements, NodeId, NodePos, StudySetup, TypedVec};
+use crate::setup::{
+    BoundaryStateRequirements, NodeId, NodePos, StudySetup, TypedVec, study_horizon_end,
+};
 use crate::workspace::CapturedBasis;
-use cobre_io::StateFamily;
+use cobre_io::{SoftwareIdentity, StateFamily};
 
 use std::collections::HashMap;
+use std::fmt;
 use std::marker::PhantomData;
 use std::ops::Deref;
-use std::path::Path;
-
-/// The version this build stamps into every checkpoint it writes, and the
-/// only one [`validate_policy_load`] accepts.
-pub const POLICY_COBRE_VERSION: &str = env!("CARGO_PKG_VERSION");
+use std::path::{Path, PathBuf};
 
 /// The constant every unmarked policy checkpoint (no `cost_scale_factor`
 /// provenance) was unconditionally scaled at. A pool or checkpoint whose
@@ -145,11 +147,11 @@ pub fn checkpoint_terminal_cost_scale_factor(
         .last()
         .and_then(|stage| stage.cost_scale_factor)
         .ok_or_else(|| {
-            SddpError::Validation(
+            SddpError::Validation(format!(
                 "policy checkpoint predates self-describing cuts (its resolved \
-                 cuts/<pool>.bin carries no cost_scale_factor); re-export it with a current Cobre"
-                    .to_string(),
-            )
+                 cuts/<pool>.bin carries no cost_scale_factor); {remedy}",
+                remedy = policy_checkpoint_remedy()
+            ))
         })
 }
 
@@ -240,8 +242,9 @@ pub struct PolicyLoadProof<K: PolicyLoadKind> {
     _kind: PhantomData<K>,
 }
 
-/// Validate that `source` was written by this build's [`POLICY_COBRE_VERSION`]
-/// — checked first, for every `K` — and that `source`'s state layout is
+/// Validate that `source` was written by this build
+/// ([`SoftwareIdentity::THIS_BUILD`]: the same software at exactly the same
+/// version) — checked first, for every `K` — and that `source`'s state layout is
 /// compatible with `current`'s, per `K`'s check matrix ([`FullFcf`],
 /// [`BoundaryInjection`]). `col_scale`/scaling is never a compatibility
 /// dimension: a state variable's identity and physical unit are independent of
@@ -251,19 +254,20 @@ pub struct PolicyLoadProof<K: PolicyLoadKind> {
 ///
 /// # Errors
 ///
-/// Returns [`SddpError::PolicyVersionMismatch`] if `source_cobre_version` does
-/// not exactly match [`POLICY_COBRE_VERSION`]. Otherwise returns
+/// Returns [`SddpError::PolicySoftwareMismatch`] if `written_by` is not exactly
+/// [`SoftwareIdentity::THIS_BUILD`]. Otherwise returns
 /// [`SddpError::Validation`] under [`FullFcf`] on a `state_dimension`
 /// mismatch, a `num_stages` mismatch, or a per-slot identity mismatch (see
 /// [`compare_manifest_slot_identity`]).
 pub fn validate_policy_load<K: PolicyLoadKind>(
-    source_cobre_version: &str,
+    written_by: SoftwareIdentity<'_>,
     source: &PolicyStageManifest<'_>,
     current: &PolicyStageManifest<'_>,
 ) -> Result<PolicyLoadProof<K>, SddpError> {
-    if source_cobre_version != POLICY_COBRE_VERSION {
-        return Err(SddpError::PolicyVersionMismatch {
-            policy_version: source_cobre_version.to_string(),
+    if written_by != SoftwareIdentity::THIS_BUILD {
+        return Err(SddpError::PolicySoftwareMismatch {
+            policy_software: written_by.name.map(str::to_owned),
+            policy_version: written_by.version.to_owned(),
         });
     }
 
@@ -371,24 +375,110 @@ pub fn compare_graph_manifest_identity(
     Ok(())
 }
 
+/// Why a stored basis record is not used for its node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoredBasisMisfit {
+    /// The record's column count differs from the node's LP.
+    Columns {
+        /// Column count of the node's current LP template.
+        expected: usize,
+        /// Column count the record carries.
+        found: usize,
+    },
+    /// The record's row count differs from the node's template rows plus the
+    /// cut rows it recorded.
+    Rows {
+        /// Template rows plus the record's own recorded cut rows.
+        expected: usize,
+        /// Row count the record carries.
+        found: usize,
+    },
+    /// The record's basic entries do not number one per row.
+    BasicCount {
+        /// The record's row count.
+        expected: usize,
+        /// Basic entries among the record's column and row statuses.
+        found: usize,
+    },
+}
+
+/// The stored bases a load did not use, summarized for one warning.
+///
+/// `count` and `total` cover the records whose node is in the current graph.
+/// `first_node` and `first_reason` belong to the failing record with the lowest
+/// node position, not the first in record order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnusedStoredBases {
+    /// In-graph records that failed the fit rule.
+    pub count: usize,
+    /// In-graph records examined.
+    pub total: usize,
+    /// The failing record's node with the lowest position.
+    pub first_node: NodeId,
+    /// Why that record failed.
+    pub first_reason: StoredBasisMisfit,
+}
+
+impl fmt::Display for UnusedStoredBases {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "stored bases not used: {} of {} do not fit the current LP (first: node {}, ",
+            self.count, self.total, self.first_node
+        )?;
+        match self.first_reason {
+            StoredBasisMisfit::Columns { expected, found } => {
+                write!(f, "{found} columns, the LP has {expected}")?;
+            }
+            StoredBasisMisfit::Rows { expected, found } => {
+                write!(f, "{found} rows, the LP expects {expected}")?;
+            }
+            StoredBasisMisfit::BasicCount { expected, found } => {
+                write!(f, "{found} basic entries for {expected} rows")?;
+            }
+        }
+        f.write_str(
+            "); a stored basis is used only when its column count equals the LP's, its row \
+             count equals the LP's template rows plus its recorded cut rows, and its basic \
+             count equals its row count; the policy was trained on a different LP",
+        )
+    }
+}
+
+/// The basis cache decoded from a checkpoint, and the records it left out.
+///
+/// A record that fails the fit rule leaves its node's slot `None`. Training
+/// cold-starts that node once, then reuses the bases it captures; a
+/// simulation-only run solves it without a stored basis in every scenario. In
+/// enumerated simulation, pool fill may warm a dropped leaf from a fitting
+/// same-pool sibling, which is valid because same-pool leaves share one
+/// template, so "dropped" means "not warm-started from its own stored basis",
+/// not always "cold".
+#[derive(Debug)]
+pub struct StoredBasisLoad {
+    /// One entry per canonical node position; `Some` only for a record that fits.
+    pub cache: Vec<Option<CapturedBasis>>,
+    /// `None` exactly when no in-graph record failed.
+    pub unused: Option<UnusedStoredBases>,
+}
+
 /// Build a basis cache from deserialized checkpoint basis records: one entry
-/// per canonical node position, `None` where no record matches.
+/// per canonical node position, `None` where no record matches or the record
+/// does not fit.
 ///
 /// `node_dims[pos]` — built once per load from `setup`'s current LP
-/// templates — is `(template columns, template rows)` for node `pos`;
-/// [`build_basis_cache_for_nodes`] refuses a record whose column count
-/// differs, or whose row count falls outside `[template rows, template rows +
-/// its own recorded cut rows]`, before decoding it.
-///
-/// # Errors
-///
-/// Returns [`SddpError::StoredBasisDimensionMismatch`] when a stored record's
-/// column or row count does not fit its node's current LP dimensions.
+/// templates — is `(template columns, template rows)` for node `pos`. A record
+/// is used only when its column count equals the template's, its row count
+/// equals the template rows plus its own recorded cut rows, and its basic count
+/// equals its row count. A record that fails is left out and counted in
+/// [`StoredBasisLoad::unused`]; the load itself never fails on a basis, which
+/// only warm-starts a solve.
+#[must_use]
 pub fn build_basis_cache_from_checkpoint(
     stage_bases: &[OwnedPolicyBasisRecord],
     stage_cuts: &[StageCutsReadResult],
     setup: &StudySetup,
-) -> Result<Vec<Option<CapturedBasis>>, SddpError> {
+) -> StoredBasisLoad {
     let node_dims: Vec<(usize, usize)> = setup
         .inputs
         .node_graph
@@ -408,6 +498,48 @@ pub fn build_basis_cache_from_checkpoint(
     )
 }
 
+/// The exact fit rule for one stored record, checked before any decoding; a
+/// pure function of the record and the node's template dimensions.
+///
+/// The basic count is checked because `reconstruct_basis` assumes it and
+/// aborts on a deficit instead of repairing it.
+fn admit_stored_basis(
+    record: &OwnedPolicyBasisRecord,
+    template_cols: usize,
+    template_rows: usize,
+) -> Result<(), StoredBasisMisfit> {
+    let found_cols = record.column_status.len();
+    if found_cols != template_cols {
+        return Err(StoredBasisMisfit::Columns {
+            expected: template_cols,
+            found: found_cols,
+        });
+    }
+
+    let found_rows = record.row_status.len();
+    let expected_rows = template_rows.saturating_add(record.num_cut_rows as usize);
+    if found_rows != expected_rows {
+        return Err(StoredBasisMisfit::Rows {
+            expected: expected_rows,
+            found: found_rows,
+        });
+    }
+
+    let basic_count = record
+        .column_status
+        .iter()
+        .chain(&record.row_status)
+        .filter(|&&code| BasisStatus::from_discriminant_code(code) == BasisStatus::Basic)
+        .count();
+    if basic_count != found_rows {
+        return Err(StoredBasisMisfit::BasicCount {
+            expected: found_rows,
+            found: basic_count,
+        });
+    }
+    Ok(())
+}
+
 /// Each basis record is keyed by its own node ordinal (its `stage_id`), so
 /// leaves sharing a pool land in distinct node slots — no `>= num_stages` drop,
 /// no cross-node collision. `u8` status codes decode via
@@ -416,13 +548,15 @@ pub fn build_basis_cache_from_checkpoint(
 /// identically, since that range means the same in the canonical and `HiGHS`
 /// code spaces.
 ///
+/// A record that fails `admit_stored_basis` leaves its node's slot `None`, is
+/// counted, and never reaches `reconstruct_basis`. The reported first failure is
+/// the one with the lowest node position, so the report does not depend on
+/// record order. A record whose node is `>= n_nodes` is skipped and not counted.
+///
 /// # Cut-slot reconstruction
 ///
 /// `base_row_count` is taken from `node_dims[pos]` — the STUDY's own template row
-/// count — never from the record's `row_status.len() - num_cut_rows`: the root
-/// node is captured in the last forward pass, before that iteration's backward
-/// pass appends cuts to its pool, so its recorded `num_cut_rows` (the pool's size
-/// at export) legitimately exceeds the cut rows the basis was captured with. The
+/// count — never from the record's `row_status.len() - num_cut_rows`. The
 /// trailing `k = row_status.len() - base_row_count` rows are matched to pool slot
 /// identity only when a node's OWN pool's [`StageCutsReadResult`]
 /// (`sc.stage_id == node_pools[node]`, never the record whose pool id happens to
@@ -443,23 +577,18 @@ pub fn build_basis_cache_from_checkpoint(
 /// `node_ids` / `node_pools` are the CURRENT study's, since a resume/warm-start
 /// continues the SAME node topology — never a value recovered from the
 /// checkpoint itself, whose wire carries no node id.
-///
-/// # Errors
-///
-/// Returns [`SddpError::StoredBasisDimensionMismatch`] when a stored record's
-/// column count differs from `node_dims[pos].0`, or its row count falls
-/// outside `[node_dims[pos].1, node_dims[pos].1 + its own num_cut_rows]` —
-/// checked against the RECORDED `num_cut_rows`, never the derived
-/// `base_row_count` below.
 fn build_basis_cache_for_nodes(
     stage_bases: &[OwnedPolicyBasisRecord],
     stage_cuts: &[StageCutsReadResult],
     node_ids: &TypedVec<NodePos, NodeId>,
     node_pools: &TypedVec<NodePos, usize>,
     node_dims: &[(usize, usize)],
-) -> Result<Vec<Option<CapturedBasis>>, SddpError> {
+) -> StoredBasisLoad {
     let n_nodes = node_ids.len();
     let mut cache: Vec<Option<CapturedBasis>> = vec![None; n_nodes];
+    let mut total = 0;
+    let mut count = 0;
+    let mut first: Option<(NodePos, StoredBasisMisfit)> = None;
     for record in stage_bases {
         // Wire boundary: the checkpoint's `stage_id` field is a legacy name for
         // what the node-native engine writes/reads as a node position — convert
@@ -469,22 +598,14 @@ fn build_basis_cache_for_nodes(
             continue;
         }
 
+        total += 1;
         let (expected_cols, expected_template_rows) = node_dims[node.0];
-        let found_cols = record.column_status.len();
-        let found_rows = record.row_status.len();
-        let found_cut_rows = record.num_cut_rows as usize;
-        if found_cols != expected_cols
-            || found_rows < expected_template_rows
-            || found_rows - expected_template_rows > found_cut_rows
-        {
-            return Err(SddpError::StoredBasisDimensionMismatch {
-                node_id: node_ids[node].0,
-                expected_cols,
-                found_cols,
-                expected_template_rows,
-                found_rows,
-                found_cut_rows,
-            });
+        if let Err(reason) = admit_stored_basis(record, expected_cols, expected_template_rows) {
+            count += 1;
+            if first.as_ref().is_none_or(|(lowest, _)| node.0 < lowest.0) {
+                first = Some((node, reason));
+            }
+            continue;
         }
 
         let col_status: Vec<BasisStatus> = record
@@ -538,7 +659,13 @@ fn build_basis_cache_for_nodes(
             node_id: node_ids[node],
         });
     }
-    Ok(cache)
+    let unused = first.map(|(node, first_reason)| UnusedStoredBases {
+        count,
+        total,
+        first_node: node_ids[node],
+        first_reason,
+    });
+    StoredBasisLoad { cache, unused }
 }
 
 /// Positional identity of one state-vector slot; `was_active` is excluded —
@@ -681,13 +808,13 @@ pub fn resolve_boundary_state_requirements(
 
 /// A resolved boundary pool whose `cuts/<pool>.bin` predates the
 /// self-describing per-pool facts (`cost_scale_factor` reads `None`): no
-/// silent default, no `metadata.json` fallback — the checkpoint must be
-/// re-exported.
+/// silent default, no `metadata.json` fallback.
 fn boundary_predates_self_describing_cuts(boundary_path: &Path) -> SddpError {
     SddpError::Validation(format!(
         "boundary policy checkpoint at {} predates self-describing cuts (its resolved \
-         cuts/<pool>.bin carries no cost_scale_factor); re-export it with a current Cobre",
-        boundary_path.display()
+         cuts/<pool>.bin carries no cost_scale_factor); {remedy}",
+        boundary_path.display(),
+        remedy = policy_checkpoint_remedy()
     ))
 }
 
@@ -771,13 +898,13 @@ impl<'a> BoundaryLoadRequest<'a> {
 
 /// A checkpoint whose every pool carries
 /// [`STAGE_CUTS_PRICED_STATE_DATE_SENTINEL`] predates recorded priced dates:
-/// date selection has nothing to compare against, so the checkpoint must be
-/// re-exported.
+/// date selection has nothing to compare against.
 fn boundary_checkpoint_undated(boundary_path: &Path) -> SddpError {
     SddpError::Validation(format!(
         "boundary policy checkpoint at {} carries no priced_state_date on any pool (a pool \
-         written before priced dates were recorded); re-export it with a current Cobre",
-        boundary_path.display()
+         written before priced dates were recorded); {remedy}",
+        boundary_path.display(),
+        remedy = policy_checkpoint_remedy()
     ))
 }
 
@@ -875,8 +1002,9 @@ fn check_season_compatibility(
     if source.cycle_code == SEASON_CYCLE_CODE_ABSENT {
         return Err(SddpError::Validation(format!(
             "boundary policy checkpoint at {} predates the season descriptor (its manifest \
-             carries no season cycle or PAR orders); re-export it with a current Cobre",
-            boundary_path.display()
+             carries no season cycle or PAR orders); {remedy}",
+            boundary_path.display(),
+            remedy = policy_checkpoint_remedy()
         )));
     }
 
@@ -935,8 +1063,9 @@ fn check_season_compatibility(
             })
         {
             return Err(SddpError::Validation(format!(
-                "boundary policy at {}: hydro {} PAR order mismatch at season {season} (study \
-                 has order {study_order}, source has order {source_order})",
+                "boundary policy at {}: hydro {} PAR order mismatch at season index {season} \
+                 (the season's 0-based position in the cycle, not its id; study has order \
+                 {study_order}, source has order {source_order})",
                 boundary_path.display(),
                 study_hydro.hydro_id
             )));
@@ -1067,19 +1196,18 @@ fn check_topology_subset(
 ///
 /// # Errors
 ///
-/// Returns [`SddpError::PolicyVersionMismatch`] if the resolved checkpoint's
-/// recorded `cobre_version` does not exactly match [`POLICY_COBRE_VERSION`].
+/// Returns [`SddpError::PolicySoftwareMismatch`] if the resolved checkpoint was
+/// not written by [`SoftwareIdentity::THIS_BUILD`].
 /// Otherwise returns [`SddpError::Validation`] if:
 /// - The checkpoint cannot be read
 /// - Every pool in the checkpoint carries
-///   [`STAGE_CUTS_PRICED_STATE_DATE_SENTINEL`] (a pre-dated checkpoint);
-///   re-export with a current Cobre
+///   [`STAGE_CUTS_PRICED_STATE_DATE_SENTINEL`] (a pre-dated checkpoint)
 /// - More than one pool is priced at the boundary date (a branching source's
 ///   terminal date tie); names the boundary date and every matching pool id
 /// - No pool is priced at the boundary date; names the boundary date and
 ///   every pool's own `(pool id, priced date)`
 /// - The resolved pool's `.bin` predates self-describing cuts
-///   (`cost_scale_factor` reads `None`); re-export with a current Cobre
+///   (`cost_scale_factor` reads `None`)
 /// - The resolved pool is shared by more than one node (`node_id` reads the
 ///   sentinel); a boundary source must be a single-node terminal pool
 /// - A cut references inflow-lag state deeper than `effective_inflow_lag_depth`
@@ -1200,7 +1328,7 @@ pub fn load_boundary_cuts(
         graph: &empty_graph,
     };
     let proof = validate_policy_load::<BoundaryInjection>(
-        &checkpoint.metadata.cobre_version,
+        checkpoint.metadata.written_by(),
         &source,
         &current,
     )?;
@@ -1386,6 +1514,72 @@ pub fn inject_boundary_cuts(
     Ok(())
 }
 
+/// A boundary checkpoint reconciled against a study by [`reconcile_boundary_policy`].
+#[derive(Debug)]
+pub struct BoundaryReconciliation {
+    /// The validated terminal-pool cut records and their reconciliation report.
+    pub cuts: ValidatedBoundaryCuts,
+    /// The checkpoint directory the cuts were read from.
+    pub checkpoint_path: PathBuf,
+    /// The date the boundary pool was selected against.
+    pub boundary_date: NaiveDate,
+}
+
+/// Reconcile `bp`'s checkpoint against `setup`'s terminal entity manifest
+/// without injecting anything.
+///
+/// # Errors
+///
+/// Returns [`SddpError::Validation`] when the study declares no non-negative
+/// stage (so it has no boundary date), and propagates [`load_boundary_cuts`]'s
+/// rejections.
+pub fn reconcile_boundary_policy(
+    setup: &StudySetup,
+    system: &System,
+    bp: &BoundaryPolicy,
+    case_dir: &Path,
+) -> Result<BoundaryReconciliation, SddpError> {
+    let checkpoint_path = bp.checkpoint_path(case_dir);
+    // Rationale: the cast cannot truncate — `state_dimension` counts FCF
+    // state variables (one per reservoir/lag), bounded by the validated study
+    // dimensions and far below `u32::MAX`.
+    #[allow(clippy::cast_possible_truncation)]
+    let state_dim = setup.fcf.state_dimension as u32;
+    let current_manifest = setup.build_terminal_entity_manifest(system);
+    let fixed_windows = setup.build_terminal_fixed_post_horizon_windows(system);
+
+    let Some(boundary_date) = study_horizon_end(system) else {
+        return Err(SddpError::Validation(format!(
+            "case {}: the study declares no non-negative stage, so it has no boundary date to \
+             load a boundary policy against",
+            case_dir.display()
+        )));
+    };
+
+    let study_seasons = build_season_manifest(system);
+    let cuts = load_boundary_cuts(
+        &BoundaryLoadRequest::new(
+            &checkpoint_path,
+            boundary_date,
+            state_dim,
+            &current_manifest,
+            setup.inputs.stage_data.stage_templates.cost_scale_factor,
+        )
+        .with_fixed_windows(&fixed_windows)
+        // The depth the state layout reserved, so the load-time depth guard is a defensive
+        // check, never a user error.
+        .with_inflow_lag_depth(setup.boundary_requirements().inflow_lag_depth())
+        .with_study_seasons(&study_seasons)
+        .with_strict(bp.strict),
+    )?;
+
+    Ok(BoundaryReconciliation {
+        cuts,
+        checkpoint_path,
+        boundary_date,
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::cast_possible_truncation)]
 mod tests {
@@ -1393,14 +1587,16 @@ mod tests {
     use cobre_core::{AnticipatedCommitmentHistory, EntityId};
     use cobre_io::{
         EntitySlot, GraphManifest, HydroSeasonOrders, ProducerBlock, SEASON_CYCLE_CODE_MONTHLY,
-        SEASON_CYCLE_CODE_WEEKLY, STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, SeasonManifest,
-        StageCutsPayload, decode_slot_date, encode_slot_date, read_policy_checkpoint,
+        SEASON_CYCLE_CODE_WEEKLY, SOFTWARE_NAME, SOFTWARE_VERSION,
+        STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, SeasonManifest, SoftwareIdentity, StageCutsPayload,
+        decode_slot_date, encode_slot_date, policy_checkpoint_remedy, read_policy_checkpoint,
     };
 
     use super::{
         BoundaryInjection, BoundaryLoadRequest, BoundaryReconciliationReport,
-        BoundaryStateRequirements, CutPool, FullFcf, NodeId, NodePos, POLICY_COBRE_VERSION,
-        PolicyStageManifest, TypedVec, ValidatedBoundaryCuts, boundary_policy_required_lag_depth,
+        BoundaryStateRequirements, CutPool, FullFcf, NodeId, NodePos, PolicyStageManifest,
+        StoredBasisMisfit, TypedVec, UnusedStoredBases, ValidatedBoundaryCuts,
+        boundary_policy_required_lag_depth, boundary_predates_self_describing_cuts,
         check_season_compatibility, compare_manifest_slot_identity, inject_boundary_cuts,
         load_boundary_cuts, validate_policy_load,
     };
@@ -1910,7 +2106,7 @@ mod tests {
             .to_string();
 
         assert!(msg.contains("predates self-describing cuts"), "{msg}");
-        assert!(msg.contains("re-export it with a current Cobre"), "{msg}");
+        assert!(msg.ends_with(&policy_checkpoint_remedy()), "{msg}");
     }
 
     // ── load_boundary_cuts tests ──────────────────────────────────────────────
@@ -2289,7 +2485,7 @@ mod tests {
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("hydro 7"), "must name the hydro: {msg}");
         assert!(
-            msg.contains("season 1"),
+            msg.contains("season index 1"),
             "must name the first differing season ordinal: {msg}"
         );
         assert!(
@@ -2388,7 +2584,7 @@ mod tests {
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("hydro 7"), "must name the hydro: {msg}");
         assert!(
-            msg.contains("season 1"),
+            msg.contains("season index 1"),
             "must name the referenced differing season ordinal: {msg}"
         );
         assert!(
@@ -2401,11 +2597,25 @@ mod tests {
         );
     }
 
+    /// A resolved pool whose `cost_scale_factor` reads `None` is refused with a
+    /// message ending in the shared remedy. No checkpoint fixture reaches this
+    /// refusal: a pool written before `cost_scale_factor` was recorded also
+    /// carries no priced date, and the undated-pool refusal fires first.
+    #[test]
+    fn boundary_pool_without_a_cost_scale_rejects_with_the_rerun_remedy() {
+        let msg =
+            boundary_predates_self_describing_cuts(std::path::Path::new("boundary")).to_string();
+        assert!(
+            msg.ends_with(&policy_checkpoint_remedy()),
+            "must end with the shared remedy: {msg}"
+        );
+    }
+
     /// Given a source whose `season_manifest` is `SeasonManifest::default()`
     /// (a pre-`id:19` checkpoint) and a present study descriptor,
-    /// `load_boundary_cuts` rejects advising re-export.
+    /// `load_boundary_cuts` rejects with a message ending in the shared remedy.
     #[test]
-    fn boundary_load_rejects_absent_source_season_descriptor_with_reexport_hint() {
+    fn boundary_load_rejects_absent_source_season_descriptor_with_the_rerun_remedy() {
         let tmp = tempfile::tempdir().unwrap();
         write_checkpoint_with_manifest(tmp.path(), 1, 1, &[10.0], &[]);
 
@@ -2422,7 +2632,10 @@ mod tests {
         );
 
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("re-export"), "must advise re-export: {msg}");
+        assert!(
+            msg.ends_with(&policy_checkpoint_remedy()),
+            "must end with the shared remedy: {msg}"
+        );
     }
 
     /// Given a study whose descriptor is absent (no `with_study_seasons`
@@ -3067,10 +3280,10 @@ mod tests {
 
     /// Given a checkpoint whose every pool carries
     /// [`STAGE_CUTS_PRICED_STATE_DATE_SENTINEL`] — a pre-dated checkpoint —
-    /// when `load_boundary_cuts` runs, then it rejects with a message
-    /// containing "re-export" and the checkpoint path.
+    /// when `load_boundary_cuts` runs, then it rejects with a message ending in
+    /// the shared remedy and containing the checkpoint path.
     #[test]
-    fn load_boundary_cuts_undated_pools_reject_with_reexport_hint() {
+    fn load_boundary_cuts_undated_pools_reject_with_the_rerun_remedy() {
         let tmp = tempfile::tempdir().unwrap();
         write_pools_with_priced_state_dates(
             tmp.path(),
@@ -3093,7 +3306,10 @@ mod tests {
             "an every-pool-undated checkpoint must reject"
         );
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("re-export"), "must advise re-export: {msg}");
+        assert!(
+            msg.ends_with(&policy_checkpoint_remedy()),
+            "must end with the shared remedy: {msg}"
+        );
         assert!(
             msg.contains(&tmp.path().display().to_string()),
             "must name the checkpoint path: {msg}"
@@ -3211,44 +3427,56 @@ mod tests {
 
     // ── validate_policy_load tests ────────────────────────────────────────────
 
-    /// `POLICY_COBRE_VERSION` as the source version passes the version gate
-    /// under both `FullFcf` and `BoundaryInjection`.
+    fn written_by(name: Option<&'static str>, version: &'static str) -> SoftwareIdentity<'static> {
+        SoftwareIdentity { name, version }
+    }
+
+    /// This build's identity passes the gate under both `FullFcf` and
+    /// `BoundaryInjection`.
     #[test]
     fn policy_version_accepted_for_every_kind() {
         let slots = storage_manifest(1, 2);
         let source = psm(2, 12, &slots);
         let current = psm(2, 12, &slots);
 
-        assert!(validate_policy_load::<FullFcf>(POLICY_COBRE_VERSION, &source, &current).is_ok());
         assert!(
-            validate_policy_load::<BoundaryInjection>(POLICY_COBRE_VERSION, &source, &current)
+            validate_policy_load::<FullFcf>(SoftwareIdentity::THIS_BUILD, &source, &current)
                 .is_ok()
+        );
+        assert!(
+            validate_policy_load::<BoundaryInjection>(
+                SoftwareIdentity::THIS_BUILD,
+                &source,
+                &current
+            )
+            .is_ok()
         );
     }
 
-    /// A source version other than `POLICY_COBRE_VERSION` is refused under
-    /// both kinds, naming the recorded version.
+    /// This software at another version is refused under both kinds, naming
+    /// the recorded version.
     #[test]
     fn policy_version_refused_for_every_kind() {
-        assert_ne!(POLICY_COBRE_VERSION, "0.0.1");
+        assert_ne!(SOFTWARE_VERSION, "0.0.1");
         let slots = storage_manifest(1, 2);
         let source = psm(2, 12, &slots);
         let current = psm(2, 12, &slots);
+        let older = written_by(Some(SOFTWARE_NAME), "0.0.1");
 
-        let full_fcf_result = validate_policy_load::<FullFcf>("0.0.1", &source, &current);
+        let full_fcf_result = validate_policy_load::<FullFcf>(older, &source, &current);
         assert!(
             matches!(
                 full_fcf_result,
-                Err(SddpError::PolicyVersionMismatch { ref policy_version }) if policy_version == "0.0.1"
+                Err(SddpError::PolicySoftwareMismatch { ref policy_version, .. }) if policy_version == "0.0.1"
             ),
             "a different-version source must be refused under FullFcf: {full_fcf_result:?}"
         );
 
-        let boundary_result = validate_policy_load::<BoundaryInjection>("0.0.1", &source, &current);
+        let boundary_result = validate_policy_load::<BoundaryInjection>(older, &source, &current);
         assert!(
             matches!(
                 boundary_result,
-                Err(SddpError::PolicyVersionMismatch { ref policy_version }) if policy_version == "0.0.1"
+                Err(SddpError::PolicySoftwareMismatch { ref policy_version, .. }) if policy_version == "0.0.1"
             ),
             "a different-version source must be refused under BoundaryInjection: {boundary_result:?}"
         );
@@ -3261,31 +3489,86 @@ mod tests {
         let slots = storage_manifest(1, 2);
         let source = psm(2, 12, &slots);
         let current = psm(2, 12, &slots);
-        let suffixed = format!("{POLICY_COBRE_VERSION}-rc.1");
+        let suffixed = format!("{SOFTWARE_VERSION}-rc.1");
 
         for version in [suffixed.as_str(), ""] {
-            let result = validate_policy_load::<FullFcf>(version, &source, &current);
+            let identity = SoftwareIdentity {
+                name: Some(SOFTWARE_NAME),
+                version,
+            };
+            let result = validate_policy_load::<FullFcf>(identity, &source, &current);
             assert!(
-                matches!(result, Err(SddpError::PolicyVersionMismatch { .. })),
+                matches!(result, Err(SddpError::PolicySoftwareMismatch { .. })),
                 "{version:?} must be refused: {result:?}"
             );
         }
     }
 
-    /// The version gate runs before the `state_dimension`/`num_stages`/slot
+    /// Other software at this build's exact version is refused under both
+    /// kinds, naming the recorded software.
+    #[test]
+    fn policy_from_other_software_refused_at_the_same_version() {
+        let slots = storage_manifest(1, 2);
+        let source = psm(2, 12, &slots);
+        let current = psm(2, 12, &slots);
+        let other = written_by(Some("another-program"), SOFTWARE_VERSION);
+
+        for result in [
+            validate_policy_load::<FullFcf>(other, &source, &current).map(|_| ()),
+            validate_policy_load::<BoundaryInjection>(other, &source, &current).map(|_| ()),
+        ] {
+            assert!(
+                matches!(
+                    result,
+                    Err(SddpError::PolicySoftwareMismatch { ref policy_software, .. })
+                        if policy_software.as_deref() == Some("another-program")
+                ),
+                "another program's checkpoint must be refused: {result:?}"
+            );
+        }
+    }
+
+    /// A checkpoint that recorded no software name is refused even at this
+    /// build's version.
+    #[test]
+    fn policy_without_recorded_software_refused() {
+        let slots = storage_manifest(1, 2);
+        let source = psm(2, 12, &slots);
+        let current = psm(2, 12, &slots);
+
+        let result =
+            validate_policy_load::<FullFcf>(written_by(None, SOFTWARE_VERSION), &source, &current);
+
+        assert!(
+            matches!(
+                result,
+                Err(SddpError::PolicySoftwareMismatch {
+                    policy_software: None,
+                    ..
+                })
+            ),
+            "an unnamed writer must be refused: {result:?}"
+        );
+    }
+
+    /// The identity gate runs before the `state_dimension`/`num_stages`/slot
     /// check matrix: a mismatched version AND a mismatched `state_dimension`
-    /// returns the version variant, not `Validation`.
+    /// returns the identity variant, not `Validation`.
     #[test]
     fn policy_version_checked_before_the_layout() {
         let slots = storage_manifest(1, 2);
         let source = psm(10, 12, &slots);
         let current = psm(8, 12, &slots);
 
-        let result = validate_policy_load::<FullFcf>("0.0.1", &source, &current);
+        let result = validate_policy_load::<FullFcf>(
+            written_by(Some(SOFTWARE_NAME), "0.0.1"),
+            &source,
+            &current,
+        );
 
         assert!(
-            matches!(result, Err(SddpError::PolicyVersionMismatch { .. })),
-            "the version gate must win over the state_dimension gate: {result:?}"
+            matches!(result, Err(SddpError::PolicySoftwareMismatch { .. })),
+            "the identity gate must win over the state_dimension gate: {result:?}"
         );
     }
 
@@ -3295,7 +3578,7 @@ mod tests {
     fn policy_version_refused_at_boundary_load() {
         let tmp = tempfile::tempdir().unwrap();
         let metadata = cobre_io::CheckpointManifest {
-            cobre_version: "0.0.1".to_string(),
+            software_version: "0.0.1".to_string(),
             ..test_support::checkpoint_metadata(1, chain_graph_manifest(1), producer_block())
         };
         write_checkpoint_with_manifest_metadata(tmp.path(), 1, 2, &[10.0, 20.0], &[], &metadata);
@@ -3311,7 +3594,7 @@ mod tests {
         assert!(
             matches!(
                 result,
-                Err(SddpError::PolicyVersionMismatch { ref policy_version }) if policy_version == "0.0.1"
+                Err(SddpError::PolicySoftwareMismatch { ref policy_version, .. }) if policy_version == "0.0.1"
             ),
             "a different-version boundary source must be refused before reconciliation: {result:?}"
         );
@@ -3326,7 +3609,8 @@ mod tests {
         let current = psm(2, 12, &slots);
 
         let report =
-            validate_policy_load::<FullFcf>(POLICY_COBRE_VERSION, &source, &current).unwrap();
+            validate_policy_load::<FullFcf>(SoftwareIdentity::THIS_BUILD, &source, &current)
+                .unwrap();
 
         assert!(
             report.warnings.is_empty(),
@@ -3344,7 +3628,8 @@ mod tests {
         let source = psm(10, 12, &slots);
         let current = psm(8, 12, &slots);
 
-        let result = validate_policy_load::<FullFcf>(POLICY_COBRE_VERSION, &source, &current);
+        let result =
+            validate_policy_load::<FullFcf>(SoftwareIdentity::THIS_BUILD, &source, &current);
 
         assert!(result.is_err(), "state_dimension mismatch must reject");
         let msg = result.unwrap_err().to_string();
@@ -3366,8 +3651,11 @@ mod tests {
         let source = psm(14, 12, &slots);
         let current = psm(17, 12, &slots);
 
-        let result =
-            validate_policy_load::<BoundaryInjection>(POLICY_COBRE_VERSION, &source, &current);
+        let result = validate_policy_load::<BoundaryInjection>(
+            SoftwareIdentity::THIS_BUILD,
+            &source,
+            &current,
+        );
 
         assert!(
             result.is_ok(),
@@ -3383,7 +3671,8 @@ mod tests {
         let source = psm(14, 12, &slots);
         let current = psm(17, 12, &slots);
 
-        let result = validate_policy_load::<FullFcf>(POLICY_COBRE_VERSION, &source, &current);
+        let result =
+            validate_policy_load::<FullFcf>(SoftwareIdentity::THIS_BUILD, &source, &current);
 
         assert!(
             result.is_err(),
@@ -3405,7 +3694,7 @@ mod tests {
         let current = psm(10, 24, &slots);
 
         let full_fcf_result =
-            validate_policy_load::<FullFcf>(POLICY_COBRE_VERSION, &source, &current);
+            validate_policy_load::<FullFcf>(SoftwareIdentity::THIS_BUILD, &source, &current);
         assert!(
             full_fcf_result.is_err(),
             "num_stages mismatch must reject FullFcf"
@@ -3415,8 +3704,11 @@ mod tests {
         assert!(msg.contains("12"), "should include source value: {msg}");
         assert!(msg.contains("24"), "should include current value: {msg}");
 
-        let boundary_result =
-            validate_policy_load::<BoundaryInjection>(POLICY_COBRE_VERSION, &source, &current);
+        let boundary_result = validate_policy_load::<BoundaryInjection>(
+            SoftwareIdentity::THIS_BUILD,
+            &source,
+            &current,
+        );
         assert!(
             boundary_result.is_ok(),
             "num_stages is unchecked under BoundaryInjection: {boundary_result:?}"
@@ -3432,7 +3724,8 @@ mod tests {
         let source = psm(10, 12, &slots);
         let current = psm(8, 24, &slots);
 
-        let result = validate_policy_load::<FullFcf>(POLICY_COBRE_VERSION, &source, &current);
+        let result =
+            validate_policy_load::<FullFcf>(SoftwareIdentity::THIS_BUILD, &source, &current);
 
         assert!(result.is_err(), "both-dimension mismatch must reject");
         let msg = result.unwrap_err().to_string();
@@ -3451,7 +3744,8 @@ mod tests {
         let source = psm(2, 12, &source_slots);
         let current = psm(2, 12, &current_slots);
 
-        let result = validate_policy_load::<FullFcf>(POLICY_COBRE_VERSION, &source, &current);
+        let result =
+            validate_policy_load::<FullFcf>(SoftwareIdentity::THIS_BUILD, &source, &current);
 
         assert!(result.is_err(), "slot identity mismatch must reject");
         let msg = result.unwrap_err().to_string();
@@ -3479,8 +3773,11 @@ mod tests {
         let source = psm(2, 12, &source_slots);
         let current = psm(2, 6, &current_slots);
 
-        let result =
-            validate_policy_load::<BoundaryInjection>(POLICY_COBRE_VERSION, &source, &current);
+        let result = validate_policy_load::<BoundaryInjection>(
+            SoftwareIdentity::THIS_BUILD,
+            &source,
+            &current,
+        );
 
         assert!(
             result.is_ok(),
@@ -3513,7 +3810,7 @@ mod tests {
 
         let current_narrow = vec![storage_slot(1), anticipated_slot_at(9, 0, first_month)];
         let full_fcf = validate_policy_load::<FullFcf>(
-            POLICY_COBRE_VERSION,
+            SoftwareIdentity::THIS_BUILD,
             &psm(lane_era.len() as u32, 12, &lane_era),
             &psm(current_narrow.len() as u32, 12, &current_narrow),
         );
@@ -3585,7 +3882,8 @@ mod tests {
         let current = psm(2, 12, &current_slots);
 
         let report =
-            validate_policy_load::<FullFcf>(POLICY_COBRE_VERSION, &source, &current).unwrap();
+            validate_policy_load::<FullFcf>(SoftwareIdentity::THIS_BUILD, &source, &current)
+                .unwrap();
 
         assert_eq!(report.warnings.len(), 1, "absence must surface one warning");
         assert!(
@@ -3640,7 +3938,7 @@ mod tests {
         use crate::policy_export::convert_basis_cache;
         use crate::workspace::CapturedBasis;
 
-        let col_status = vec![
+        let mut row_status = vec![
             BasisStatus::Lower,
             BasisStatus::Basic,
             BasisStatus::Upper,
@@ -3649,8 +3947,10 @@ mod tests {
             BasisStatus::Superbasic,
             BasisStatus::Fixed,
         ];
-        // Reversed so the column and row vectors are checked independently.
-        let mut row_status = col_status.clone();
+        // Every variant in the columns too, with five more Basic so the basic
+        // count (6 + 1) equals the 7 rows; the vectors differ in length and order.
+        let mut col_status = row_status.clone();
+        col_status.extend([BasisStatus::Basic; 5]);
         row_status.reverse();
 
         let captured = CapturedBasis {
@@ -3677,7 +3977,7 @@ mod tests {
             None,
         );
 
-        let (col_u8, row_u8) = convert_basis_cache(&training_result);
+        let (col_u8, row_u8) = convert_basis_cache(&training_result.basis_cache);
 
         let record = PolicyBasisRecord {
             stage_id: 0,
@@ -3689,15 +3989,17 @@ mod tests {
         let buf = serialize_stage_basis(&record);
         let owned = deserialize_stage_basis(&buf).expect("codec round-trip must succeed");
 
-        let cache = build_basis_cache_for_nodes(
+        let load = build_basis_cache_for_nodes(
             std::slice::from_ref(&owned),
             &[],
             &vec![NodeId(0)].into(),
             &vec![0].into(),
-            &[(7, 7)],
-        )
-        .expect("a same-shape record must load");
-        let recovered = cache[0].as_ref().expect("stage 0 basis must be present");
+            &[(12, 7)],
+        );
+        assert!(load.unused.is_none(), "a same-shape record must load");
+        let recovered = load.cache[0]
+            .as_ref()
+            .expect("stage 0 basis must be present");
 
         assert_eq!(
             recovered.basis.col_status, col_status,
@@ -3721,8 +4023,9 @@ mod tests {
 
         use super::build_basis_cache_for_nodes;
 
-        // HiGHS codes 0..=4, exactly what the pre-canonical writer stored on disk.
-        let col_bytes: [u8; 5] = [0, 1, 2, 3, 4];
+        // HiGHS codes 0..=4, exactly what the pre-canonical writer stored on disk;
+        // three trailing Basic columns bring the basic count (4 + 1) to the 5 rows.
+        let col_bytes: [u8; 8] = [0, 1, 2, 3, 4, 1, 1, 1];
         let row_bytes: [u8; 5] = [4, 3, 2, 1, 0];
 
         let record = PolicyBasisRecord {
@@ -3735,15 +4038,17 @@ mod tests {
         let buf = serialize_stage_basis(&record);
         let owned = deserialize_stage_basis(&buf).expect("codec round-trip must succeed");
 
-        let cache = build_basis_cache_for_nodes(
+        let load = build_basis_cache_for_nodes(
             std::slice::from_ref(&owned),
             &[],
             &vec![NodeId(0)].into(),
             &vec![0].into(),
-            &[(5, 5)],
-        )
-        .expect("a same-shape record must load");
-        let recovered = cache[0].as_ref().expect("stage 0 basis must be present");
+            &[(8, 5)],
+        );
+        assert!(load.unused.is_none(), "a same-shape record must load");
+        let recovered = load.cache[0]
+            .as_ref()
+            .expect("stage 0 basis must be present");
 
         let expected_col: Vec<BasisStatus> = col_bytes
             .iter()
@@ -3799,12 +4104,13 @@ mod tests {
     }
 
     /// A node-keyed basis record (`stage_id` is the node ordinal) with
-    /// `num_cut` trailing cut rows over `3` template rows.
+    /// `num_cut` trailing cut rows over `3` template rows, every row Basic and
+    /// every column Lower — one basic entry per row.
     fn node_basis(node: u32, num_cut: usize) -> OwnedPolicyBasisRecord {
         OwnedPolicyBasisRecord {
             stage_id: node,
             iteration: 0,
-            column_status: vec![1_u8, 1_u8],
+            column_status: vec![0_u8, 0_u8],
             row_status: vec![1_u8; 3 + num_cut],
             num_cut_rows: num_cut as u32,
         }
@@ -3848,14 +4154,18 @@ mod tests {
             node_basis(6, 4),
         ];
 
-        let cache = build_basis_cache_for_nodes(
+        let load = build_basis_cache_for_nodes(
             &stage_bases,
             &stage_cuts,
             &node_ids,
             &node_pools,
             &node_dims,
-        )
-        .expect("every node's record fits its (2, 3) template");
+        );
+        assert!(
+            load.unused.is_none(),
+            "every node's record fits its (2, 3) template"
+        );
+        let cache = load.cache;
 
         assert_eq!(cache.len(), 7, "cache is sized by n_nodes, not num_stages");
         for (node, slot) in cache.iter().enumerate() {
@@ -3908,14 +4218,18 @@ mod tests {
         ];
         let stage_bases = vec![node_basis(0, 1), node_basis(1, 2), node_basis(2, 3)];
 
-        let cache = build_basis_cache_for_nodes(
+        let load = build_basis_cache_for_nodes(
             &stage_bases,
             &stage_cuts,
             &node_ids,
             &node_pools,
             &node_dims,
-        )
-        .expect("every node's record fits its (2, 3) template");
+        );
+        assert!(
+            load.unused.is_none(),
+            "every node's record fits its (2, 3) template"
+        );
+        let cache = load.cache;
 
         assert_eq!(cache.len(), 3);
         assert_eq!(cache[0].as_ref().unwrap().cut_row_slots, vec![0_u32]);
@@ -3926,15 +4240,16 @@ mod tests {
         );
     }
 
-    // ── stored-basis dimension check ──────────────────────────────────────────
+    // ── stored-basis fit rule ─────────────────────────────────────────────────
 
     /// A node-0 basis record with `cols` columns, `rows` total row entries, and
-    /// `num_cut` recorded cut rows.
+    /// `num_cut` recorded cut rows, every column Lower and every row Basic — one
+    /// basic entry per row.
     fn dim_basis_record(cols: usize, rows: usize, num_cut: usize) -> OwnedPolicyBasisRecord {
         OwnedPolicyBasisRecord {
             stage_id: 0,
             iteration: 0,
-            column_status: vec![1_u8; cols],
+            column_status: vec![0_u8; cols],
             row_status: vec![1_u8; rows],
             num_cut_rows: num_cut as u32,
         }
@@ -3945,130 +4260,129 @@ mod tests {
         (vec![NodeId(0)].into(), vec![0].into())
     }
 
-    #[test]
-    fn stored_basis_with_extra_column_is_refused() {
-        use super::build_basis_cache_for_nodes;
-
+    /// Loads one record for a single node of `(4, 3)` template dimensions.
+    fn load_single_record(
+        record: OwnedPolicyBasisRecord,
+        stage_cuts: &[StageCutsReadResult],
+    ) -> super::StoredBasisLoad {
         let (node_ids, node_pools) = single_node_ids_and_pools();
-        let stage_bases = vec![dim_basis_record(5, 3, 0)];
+        super::build_basis_cache_for_nodes(&[record], stage_cuts, &node_ids, &node_pools, &[(4, 3)])
+    }
 
-        let err = build_basis_cache_for_nodes(&stage_bases, &[], &node_ids, &node_pools, &[(4, 3)])
-            .expect_err("a wider column count must be refused");
-
+    fn assert_only_record_dropped(load: &super::StoredBasisLoad, reason: StoredBasisMisfit) {
         assert!(
-            matches!(
-                err,
-                SddpError::StoredBasisDimensionMismatch {
-                    expected_cols: 4,
-                    found_cols: 5,
-                    ..
-                }
-            ),
-            "{err:?}"
+            load.cache[0].is_none(),
+            "a record that fails the fit rule must leave its slot empty"
+        );
+        let unused = load
+            .unused
+            .as_ref()
+            .expect("a dropped record must be reported");
+        assert_eq!((unused.count, unused.total), (1, 1));
+        assert_eq!(unused.first_node, NodeId(0));
+        assert_eq!(unused.first_reason, reason);
+    }
+
+    #[test]
+    fn stored_basis_with_extra_column_is_dropped() {
+        let load = load_single_record(dim_basis_record(5, 3, 0), &[]);
+
+        assert_only_record_dropped(
+            &load,
+            StoredBasisMisfit::Columns {
+                expected: 4,
+                found: 5,
+            },
         );
     }
 
     #[test]
-    fn stored_basis_with_fewer_rows_than_the_template_is_refused() {
-        use super::build_basis_cache_for_nodes;
+    fn stored_basis_with_fewer_rows_than_the_template_is_dropped() {
+        let load = load_single_record(dim_basis_record(4, 2, 0), &[]);
 
-        let (node_ids, node_pools) = single_node_ids_and_pools();
-        let stage_bases = vec![dim_basis_record(4, 2, 0)];
-
-        let err = build_basis_cache_for_nodes(&stage_bases, &[], &node_ids, &node_pools, &[(4, 3)])
-            .expect_err("fewer rows than the template must be refused");
-
-        assert!(
-            matches!(
-                err,
-                SddpError::StoredBasisDimensionMismatch {
-                    expected_template_rows: 3,
-                    found_rows: 2,
-                    ..
-                }
-            ),
-            "{err:?}"
+        assert_only_record_dropped(
+            &load,
+            StoredBasisMisfit::Rows {
+                expected: 3,
+                found: 2,
+            },
         );
     }
 
     #[test]
-    fn stored_basis_with_more_rows_than_recorded_cuts_allow_is_refused() {
-        use super::build_basis_cache_for_nodes;
+    fn stored_basis_with_more_rows_than_recorded_cuts_allow_is_dropped() {
+        let load = load_single_record(dim_basis_record(4, 6, 2), &[]);
 
-        let (node_ids, node_pools) = single_node_ids_and_pools();
-        let stage_bases = vec![dim_basis_record(4, 6, 2)];
-
-        let err = build_basis_cache_for_nodes(&stage_bases, &[], &node_ids, &node_pools, &[(4, 3)])
-            .expect_err("more rows than the recorded cut count allows must be refused");
-
-        assert!(
-            matches!(
-                err,
-                SddpError::StoredBasisDimensionMismatch {
-                    expected_template_rows: 3,
-                    found_rows: 6,
-                    found_cut_rows: 2,
-                    ..
-                }
-            ),
-            "{err:?}"
+        assert_only_record_dropped(
+            &load,
+            StoredBasisMisfit::Rows {
+                expected: 5,
+                found: 6,
+            },
         );
     }
 
-    /// The root-record shape: captured before the last backward pass appends
-    /// its cuts, so `row_status` carries fewer trailing rows than the
-    /// `num_cut_rows` recorded at export time — a shape the dimension check admits.
+    /// A record whose rows fall short of the cut rows it records does not fit:
+    /// the rule is exact, not an upper bound.
     #[test]
-    fn stored_basis_captured_before_the_last_cuts_loads() {
-        use super::build_basis_cache_for_nodes;
+    fn stored_basis_with_fewer_cut_rows_than_recorded_is_dropped() {
+        let load = load_single_record(dim_basis_record(4, 4, 3), &[]);
 
-        let (node_ids, node_pools) = single_node_ids_and_pools();
-        let stage_bases = vec![dim_basis_record(4, 4, 3)];
+        assert_only_record_dropped(
+            &load,
+            StoredBasisMisfit::Rows {
+                expected: 6,
+                found: 4,
+            },
+        );
+    }
 
-        let cache =
-            build_basis_cache_for_nodes(&stage_bases, &[], &node_ids, &node_pools, &[(4, 3)])
-                .expect("a record within the bound must load");
+    /// `reconstruct_basis` aborts on a basic-count deficit, and a surplus is an
+    /// inconsistent basis `HiGHS` rejects, so both directions are dropped.
+    #[test]
+    fn stored_basis_whose_basic_count_differs_from_its_rows_is_dropped() {
+        for (code, basic_entries) in [(0_u8, 0), (1_u8, 7)] {
+            let mut record = dim_basis_record(4, 3, 0);
+            record.column_status.fill(code);
+            record.row_status.fill(code);
 
-        assert!(cache[0].is_some(), "the node's basis must be present");
+            let load = load_single_record(record, &[]);
+
+            assert_only_record_dropped(
+                &load,
+                StoredBasisMisfit::BasicCount {
+                    expected: 3,
+                    found: basic_entries,
+                },
+            );
+        }
     }
 
     #[test]
     fn stored_basis_with_every_recorded_cut_row_loads() {
-        use super::build_basis_cache_for_nodes;
+        let load = load_single_record(dim_basis_record(4, 5, 2), &[]);
 
-        let (node_ids, node_pools) = single_node_ids_and_pools();
-        let stage_bases = vec![dim_basis_record(4, 5, 2)];
-
-        let cache =
-            build_basis_cache_for_nodes(&stage_bases, &[], &node_ids, &node_pools, &[(4, 3)])
-                .expect("a record within the bound must load");
-
-        assert!(cache[0].is_some(), "the node's basis must be present");
+        assert!(
+            load.unused.is_none(),
+            "an exact-shape record is not reported"
+        );
+        assert!(load.cache[0].is_some(), "the node's basis must be present");
     }
 
-    /// The root-record shape (consult 1): captured before the last backward pass
-    /// appends its cuts, so the pool's active slots outrun the basis's own cut
-    /// rows. `base_row_count` must come from the template (`node_dims`), not
+    /// The pool holds more cuts than the basis has cut rows, so `base_row_count`
+    /// must come from the template (`node_dims`), not
     /// `row_status.len() - num_cut_rows`, and the unbroken `0..populated` prefix
-    /// still lets the single captured cut row resolve to slot 0.
+    /// resolves the single cut row to the pool's oldest slot.
     #[test]
-    fn stored_basis_captured_before_the_last_cuts_keeps_the_template_rows() {
-        use super::build_basis_cache_for_nodes;
-
-        let (node_ids, node_pools) = single_node_ids_and_pools();
-        let stage_bases = vec![dim_basis_record(4, 4, 3)];
+    fn stored_basis_cut_rows_map_to_the_oldest_pool_slots() {
         let stage_cuts = vec![pool_cuts(0, &[0, 1, 2])];
 
-        let cache = build_basis_cache_for_nodes(
-            &stage_bases,
-            &stage_cuts,
-            &node_ids,
-            &node_pools,
-            &[(4, 3)],
-        )
-        .expect("a record within the bound must load");
+        let load = load_single_record(dim_basis_record(4, 4, 1), &stage_cuts);
 
-        let cb = cache[0].as_ref().expect("the node's basis must be present");
+        assert!(load.unused.is_none());
+        let cb = load.cache[0]
+            .as_ref()
+            .expect("the node's basis must be present");
         assert_eq!(
             cb.base_row_count, 3,
             "base_row_count must come from the template, not row_status.len() - num_cut_rows"
@@ -4082,24 +4396,15 @@ mod tests {
     /// the template rows and `cut_row_slots` stays empty.
     #[test]
     fn stored_basis_after_cut_deactivation_drops_cut_statuses() {
-        use super::build_basis_cache_for_nodes;
-
-        let (node_ids, node_pools) = single_node_ids_and_pools();
-        let stage_bases = vec![dim_basis_record(4, 4, 3)];
         let mut pool = pool_cuts(0, &[0, 1, 2]);
         pool.cuts[1].is_active = false;
-        let stage_cuts = vec![pool];
 
-        let cache = build_basis_cache_for_nodes(
-            &stage_bases,
-            &stage_cuts,
-            &node_ids,
-            &node_pools,
-            &[(4, 3)],
-        )
-        .expect("a record within the bound must load");
+        let load = load_single_record(dim_basis_record(4, 4, 1), &[pool]);
 
-        let cb = cache[0].as_ref().expect("the node's basis must be present");
+        assert!(load.unused.is_none());
+        let cb = load.cache[0]
+            .as_ref()
+            .expect("the node's basis must be present");
         assert_eq!(
             cb.basis.row_status.len(),
             3,
@@ -4109,6 +4414,105 @@ mod tests {
             cb.cut_row_slots.is_empty(),
             "cut_row_slots must be empty when slot identity cannot be proven"
         );
+    }
+
+    /// Leaves 3..=6 of the branching graph share pool 3 and one template, so a
+    /// misfit at leaf 4 leaves that slot empty while its siblings keep theirs;
+    /// enumerated simulation's pool fill then warms leaf 4 from a sibling.
+    #[test]
+    fn stored_basis_misfit_leaf_is_dropped_while_its_same_pool_sibling_is_kept() {
+        let node_ids: TypedVec<NodePos, NodeId> = vec![10, 11, 12, 13, 14, 15, 16]
+            .into_iter()
+            .map(NodeId)
+            .collect();
+        let node_pools: TypedVec<NodePos, usize> = vec![0, 1, 2, 3, 3, 3, 3].into();
+        let mut stage_bases: Vec<_> = (0..7).map(|node| node_basis(node, 4)).collect();
+        stage_bases[4].column_status.push(0);
+
+        let load = super::build_basis_cache_for_nodes(
+            &stage_bases,
+            &[],
+            &node_ids,
+            &node_pools,
+            &[(2, 3); 7],
+        );
+
+        assert!(load.cache[4].is_none(), "the misfit leaf must be dropped");
+        for sibling in [3, 5, 6] {
+            assert!(
+                load.cache[sibling].is_some(),
+                "sibling leaf {sibling} fits and must be kept"
+            );
+        }
+        let unused = load.unused.expect("the misfit leaf must be reported");
+        assert_eq!((unused.count, unused.total), (1, 7));
+        assert_eq!(unused.first_node, NodeId(14));
+        assert_eq!(
+            unused.first_reason,
+            StoredBasisMisfit::Columns {
+                expected: 2,
+                found: 3
+            }
+        );
+    }
+
+    #[test]
+    fn unused_stored_bases_report_is_independent_of_record_order() {
+        let node_ids: TypedVec<NodePos, NodeId> = vec![0, 1, 2].into_iter().map(NodeId).collect();
+        let node_pools: TypedVec<NodePos, usize> = vec![0, 1, 2].into();
+        let mut columns_misfit = node_basis(1, 0);
+        columns_misfit.column_status.push(0);
+        let mut basic_count_misfit = node_basis(2, 0);
+        basic_count_misfit.row_status.fill(0);
+        let mut records = vec![node_basis(0, 0), columns_misfit, basic_count_misfit];
+
+        let forward =
+            super::build_basis_cache_for_nodes(&records, &[], &node_ids, &node_pools, &[(2, 3); 3]);
+        records.reverse();
+        let reversed =
+            super::build_basis_cache_for_nodes(&records, &[], &node_ids, &node_pools, &[(2, 3); 3]);
+
+        assert_eq!(
+            format!("{:?}", forward.cache),
+            format!("{:?}", reversed.cache)
+        );
+        let expected = UnusedStoredBases {
+            count: 2,
+            total: 3,
+            first_node: NodeId(1),
+            first_reason: StoredBasisMisfit::Columns {
+                expected: 2,
+                found: 3,
+            },
+        };
+        assert_eq!(forward.unused.as_ref(), Some(&expected));
+        assert_eq!(reversed.unused.as_ref(), Some(&expected));
+    }
+
+    #[test]
+    fn unused_stored_bases_warning_states_the_count_and_the_rule() {
+        let unused = UnusedStoredBases {
+            count: 2,
+            total: 3,
+            first_node: NodeId(1),
+            first_reason: StoredBasisMisfit::Columns {
+                expected: 2,
+                found: 3,
+            },
+        };
+
+        let warning = unused.to_string();
+
+        for needle in [
+            "stored bases not used: 2 of 3",
+            "node 1, 3 columns, the LP has 2",
+            "column count equals the LP's",
+            "template rows plus its recorded cut rows",
+            "basic count equals its row count",
+            "trained on a different LP",
+        ] {
+            assert!(warning.contains(needle), "missing {needle:?} in: {warning}");
+        }
     }
 
     // ── inject_boundary_cuts tests ──────────────────────────────────────────────

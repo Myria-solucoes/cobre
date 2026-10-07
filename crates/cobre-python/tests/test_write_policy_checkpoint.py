@@ -87,7 +87,7 @@ def test_write_policy_checkpoint_round_trip(tmp_path: pathlib.Path) -> None:
 
     loaded = cobre.results.load_policy(str(tmp_path))
 
-    assert loaded["metadata"]["format_version"] == 2
+    assert loaded["metadata"]["format_version"] == 3
     assert loaded["metadata"]["producer"]["cost_scale_factor"] == pytest.approx(
         2_500_000.0
     )
@@ -109,16 +109,18 @@ def test_write_policy_checkpoint_round_trip(tmp_path: pathlib.Path) -> None:
     assert cuts[1]["coefficients"] == pytest.approx([0.5, -1.5, 2.5])
 
 
-def test_write_policy_checkpoint_stamps_the_running_version(
+def test_write_policy_checkpoint_stamps_the_running_software(
     tmp_path: pathlib.Path,
 ) -> None:
-    """A caller-supplied cobre_version is ignored; the checkpoint always
-    records the running cobre version.
+    """A caller-supplied software identity is ignored; the checkpoint always
+    records the running software and version.
     """
     import cobre  # noqa: PLC0415
     import cobre.results  # noqa: PLC0415
 
     metadata = _make_metadata()
+    metadata["software"] = "another-program"
+    metadata["software_version"] = "0.13.0"
     metadata["cobre_version"] = "0.13.0"
 
     cobre.write_policy_checkpoint(
@@ -126,7 +128,8 @@ def test_write_policy_checkpoint_stamps_the_running_version(
     )
 
     loaded = cobre.results.load_policy(str(tmp_path))
-    assert loaded["metadata"]["cobre_version"] == cobre.__version__
+    assert loaded["metadata"]["software"] == "cobre"
+    assert loaded["metadata"]["software_version"] == cobre.__version__
 
 
 def test_write_policy_checkpoint_cost_scale_factor_omitted_reads_as_none(
@@ -146,6 +149,44 @@ def test_write_policy_checkpoint_cost_scale_factor_omitted_reads_as_none(
 
     loaded = cobre.results.load_policy(str(tmp_path))
     assert loaded["metadata"]["producer"]["cost_scale_factor"] is None
+
+
+def test_write_policy_checkpoint_lower_bound_history_round_trips(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The producer's lower_bound_history reads back bit for bit, -0.0 included."""
+    import cobre  # noqa: PLC0415
+    import cobre.results  # noqa: PLC0415
+
+    history = [130.0, -0.0, 2.2250738585072014e-308, 123.45]
+    metadata = _make_metadata()
+    metadata["producer"]["lower_bound_history"] = history
+
+    cobre.write_policy_checkpoint(
+        str(tmp_path / "policy"), _make_stage_cuts(), metadata
+    )
+
+    loaded = cobre.results.load_policy(str(tmp_path))
+    recorded = loaded["metadata"]["producer"]["lower_bound_history"]
+    assert [v.hex() for v in recorded] == [v.hex() for v in history]
+
+
+def test_write_policy_checkpoint_lower_bound_history_omitted_reads_as_empty(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Omitting lower_bound_history from the producer dict writes an empty series."""
+    import cobre  # noqa: PLC0415
+    import cobre.results  # noqa: PLC0415
+
+    metadata = _make_metadata()
+    assert "lower_bound_history" not in metadata["producer"]
+
+    cobre.write_policy_checkpoint(
+        str(tmp_path / "policy"), _make_stage_cuts(), metadata
+    )
+
+    loaded = cobre.results.load_policy(str(tmp_path))
+    assert loaded["metadata"]["producer"]["lower_bound_history"] == []
 
 
 def test_write_policy_checkpoint_coefficient_length_mismatch_raises(
@@ -548,3 +589,28 @@ def test_write_policy_checkpoint_season_manifest_order_length_rejected_on_load(
 
     with pytest.raises(cobre.errors.OutputError, match=r"expected n_seasons=3"):
         cobre.results.load_policy(str(tmp_path))
+
+
+def test_write_policy_checkpoint_refuses_a_directory_holding_other_files(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A policy directory holding a file no checkpoint writer leaves there is
+    refused with ValidationError, and the file survives.
+    """
+    import cobre  # noqa: PLC0415
+    import cobre.errors  # noqa: PLC0415
+
+    policy = tmp_path / "policy"
+    policy.mkdir()
+    notes = policy / "notes.txt"
+    notes.write_text("keep me")
+
+    with pytest.raises(
+        cobre.errors.ValidationError,
+        match=r"notes\.txt, found in .*, is not part of a checkpoint",
+    ):
+        cobre.write_policy_checkpoint(str(policy), _make_stage_cuts(), _make_metadata())
+
+    assert notes.read_text() == "keep me"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["policy"]
+    assert sorted(p.name for p in policy.iterdir()) == ["notes.txt"]

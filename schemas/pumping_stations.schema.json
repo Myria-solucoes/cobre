@@ -2,15 +2,15 @@
   "$defs": {
     "RawPumpingFlow": {
       "additionalProperties": false,
-      "description": "Intermediate type for the nested flow bounds sub-object.",
+      "description": "The nested flow bounds sub-object.",
       "properties": {
         "max_m3s": {
-          "description": "Maximum pumped flow [m³/s].",
+          "description": "Maximum pumped flow (m³/s).",
           "format": "double",
           "type": "number"
         },
         "min_m3s": {
-          "description": "Minimum pumped flow [m³/s].",
+          "description": "Minimum pumped flow (m³/s).",
           "format": "double",
           "type": "number"
         }
@@ -23,7 +23,7 @@
     },
     "RawPumpingStation": {
       "additionalProperties": false,
-      "description": "Intermediate type for a single pumping station entry.",
+      "description": "A single pumping station entry.",
       "properties": {
         "bus_id": {
           "description": "Bus from which electrical power is consumed.",
@@ -31,7 +31,7 @@
           "type": "integer"
         },
         "consumption_mw_per_m3s": {
-          "description": "Power consumption rate per unit of pumped flow [MW/(m³/s)].",
+          "description": "Power consumption rate per unit of pumped flow (MW/(m³/s)).",
           "format": "double",
           "type": "number"
         },
@@ -96,7 +96,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Top-level intermediate type for `pumping_stations.json` (serde only, not re-exported).",
+  "description": "Root object of `pumping_stations.json`.",
   "properties": {
     "$schema": {
       "description": "`$schema` field — informational, not validated.",

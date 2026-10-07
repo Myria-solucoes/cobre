@@ -4,37 +4,43 @@
 //! `Study.__new__` runs the front half of the solve lifecycle via
 //! [`crate::run::build_study_setup`], storing the live [`StudySetup`] and
 //! adjacent immutable state so later `train`/`simulate` methods need no reload.
-//! [`Study::validate`] replays the validation warnings captured during
-//! construction without re-reading disk.
+//! [`Study::validate`] reports the warnings captured during construction and
+//! checks the configured policy load against the live setup, without
+//! re-reading the case.
 //!
 //! ## Single-process only
 //!
 //! Like [`crate::run`], this module uses [`cobre_comm::LocalBackend`] exclusively
 //! and never initializes MPI.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 
 use pyo3::exceptions::{PyIndexError, PyOSError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::PyDict;
 
+use cobre_io::remove_conditional_training_outputs;
+use cobre_io::remove_success_marker;
+use cobre_sddp::policy::full_fcf_load::{
+    FullFcfLoadError, FullFcfLoadKind, check_full_fcf_load, locate_policy_dir,
+};
+use cobre_sddp::validate_phases::check_configured_policy_load;
 use cobre_sddp::{
     FutureCostFunction, HydroModelSummary, ModelProvenanceReport, StochasticSummary, StudySetup,
     TrainingResult,
 };
 
 use crate::convert::pydict_to_json_map;
-use crate::errors::{ErrorSource, convert_error};
-use crate::io::build_warnings_list;
+use crate::errors::{ErrorSource, OUTPUT_WRITE_ERROR_PREFIX, convert_error};
+use crate::io::{ValidateFailure, build_validation_report};
 use crate::model::PySystem;
 use crate::run::{
     LoadedStudy, PhaseError, RunError, SimSummary, TrainingPhaseResult, apply_training_policy_mode,
-    build_study_setup, reconstruct_policy_from_checkpoint, run_in_scoped_pool,
-    run_simulation_phase_py, run_training_phase_py, run_training_phase_py_streaming,
-    write_evaporation_models_if_any, write_fixed_delivery_if_any,
-    write_fpha_deviation_points_if_any, write_fpha_hyperplanes_if_any,
-    write_generic_constraint_echo_if_any, write_training_artifacts,
+    build_study_setup, resolved_thread_count, run_in_scoped_pool, run_simulation_phase_py,
+    run_training_phase_py, run_training_phase_py_streaming, write_skipped_simulation_py,
+    write_training_outputs,
 };
 
 /// Map a [`PhaseError`] to a Python exception through the single
@@ -46,6 +52,7 @@ fn phase_error_to_pyerr(err: PhaseError) -> PyErr {
     match err {
         PhaseError::Message(msg) => convert_error(ErrorSource::Message(msg)),
         PhaseError::Load(err) => convert_error(ErrorSource::Load(&err)),
+        PhaseError::PolicyLoad(err) => convert_error(ErrorSource::PolicyLoad(&err)),
         PhaseError::Sddp { error, message } => convert_error(ErrorSource::Sddp {
             error: &error,
             message,
@@ -53,12 +60,19 @@ fn phase_error_to_pyerr(err: PhaseError) -> PyErr {
     }
 }
 
+/// The directory a run or validation reads and writes: `output_dir` as given, or
+/// `<case_dir>/output` when absent.
+pub(crate) fn resolve_output_dir(case_dir: &Path, output_dir: Option<PathBuf>) -> PathBuf {
+    output_dir.unwrap_or_else(|| case_dir.join("output"))
+}
+
 /// A loaded study: the live [`StudySetup`] plus the immutable state produced by
 /// the front half of the solve lifecycle.
 ///
 /// Constructed once via [`Study::__new__`] (which runs
 /// [`crate::run::build_study_setup`]); `train`/`simulate` reuse the stored
-/// state, and [`Study::validate`] replays the captured warnings.
+/// state, and [`Study::validate`] reports the captured warnings and the policy
+/// load check.
 /// The `output_dir` from construction is the default write target for
 /// [`Study::train`]; [`Study::simulate`] and [`Study::load_policy`] each accept
 /// a per-call `output_dir` override.
@@ -81,7 +95,7 @@ pub struct Study {
     stochastic_summary: StochasticSummary,
     /// The structural hydro-model summary.
     hydro_models_summary: HydroModelSummary,
-    /// Validation-pipeline warnings captured during the case load, replayed by
+    /// Validation-pipeline warnings captured during the case load, reported by
     /// [`Study::validate`].
     warnings: Vec<cobre_io::ReportEntry>,
     /// Wall-clock setup-phase timings captured during construction.
@@ -282,7 +296,7 @@ impl Study {
         threads: Option<u32>,
         overrides: Option<serde_json::Map<String, serde_json::Value>>,
     ) -> Result<Self, PhaseError> {
-        let resolved_output = output_dir.unwrap_or_else(|| case_dir.join("output"));
+        let resolved_output = resolve_output_dir(case_dir, output_dir);
 
         let LoadedStudy {
             setup,
@@ -316,6 +330,7 @@ impl Study {
     pub(crate) fn train_native(
         &mut self,
         on_iteration: Option<Py<PyAny>>,
+        shutdown_flag: &Arc<AtomicUsize>,
     ) -> Result<Policy, RunError> {
         if !self.config.training.enabled {
             let synthetic = TrainingResult::new(
@@ -350,14 +365,23 @@ impl Study {
 
         let phase_result: Result<(TrainingPhaseResult, Option<PyErr>), PhaseError> =
             run_in_scoped_pool(threads, |n| {
+                remove_success_marker(&output_dir.join("training")).map_err(|e| {
+                    format!("{OUTPUT_WRITE_ERROR_PREFIX}: stale training marker: {e}")
+                })?;
+                remove_conditional_training_outputs(&output_dir).map_err(|e| {
+                    format!("{OUTPUT_WRITE_ERROR_PREFIX}: stale training outputs: {e}")
+                })?;
                 apply_training_policy_mode(setup, system, config, &output_dir, &case_dir)?;
+                setup.enable_periodic_checkpoints(system, &output_dir);
 
                 let (training, callback_error) = match on_iteration {
-                    Some(callback) => run_training_phase_py_streaming(setup, n, callback)?,
-                    None => (run_training_phase_py(setup, n)?, None),
+                    Some(callback) => {
+                        run_training_phase_py_streaming(setup, n, callback, shutdown_flag)?
+                    }
+                    None => (run_training_phase_py(setup, n, shutdown_flag)?, None),
                 };
 
-                write_training_artifacts(
+                write_training_outputs(
                     &output_dir,
                     system,
                     config,
@@ -367,11 +391,6 @@ impl Study {
                     seed,
                     n,
                 )?;
-                write_fpha_hyperplanes_if_any(&output_dir, setup)?;
-                write_evaporation_models_if_any(&output_dir, setup, system)?;
-                write_fpha_deviation_points_if_any(&output_dir, setup, config)?;
-                write_generic_constraint_echo_if_any(&output_dir, setup, system)?;
-                write_fixed_delivery_if_any(&output_dir, setup, system)?;
 
                 Ok::<_, PhaseError>((training, callback_error))
             })?;
@@ -397,15 +416,21 @@ impl Study {
     }
 
     /// GIL-free policy reconstruction: read checkpoint from disk, validate, return [`Policy`].
-    pub(crate) fn load_policy_native(&self, output_dir: Option<PathBuf>) -> Result<Policy, String> {
+    pub(crate) fn load_policy_native(
+        &self,
+        output_dir: Option<PathBuf>,
+    ) -> Result<Policy, FullFcfLoadError> {
         let out_dir = output_dir.unwrap_or_else(|| self.output_dir.clone());
-        let policy_dir = out_dir.join(&self.setup.policy_path);
-
         let setup = &self.setup;
         let system = self.system.as_ref();
 
+        let kind = FullFcfLoadKind::SimulationOnly;
+        let policy_dir = locate_policy_dir(kind, &out_dir, setup)?;
         let (fcf, training_result) =
-            reconstruct_policy_from_checkpoint(setup, system, &policy_dir)?;
+            check_full_fcf_load(kind, &policy_dir, system, setup, &mut |msg| {
+                eprintln!("cobre-python: policy validation warning: {msg}");
+            })?
+            .into_simulation_policy();
         Ok(Policy {
             training_result,
             fcf,
@@ -441,6 +466,15 @@ impl Study {
             run_simulation_phase_py(setup, &out_dir, system, training_result, n)
         })?
     }
+
+    /// GIL-free skipped simulation: write partial metadata and the marker, return [`SimSummary`].
+    pub(crate) fn skip_simulation_native(&self) -> Result<SimSummary, PhaseError> {
+        Ok(write_skipped_simulation_py(
+            &self.output_dir,
+            self.setup.simulation_config.n_scenarios,
+            resolved_thread_count(self.threads),
+        )?)
+    }
 }
 
 #[pymethods]
@@ -471,7 +505,8 @@ impl Study {
     /// - Raises `CaseIoError` (an `OSError`) on a sidecar write failure or an
     ///   unreadable case file.
     /// - Raises `ValidationError` on a schema, parse, or constraint failure in
-    ///   the case data.
+    ///   the case data, or when the case data cannot support its stochastic
+    ///   model (e.g. no complete historical window).
     /// - Raises `PolicyIncompatibleError` (a `ValueError`) when a warm-start
     ///   policy does not match the system.
     /// - Raises `SolverError` (a `RuntimeError`) on any other preprocessing or
@@ -543,16 +578,30 @@ impl Study {
     /// `cobre.io.validate`: keys `"valid"` (bool), `"errors"` (`list[dict]`),
     /// `"warnings"` (`list[dict]`).
     ///
-    /// `__new__` raises on any construction-time validation failure, so this
-    /// method reports the warnings captured then without re-reading disk. Always
-    /// returns `{"valid": True, "errors": [], "warnings": [...]}`.
+    /// `__new__` raises on any construction-time validation failure. This method
+    /// reports the warnings captured then, and checks the configured warm-start,
+    /// resume or simulation-only policy against this study's output directory
+    /// without re-reading the case, so it returns `valid: False` for a policy
+    /// that `cobre.run.run` would refuse, with the error `cobre.io.validate`
+    /// reports for the same output directory.
     fn validate<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let dict = PyDict::new(py);
-        dict.set_item("valid", true)?;
-        dict.set_item("errors", PyList::empty(py))?;
-        dict.set_item("warnings", build_warnings_list(py, &self.warnings)?)?;
+        let outcome = py
+            .detach(|| {
+                check_configured_policy_load(
+                    &self.system,
+                    &self.setup,
+                    &self.config,
+                    &self.output_dir,
+                )
+            })
+            .map(|report| {
+                let mut warnings = self.warnings.clone();
+                warnings.extend(report.into_iter().flat_map(|r| r.warnings));
+                warnings
+            })
+            .map_err(ValidateFailure::from);
 
-        Ok(dict)
+        build_validation_report(py, outcome)
     }
 
     /// Train an SDDP policy against this study's in-memory [`StudySetup`],
@@ -572,14 +621,17 @@ impl Study {
     /// `training/timing/iterations.parquet`, `training/solver/iterations.parquet`,
     /// `training/solver/retry_histogram.parquet`, and the four
     /// `training/dictionaries/` files (`variables.csv`, `entities.csv`,
-    /// `codes.json`, `bounds.parquet`). When cut selection is enabled and produces
-    /// rows, a `training/cut_selection/` directory is written. Several sidecars
-    /// are written conditionally when their source data is non-empty:
+    /// `codes.json`, `bounds.parquet`). The following are written only when the
+    /// run has rows for them: `training/cut_selection/iterations.parquet` (cut
+    /// selection),
     /// `hydro_models/fpha_hyperplanes.parquet` (FPHA planes),
-    /// `hydro_models/fpha_deviation_points.parquet` (FPHA deviation tracking),
-    /// `hydro_models/evaporation_models.json` (evaporation config),
-    /// `constraints/generic_constraints_echo.json` (generic constraint reflection),
-    /// `delivery/fixed_delivery.parquet` (fixed-delivery schedules).
+    /// `hydro_models/evaporation_models.parquet` (evaporation models),
+    /// `hydro_models/fpha_deviation_points.parquet` (FPHA deviation tracking,
+    /// with `exports.fpha_deviation_points`),
+    /// `generic_constraints/resolved_echo.parquet` (resolved generic constraints)
+    /// and `anticipated/fixed_deliveries.parquet` (fixed post-horizon deliveries).
+    /// Training first removes an earlier run's copies of these files and of the
+    /// two `training/solver/` files from the output directory.
     ///
     /// Artifacts reach disk via an identical call sequence to
     /// [`crate::run::run_via_study`], invoking the same writers; byte-identity
@@ -616,18 +668,25 @@ impl Study {
     ///
     /// # Errors
     ///
-    /// - `SolverError` (a `RuntimeError`) on `HiGHS` init failure, a training
-    ///   error, or a policy-mode failure (e.g. a missing prior policy directory
-    ///   under `WarmStart`/`Resume`).
+    /// - `ValidationError` (a `ValueError`) when `WarmStart`/`Resume` finds no
+    ///   prior policy directory, when a boundary policy is refused, or when the
+    ///   training data is refused.
+    /// - `PolicyIncompatibleError` (a `ValueError`) when the stored policy has
+    ///   no manifest, is malformed, or was written by another version.
+    /// - `CaseIoError` (an `OSError`) when a policy file cannot be opened.
+    /// - `SolverError` (a `RuntimeError`) on `HiGHS` init failure, an LP
+    ///   failure during training, or an internal fault.
     /// - `InternalError` (a `RuntimeError`) on a drain-thread panic.
     /// - The original exception raised by a callback (or `KeyboardInterrupt`)
     ///   re-raised verbatim AFTER the training artifacts are written.
     #[pyo3(signature = (on_iteration=None))]
     fn train(&mut self, py: Python<'_>, on_iteration: Option<Py<PyAny>>) -> PyResult<Policy> {
-        match py.detach(|| self.train_native(on_iteration)) {
+        let shutdown_flag = Arc::new(AtomicUsize::new(0));
+        match py.detach(|| self.train_native(on_iteration, &shutdown_flag)) {
             Ok(policy) => Ok(policy),
             Err(RunError::Callback(err)) => Err(err),
             Err(RunError::Load(err)) => Err(convert_error(ErrorSource::Load(&err))),
+            Err(RunError::PolicyLoad(err)) => Err(convert_error(ErrorSource::PolicyLoad(&err))),
             Err(RunError::Sddp { error, message }) => Err(convert_error(ErrorSource::Sddp {
                 error: &error,
                 message,
@@ -643,8 +702,8 @@ impl Study {
     /// Reads `<output_dir>/<policy_path>/` (`output_dir` defaults to this study's
     /// construction-time `output_dir`), reconstructs the
     /// [`FutureCostFunction`] and a synthetic [`TrainingResult`] via the shared
-    /// [`reconstruct_policy_from_checkpoint`] helper, and packages them into a
-    /// [`Policy`]. The returned policy carries `frozen_templates = None`;
+    /// [`check_full_fcf_load`] entry, and packages them into a [`Policy`]. The
+    /// returned policy carries `frozen_templates = None`;
     /// [`Study::simulate`] re-freezes the stage templates from the FCF at startup,
     /// exactly as the monolithic simulation-only path does.
     ///
@@ -654,15 +713,16 @@ impl Study {
     ///
     /// # Errors
     ///
-    /// - `SolverError` (a `RuntimeError`) when the policy directory is missing or
-    ///   the checkpoint cannot be read or reconstructed.
-    /// - `PolicyIncompatibleError` (a `ValueError`) when policy validation
+    /// - `ValidationError` (a `ValueError`) when the policy directory is missing.
+    /// - `PolicyIncompatibleError` (a `ValueError`) when the checkpoint has no
+    ///   manifest, cannot be parsed or reconstructed, or policy validation
     ///   rejects it.
+    /// - `CaseIoError` (an `OSError`) when a policy file cannot be opened.
     #[pyo3(signature = (output_dir=None))]
     #[allow(clippy::needless_pass_by_value)]
     fn load_policy(&self, py: Python<'_>, output_dir: Option<PathBuf>) -> PyResult<Policy> {
         py.detach(|| self.load_policy_native(output_dir))
-            .map_err(|msg| convert_error(ErrorSource::Message(msg)))
+            .map_err(|err| convert_error(ErrorSource::PolicyLoad(&err)))
     }
 
     /// Run the simulation phase against this study's in-memory [`StudySetup`]

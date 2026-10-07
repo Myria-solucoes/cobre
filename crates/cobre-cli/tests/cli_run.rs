@@ -21,7 +21,10 @@ use predicates::prelude::*;
 use tempfile::TempDir;
 
 mod common;
-use common::{case_dir, cobre, make_valid_case, restamp_policy_version, write_file};
+use common::{
+    case_dir, cobre, copy_dir_recursive, make_valid_case, restamp_policy_version, write_file,
+    write_supplied_opening_tree_case,
+};
 
 #[test]
 fn valid_case_exits_0() {
@@ -1281,26 +1284,12 @@ fn run_produces_deterministic_end_block_and_metadata() {
     );
 }
 
-// ── Stored-basis dimension mismatch at simulation-only load ──────────────────
-
-fn copy_dir_recursive(src: &Path, dst: &Path) {
-    fs::create_dir_all(dst).unwrap();
-    for entry in fs::read_dir(src).unwrap() {
-        let entry = entry.unwrap();
-        let from = entry.path();
-        let to = dst.join(entry.file_name());
-        if from.is_dir() {
-            copy_dir_recursive(&from, &to);
-        } else {
-            fs::copy(&from, &to).unwrap();
-        }
-    }
-}
+// ── Stored basis that does not fit, at simulation-only load ──────────────────
 
 /// `examples/1dtoy`'s two thermals plus a third on the same bus: adds LP
 /// columns but no state, so a policy trained on this variant passes every
 /// `validate_policy_load` check against the original 1dtoy and reaches the
-/// stored-basis dimension check.
+/// stored-basis fit rule.
 const THERMALS_WITH_EXTRA_JSON: &str = r#"{
     "thermals": [
         {
@@ -1350,13 +1339,13 @@ const CONFIG_SIMULATION_ONLY_JSON: &str = r#"{
 }"#;
 
 /// A policy trained on a 1dtoy variant with one extra thermal (wider LP
-/// columns, identical state) is refused when loaded for simulation-only into
-/// the original 1dtoy: the stored basis's column count no longer matches its
-/// node's LP template. Ends with the ordering assertion: the same policy,
-/// restamped to another cobre version, is refused by the version check
-/// instead — the version refusal fires first on every load path.
+/// columns, identical state) loads for simulation-only into the original 1dtoy:
+/// each stored basis whose column count no longer matches its node's LP is left
+/// out, one warning reports them, and the simulation runs. Ends with the
+/// ordering assertion: the same policy, restamped to another cobre version, is
+/// refused by the version check instead, before any basis is examined.
 #[test]
-fn simulation_only_refuses_a_policy_with_a_wider_stored_basis() {
+fn simulation_only_loads_a_policy_with_a_wider_stored_basis_and_warns() {
     let variant_dir = TempDir::new().unwrap();
     copy_dir_recursive(&case_dir("1dtoy"), variant_dir.path());
     write_file(
@@ -1386,18 +1375,22 @@ fn simulation_only_refuses_a_policy_with_a_wider_stored_basis() {
         CONFIG_SIMULATION_ONLY_JSON,
     );
 
-    cobre()
+    let run = cobre()
         .args([
             "run",
             sim_only_dir.path().to_str().unwrap(),
             "--output",
             output.path().to_str().unwrap(),
-            "--quiet",
         ])
         .assert()
-        .failure()
-        .code(1)
-        .stderr(predicate::str::contains("stored basis for node"));
+        .success();
+    let stderr = String::from_utf8_lossy(&run.get_output().stderr).into_owned();
+    assert_eq!(
+        stderr.matches("stored bases not used: ").count(),
+        1,
+        "the misfit must be reported exactly once: {stderr}"
+    );
+    assert_empty_file(&output.path().join("simulation/_SUCCESS"));
 
     restamp_policy_version(&output.path().join("policy"), "0.0.1");
 
@@ -1413,5 +1406,707 @@ fn simulation_only_refuses_a_policy_with_a_wider_stored_basis() {
         .failure()
         .code(1)
         .stderr(predicate::str::contains("written by cobre 0.0.1"))
-        .stderr(predicate::str::contains("stored basis for node").not());
+        .stderr(predicate::str::contains("stored bases not used").not());
+}
+
+/// The policy of the wider-basis variant, validated against the original
+/// 1dtoy for simulation-only: stored bases that no longer fit are warnings, and
+/// validate still exits 0, with the same count in the human line and in `--json`.
+#[test]
+fn simulation_only_validate_warns_about_unused_stored_bases_and_exits_0() {
+    let variant_dir = TempDir::new().unwrap();
+    copy_dir_recursive(&case_dir("1dtoy"), variant_dir.path());
+    write_file(
+        variant_dir.path(),
+        "system/thermals.json",
+        THERMALS_WITH_EXTRA_JSON,
+    );
+    write_file(variant_dir.path(), "config.json", CONFIG_VARIANT_TRAIN_JSON);
+
+    let sim_only_dir = TempDir::new().unwrap();
+    copy_dir_recursive(&case_dir("1dtoy"), sim_only_dir.path());
+    write_file(
+        sim_only_dir.path(),
+        "config.json",
+        CONFIG_SIMULATION_ONLY_JSON,
+    );
+    cobre()
+        .args([
+            "run",
+            variant_dir.path().to_str().unwrap(),
+            "--output",
+            sim_only_dir.path().join("output").to_str().unwrap(),
+            "--quiet",
+        ])
+        .assert()
+        .success();
+
+    let human = cobre()
+        .args(["validate", sim_only_dir.path().to_str().unwrap()])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&human.get_output().stdout).into_owned();
+    let line = stdout
+        .lines()
+        .find(|line| line.contains("warning:") && line.contains("stored bases not used: "))
+        .unwrap_or_else(|| panic!("no unused-basis warning line: {stdout}"));
+    let count: usize = line
+        .split("stored bases not used: ")
+        .nth(1)
+        .and_then(|rest| rest.split(' ').next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("no count in: {line}"));
+    assert!(count > 0, "{line}");
+
+    let json = cobre()
+        .args(["validate", sim_only_dir.path().to_str().unwrap(), "--json"])
+        .assert()
+        .success();
+    let value: serde_json::Value = serde_json::from_slice(&json.get_output().stdout).unwrap();
+    assert_eq!(
+        value["policy_load"],
+        serde_json::json!({ "mode": "simulation_only", "unused_stored_bases": count })
+    );
+}
+
+fn policy_mode_config(mode: &str) -> String {
+    format!(
+        r#"{{
+    "training": {{
+        "selection": {{ "method": "sampled", "forward_passes": 1 }},
+        "stopping_rules": [ {{ "type": "iteration_limit", "limit": 2 }} ],
+        "scenario_source": {{
+            "seed": 42,
+            "inflow": {{ "scheme": "in_sample" }},
+            "load": {{ "scheme": "in_sample" }},
+            "ncs": {{ "scheme": "in_sample" }}
+        }}
+    }},
+    "simulation": {{ "enabled": false }},
+    "modeling": {{ "inflow_non_negativity": {{ "method": "none" }} }},
+    "policy": {{ "mode": "{mode}" }}
+}}"#
+    )
+}
+
+#[test]
+fn missing_policy_directory_is_reported_for_each_load_kind() {
+    let cases = [
+        (
+            policy_mode_config("warm_start"),
+            "Cannot warm-start without a prior policy.",
+        ),
+        (
+            policy_mode_config("resume"),
+            "Cannot resume without a prior checkpoint.",
+        ),
+        (
+            CONFIG_SIMULATION_ONLY_JSON.to_string(),
+            "Cannot run simulation-only mode without a trained policy.",
+        ),
+    ];
+    for (config, sentence) in cases {
+        let case = TempDir::new().unwrap();
+        copy_dir_recursive(&case_dir("1dtoy"), case.path());
+        write_file(case.path(), "config.json", &config);
+        let output = TempDir::new().unwrap();
+        cobre()
+            .args([
+                "run",
+                case.path().to_str().unwrap(),
+                "--output",
+                output.path().to_str().unwrap(),
+                "--quiet",
+            ])
+            .assert()
+            .failure()
+            .code(1)
+            .stderr(predicate::str::contains("Policy directory not found: "))
+            .stderr(predicate::str::contains(sentence))
+            .stderr(predicate::str::contains(
+                "run `cobre validate <CASE_DIR>` for a full diagnostic report",
+            ))
+            .stderr(predicate::str::contains("report this at").not());
+    }
+}
+
+#[test]
+fn unreadable_policy_checkpoint_is_reported_as_a_read_failure() {
+    let case = TempDir::new().unwrap();
+    copy_dir_recursive(&case_dir("1dtoy"), case.path());
+    write_file(case.path(), "config.json", &policy_mode_config("fresh"));
+    let output = TempDir::new().unwrap();
+    cobre()
+        .args([
+            "run",
+            case.path().to_str().unwrap(),
+            "--output",
+            output.path().to_str().unwrap(),
+            "--quiet",
+        ])
+        .assert()
+        .success();
+
+    fs::write(output.path().join("policy/manifest.bin"), b"garbage").unwrap();
+
+    write_file(
+        case.path(),
+        "config.json",
+        &policy_mode_config("warm_start"),
+    );
+    cobre()
+        .args([
+            "run",
+            case.path().to_str().unwrap(),
+            "--output",
+            output.path().to_str().unwrap(),
+            "--quiet",
+        ])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "failed to read policy checkpoint: ",
+        ))
+        .stderr(predicate::str::contains("report this at").not());
+}
+
+fn warm_start_case_with_output_policy_dir() -> (TempDir, TempDir, std::path::PathBuf) {
+    let case = TempDir::new().unwrap();
+    copy_dir_recursive(&case_dir("1dtoy"), case.path());
+    rewrite_json(&case.path().join("config.json"), |config| {
+        config["policy"]["mode"] = serde_json::json!("warm_start");
+    });
+    let output = TempDir::new().unwrap();
+    let policy = output.path().join("policy");
+    fs::create_dir(&policy).unwrap();
+    (case, output, policy)
+}
+
+#[test]
+fn policy_directory_without_manifest_exits_1() {
+    let (case, output, _policy) = warm_start_case_with_output_policy_dir();
+    cobre()
+        .args([
+            "run",
+            case.path().to_str().unwrap(),
+            "--output",
+            output.path().to_str().unwrap(),
+            "--quiet",
+        ])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "failed to read policy checkpoint: ",
+        ))
+        .stderr(predicate::str::contains("manifest.bin"))
+        .stderr(predicate::str::contains("report this at").not());
+}
+
+#[cfg(unix)]
+#[test]
+fn policy_manifest_the_process_cannot_open_exits_2() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (case, output, policy) = warm_start_case_with_output_policy_dir();
+    let manifest = policy.join("manifest.bin");
+    fs::write(&manifest, b"garbage").unwrap();
+    fs::set_permissions(&manifest, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read(&manifest).is_ok() {
+        fs::set_permissions(&manifest, fs::Permissions::from_mode(0o644)).unwrap();
+        println!("skipped: permission bits are not enforced for this process");
+        return;
+    }
+
+    let assertion = cobre()
+        .args([
+            "run",
+            case.path().to_str().unwrap(),
+            "--output",
+            output.path().to_str().unwrap(),
+            "--quiet",
+        ])
+        .assert();
+    fs::set_permissions(&manifest, fs::Permissions::from_mode(0o644)).unwrap();
+    assertion
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("I/O error in"))
+        .stderr(predicate::str::contains("manifest.bin"));
+}
+
+// ── Error classification of refusals and in-loop failures ────────────────────
+
+fn rewrite_json(path: &Path, edit: impl FnOnce(&mut serde_json::Value)) {
+    let mut value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    edit(&mut value);
+    fs::write(path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+}
+
+#[test]
+fn stochastic_data_refusal_exits_1_without_a_bug_report_request() {
+    let dir = TempDir::new().unwrap();
+    copy_dir_recursive(&case_dir("1dtoy"), dir.path());
+    rewrite_json(&dir.path().join("config.json"), |config| {
+        config["training"]["scenario_source"]["inflow"] =
+            serde_json::json!({ "scheme": "historical" });
+    });
+
+    cobre()
+        .args(["run", dir.path().to_str().unwrap()])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "stochastic error: insufficient data: no valid historical windows found",
+        ))
+        .stderr(predicate::str::contains(
+            "run `cobre validate <CASE_DIR>` for a full diagnostic report",
+        ))
+        .stderr(predicate::str::contains("report this at").not());
+}
+
+#[test]
+fn infeasible_training_lp_exits_3_naming_stage_iteration_and_scenario() {
+    let dir = TempDir::new().unwrap();
+    copy_dir_recursive(
+        &case_dir("deterministic/d13-generic-constraint"),
+        dir.path(),
+    );
+    rewrite_json(
+        &dir.path().join("constraints/generic_constraints.json"),
+        |constraints| {
+            constraints["constraints"][0]["slack"] = serde_json::json!({ "enabled": false });
+        },
+    );
+    rewrite_json(&dir.path().join("system/thermals.json"), |thermals| {
+        thermals["thermals"][0]["generation"]["min_mw"] = serde_json::json!(20.0);
+    });
+
+    cobre()
+        .args(["run", dir.path().to_str().unwrap()])
+        .assert()
+        .failure()
+        .code(3)
+        .stderr(predicate::str::contains(
+            "LP infeasible at stage 0, iteration 1, scenario 0",
+        ))
+        .stderr(predicate::str::contains(
+            "Training failed after 0 iterations",
+        ))
+        .stderr(predicate::str::contains("report this at").not());
+}
+
+// ── Phase success markers ─────────────────────────────────────────────────────
+
+fn assert_empty_file(path: &Path) {
+    let metadata =
+        fs::metadata(path).unwrap_or_else(|e| panic!("{} must exist: {e}", path.display()));
+    assert!(metadata.is_file(), "{} must be a file", path.display());
+    assert_eq!(metadata.len(), 0, "{} must be empty", path.display());
+}
+
+fn run_1dtoy_with_a_directory_at(blocked: &str) -> TempDir {
+    let out = TempDir::new().unwrap();
+    fs::create_dir_all(out.path().join(blocked)).unwrap();
+    cobre()
+        .args([
+            "run",
+            case_dir("1dtoy").to_str().unwrap(),
+            "--output",
+            out.path().to_str().unwrap(),
+            "--quiet",
+        ])
+        .assert()
+        .failure();
+    out
+}
+
+#[test]
+fn run_writes_a_success_marker_for_each_executed_phase() {
+    let out = TempDir::new().unwrap();
+    run_case(&case_dir("1dtoy"), out.path());
+
+    assert_empty_file(&out.path().join("training/_SUCCESS"));
+    assert_empty_file(&out.path().join("simulation/_SUCCESS"));
+}
+
+#[test]
+fn training_only_run_writes_no_simulation_success_marker() {
+    let dir = TempDir::new().unwrap();
+    make_valid_case(dir.path(), None, None, None, None);
+    let out = TempDir::new().unwrap();
+    run_case(dir.path(), out.path());
+
+    assert_empty_file(&out.path().join("training/_SUCCESS"));
+    assert!(!out.path().join("simulation/_SUCCESS").exists());
+}
+
+#[test]
+fn run_writes_no_training_marker_when_the_last_training_write_fails() {
+    let out = run_1dtoy_with_a_directory_at("training/solver/retry_histogram.parquet.tmp");
+
+    assert!(out.path().join("training/metadata.json").is_file());
+    assert!(
+        !out.path().join("training/_SUCCESS").exists(),
+        "training/_SUCCESS must not exist when a training write failed"
+    );
+    assert!(!out.path().join("simulation/_SUCCESS").exists());
+}
+
+#[test]
+fn run_writes_no_simulation_marker_when_the_last_simulation_write_fails() {
+    let out = run_1dtoy_with_a_directory_at("simulation/scenario_summary.parquet.tmp");
+
+    assert!(out.path().join("simulation/metadata.json").is_file());
+    assert!(out.path().join("training/_SUCCESS").is_file());
+    assert!(
+        !out.path().join("simulation/_SUCCESS").exists(),
+        "simulation/_SUCCESS must not exist when a simulation write failed"
+    );
+}
+
+#[test]
+fn run_clears_stale_markers_of_planned_phases_before_writing() {
+    let out = TempDir::new().unwrap();
+    write_file(out.path(), "training/_SUCCESS", "");
+    write_file(out.path(), "simulation/_SUCCESS", "");
+    fs::create_dir_all(
+        out.path()
+            .join("training/solver/retry_histogram.parquet.tmp"),
+    )
+    .unwrap();
+
+    cobre()
+        .args([
+            "run",
+            case_dir("1dtoy").to_str().unwrap(),
+            "--output",
+            out.path().to_str().unwrap(),
+            "--quiet",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("training/solver"));
+
+    assert!(out.path().join("training/metadata.json").is_file());
+    assert!(
+        !out.path().join("training/_SUCCESS").exists(),
+        "the stale training/_SUCCESS must be removed before training writes"
+    );
+    assert!(
+        !out.path().join("simulation/_SUCCESS").exists(),
+        "the stale simulation/_SUCCESS must be removed before training when simulation is planned"
+    );
+}
+
+#[test]
+fn run_keeps_the_marker_of_a_phase_it_does_not_run() {
+    let dir = TempDir::new().unwrap();
+    make_valid_case(dir.path(), None, None, None, None);
+    let out = TempDir::new().unwrap();
+    write_file(out.path(), "simulation/_SUCCESS", "");
+    write_file(out.path(), "simulation/paths.parquet", "");
+    write_file(
+        out.path(),
+        "simulation/costs/scenario_id=0000/data.parquet",
+        "",
+    );
+
+    run_case(dir.path(), out.path());
+
+    assert_empty_file(&out.path().join("simulation/_SUCCESS"));
+    assert_empty_file(&out.path().join("training/_SUCCESS"));
+    assert!(out.path().join("simulation/paths.parquet").is_file());
+    assert!(
+        out.path()
+            .join("simulation/costs/scenario_id=0000/data.parquet")
+            .is_file()
+    );
+}
+
+#[test]
+fn simulation_only_run_keeps_the_training_marker() {
+    let dir = TempDir::new().unwrap();
+    copy_dir_recursive(&case_dir("1dtoy"), dir.path());
+    let out = TempDir::new().unwrap();
+    run_case(dir.path(), out.path());
+    rewrite_json(&dir.path().join("config.json"), |config| {
+        config["training"]["enabled"] = serde_json::json!(false);
+    });
+    write_file(
+        out.path(),
+        "training/cut_selection/iterations.parquet",
+        "stale",
+    );
+    write_file(out.path(), "hydro_models/fpha_hyperplanes.parquet", "stale");
+
+    run_case(dir.path(), out.path());
+
+    assert_empty_file(&out.path().join("training/_SUCCESS"));
+    assert_empty_file(&out.path().join("simulation/_SUCCESS"));
+    for kept in [
+        "training/cut_selection/iterations.parquet",
+        "hydro_models/fpha_hyperplanes.parquet",
+        "training/solver/iterations.parquet",
+    ] {
+        assert!(
+            out.path().join(kept).is_file(),
+            "{kept} must be kept by a run that does not train"
+        );
+    }
+}
+
+const STALE_SIMULATION_OUTPUTS: [(&str, &str); 6] = [
+    ("simulation/costs/scenario_id=9999/data.parquet", ""),
+    (
+        "simulation/pumping_stations/scenario_id=0000/data.parquet",
+        "",
+    ),
+    ("simulation/solver/iterations.parquet", "stale"),
+    ("simulation/paths.parquet", ""),
+    ("simulation/scenario_summary.parquet", ""),
+    ("simulation/metadata.json", "{}"),
+];
+
+const FOREIGN_SIMULATION_FILES: [&str; 2] = ["simulation/solver/stale.txt", "simulation/notes.txt"];
+
+fn seed_stale_simulation_outputs(out: &Path) {
+    for (relative, content) in STALE_SIMULATION_OUTPUTS {
+        write_file(out, relative, content);
+    }
+    for relative in FOREIGN_SIMULATION_FILES {
+        write_file(out, relative, "");
+    }
+}
+
+#[test]
+fn run_clears_stale_simulation_outputs_before_training() {
+    let out = TempDir::new().unwrap();
+    seed_stale_simulation_outputs(out.path());
+    write_file(out.path(), "training/solver", "");
+
+    cobre()
+        .args([
+            "run",
+            case_dir("1dtoy").to_str().unwrap(),
+            "--output",
+            out.path().to_str().unwrap(),
+            "--quiet",
+        ])
+        .assert()
+        .failure();
+
+    for (relative, _) in STALE_SIMULATION_OUTPUTS {
+        assert!(
+            !out.path().join(relative).exists(),
+            "the stale {relative} must be removed before training when simulation is planned"
+        );
+    }
+    for relative in FOREIGN_SIMULATION_FILES {
+        assert!(
+            out.path().join(relative).is_file(),
+            "{relative} is not a cobre output and must be kept"
+        );
+    }
+}
+
+#[test]
+fn run_replaces_stale_simulation_outputs() {
+    let out = TempDir::new().unwrap();
+    seed_stale_simulation_outputs(out.path());
+
+    run_case(&case_dir("1dtoy"), out.path());
+
+    let sim = out.path().join("simulation");
+    assert!(!sim.join("costs/scenario_id=9999").exists());
+    assert!(!sim.join("pumping_stations").exists());
+    for kept in [
+        "costs/scenario_id=0000/data.parquet",
+        "solver/iterations.parquet",
+        "solver/stale.txt",
+        "notes.txt",
+        "_SUCCESS",
+    ] {
+        assert!(sim.join(kept).is_file(), "simulation/{kept} must exist");
+    }
+}
+
+// ── Conditional training outputs ──────────────────────────────────────────────
+
+/// The conditional training outputs 1dtoy never writes.
+const STALE_CONDITIONAL_TRAINING_OUTPUTS: [&str; 6] = [
+    "training/cut_selection/iterations.parquet",
+    "hydro_models/fpha_hyperplanes.parquet",
+    "hydro_models/evaporation_models.parquet",
+    "hydro_models/fpha_deviation_points.parquet",
+    "generic_constraints/resolved_echo.parquet",
+    "anticipated/fixed_deliveries.parquet",
+];
+
+fn seed_stale_conditional_training_outputs(out: &Path) {
+    for relative in STALE_CONDITIONAL_TRAINING_OUTPUTS {
+        write_file(out, relative, "stale");
+    }
+    write_file(out, "hydro_models/notes.txt", "");
+}
+
+fn assert_stale_conditional_training_outputs_removed(out: &Path) {
+    for relative in STALE_CONDITIONAL_TRAINING_OUTPUTS {
+        assert!(
+            !out.join(relative).exists(),
+            "the stale {relative} must be removed before training"
+        );
+    }
+}
+
+fn copy_of_1dtoy_training_six_iterations() -> TempDir {
+    let case = TempDir::new().unwrap();
+    copy_dir_recursive(&case_dir("1dtoy"), case.path());
+    rewrite_json(&case.path().join("config.json"), |config| {
+        config["training"]["stopping_rules"] =
+            serde_json::json!([{ "type": "iteration_limit", "limit": 6 }]);
+        config["simulation"]["enabled"] = serde_json::json!(false);
+    });
+    case
+}
+
+#[test]
+fn run_clears_stale_conditional_training_outputs() {
+    let out = TempDir::new().unwrap();
+    seed_stale_conditional_training_outputs(out.path());
+
+    run_case(&case_dir("1dtoy"), out.path());
+
+    assert_stale_conditional_training_outputs_removed(out.path());
+    for emptied in [
+        "training/cut_selection",
+        "anticipated",
+        "generic_constraints",
+    ] {
+        assert!(
+            !out.path().join(emptied).exists(),
+            "{emptied} must be removed once its stale output is gone"
+        );
+    }
+    assert!(out.path().join("hydro_models/notes.txt").is_file());
+    assert_empty_file(&out.path().join("training/_SUCCESS"));
+}
+
+#[test]
+fn run_clears_stale_conditional_training_outputs_before_training() {
+    let out = TempDir::new().unwrap();
+    seed_stale_conditional_training_outputs(out.path());
+    fs::create_dir_all(
+        out.path()
+            .join("training/solver/retry_histogram.parquet.tmp"),
+    )
+    .unwrap();
+
+    cobre()
+        .args([
+            "run",
+            case_dir("1dtoy").to_str().unwrap(),
+            "--output",
+            out.path().to_str().unwrap(),
+            "--quiet",
+        ])
+        .assert()
+        .failure();
+
+    assert_stale_conditional_training_outputs_removed(out.path());
+    assert!(out.path().join("training/metadata.json").is_file());
+    assert!(
+        !out.path().join("training/_SUCCESS").exists(),
+        "training/_SUCCESS must not exist when a training write failed"
+    );
+}
+
+#[test]
+fn run_clears_cut_selection_output_after_cut_selection_is_disabled() {
+    let case = copy_of_1dtoy_training_six_iterations();
+    rewrite_json(&case.path().join("config.json"), |config| {
+        config["training"]["cut_selection"] = serde_json::json!({
+            "selection": { "method": "level1", "check_frequency": 2 }
+        });
+    });
+    let out = TempDir::new().unwrap();
+    run_case(case.path(), out.path());
+    assert!(
+        out.path()
+            .join("training/cut_selection/iterations.parquet")
+            .is_file()
+    );
+
+    rewrite_json(&case.path().join("config.json"), |config| {
+        config["training"]
+            .as_object_mut()
+            .unwrap()
+            .remove("cut_selection");
+    });
+    run_case(case.path(), out.path());
+
+    assert_empty_file(&out.path().join("training/_SUCCESS"));
+    assert!(!out.path().join("training/cut_selection").exists());
+}
+
+#[test]
+fn run_clears_fpha_hyperplanes_after_switching_to_constant_productivity() {
+    let case = TempDir::new().unwrap();
+    copy_dir_recursive(&case_dir("deterministic/d07-fpha-computed"), case.path());
+    let out = TempDir::new().unwrap();
+    run_case(case.path(), out.path());
+    assert!(
+        out.path()
+            .join("hydro_models/fpha_hyperplanes.parquet")
+            .is_file()
+    );
+
+    rewrite_json(
+        &case.path().join("system/hydro_production_models.json"),
+        |models| {
+            let range = &mut models["production_models"][0]["stage_ranges"][0];
+            range["model"] = serde_json::json!("constant_productivity");
+            range.as_object_mut().unwrap().remove("fpha_config");
+        },
+    );
+    run_case(case.path(), out.path());
+
+    assert_empty_file(&out.path().join("training/_SUCCESS"));
+    assert!(!out.path().join("hydro_models").exists());
+}
+
+#[test]
+fn warm_start_rerun_reads_the_policy_the_training_clear_keeps() {
+    let case = copy_of_1dtoy_training_six_iterations();
+    let out = TempDir::new().unwrap();
+    run_case(case.path(), out.path());
+    rewrite_json(&case.path().join("config.json"), |config| {
+        config["policy"]["mode"] = serde_json::json!("warm_start");
+    });
+
+    run_case(case.path(), out.path());
+
+    assert_empty_file(&out.path().join("training/_SUCCESS"));
+}
+
+/// A study that supplies its opening tree from a file runs although its
+/// `historical_residuals` stages have no inflow history to build a library from.
+#[test]
+fn run_accepts_a_supplied_opening_tree_with_historical_residuals_stages() {
+    let case = TempDir::new().unwrap();
+    write_supplied_opening_tree_case(case.path());
+    let out = TempDir::new().unwrap();
+
+    cobre()
+        .args(["run", case.path().to_str().unwrap()])
+        .args(["--output", out.path().to_str().unwrap(), "--quiet"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("historical windows").not())
+        .stdout(predicate::str::contains("V2.").not())
+        .stderr(predicate::str::contains("historical windows").not())
+        .stderr(predicate::str::contains("V2.").not());
 }

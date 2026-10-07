@@ -1,8 +1,9 @@
 //! Validation infrastructure for the cobre-io loading pipeline.
 //!
-//! This module provides the [`ValidationContext`] error/warning collector used by all five
-//! validation layers, along with the [`ErrorKind`] and [`Severity`] enums that categorise
-//! every diagnostic emitted during validation.
+//! This module provides the [`ValidationContext`] collector that every validation layer
+//! reports into, the [`ErrorKind`] and [`Severity`] enums, and the [`rules`] table. A layer
+//! adds a diagnostic only through [`ValidationContext::emit`], for a rule of
+//! [`rules::RULES`], and that rule supplies the diagnostic's kind and severity.
 //!
 //! ## Design
 //!
@@ -10,11 +11,16 @@
 //! first problem.  This lets users see and fix every issue in a single iteration.
 //!
 //! ```
-//! use cobre_io::validation::{ValidationContext, ErrorKind, Severity};
+//! use cobre_io::validation::{ValidationContext, rules::RULES};
+//!
+//! let missing_file = RULES
+//!     .iter()
+//!     .find(|rule| rule.id == "structural.2")
+//!     .expect("structural.2 is listed");
 //!
 //! let mut ctx = ValidationContext::new();
-//! ctx.add_error(
-//!     ErrorKind::FileNotFound,
+//! ctx.emit(
+//!     missing_file,
 //!     "system/hydros.json",
 //!     None::<&str>,
 //!     "required file is missing",
@@ -26,6 +32,7 @@
 pub mod dimensional;
 pub mod productivity_resolution;
 pub mod referential;
+pub mod rules;
 pub mod scalar_parameters;
 pub mod schema;
 pub mod semantic;
@@ -34,6 +41,8 @@ pub mod structural;
 use std::path::PathBuf;
 
 use crate::LoadError;
+
+use self::rules::ValidationRule;
 
 // ── Severity ─────────────────────────────────────────────────────────────────
 
@@ -73,9 +82,9 @@ pub enum ErrorKind {
     DimensionMismatch,
     /// A domain-specific business rule is violated.
     BusinessRuleViolation,
-    /// A warm-start policy is structurally incompatible with the current system.
+    /// A stored policy loaded to seed training, or to run simulation only, cannot be used with the current case.
     WarmStartIncompatible,
-    /// A resume state is incompatible with the current run configuration.
+    /// A stored checkpoint loaded to resume training cannot be used with the current case.
     ResumeIncompatible,
     /// A feature that is used in the input files is not yet implemented.
     NotImplemented,
@@ -122,7 +131,7 @@ pub struct ValidationEntry {
 /// # Examples
 ///
 /// ```
-/// use cobre_io::validation::{ValidationContext, ErrorKind};
+/// use cobre_io::validation::ValidationContext;
 ///
 /// let mut ctx = ValidationContext::new();
 /// assert!(!ctx.has_errors());
@@ -140,34 +149,17 @@ impl ValidationContext {
         Self::default()
     }
 
-    /// Adds an error diagnostic to the context.
-    pub fn add_error(
+    /// Adds a diagnostic for `rule`, with the rule's own kind and severity.
+    pub fn emit(
         &mut self,
-        kind: ErrorKind,
+        rule: &ValidationRule,
         file: impl Into<PathBuf>,
         entity: Option<impl Into<String>>,
         message: impl Into<String>,
     ) {
         self.entries.push(ValidationEntry {
-            severity: Severity::Error,
-            kind,
-            file: file.into(),
-            entity: entity.map(Into::into),
-            message: message.into(),
-        });
-    }
-
-    /// Adds a warning diagnostic to the context.
-    pub fn add_warning(
-        &mut self,
-        kind: ErrorKind,
-        file: impl Into<PathBuf>,
-        entity: Option<impl Into<String>>,
-        message: impl Into<String>,
-    ) {
-        self.entries.push(ValidationEntry {
-            severity: Severity::Warning,
-            kind,
+            severity: rule.severity,
+            kind: rule.kind,
             file: file.into(),
             entity: entity.map(Into::into),
             message: message.into(),
@@ -223,10 +215,20 @@ impl ValidationContext {
     /// # Examples
     ///
     /// ```
-    /// use cobre_io::validation::{ValidationContext, ErrorKind};
+    /// use cobre_io::validation::{ValidationContext, rules::RULES};
+    ///
+    /// let stub_term = RULES
+    ///     .iter()
+    ///     .find(|rule| rule.id == "referential.11")
+    ///     .expect("referential.11 is listed");
     ///
     /// let mut ctx = ValidationContext::new();
-    /// ctx.add_warning(ErrorKind::UnusedEntity, "system/thermals.json", Some("T1"), "inactive");
+    /// ctx.emit(
+    ///     stub_term,
+    ///     "constraints/generic_constraints.json",
+    ///     Some("GenericConstraint 1 term[0]"),
+    ///     "GenericConstraint 1 term[0] references Contract 3 which is a stub entity with no LP effect",
+    /// );
     /// assert!(ctx.into_result().is_ok());
     /// ```
     pub fn into_result(self) -> Result<(), LoadError> {
@@ -281,20 +283,20 @@ mod tests {
     #[test]
     fn test_context_errors_collected() {
         let mut ctx = ValidationContext::new();
-        ctx.add_error(
-            ErrorKind::FileNotFound,
+        ctx.emit(
+            &rules::STRUCTURAL_REQUIRED_FILE_MISSING,
             "system/hydros.json",
             None::<&str>,
             "file missing",
         );
-        ctx.add_error(
-            ErrorKind::ParseError,
+        ctx.emit(
+            &rules::SCHEMA_FILE_UNPARSABLE,
             "stages.json",
             None::<&str>,
             "malformed JSON",
         );
-        ctx.add_error(
-            ErrorKind::SchemaViolation,
+        ctx.emit(
+            &rules::SCHEMA_FILE_NONCONFORMING,
             "system/buses.json",
             Some("bus_42"),
             "missing field bus_id",
@@ -313,14 +315,14 @@ mod tests {
     #[test]
     fn test_context_warnings_not_errors() {
         let mut ctx = ValidationContext::new();
-        ctx.add_warning(
-            ErrorKind::UnusedEntity,
+        ctx.emit(
+            &rules::REFERENTIAL_GENERIC_TERM_STUB_CONTRACT,
             "system/thermals.json",
             Some("thermal_old"),
             "max_generation=0 for all stages",
         );
-        ctx.add_warning(
-            ErrorKind::ModelQuality,
+        ctx.emit(
+            &rules::SEMANTIC_SOBOL_OPENING_COUNT,
             "scenarios/inflow_seasonal_stats.parquet",
             None::<&str>,
             "residual bias detected",
@@ -343,8 +345,8 @@ mod tests {
     #[test]
     fn test_context_into_result_with_errors() {
         let mut ctx = ValidationContext::new();
-        ctx.add_error(
-            ErrorKind::FileNotFound,
+        ctx.emit(
+            &rules::STRUCTURAL_REQUIRED_FILE_MISSING,
             "system/hydros.json",
             None::<&str>,
             "required file is missing",
@@ -362,8 +364,8 @@ mod tests {
     #[test]
     fn test_context_into_result_warnings_only_is_ok() {
         let mut ctx = ValidationContext::new();
-        ctx.add_warning(
-            ErrorKind::UnusedEntity,
+        ctx.emit(
+            &rules::REFERENTIAL_GENERIC_TERM_STUB_CONTRACT,
             "system/thermals.json",
             Some("T1"),
             "inactive thermal",
@@ -377,14 +379,14 @@ mod tests {
     #[test]
     fn test_context_into_result_multiple_errors_joined() {
         let mut ctx = ValidationContext::new();
-        ctx.add_error(
-            ErrorKind::FileNotFound,
+        ctx.emit(
+            &rules::STRUCTURAL_REQUIRED_FILE_MISSING,
             "system/hydros.json",
             None::<&str>,
             "file alpha missing",
         );
-        ctx.add_error(
-            ErrorKind::FileNotFound,
+        ctx.emit(
+            &rules::STRUCTURAL_REQUIRED_FILE_MISSING,
             "system/buses.json",
             None::<&str>,
             "file beta missing",

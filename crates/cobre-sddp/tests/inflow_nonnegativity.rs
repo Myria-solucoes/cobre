@@ -486,6 +486,7 @@ fn train_fixture(
                 training_enumerated: false,
                 max_iterations: 10,
                 start_iteration: 0,
+                resume_lower_bound_history: Vec::new(),
                 n_fwd_threads: 1,
                 stopping_rules: StoppingRuleSet {
                     rules: vec![StoppingRule::IterationLimit { limit: iterations }],
@@ -500,7 +501,7 @@ fn train_fixture(
             },
             events: EventConfig {
                 event_sender: None,
-                checkpoint_interval: None,
+                periodic_checkpoint: None,
                 shutdown_flag: None,
                 export_states: false,
             },
@@ -605,6 +606,7 @@ fn simulate_fixture(
             n_scenarios: 20,
             io_channel_capacity: 32,
             profile: Phase::Simulation.profile(),
+            forward_seed: None,
         },
         SimulationOutputSpec {
             result_tx: &result_tx,
@@ -743,7 +745,7 @@ fn truncation_with_penalty_training_completes() {
     );
 }
 
-/// Per-plant `inflow_nonnegativity_cost` (H1 = 100, H2 = 5000 R$/MWh) produces
+/// Per-plant `inflow_nonnegativity_cost` (H1 = 100, H2 = 5000 $/(m³/s·h)) produces
 /// distinct inflow-slack objective coefficients in the LP template: H1's equals
 /// `100 * block_hours`, H2's `5000 * block_hours` (justifies the magic asserts).
 #[test]

@@ -1,10 +1,12 @@
 //! `StudyParams` and associated constants.
 
+use std::path::Path;
+
 use cobre_core::ScalarParameter;
 use cobre_io::Config;
 use cobre_io::config::{
-    BackwardScheduler, ForwardPassesResolution, NumScenariosResolution, PhaseSolverProfileConfig,
-    StoppingRuleConfig,
+    BackwardScheduler, CheckpointSchedule, ForwardPassesResolution, NumScenariosResolution,
+    PhaseSolverProfileConfig, StoppingRuleConfig,
 };
 use serde::{Deserialize, Serialize};
 
@@ -31,9 +33,6 @@ pub enum SimulationEnumeratedRequest {
 
 /// Default number of forward-pass trajectories when not specified in config.
 pub const DEFAULT_FORWARD_PASSES: u32 = 1;
-
-/// Default maximum iterations when no stopping rule specifies an iteration limit.
-pub const DEFAULT_MAX_ITERATIONS: u64 = 100;
 
 /// Default random seed for stochastic scenario generation.
 pub const DEFAULT_SEED: u64 = 42;
@@ -171,6 +170,9 @@ pub struct StudyParams {
     /// (`config.exports.states`). Overridable post-construction via
     /// [`StudySetup::set_export_states`](super::StudySetup::set_export_states).
     pub export_states: bool,
+    /// `policy.checkpointing`'s resolved schedule; `None` when periodic
+    /// checkpointing is off.
+    pub checkpoint_schedule: Option<CheckpointSchedule>,
     /// Caller-supplied scalar parameters from `constraints/generic_parameters.json`
     /// to ensure boundary-configured studies cannot build against an empty table by omission.
     pub scalar_parameters: Vec<ScalarParameter>,
@@ -183,6 +185,8 @@ impl StudyParams {
     /// # Errors
     ///
     /// - [`SddpError::Validation`] if cut selection config is invalid.
+    /// - [`SddpError::Io`] if `policy.checkpointing` is enabled without an
+    ///   interval of at least 1.
     pub fn from_config(
         config: &Config,
         scalar_parameters: Vec<ScalarParameter>,
@@ -200,12 +204,7 @@ impl StudyParams {
             Some(ForwardPassesResolution::Enumerated) => (DEFAULT_FORWARD_PASSES, true),
         };
 
-        let rule_configs = match &config.training.stopping_rules {
-            Some(rules) if !rules.is_empty() => rules.clone(),
-            _ => vec![StoppingRuleConfig::IterationLimit {
-                limit: u32::try_from(DEFAULT_MAX_ITERATIONS).unwrap_or(u32::MAX),
-            }],
-        };
+        let rule_configs = config.training.stopping_rules.clone().unwrap_or_default();
 
         let stopping_rules: Vec<StoppingRule> = rule_configs
             .into_iter()
@@ -339,6 +338,7 @@ impl StudyParams {
             // feeds them, so from_config leaves the placeholder for the caller to patch.
             boundary: BoundaryStateRequirements::none(),
             export_states: config.exports.states,
+            checkpoint_schedule: config.checkpoint_schedule(Path::new("config.json"))?,
             scalar_parameters,
         })
     }
@@ -472,30 +472,39 @@ mod tests {
     /// `relative_tolerance` set.
     fn config_with_gap_stopping_rule_neither_field() -> Config {
         let mut config = base_test_config();
-        config.training.stopping_rules = Some(vec![StoppingRuleConfig::Gap {
-            tolerance: None,
-            relative_tolerance: None,
-        }]);
+        config.training.stopping_rules = Some(vec![
+            StoppingRuleConfig::IterationLimit { limit: 1 },
+            StoppingRuleConfig::Gap {
+                tolerance: None,
+                relative_tolerance: None,
+            },
+        ]);
         config
     }
 
     /// Stopping rules containing a well-formed absolute-only `Gap` entry.
     fn config_with_gap_stopping_rule() -> Config {
         let mut config = base_test_config();
-        config.training.stopping_rules = Some(vec![StoppingRuleConfig::Gap {
-            tolerance: Some(1000.0),
-            relative_tolerance: None,
-        }]);
+        config.training.stopping_rules = Some(vec![
+            StoppingRuleConfig::IterationLimit { limit: 1 },
+            StoppingRuleConfig::Gap {
+                tolerance: Some(1000.0),
+                relative_tolerance: None,
+            },
+        ]);
         config
     }
 
     /// A relative-only `Gap` entry with no user `BoundStalling`.
     fn config_with_gap_relative_only() -> Config {
         let mut config = base_test_config();
-        config.training.stopping_rules = Some(vec![StoppingRuleConfig::Gap {
-            tolerance: None,
-            relative_tolerance: Some(0.01),
-        }]);
+        config.training.stopping_rules = Some(vec![
+            StoppingRuleConfig::IterationLimit { limit: 1 },
+            StoppingRuleConfig::Gap {
+                tolerance: None,
+                relative_tolerance: Some(0.01),
+            },
+        ]);
         config
     }
 
@@ -504,6 +513,7 @@ mod tests {
     fn config_with_gap_relative_and_user_bound_stalling() -> Config {
         let mut config = base_test_config();
         config.training.stopping_rules = Some(vec![
+            StoppingRuleConfig::IterationLimit { limit: 1 },
             StoppingRuleConfig::Gap {
                 tolerance: None,
                 relative_tolerance: Some(0.01),
@@ -522,6 +532,21 @@ mod tests {
         let mut config = base_test_config();
         config.modeling.cost_scale_factor = value;
         config
+    }
+
+    #[test]
+    fn from_config_adds_no_rule_to_an_absent_or_empty_list() {
+        for stopping_rules in [None, Some(Vec::new())] {
+            let mut config = base_test_config();
+            config.training.stopping_rules = stopping_rules;
+            let params = StudyParams::from_config(&config, Vec::new())
+                .expect("an absent or empty rule list maps without error");
+            assert!(
+                params.stopping_rule_set.rules.is_empty(),
+                "no rule may be added: {:?}",
+                params.stopping_rule_set.rules
+            );
+        }
     }
 
     /// An absent `modeling.cost_scale_factor` resolves to
@@ -744,6 +769,36 @@ mod tests {
             !recorded.iter().any(|m| m.contains("companion")),
             "no companion-injection advisory may be logged: {recorded:?}"
         );
+    }
+
+    /// A shutdown request alone is reported as `graceful_shutdown`; one that
+    /// coincides with the iteration limit is reported as `iteration_limit`.
+    #[test]
+    fn production_rule_set_reports_graceful_shutdown_on_a_shutdown_request() {
+        use crate::stopping_rule::MonitorState;
+
+        let mut config = base_test_config();
+        config.training.stopping_rules =
+            Some(vec![StoppingRuleConfig::IterationLimit { limit: 10 }]);
+        let params = StudyParams::from_config(&config, Vec::new())
+            .expect("the base config maps successfully");
+        let rule_set = &params.stopping_rule_set;
+
+        let shutdown_at = |iteration| MonitorState {
+            iteration,
+            wall_time_seconds: 0.0,
+            lower_bound: 0.0,
+            upper_bound: 0.0,
+            lower_bound_history: Vec::new(),
+            shutdown_requested: true,
+        };
+        let first = rule_set.evaluate(&shutdown_at(1));
+        assert_eq!(first.termination_reason(), Some("graceful_shutdown"));
+        assert!(first.ended_by_shutdown());
+
+        let at_limit = rule_set.evaluate(&shutdown_at(10));
+        assert_eq!(at_limit.termination_reason(), Some("iteration_limit"));
+        assert!(!at_limit.ended_by_shutdown());
     }
 
     /// A user-declared `BoundStalling` alongside a `Gap` rule passes through

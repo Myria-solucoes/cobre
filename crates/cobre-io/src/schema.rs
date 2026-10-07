@@ -306,6 +306,89 @@ mod tests {
     }
 
     #[test]
+    fn stages_schema_does_not_accept_scenario_source() {
+        let schemas = generate_schemas().unwrap();
+        let (_, stages_schema) = schemas
+            .iter()
+            .find(|(name, _)| name == "stages.schema.json")
+            .unwrap_or_else(|| panic!("stages.schema.json not found in schemas"));
+
+        assert_eq!(stages_schema.pointer("/properties/scenario_source"), None);
+        assert_eq!(
+            stages_schema.pointer("/additionalProperties"),
+            Some(&Value::Bool(false))
+        );
+        for expected_field in [
+            "policy_graph",
+            "stages",
+            "pre_study_stages",
+            "season_definitions",
+        ] {
+            assert!(
+                stages_schema
+                    .pointer(&format!("/properties/{expected_field}"))
+                    .is_some(),
+                "stages schema /properties should contain '{expected_field}'"
+            );
+        }
+    }
+
+    #[test]
+    fn config_schema_requires_training_selection_and_stopping_rules() {
+        let schemas = generate_schemas().unwrap();
+        let (_, config_schema) = schemas
+            .iter()
+            .find(|(name, _)| name == "config.schema.json")
+            .unwrap_or_else(|| panic!("config.schema.json not found in schemas"));
+
+        let required = config_schema
+            .pointer("/$defs/TrainingConfig/required")
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("TrainingConfig has no required list"));
+        for key in ["selection", "stopping_rules"] {
+            assert!(
+                required.iter().any(|entry| entry == key),
+                "TrainingConfig should require '{key}', got: {required:?}"
+            );
+        }
+
+        assert_eq!(
+            config_schema.pointer("/$defs/TrainingConfig/properties/stopping_rules/type"),
+            Some(&Value::String("array".to_string()))
+        );
+
+        let selection = config_schema
+            .pointer("/$defs/TrainingConfig/properties/selection")
+            .unwrap_or_else(|| panic!("TrainingConfig has no selection property"));
+        assert_eq!(selection.get("anyOf"), None);
+        assert_eq!(selection.get("default"), None);
+        assert_eq!(
+            selection
+                .get("oneOf")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn config_schema_requires_an_iteration_limit_stopping_rule() {
+        let schemas = generate_schemas().unwrap();
+        let (_, config_schema) = schemas
+            .iter()
+            .find(|(name, _)| name == "config.schema.json")
+            .unwrap_or_else(|| panic!("config.schema.json not found in schemas"));
+
+        assert_eq!(
+            config_schema.pointer("/$defs/TrainingConfig/properties/stopping_rules/contains"),
+            Some(&serde_json::json!({
+                "required": ["type"],
+                "properties": {"type": {"const": "iteration_limit"}}
+            }))
+        );
+    }
+
+    #[test]
     fn test_all_expected_schema_filenames_present() {
         let schemas = generate_schemas().unwrap();
         let names: Vec<&str> = schemas.iter().map(|(n, _)| n.as_str()).collect();
@@ -364,5 +447,480 @@ mod tests {
 
         assert!(nested.is_dir());
         assert!(count > 0);
+    }
+
+    fn rustdoc_escapes(text: &str) -> Vec<String> {
+        let mut found = Vec::new();
+        let mut chars = text.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\\'
+                && let Some(escaped) = chars.next_if(char::is_ascii_punctuation)
+            {
+                found.push(format!("\\{escaped}"));
+            }
+        }
+        found
+    }
+
+    const IMPLEMENTATION_MARKERS_ANY_CASE: [&str; 11] = [
+        "intermediate type",
+        "intermediate serde",
+        "intermediate enum",
+        "intermediate untagged",
+        "intermediate representation",
+        "serde",
+        "deserializ",
+        "re-export",
+        "untagged",
+        "internally tagged",
+        "internally-tagged",
+    ];
+    const IMPLEMENTATION_MARKERS: [&str; 16] = [
+        "#[",
+        "deny_unknown_fields",
+        "::",
+        "`None`",
+        "`Some(",
+        "Option<",
+        "Vec<",
+        "HashMap<",
+        "<f64>",
+        "<u32>",
+        "`f64`",
+        "`u32`",
+        "`i32`",
+        "`usize`",
+        "```\n",
+        "```rust",
+    ];
+
+    fn rustdoc_links(text: &str) -> Vec<String> {
+        let mut found = Vec::new();
+        let mut rest = text;
+        while let Some(open) = rest.find("[`") {
+            let Some(close) = rest[open + 2..].find("`]") else {
+                break;
+            };
+            let end = open + 2 + close + 2;
+            if !matches!(rest[end..].chars().next(), Some('(' | '[')) {
+                found.push(rest[open..end].to_owned());
+            }
+            rest = &rest[end..];
+        }
+        found
+    }
+
+    fn raw_latex(text: &str) -> Vec<String> {
+        let mut found = Vec::new();
+        let mut chars = text.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\\'
+                && let Some(letter) = chars.next_if(char::is_ascii_alphabetic)
+            {
+                found.push(format!("\\{letter}"));
+            }
+        }
+        let mut rest = text;
+        while let Some(open) = rest.find('$') {
+            let Some(close) = rest[open + 1..].find('$') else {
+                break;
+            };
+            let inner = &rest[open + 1..open + 1 + close];
+            let is_latex = inner
+                .chars()
+                .next()
+                .is_some_and(|first| first.is_ascii_alphabetic() || first == '\\')
+                && !inner.contains(char::is_whitespace)
+                && inner.contains(['_', '^', '{', '\\']);
+            if is_latex {
+                found.push(format!("${inner}$"));
+                rest = &rest[open + close + 2..];
+            } else {
+                rest = &rest[open + 1 + close..];
+            }
+        }
+        found
+    }
+
+    fn implementation_wording(text: &str) -> Vec<&'static str> {
+        let lower = text.to_lowercase();
+        IMPLEMENTATION_MARKERS_ANY_CASE
+            .into_iter()
+            .filter(|marker| lower.contains(marker))
+            .chain(
+                IMPLEMENTATION_MARKERS
+                    .into_iter()
+                    .filter(|marker| text.contains(marker)),
+            )
+            .collect()
+    }
+
+    fn case_author_artifacts(text: &str) -> Vec<String> {
+        let mut found = rustdoc_escapes(text);
+        found.extend(rustdoc_links(text));
+        found.extend(raw_latex(text));
+        found.extend(implementation_wording(text).into_iter().map(str::to_owned));
+        found
+    }
+
+    fn collect_descriptions(value: &Value, pointer: &str, out: &mut Vec<(String, String)>) {
+        match value {
+            Value::Object(map) => {
+                if let Some(Value::String(text)) = map.get("description") {
+                    out.push((pointer.to_owned(), text.clone()));
+                }
+                for (key, child) in map {
+                    collect_descriptions(child, &format!("{pointer}/{key}"), out);
+                }
+            }
+            Value::Array(items) => {
+                for (index, child) in items.iter().enumerate() {
+                    collect_descriptions(child, &format!("{pointer}/{index}"), out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn exported_schema_descriptions_are_written_for_case_authors() {
+        let mut offences = Vec::new();
+        for (name, schema) in generate_schemas().unwrap() {
+            let mut descriptions = Vec::new();
+            collect_descriptions(&schema, "", &mut descriptions);
+            for (pointer, text) in descriptions {
+                let artifacts = case_author_artifacts(&text);
+                if !artifacts.is_empty() {
+                    offences.push(format!("{name} {pointer}: {}", artifacts.join(" ")));
+                }
+            }
+        }
+        assert!(
+            offences.is_empty(),
+            "schema descriptions carry artifacts not written for case authors:\n{}",
+            offences.join("\n")
+        );
+    }
+
+    #[test]
+    fn rustdoc_escape_scan_flags_backslash_punctuation_only() {
+        assert_eq!(rustdoc_escapes(r"Power \[MW\]."), ["\\[", "\\]"]);
+        assert_eq!(rustdoc_escapes(r"a\_b \* c"), ["\\_", "\\*"]);
+        for clean in [
+            r"Window $\tau$",
+            "see [`Type`]",
+            "Power (MW).",
+            "in [-1.0, 1.0]",
+        ] {
+            assert!(rustdoc_escapes(clean).is_empty(), "{clean:?} was flagged");
+        }
+    }
+
+    #[test]
+    fn case_author_scan_flags_rust_artifacts_and_spares_author_text() {
+        assert_eq!(rustdoc_links("see [`Self::Pacf`] path"), ["[`Self::Pacf`]"]);
+        assert!(rustdoc_links("a [`x`](https://example.org) link").is_empty());
+        assert_eq!(raw_latex(r"Window size $\tau$."), [r"\t", r"$\tau$"]);
+        assert_eq!(raw_latex("Maximum count $k_{max}$."), ["$k_{max}$"]);
+
+        let flagged: [(&str, &[&str]); 17] = [
+            (
+                "Top-level intermediate type for `hydros.json`.",
+                &["intermediate type"],
+            ),
+            (
+                "Intermediate serde type for `config.json`.",
+                &["intermediate serde", "serde"],
+            ),
+            (
+                "Raw intermediate enum for contract direction.",
+                &["intermediate enum"],
+            ),
+            (
+                "Intermediate untagged union for `risk_measure`.",
+                &["intermediate untagged", "untagged"],
+            ),
+            (
+                "Per-entry intermediate representation.",
+                &["intermediate representation"],
+            ),
+            (
+                "Private — only used during deserialization. Not re-exported.",
+                &["deserializ", "re-export"],
+            ),
+            (
+                "Untagged with per-variant `deny_unknown_fields`.",
+                &["untagged", "deny_unknown_fields"],
+            ),
+            ("Internally tagged on `method`.", &["internally tagged"]),
+            ("An internally-tagged union.", &["internally-tagged"]),
+            ("Uses `#[serde(tag = \"model\")]`.", &["serde", "#["]),
+            (
+                "`cobre_core::AnticipatedConfig` keeps a plain derive.",
+                &["::"],
+            ),
+            (
+                "Defaults to `None`; `Some(n)` caps it.",
+                &["`None`", "`Some("],
+            ),
+            (
+                "Fields are `Option<f64>` in a `Vec<i32>` keyed by `HashMap<K, V>`.",
+                &["Option<", "Vec<", "HashMap<"],
+            ),
+            (
+                "Shape `{ \"tolerance_deg\": <f64>, \"n_samples\": <u32> }`.",
+                &["<f64>", "<u32>"],
+            ),
+            (
+                "Wraps the `i32` id, not a `usize` index; `f64` and `u32` fields.",
+                &["`i32`", "`usize`", "`f64`", "`u32`"],
+            ),
+            ("# Examples\n\n```\nlet x = 1;\n```", &["```\n"]),
+            ("```rust\nlet x = 1;\n```", &["```rust"]),
+        ];
+        for (text, markers) in flagged {
+            let found = implementation_wording(text);
+            for marker in markers {
+                assert!(found.contains(marker), "{text:?} missed {marker:?}");
+            }
+        }
+
+        let spared = [
+            "Power (MW).",
+            "Cost ($/`MWh`) and ($/hm³).",
+            "Penalty ($/(m³/s·h)).",
+            "in [-1.0, 1.0]",
+            "Method: `\"none\"` or `\"truncation\"`.",
+            "An array such as `[1940, 1953, 1971]`.",
+            "Must be symmetric: `|m[i][j] - m[j][i]| <= 1e-10`.",
+            "```json\n{}\n```",
+            "Intermediate stages are allowed.",
+            "Between $10 and $20.",
+            "The `method` key selects the scheduler.",
+        ];
+        for text in spared {
+            let artifacts = case_author_artifacts(text);
+            assert!(artifacts.is_empty(), "{text:?} was flagged: {artifacts:?}");
+        }
+    }
+
+    #[test]
+    fn hydro_penalty_descriptions_state_the_priced_unit() {
+        const FLOW: &str = "($/(m³/s·h))";
+        const STORAGE: &str = "($/hm³)";
+        const ENERGY: &str = "($/`MWh`)";
+        let units: [(&str, &str); 16] = [
+            ("spillage_cost", FLOW),
+            ("turbined_cost", FLOW),
+            ("diversion_cost", FLOW),
+            ("storage_violation_below_cost", STORAGE),
+            ("filling_target_violation_cost", STORAGE),
+            ("turbined_violation_below_cost", FLOW),
+            ("outflow_violation_below_cost", FLOW),
+            ("outflow_violation_above_cost", FLOW),
+            ("generation_violation_below_cost", ENERGY),
+            ("evaporation_violation_cost", FLOW),
+            ("water_withdrawal_violation_cost", FLOW),
+            ("water_withdrawal_violation_pos_cost", FLOW),
+            ("water_withdrawal_violation_neg_cost", FLOW),
+            ("evaporation_violation_pos_cost", FLOW),
+            ("evaporation_violation_neg_cost", FLOW),
+            ("inflow_nonnegativity_cost", FLOW),
+        ];
+        let schemas = generate_schemas().unwrap();
+        let properties = |file: &str, def: &str| {
+            let (_, schema) = schemas
+                .iter()
+                .find(|(name, _)| name == file)
+                .unwrap_or_else(|| panic!("{file} not found in schemas"));
+            schema
+                .pointer(&format!("/$defs/{def}/properties"))
+                .and_then(Value::as_object)
+                .unwrap_or_else(|| panic!("{file} has no /$defs/{def}/properties"))
+                .clone()
+        };
+
+        let mut offences = Vec::new();
+        for (file, def) in [
+            ("penalties.schema.json", "RawHydroPenalties"),
+            ("hydros.schema.json", "RawHydroPenaltyOverrides"),
+        ] {
+            for (key, property) in properties(file, def) {
+                let description = property.get("description").and_then(Value::as_str);
+                match units.iter().find(|(unit_key, _)| *unit_key == key) {
+                    None => offences.push(format!("{file} {def}.{key}: has no unit in the table")),
+                    Some((_, unit)) if !description.is_some_and(|text| text.contains(unit)) => {
+                        offences.push(format!(
+                            "{file} {def}.{key}: {} lacks {unit}",
+                            description.unwrap_or("no description")
+                        ));
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+        assert!(
+            offences.is_empty(),
+            "hydro penalty descriptions do not state the priced unit:\n{}",
+            offences.join("\n")
+        );
+
+        let mut hydro_section: Vec<String> =
+            properties("penalties.schema.json", "RawHydroPenalties")
+                .keys()
+                .cloned()
+                .collect();
+        hydro_section.sort_unstable();
+        let mut table: Vec<&str> = units.iter().map(|(key, _)| *key).collect();
+        table.sort_unstable();
+        assert_eq!(hydro_section, table);
+    }
+
+    fn schema_named<'a>(schemas: &'a [(String, Value)], name: &str) -> &'a Value {
+        let Some((_, schema)) = schemas.iter().find(|(file, _)| file == name) else {
+            panic!("{name} not found in schemas");
+        };
+        schema
+    }
+
+    #[test]
+    fn entity_penalty_override_descriptions_cite_penalties_json_keys() {
+        let schemas = generate_schemas().unwrap();
+        let penalties = schema_named(&schemas, "penalties.schema.json");
+        for (file, def, property, section, key) in [
+            (
+                "non_controllable_sources.schema.json",
+                "RawNcs",
+                "curtailment_cost",
+                "non_controllable_source",
+                "curtailment_cost",
+            ),
+            (
+                "lines.schema.json",
+                "RawLine",
+                "exchange_cost",
+                "line",
+                "exchange_cost",
+            ),
+            (
+                "buses.schema.json",
+                "RawBus",
+                "deficit_segments",
+                "bus",
+                "deficit_segments",
+            ),
+        ] {
+            let pointer = format!("/$defs/{def}/properties/{property}/description");
+            let description = schema_named(&schemas, file)
+                .pointer(&pointer)
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("{file} has no {pointer}"));
+            let cited = format!("`{section}.{key}`");
+            assert!(
+                description.contains(&cited) && description.contains("`penalties.json`"),
+                "{file} {pointer} does not cite {cited} in `penalties.json`: {description:?}"
+            );
+
+            let reference = penalties
+                .pointer(&format!("/properties/{section}/$ref"))
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| {
+                    panic!("penalties.schema.json has no /properties/{section}/$ref")
+                });
+            let section_properties = reference
+                .strip_prefix('#')
+                .and_then(|def_pointer| penalties.pointer(def_pointer))
+                .and_then(|section_def| section_def.get("properties"))
+                .and_then(Value::as_object)
+                .unwrap_or_else(|| panic!("penalties.schema.json {reference} has no properties"));
+            assert!(
+                section_properties.contains_key(key),
+                "penalties.schema.json {reference}/properties has no {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn hydro_penalty_override_fields_are_fields_of_the_penalties_hydro_section() {
+        let schemas = generate_schemas().unwrap();
+        let penalties = schema_named(&schemas, "penalties.schema.json");
+        let hydros = schema_named(&schemas, "hydros.schema.json");
+
+        let reference = penalties
+            .pointer("/properties/hydro/$ref")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("penalties.schema.json has no /properties/hydro/$ref"));
+        let hydro_section = reference
+            .strip_prefix('#')
+            .and_then(|def_pointer| penalties.pointer(def_pointer))
+            .and_then(|section_def| section_def.get("properties"))
+            .and_then(Value::as_object)
+            .unwrap_or_else(|| panic!("penalties.schema.json {reference} has no properties"));
+        let overrides = hydros
+            .pointer("/$defs/RawHydroPenaltyOverrides/properties")
+            .and_then(Value::as_object)
+            .unwrap_or_else(|| {
+                panic!("hydros.schema.json has no /$defs/RawHydroPenaltyOverrides/properties")
+            });
+        let foreign: Vec<&String> = overrides
+            .keys()
+            .filter(|key| !hydro_section.contains_key(*key))
+            .collect();
+        assert!(
+            foreign.is_empty(),
+            "hydros.schema.json /$defs/RawHydroPenaltyOverrides/properties names keys absent \
+             from penalties.schema.json {reference}/properties: {foreign:?}"
+        );
+
+        let pointer = "/$defs/RawHydro/properties/penalties/description";
+        let description = hydros
+            .pointer(pointer)
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("hydros.schema.json has no {pointer}"));
+        assert!(
+            description.contains("`hydro`") && description.contains("`penalties.json`"),
+            "hydros.schema.json {pointer} does not cite the `hydro` section of \
+             `penalties.json`: {description:?}"
+        );
+    }
+
+    #[test]
+    fn generic_parameters_schema_enumerates_every_parameter_kind() {
+        let schemas = generate_schemas().unwrap();
+        let parameters = schema_named(&schemas, "generic_parameters.schema.json");
+        let pointer = "/$defs/ScalarParameterJsonEntry/properties/kind/$ref";
+        let reference = parameters
+            .pointer(pointer)
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("generic_parameters.schema.json has no {pointer}"));
+        let kind_def = reference
+            .strip_prefix('#')
+            .and_then(|def_pointer| parameters.pointer(def_pointer))
+            .unwrap_or_else(|| panic!("generic_parameters.schema.json has no {reference}"));
+        let listed: Vec<&Value> = match (kind_def.get("oneOf"), kind_def.get("enum")) {
+            (Some(Value::Array(variants)), _) => {
+                variants.iter().map(|variant| &variant["const"]).collect()
+            }
+            (_, Some(Value::Array(values))) => values.iter().collect(),
+            _ => panic!("{reference} has neither a oneOf nor an enum array: {kind_def}"),
+        };
+        let mut kinds: Vec<&str> = listed
+            .into_iter()
+            .map(|kind| {
+                kind.as_str()
+                    .unwrap_or_else(|| panic!("{reference} lists a non-string kind: {kind}"))
+            })
+            .collect();
+        kinds.sort_unstable();
+        assert_eq!(
+            kinds,
+            [
+                "computed",
+                "constant",
+                "per_stage",
+                "per_stage_block",
+                "seasonal"
+            ]
+        );
     }
 }

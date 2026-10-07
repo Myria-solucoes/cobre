@@ -12,9 +12,9 @@
 //! ```
 
 use crate::context::ClassSchemes;
-use crate::season_cast::{StageCalendar, occurrence_year};
+use crate::season_cast::occurrence_year;
 
-use chrono::{Datelike, Months, NaiveDate};
+use chrono::{Datelike, NaiveDate};
 use std::fmt;
 pub mod class_sampler;
 mod eta_inversion;
@@ -31,7 +31,8 @@ pub use external::{
     validate_external_library,
 };
 pub use historical::{
-    HistoricalScenarioLibrary, standardize_historical_windows, validate_historical_library,
+    HistoricalScenarioLibrary, HistoricalStructureProof, check_historical_structure,
+    standardize_historical_windows, validate_historical_library,
 };
 pub use tables::{ClassNoiseTables, ForwardNoiseTables, NoiseTable};
 pub use window::discover_historical_windows;
@@ -333,8 +334,11 @@ fn rebuild_class_tables(
 pub struct ForwardSamplerConfig<'a> {
     /// Per-class sampling scheme selections.
     pub class_schemes: ClassSchemes,
-    /// Stochastic context providing tree, seeds, correlation, and entity order.
+    /// Stochastic context providing opening tree, base seed, correlation and entity order.
     pub ctx: &'a StochasticContext,
+    /// Root seed of `OutOfSample` forward noise. The load and NCS class seeds
+    /// derive from it. Required when a class is `OutOfSample`.
+    pub forward_seed: Option<u64>,
     /// Study stages in index order; required by `OutOfSample` to read per-stage
     /// noise methods.
     pub stages: &'a [Stage],
@@ -420,8 +424,7 @@ fn build_class_sampler<'a>(
             let forward_seed =
                 forward_seed.ok_or_else(|| StochasticError::MissingScenarioSource {
                     scheme: "out_of_sample".to_string(),
-                    reason: "no forward_seed configured; set a seed in stages.json for \
-                             out-of-sample forward pass noise generation"
+                    reason: "no forward seed was supplied for out-of-sample noise generation"
                         .to_string(),
                 })?;
             Ok(ClassSampler::OutOfSample {
@@ -574,7 +577,7 @@ fn warn_unsupported_forward_noise_methods(
 /// # Errors
 ///
 /// Returns [`StochasticError::MissingScenarioSource`] when:
-/// - `OutOfSample` scheme lacks a configured `forward_seed` in `ctx`.
+/// - `OutOfSample` is selected and `forward_seed` is `None`.
 /// - `Historical` is selected for inflow but `historical_library` is `None`.
 /// - `Historical` is selected for load or NCS (not supported).
 /// - `External` is selected but the corresponding library is `None`.
@@ -584,6 +587,7 @@ pub fn build_forward_sampler(
     let ForwardSamplerConfig {
         class_schemes,
         ctx,
+        forward_seed,
         stages,
         historical_library,
         external_inflow_library,
@@ -598,7 +602,7 @@ pub fn build_forward_sampler(
 
     // Inflow keeps the root seed: deriving it too would change every shipped
     // inflow-only deck.
-    let inflow_forward_seed = ctx.forward_seed();
+    let inflow_forward_seed = forward_seed;
     let load_forward_seed =
         inflow_forward_seed.map(|s| derive_class_forward_seed(s, EntityClass::Load));
     let ncs_forward_seed =
@@ -685,29 +689,13 @@ pub fn build_forward_sampler(
 // Shared helper
 // ---------------------------------------------------------------------------
 
-/// Build the observation sequence as `(year_offset, season_id)` pairs.
-///
-/// The anchor is `stages[0]`; its own resolved year is `y0`, and every other
-/// entry's `year_offset` is relative to it — `window_year` is the first study
-/// observation's year.
-///
-/// **Layout.** The study entries come first, one per stage carrying a
-/// `season_id`, in stage order. The resolved lag entries follow, for
-/// `k = 1..=r` (newest first), where `r <= max_order`: the season-map walk
-/// ([`StageCalendar::season_occurrences`]) may truncate before `max_order` on
-/// a sparse `Custom` map, and there are no lag entries at all when
-/// `stages[0]`'s own season id has no entry in `season_map`.
-///
-/// **Year.** A study or lag entry whose season id resolves to a
-/// [`SeasonDefinition`](cobre_core::temporal::SeasonDefinition) in
-/// `season_map` is dated via [`occurrence_year`]; one that does not (a
-/// missing def, or `season_map: None`) falls back to its own date's calendar
-/// year — the same fallback `None` uses throughout, so a `None` map's lag `k`
-/// is `stages[0].start_date` minus `k` calendar months, keyed by that date's
-/// `month0()`.
+/// The `(year_offset, season_id)` observations the historical library's
+/// consumers read: one per study stage carrying a `season_id`, in stage order,
+/// dated by [`occurrence_year`] relative to the first stage's year. Lags come
+/// from the derived stage-0 seed, never from the window, and window
+/// admissibility and standardization both index this one sequence.
 pub(crate) fn build_observation_sequence(
     stages: &[Stage],
-    max_order: usize,
     season_map: Option<&SeasonMap>,
 ) -> Vec<(i32, usize)> {
     let Some(first_stage) = stages.first() else {
@@ -732,47 +720,14 @@ pub(crate) fn build_observation_sequence(
         first_stage.end_date,
     );
 
-    let mut result: Vec<(i32, usize)> = stages
+    stages
         .iter()
         .filter_map(|stage| {
             let sid = stage.season_id?;
             let year = year_for(Some(sid), stage.start_date, stage.end_date);
             Some((year - y0, sid))
         })
-        .collect();
-
-    match season_map {
-        Some(map) => {
-            if let Some(def0) = first_stage
-                .season_id
-                .and_then(|sid| map.seasons.iter().find(|def| def.id == sid))
-                && let Some(occurrences) = StageCalendar::new(std::slice::from_ref(first_stage))
-                    .season_occurrences(map, def0, max_order)
-            {
-                for occ in occurrences.iter().skip(1) {
-                    let Some(id_k) = map.season_for_date(occ.start) else {
-                        break;
-                    };
-                    let year_k = year_for(Some(id_k), occ.start, occ.end);
-                    result.push((year_k - y0, id_k));
-                }
-            }
-        }
-        None => {
-            for k in 1..=max_order {
-                let months = u32::try_from(k).unwrap_or(u32::MAX);
-                let Some(d) = first_stage
-                    .start_date
-                    .checked_sub_months(Months::new(months))
-                else {
-                    break;
-                };
-                result.push((d.year() - y0, d.month0() as usize));
-            }
-        }
-    }
-
-    result
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1007,6 +962,7 @@ mod tests {
                 ncs: Some(scheme),
             },
             ctx,
+            forward_seed: ctx.forward_seed(),
             stages,
             historical_library: None,
             external_inflow_library: None,
@@ -1091,6 +1047,7 @@ mod tests {
                 ncs: Some(SamplingScheme::InSample),
             },
             ctx: &ctx,
+            forward_seed: ctx.forward_seed(),
             stages: &stages,
             historical_library: Some(&lib),
             external_inflow_library: None,
@@ -1134,6 +1091,7 @@ mod tests {
                 ncs: Some(SamplingScheme::InSample),
             },
             ctx: &ctx,
+            forward_seed: ctx.forward_seed(),
             stages: &stages,
             historical_library: Some(&historical_lib),
             external_inflow_library: Some(&external_lib),
@@ -1181,6 +1139,7 @@ mod tests {
                 ncs: Some(SamplingScheme::InSample),
             },
             ctx: &ctx,
+            forward_seed: ctx.forward_seed(),
             stages: &stages,
             historical_library: None,
             external_inflow_library: None,
@@ -1218,6 +1177,7 @@ mod tests {
                 ncs: Some(SamplingScheme::InSample),
             },
             ctx: &ctx,
+            forward_seed: ctx.forward_seed(),
             stages: &stages,
             historical_library: None,
             external_inflow_library: Some(&lib),
@@ -1241,6 +1201,7 @@ mod tests {
                 ncs: Some(SamplingScheme::InSample),
             },
             ctx: &ctx,
+            forward_seed: ctx.forward_seed(),
             stages: &stages,
             historical_library: None,
             external_inflow_library: None,
@@ -1611,11 +1572,7 @@ mod tests {
         );
     }
 
-    /// Classes sampled out of sample must not share a noise stream: one seed
-    /// for every class makes the load and NCS slots repeat the first inflow
-    /// slots bit-for-bit. Inflow keeps the root seed, so its slot is pinned.
-    #[test]
-    fn test_out_of_sample_classes_draw_distinct_streams() {
+    fn build_three_class_oos_ctx(forward_seed: Option<u64>) -> (StochasticContext, Vec<Stage>) {
         let stages = vec![make_stage(0, 0, 5), make_stage(1, 1, 5)];
         let load_model = |stage_id: i32| LoadModel {
             bus_id: EntityId(0),
@@ -1647,7 +1604,7 @@ mod tests {
         let ctx = build_stochastic_context(
             &system,
             42,
-            Some(99),
+            forward_seed,
             &[],
             &[],
             OpeningTreeInputs::default(),
@@ -1658,6 +1615,15 @@ mod tests {
             },
         )
         .unwrap();
+        (ctx, stages)
+    }
+
+    /// Classes sampled out of sample must not share a noise stream: one seed
+    /// for every class makes the load and NCS slots repeat the first inflow
+    /// slots bit-for-bit. Inflow keeps the root seed, so its slot is pinned.
+    #[test]
+    fn test_out_of_sample_classes_draw_distinct_streams() {
+        let (ctx, stages) = build_three_class_oos_ctx(Some(99));
         assert_eq!(ctx.n_load_buses(), 1);
         assert_eq!(ctx.n_stochastic_ncs(), 1);
         let sampler = build_forward_sampler(ForwardSamplerConfig {
@@ -1667,6 +1633,7 @@ mod tests {
                 ncs: Some(SamplingScheme::OutOfSample),
             },
             ctx: &ctx,
+            forward_seed: ctx.forward_seed(),
             stages: &stages,
             historical_library: None,
             external_inflow_library: None,
@@ -1708,6 +1675,59 @@ mod tests {
             4_608_014_355_120_151_153_u64,
             "inflow draw must keep its root-seed value"
         );
+    }
+
+    #[test]
+    fn forward_sampler_draws_from_the_config_forward_seed() {
+        let (ctx_seeded, stages) = build_three_class_oos_ctx(Some(99));
+        let (ctx_unseeded, _) = build_three_class_oos_ctx(None);
+        let dim = ctx_seeded.dim();
+        let draw = |ctx: &StochasticContext, forward_seed: Option<u64>| {
+            let sampler = build_forward_sampler(ForwardSamplerConfig {
+                forward_seed,
+                ..all_classes_config(SamplingScheme::OutOfSample, ctx, &stages)
+            })
+            .unwrap();
+            let mut buf = vec![0.0f64; dim];
+            let mut corr = vec![0.0f64; 2 * dim];
+            let tables = tables_for(&sampler, 1, 5, &[]);
+            let noise = sampler
+                .sample(SampleRequest {
+                    iteration: 1,
+                    scenario: 2,
+                    stage: 0,
+                    stage_idx: 0,
+                    noise_buf: &mut buf,
+                    corr_scratch: &mut corr,
+                    total_scenarios: 5,
+                    noise_group_id: 0,
+                    node_opening_offset: 0,
+                    node_opening_len: 0,
+                    pinned_scenario: None,
+                    tables: &tables,
+                })
+                .unwrap();
+            noise.as_slice().to_vec()
+        };
+
+        let seeded = draw(&ctx_seeded, Some(7));
+        let unseeded = draw(&ctx_unseeded, Some(7));
+        let other = draw(&ctx_seeded, Some(8));
+
+        for (slot, (s, u)) in seeded.iter().zip(&unseeded).enumerate() {
+            assert_eq!(
+                s.to_bits(),
+                u.to_bits(),
+                "slot {slot} must not depend on the context's forward seed"
+            );
+        }
+        let differs = |slot: usize| seeded[slot].to_bits() != other[slot].to_bits();
+        assert!(
+            differs(0) || differs(1),
+            "an inflow slot must follow the config seed"
+        );
+        assert!(differs(2), "the load slot must follow the config seed");
+        assert!(differs(3), "the NCS slot must follow the config seed");
     }
 
     // -----------------------------------------------------------------------
@@ -1768,6 +1788,7 @@ mod tests {
                 ncs: Some(SamplingScheme::InSample),
             },
             ctx,
+            forward_seed: ctx.forward_seed(),
             stages,
             historical_library: None,
             external_inflow_library: None,

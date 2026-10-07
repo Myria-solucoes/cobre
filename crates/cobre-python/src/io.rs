@@ -17,7 +17,6 @@
 //! | `LoadError::ParseError`             | `ValidationError` (`ValueError`) |
 //! | `LoadError::SchemaError`            | `ValidationError` (`ValueError`) |
 //! | `LoadError::ConstraintError`        | `ValidationError` (`ValueError`) |
-//! | `LoadError::PolicyIncompatible`     | `PolicyIncompatibleError` (`ValueError`) |
 //!
 //! [`validate`] returns case-validation failures as data; a malformed
 //! `config_overrides` dict raises `ValueError` at call time.
@@ -33,18 +32,13 @@ use cobre_io::LoadError;
 use cobre_io::ReportEntry;
 use cobre_io::parse_config;
 use cobre_io::validate_case_with_artifacts;
-use cobre_sddp::hydro_models::prepare_hydro_models_from_artifacts;
-use cobre_sddp::validate_phases::{PrepPhase, prep_phase_metadata};
-use cobre_sddp::{
-    StudyParams, StudySetup, prepare_stochastic, resolve_boundary_state_requirements,
-    validate_generic_constraint_parameters,
-};
+use cobre_sddp::validate_phases::{self, PolicyLoadFailure, ValidateRequest, validate_study};
 
 use crate::convert::pydict_to_json_map;
 use crate::errors::ErrorSource::Load;
 use crate::errors::convert_error;
 use crate::model::PySystem;
-use crate::run::reconcile_boundary_policy;
+use crate::study::resolve_output_dir;
 
 // ── Error conversion ──────────────────────────────────────────────────────────
 
@@ -70,8 +64,7 @@ fn convert_load_error(err: &LoadError) -> PyErr {
     convert_error(Load(err))
 }
 
-/// Converts `ReportEntry` warnings to the `{"kind", "message", "file", "entity"}` dict shape shared by [`validate`] and `Study::validate`.
-pub(crate) fn build_warnings_list<'py>(
+fn build_warnings_list<'py>(
     py: Python<'py>,
     warnings: &[ReportEntry],
 ) -> PyResult<Bound<'py, PyList>> {
@@ -138,12 +131,19 @@ pub fn load_case(py: Python<'_>, path: PathBuf) -> PyResult<PySystem> {
 /// raises `ValueError` at call time.
 ///
 /// Executes the full validation pipeline (case structure, schema, configuration,
-/// stochastic preparation, hydro models, generic constraints, and boundary
-/// reconciliation when configured), short-circuiting on the first failure.
+/// stochastic preparation, hydro models, generic constraints, study construction,
+/// the configured warm-start, resume or simulation-only policy read from
+/// `<output_dir>/<policy.path>`, and boundary reconciliation when configured),
+/// short-circuiting on the first failure. Nothing is written, and an absent
+/// `output_dir` is not created.
 ///
 /// # Arguments
 ///
 /// * `path` — path to the case directory, as a `str` or `pathlib.Path`.
+/// * `output_dir` — keyword-only; the directory the configured policy is read
+///   from, as `cobre.run.run`'s `output_dir` names it. Defaults to
+///   `<path>/output`. A relative path resolves from the process working
+///   directory.
 ///
 /// # Returns
 ///
@@ -166,18 +166,43 @@ pub fn load_case(py: Python<'_>, path: PathBuf) -> PyResult<PySystem> {
 /// ```
 #[allow(clippy::needless_pass_by_value)]
 #[pyfunction]
-#[pyo3(signature = (path, config_overrides=None))]
+#[pyo3(signature = (path, config_overrides=None, *, output_dir=None))]
 pub fn validate(
     py: Python<'_>,
     path: PathBuf,
     config_overrides: Option<Bound<'_, PyDict>>,
+    output_dir: Option<PathBuf>,
 ) -> PyResult<Py<PyAny>> {
     let overrides = config_overrides
         .map(|d| pydict_to_json_map(&d))
         .transpose()?;
+    let output_dir = resolve_output_dir(&path, output_dir);
 
-    let outcome = py.detach(|| run_validate_pipeline(&path, overrides.as_ref()));
+    let outcome = py.detach(|| run_validate_pipeline(&path, overrides.as_ref(), &output_dir));
 
+    Ok(build_validation_report(py, outcome)?.into())
+}
+
+/// A refusal rendered as one `{"kind", "message"}` error entry.
+pub(crate) struct ValidateFailure {
+    kind: String,
+    message: String,
+}
+
+impl From<PolicyLoadFailure> for ValidateFailure {
+    fn from(failure: PolicyLoadFailure) -> Self {
+        Self {
+            kind: failure.kind(),
+            message: failure.report(),
+        }
+    }
+}
+
+/// Renders a validation outcome as the `{"valid", "errors", "warnings"}` dict shared by [`validate`] and `Study::validate`.
+pub(crate) fn build_validation_report(
+    py: Python<'_>,
+    outcome: Result<Vec<ReportEntry>, ValidateFailure>,
+) -> PyResult<Bound<'_, PyDict>> {
     let dict = PyDict::new(py);
     match outcome {
         Ok(warnings) => {
@@ -195,134 +220,54 @@ pub fn validate(
             dict.set_item("warnings", PyList::empty(py))?;
         }
     }
-
-    Ok(dict.into())
-}
-
-struct ValidateFailure {
-    kind: &'static str,
-    message: String,
+    Ok(dict)
 }
 
 /// GIL-free validation pipeline, short-circuiting on the first failure.
 fn run_validate_pipeline(
     path: &std::path::Path,
     overrides: Option<&serde_json::Map<String, serde_json::Value>>,
+    output_dir: &std::path::Path,
 ) -> Result<Vec<ReportEntry>, ValidateFailure> {
     if !path.exists() {
         return Err(ValidateFailure {
-            kind: "IoError",
+            kind: "IoError".to_owned(),
             message: format!("case directory does not exist: {}", path.display()),
         });
     }
 
     let (loaded, report) = validate_case_with_artifacts(path).map_err(|err| ValidateFailure {
-        kind: err.kind(),
+        kind: err.kind().to_owned(),
         message: err.to_string(),
     })?;
 
-    let system = loaded.system;
-    let artifacts = loaded.artifacts;
-
-    let config_path = path.join("config.json");
-    let config = load_validate_config(&config_path, overrides).map_err(|err| ValidateFailure {
-        kind: err.kind(),
-        message: err.to_string(),
-    })?;
-
-    let study_params = StudyParams::from_config(&config, Vec::new()).map_err(|err| {
-        let (kind, file_label) = prep_phase_metadata(PrepPhase::Config, &err);
+    let config = load_validate_config(&path.join("config.json"), overrides).map_err(|err| {
         ValidateFailure {
-            kind,
-            message: format!("{file_label}: {err}"),
-        }
-    })?;
-
-    let seed = study_params.seed;
-
-    let boundary_requirements =
-        resolve_boundary_state_requirements(path, &config).map_err(|err| {
-            let (kind, file_label) = prep_phase_metadata(PrepPhase::Boundary, &err);
-            ValidateFailure {
-                kind,
-                message: format!("{file_label}: {err}"),
-            }
-        })?;
-
-    let training_source = config
-        .training_scenario_source(&config_path)
-        .map_err(|err| ValidateFailure {
-            kind: err.kind(),
+            kind: err.kind().to_owned(),
             message: err.to_string(),
-        })?;
-
-    let prepared = prepare_stochastic(
-        system,
-        path,
-        &config,
-        seed,
-        &training_source,
-        boundary_requirements.inflow_lag_depth(),
-    )
-    .map_err(|err| {
-        let (kind, file_label) = prep_phase_metadata(PrepPhase::Stochastic, &err);
-        ValidateFailure {
-            kind,
-            message: format!("{file_label}: {err}"),
         }
     })?;
 
-    let hydro_models =
-        prepare_hydro_models_from_artifacts(&prepared.system, &artifacts, false, None).map_err(
-            |err| {
-                let (kind, file_label) = prep_phase_metadata(PrepPhase::HydroModels, &err);
-                ValidateFailure {
-                    kind,
-                    message: format!("{file_label}: {err}"),
-                }
-            },
-        )?;
+    let validated = validate_study(ValidateRequest {
+        case_dir: path,
+        config: &config,
+        system: loaded.system,
+        artifacts: loaded.artifacts,
+        output_dir,
+    })
+    .map_err(|failure| match failure {
+        validate_phases::ValidateFailure::ConfigLoad(err) => ValidateFailure {
+            kind: err.kind().to_owned(),
+            message: err.to_string(),
+        },
+        validate_phases::ValidateFailure::Phase(failure) => ValidateFailure {
+            kind: failure.kind().to_owned(),
+            message: failure.report(),
+        },
+        validate_phases::ValidateFailure::PolicyLoad(failure) => failure.into(),
+    })?;
 
-    if let Some(bp) = config.policy.boundary.as_ref() {
-        let setup = StudySetup::new_with_boundary_requirements(
-            &prepared.system,
-            &config,
-            prepared.stochastic,
-            hydro_models,
-            boundary_requirements,
-            artifacts.scalar_parameters,
-        )
-        .map_err(|err| {
-            let (kind, file_label) = prep_phase_metadata(PrepPhase::Boundary, &err);
-            ValidateFailure {
-                kind,
-                message: format!("{file_label}: {err}"),
-            }
-        })?;
-
-        reconcile_boundary_policy(&setup, &prepared.system, bp, path).map_err(|err| {
-            let (kind, file_label) = prep_phase_metadata(PrepPhase::Boundary, &err);
-            ValidateFailure {
-                kind,
-                message: format!("{file_label}: {err}"),
-            }
-        })?;
-    } else {
-        // The boundary branch runs this guard inside StudySetup::new.
-        validate_generic_constraint_parameters(
-            &prepared.system,
-            &hydro_models,
-            &artifacts.scalar_parameters,
-            study_params.cost_scale_factor,
-        )
-        .map_err(|err| {
-            let (kind, file_label) = prep_phase_metadata(PrepPhase::GenericConstraints, &err);
-            ValidateFailure {
-                kind,
-                message: format!("{file_label}: {err}"),
-            }
-        })?;
-    }
-
-    Ok(report.warnings)
+    let mut warnings = report.warnings;
+    warnings.extend(validated.warnings);
+    Ok(warnings)
 }

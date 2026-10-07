@@ -773,9 +773,10 @@ fn metadata_to_py<'py>(
 ) -> PyResult<Bound<'py, PyDict>> {
     let dict = PyDict::new(py);
     dict.set_item("format_version", into_py(py, metadata.format_version)?)?;
+    dict.set_item("software", into_py(py, metadata.software.as_deref())?)?;
     dict.set_item(
-        "cobre_version",
-        into_py(py, metadata.cobre_version.as_str())?,
+        "software_version",
+        into_py(py, metadata.software_version.as_str())?,
     )?;
     dict.set_item("created_at", into_py(py, metadata.created_at.as_str())?)?;
     dict.set_item("num_stages", into_py(py, metadata.num_stages)?)?;
@@ -858,6 +859,11 @@ fn metadata_to_py<'py>(
         "cost_scale_factor",
         into_py(py, producer.cost_scale_factor)?,
     )?;
+    let lower_bound_history = PyList::empty(py);
+    for &lb in &producer.lower_bound_history {
+        lower_bound_history.append(into_py(py, lb)?)?;
+    }
+    producer_dict.set_item("lower_bound_history", lower_bound_history)?;
     dict.set_item("producer", producer_dict)?;
 
     Ok(dict)
@@ -1319,8 +1325,9 @@ pub fn load_simulation_arrow(
 /// ```python
 /// {
 ///     "metadata": {
-///         "format_version": 2,
-///         "cobre_version": "1.0.0",
+///         "format_version": 3,
+///         "software": "cobre",
+///         "software_version": "1.0.0",
 ///         "created_at": "2026-01-15T12:00:00Z",
 ///         "num_stages": 60,
 ///         "graph_manifest": { "n_pools": 60, "nodes": [ ... ], "edges": [ ... ] },
@@ -1382,8 +1389,10 @@ pub fn load_simulation_arrow(
 ///
 /// ## Errors
 ///
-/// - `FileNotFoundError` if `output_dir` or `<output_dir>/<policy_subdir>` does
-///   not exist.
+/// - `FileNotFoundError` if `output_dir` does not exist, or if
+///   `<output_dir>/<policy_subdir>` (for a symbolic link, its target) does not
+///   exist and neither `.staging` nor `.previous` beside it holds a
+///   `manifest.bin`.
 /// - `OSError` for corrupt `FlatBuffers` files or other I/O failures.
 ///
 /// ## Examples (Python)
@@ -1410,7 +1419,9 @@ pub fn load_policy(
 
     let policy_dir = output_dir.join(policy_subdir);
 
-    if !policy_dir.exists() {
+    let resolved = cobre_io::resolve_policy_checkpoint(&policy_dir)
+        .map_err(|e| convert_error(ErrorSource::Output(&e)))?;
+    if resolved == cobre_io::ResolvedCheckpoint::NoDirectory {
         return Err(PyFileNotFoundError::new_err(format!(
             "policy directory not found: {}",
             policy_dir.display()

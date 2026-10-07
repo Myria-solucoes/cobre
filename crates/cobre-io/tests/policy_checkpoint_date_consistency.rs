@@ -17,7 +17,8 @@ use cobre_io::{
 fn metadata() -> CheckpointManifest {
     CheckpointManifest {
         format_version: FORMAT_VERSION,
-        cobre_version: "0.13.0".to_string(),
+        software: Some("cobre".to_string()),
+        software_version: "0.13.0".to_string(),
         created_at: "2026-08-11T00:00:00Z".to_string(),
         num_stages: 1,
         graph_manifest: GraphManifest::default(),
@@ -34,6 +35,7 @@ fn metadata() -> CheckpointManifest {
             training_block_mode: "parallel".to_string(),
             training_block_mode_per_stage: vec![],
             cost_scale_factor: None,
+            lower_bound_history: Vec::new(),
         },
         season_manifest: SeasonManifest::default(),
     }

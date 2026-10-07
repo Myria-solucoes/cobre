@@ -14,6 +14,7 @@
 use flatbuffers::{FlatBufferBuilder, WIPOffset};
 
 use super::super::error::OutputError;
+use super::super::software::policy_checkpoint_remedy;
 use super::records::{
     CheckpointManifest, ENTITY_SLOT_DATE_SENTINEL, EntitySlot, FORMAT_VERSION, GraphManifest,
     HydroSeasonOrders, ManifestEdge, ManifestNode, OwnedPolicyBasisRecord, OwnedPolicyCutRecord,
@@ -87,7 +88,7 @@ const STATES_FIELD_NODE_ID: u16 = 14;
 // CheckpointManifest ids start fresh at 0; its own vtable is distinct from the
 // AffinePiece/EntitySlot vtables, so its id 4 / id 7 collide with no burned slot.
 const MANIFEST_FIELD_FORMAT_VERSION: u16 = 4;
-const MANIFEST_FIELD_COBRE_VERSION: u16 = 6;
+const MANIFEST_FIELD_SOFTWARE_VERSION: u16 = 6;
 const MANIFEST_FIELD_CREATED_AT: u16 = 8;
 const MANIFEST_FIELD_NUM_STAGES: u16 = 10;
 const MANIFEST_FIELD_N_POOLS: u16 = 12;
@@ -106,6 +107,8 @@ const MANIFEST_FIELD_TRAINING_BLOCK_MODE: u16 = 36;
 const MANIFEST_FIELD_TRAINING_BLOCK_MODE_PER_STAGE: u16 = 38;
 const MANIFEST_FIELD_COST_SCALE_FACTOR: u16 = 40;
 const MANIFEST_FIELD_SEASON_MANIFEST: u16 = 42;
+const MANIFEST_FIELD_SOFTWARE: u16 = 44;
+const MANIFEST_FIELD_LOWER_BOUND_HISTORY: u16 = 46;
 
 const MANIFEST_NODE_FIELD_ID: u16 = 4;
 const MANIFEST_NODE_FIELD_STAGE_ID: u16 = 6;
@@ -454,10 +457,12 @@ pub(super) fn build_checkpoint_manifest(
     let estimated = 128
         + graph.nodes.len() * 32
         + graph.edges.len() * 40
-        + manifest.cobre_version.len()
+        + manifest.software.as_ref().map_or(0, String::len)
+        + manifest.software_version.len()
         + manifest.created_at.len()
         + producer.training_block_mode.len()
         + producer.warm_start_counts.len() * std::mem::size_of::<u32>()
+        + producer.lower_bound_history.len() * std::mem::size_of::<f64>()
         + producer
             .training_block_mode_per_stage
             .iter()
@@ -483,7 +488,11 @@ pub(super) fn build_checkpoint_manifest(
         .collect();
     let season_manifest_offset = build_season_manifest_table(&mut builder, season_manifest);
 
-    let cobre_version = builder.create_string(&manifest.cobre_version);
+    let software = manifest
+        .software
+        .as_deref()
+        .map(|name| builder.create_string(name));
+    let software_version = builder.create_string(&manifest.software_version);
     let created_at = builder.create_string(&manifest.created_at);
     let training_block_mode = builder.create_string(&producer.training_block_mode);
     let per_stage_offsets: Vec<WIPOffset<&str>> = producer
@@ -496,11 +505,12 @@ pub(super) fn build_checkpoint_manifest(
     let edges_vec = builder.create_vector(&edge_offsets);
     let warm_start_counts_vec = builder.create_vector(producer.warm_start_counts.as_slice());
     let per_stage_vec = builder.create_vector(&per_stage_offsets);
+    let lower_bound_history_vec = builder.create_vector(producer.lower_bound_history.as_slice());
 
     let root = builder.start_table();
 
     builder.push_slot_always::<u32>(MANIFEST_FIELD_FORMAT_VERSION, manifest.format_version);
-    builder.push_slot_always(MANIFEST_FIELD_COBRE_VERSION, cobre_version);
+    builder.push_slot_always(MANIFEST_FIELD_SOFTWARE_VERSION, software_version);
     builder.push_slot_always(MANIFEST_FIELD_CREATED_AT, created_at);
     builder.push_slot_always::<u32>(MANIFEST_FIELD_NUM_STAGES, manifest.num_stages);
     builder.push_slot_always::<u32>(MANIFEST_FIELD_N_POOLS, graph.n_pools);
@@ -529,6 +539,10 @@ pub(super) fn build_checkpoint_manifest(
         builder.push_slot_always::<f64>(MANIFEST_FIELD_COST_SCALE_FACTOR, csf);
     }
     builder.push_slot_always(MANIFEST_FIELD_SEASON_MANIFEST, season_manifest_offset);
+    if let Some(software) = software {
+        builder.push_slot_always(MANIFEST_FIELD_SOFTWARE, software);
+    }
+    builder.push_slot_always(MANIFEST_FIELD_LOWER_BOUND_HISTORY, lower_bound_history_vec);
 
     let root_offset = builder.end_table(root);
     builder.finish(root_offset, Some(POLICY_FILE_IDENTIFIER));
@@ -849,6 +863,22 @@ fn read_u32_vector_field(
         .ok_or_else(|| OutputError::serialization(ctx, "uint32 vector truncated or corrupt"))
 }
 
+fn read_f64_vector_field(
+    buf: &[u8],
+    table_pos: usize,
+    vtable_pos: usize,
+    slot: u16,
+    ctx: &str,
+) -> Result<Vec<f64>, OutputError> {
+    let Some(field_pos) = field_pos(buf, table_pos, vtable_pos, slot) else {
+        return Ok(Vec::new());
+    };
+    let vec_pos = follow_uoffset(buf, field_pos)
+        .ok_or_else(|| OutputError::serialization(ctx, "invalid uoffset for float64 vector"))?;
+    read_f64_vector(buf, vec_pos)
+        .ok_or_else(|| OutputError::serialization(ctx, "float64 vector truncated or corrupt"))
+}
+
 fn read_string_vector_field(
     buf: &[u8],
     table_pos: usize,
@@ -919,6 +949,20 @@ fn read_manifest_edges(
         out.push(edge);
     }
     Ok(out)
+}
+
+/// Unlike [`read_string_field`], an absent field reads as `None`, not `""`.
+fn read_optional_string_field(
+    buf: &[u8],
+    table_pos: usize,
+    vtable_pos: usize,
+    slot: u16,
+    ctx: &str,
+) -> Result<Option<String>, OutputError> {
+    if field_pos(buf, table_pos, vtable_pos, slot).is_none() {
+        return Ok(None);
+    }
+    read_string_field(buf, table_pos, vtable_pos, slot, ctx).map(Some)
 }
 
 fn deserialize_manifest_node_table(buf: &[u8], node_table_pos: usize) -> Option<ManifestNode> {
@@ -1482,16 +1526,19 @@ pub fn deserialize_checkpoint_manifest(buf: &[u8]) -> Result<CheckpointManifest,
             ctx,
             format!(
                 "unsupported checkpoint manifest format_version {format_version}; expected \
-                 {FORMAT_VERSION}; re-export it with a current Cobre"
+                 {FORMAT_VERSION}; {remedy}",
+                remedy = policy_checkpoint_remedy()
             ),
         ));
     }
 
-    let cobre_version = read_string_field(
+    let software =
+        read_optional_string_field(buf, table_pos, vtable_pos, MANIFEST_FIELD_SOFTWARE, ctx)?;
+    let software_version = read_string_field(
         buf,
         table_pos,
         vtable_pos,
-        MANIFEST_FIELD_COBRE_VERSION,
+        MANIFEST_FIELD_SOFTWARE_VERSION,
         ctx,
     )?;
     let created_at = read_string_field(buf, table_pos, vtable_pos, MANIFEST_FIELD_CREATED_AT, ctx)?;
@@ -1578,9 +1625,18 @@ pub fn deserialize_checkpoint_manifest(buf: &[u8]) -> Result<CheckpointManifest,
         ctx,
     )?;
 
+    let lower_bound_history = read_f64_vector_field(
+        buf,
+        table_pos,
+        vtable_pos,
+        MANIFEST_FIELD_LOWER_BOUND_HISTORY,
+        ctx,
+    )?;
+
     Ok(CheckpointManifest {
         format_version,
-        cobre_version,
+        software,
+        software_version,
         created_at,
         num_stages,
         graph_manifest: GraphManifest {
@@ -1601,6 +1657,7 @@ pub fn deserialize_checkpoint_manifest(buf: &[u8]) -> Result<CheckpointManifest,
             training_block_mode,
             training_block_mode_per_stage,
             cost_scale_factor,
+            lower_bound_history,
         },
         season_manifest,
     })
@@ -1825,7 +1882,111 @@ mod tests {
             training_block_mode: "parallel".to_string(),
             training_block_mode_per_stage: vec![],
             cost_scale_factor: None,
+            lower_bound_history: Vec::new(),
         }
+    }
+
+    #[test]
+    fn checkpoint_manifest_software_round_trips_and_absent_reads_as_none() {
+        for software in [Some("cobre".to_string()), None] {
+            let manifest = CheckpointManifest {
+                format_version: FORMAT_VERSION,
+                software: software.clone(),
+                software_version: "0.14.0".to_string(),
+                created_at: "2026-09-15T00:00:00Z".to_string(),
+                num_stages: 1,
+                graph_manifest: GraphManifest::default(),
+                producer: minimal_manifest_producer(),
+                season_manifest: SeasonManifest::default(),
+            };
+
+            let buf = serialize_checkpoint_manifest(&manifest);
+            let decoded = deserialize_checkpoint_manifest(&buf).expect("round-trip must succeed");
+
+            assert_eq!(decoded.software, software);
+            assert_eq!(decoded.software_version, "0.14.0");
+        }
+    }
+
+    #[test]
+    fn checkpoint_manifest_round_trips_the_lower_bound_history_bitwise() {
+        let history = [1.5, -0.0, f64::MIN_POSITIVE, 1.0e300];
+        let manifest = CheckpointManifest {
+            format_version: FORMAT_VERSION,
+            software: Some("cobre".to_string()),
+            software_version: "0.18.0".to_string(),
+            created_at: "2026-10-06T00:00:00Z".to_string(),
+            num_stages: 1,
+            graph_manifest: GraphManifest::default(),
+            producer: ProducerBlock {
+                lower_bound_history: history.to_vec(),
+                ..minimal_manifest_producer()
+            },
+            season_manifest: SeasonManifest::default(),
+        };
+
+        let buf = serialize_checkpoint_manifest(&manifest);
+        let decoded = deserialize_checkpoint_manifest(&buf).expect("round-trip must succeed");
+
+        let decoded_bits: Vec<u64> = decoded
+            .producer
+            .lower_bound_history
+            .iter()
+            .copied()
+            .map(f64::to_bits)
+            .collect();
+        let expected_bits: Vec<u64> = history.iter().copied().map(f64::to_bits).collect();
+        assert_eq!(decoded_bits, expected_bits);
+    }
+
+    #[test]
+    fn checkpoint_manifest_without_the_lower_bound_history_reads_an_empty_series() {
+        let mut builder = FlatBufferBuilder::with_capacity(128);
+
+        let season_manifest_offset =
+            build_season_manifest_table(&mut builder, &SeasonManifest::default());
+        let software = builder.create_string("cobre");
+        let software_version = builder.create_string("0.18.0");
+        let created_at = builder.create_string("2026-10-06T00:00:00Z");
+        let training_block_mode = builder.create_string("parallel");
+        let nodes_vec =
+            builder.create_vector::<WIPOffset<flatbuffers::TableFinishedWIPOffset>>(&[]);
+        let edges_vec =
+            builder.create_vector::<WIPOffset<flatbuffers::TableFinishedWIPOffset>>(&[]);
+        let warm_start_counts_vec = builder.create_vector::<u32>(&[]);
+        let per_stage_offsets: Vec<WIPOffset<&str>> = Vec::new();
+        let per_stage_vec = builder.create_vector(&per_stage_offsets);
+
+        let root = builder.start_table();
+        builder.push_slot_always::<u32>(MANIFEST_FIELD_FORMAT_VERSION, FORMAT_VERSION);
+        builder.push_slot_always(MANIFEST_FIELD_SOFTWARE_VERSION, software_version);
+        builder.push_slot_always(MANIFEST_FIELD_CREATED_AT, created_at);
+        builder.push_slot_always::<u32>(MANIFEST_FIELD_NUM_STAGES, 1);
+        builder.push_slot_always::<u32>(MANIFEST_FIELD_N_POOLS, 0);
+        builder.push_slot_always(MANIFEST_FIELD_NODES, nodes_vec);
+        builder.push_slot_always(MANIFEST_FIELD_EDGES, edges_vec);
+        builder.push_slot_always::<u32>(MANIFEST_FIELD_COMPLETED_ITERATIONS, 3);
+        builder.push_slot_always::<f64>(MANIFEST_FIELD_FINAL_LOWER_BOUND, 42.0);
+        builder.push_slot_always::<u32>(MANIFEST_FIELD_MAX_ITERATIONS, 10);
+        builder.push_slot_always::<u32>(MANIFEST_FIELD_FORWARD_PASSES, 1);
+        builder.push_slot_always::<u32>(MANIFEST_FIELD_WARM_START_CUTS, 0);
+        builder.push_slot_always(MANIFEST_FIELD_WARM_START_COUNTS, warm_start_counts_vec);
+        builder.push_slot_always::<u64>(MANIFEST_FIELD_RNG_SEED, 0);
+        builder.push_slot_always::<u64>(MANIFEST_FIELD_TOTAL_VISITED_STATES, 0);
+        builder.push_slot_always(MANIFEST_FIELD_TRAINING_BLOCK_MODE, training_block_mode);
+        builder.push_slot_always(MANIFEST_FIELD_TRAINING_BLOCK_MODE_PER_STAGE, per_stage_vec);
+        builder.push_slot_always(MANIFEST_FIELD_SEASON_MANIFEST, season_manifest_offset);
+        builder.push_slot_always(MANIFEST_FIELD_SOFTWARE, software);
+        // MANIFEST_FIELD_LOWER_BOUND_HISTORY (id 21) deliberately omitted.
+        let root_offset = builder.end_table(root);
+        builder.finish(root_offset, Some(POLICY_FILE_IDENTIFIER));
+
+        let buf = builder.finished_data().to_vec();
+        let decoded = deserialize_checkpoint_manifest(&buf)
+            .expect("a buffer without the lower-bound history must still decode");
+
+        assert_eq!(decoded.producer.completed_iterations, 3);
+        assert!(decoded.producer.lower_bound_history.is_empty());
     }
 
     /// Two hydros with differing order vectors round-trip field for field, in
@@ -1834,7 +1995,8 @@ mod tests {
     fn checkpoint_manifest_season_descriptor_round_trips() {
         let manifest = CheckpointManifest {
             format_version: FORMAT_VERSION,
-            cobre_version: "0.14.0".to_string(),
+            software: Some("cobre".to_string()),
+            software_version: "0.14.0".to_string(),
             created_at: "2026-09-15T00:00:00Z".to_string(),
             num_stages: 2,
             graph_manifest: GraphManifest::default(),
@@ -1884,7 +2046,8 @@ mod tests {
     fn checkpoint_manifest_rejects_unsorted_season_hydro_orders() {
         let manifest = CheckpointManifest {
             format_version: FORMAT_VERSION,
-            cobre_version: "0.14.0".to_string(),
+            software: Some("cobre".to_string()),
+            software_version: "0.14.0".to_string(),
             created_at: "2026-09-16T00:00:00Z".to_string(),
             num_stages: 1,
             graph_manifest: GraphManifest::default(),
@@ -1922,7 +2085,8 @@ mod tests {
     fn checkpoint_manifest_rejects_season_orders_length_mismatch() {
         let manifest = CheckpointManifest {
             format_version: FORMAT_VERSION,
-            cobre_version: "0.14.0".to_string(),
+            software: Some("cobre".to_string()),
+            software_version: "0.14.0".to_string(),
             created_at: "2026-09-16T00:00:00Z".to_string(),
             num_stages: 1,
             graph_manifest: GraphManifest::default(),
@@ -1955,7 +2119,7 @@ mod tests {
     fn checkpoint_manifest_absent_season_descriptor_reads_as_absent_cycle_code() {
         let mut builder = FlatBufferBuilder::with_capacity(128);
 
-        let cobre_version = builder.create_string("0.13.0");
+        let software_version = builder.create_string("0.13.0");
         let created_at = builder.create_string("2026-01-01T00:00:00Z");
         let training_block_mode = builder.create_string("parallel");
         let nodes_vec =
@@ -1968,7 +2132,7 @@ mod tests {
 
         let root = builder.start_table();
         builder.push_slot_always::<u32>(MANIFEST_FIELD_FORMAT_VERSION, FORMAT_VERSION);
-        builder.push_slot_always(MANIFEST_FIELD_COBRE_VERSION, cobre_version);
+        builder.push_slot_always(MANIFEST_FIELD_SOFTWARE_VERSION, software_version);
         builder.push_slot_always(MANIFEST_FIELD_CREATED_AT, created_at);
         builder.push_slot_always::<u32>(MANIFEST_FIELD_NUM_STAGES, 1);
         builder.push_slot_always::<u32>(MANIFEST_FIELD_N_POOLS, 0);

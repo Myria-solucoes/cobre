@@ -309,7 +309,7 @@ fn write_stage_wide_thermal_bound(
 /// storage at stage boundary = 105.12 hm³.
 ///
 /// Analytical thermal cost is `23_635_000 / 9 ≈ 2_626_111.11 $`. With
-/// `turbined_cost = 0.01 $/MWh` applied to every hydro's turbine column
+/// `turbined_cost = 0.01 $/(m³/s·h)` applied to every hydro's turbine column
 /// (see `fill_turbine_columns` in `lp::builder::columns`), the
 /// deterministic LB adds a fixed regularization contribution of
 /// `5_785 / 9 ≈ 642.78 $` (= 0.01 · 730 · (25_000/657 + 50) summed across the
@@ -1477,6 +1477,7 @@ fn d12_checkpoint_round_trip() {
             training_block_mode: "parallel".to_string(),
             training_block_mode_per_stage: vec![],
             cost_scale_factor: None,
+            lower_bound_history: Vec::new(),
         },
     );
 
@@ -2307,7 +2308,8 @@ pub const D19_EXPECTED_COST: f64 = 1_334_568.013_586_834_3;
 /// - Hydro: min_outflow=40, max_outflow=50, min_turbined=30, min_generation=20,
 ///   max_turbined=50, productivity=1.0, max_storage=200, initial_storage=10.
 /// - Inflows: stage 0 = 40 m3/s, stage 1 = 10 m3/s (zero std_dev).
-/// - Penalty costs: all 4 operational violations = 5000 $/MWh, deficit = 1000 $/MWh.
+/// - Penalty costs: all 4 operational violations = 5000 ($/(m³/s·h) for the
+///   three flow bounds, $/MWh for min_generation), deficit = 1000 $/MWh.
 ///
 /// ## Expected behaviour
 ///
@@ -5803,6 +5805,62 @@ fn d57_computed_fpha_without_turbine_capacity_trains_at_zero_generation() {
     assert_cost(result.final_lb, closed_form_total_cost(), 1e-2, "D57");
 }
 
+/// D57 switched to `source: "precomputed"` with the hyperplanes its computed run
+/// exports — none, so no `fpha_hyperplanes.parquet` — trains at the computed cost.
+#[test]
+fn d57_precomputed_round_trip_trains_at_the_computed_cost() {
+    let computed_dir = Path::new("../../examples/deterministic/d57-fpha-zero-turbine-capacity");
+    let computed_system = cobre_io::load_case(computed_dir).expect("load_case must succeed");
+    let computed_models = prepare_hydro_models(&computed_system, computed_dir, false)
+        .expect("prepare_hydro_models must succeed");
+    assert!(
+        computed_models.fpha_export_rows.is_empty(),
+        "D57: a plant with no turbine capacity exports no hyperplanes"
+    );
+    let computed = run_deterministic(computed_dir);
+
+    let tmp = copy_case_dir(computed_dir);
+    let models_path = tmp.path().join("system/hydro_production_models.json");
+    let mut models: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&models_path).expect("read hydro_production_models.json"),
+    )
+    .expect("hydro_production_models.json is JSON");
+    models["production_models"][0]["stage_ranges"][0]["fpha_config"]["source"] =
+        serde_json::Value::from("precomputed");
+    std::fs::write(
+        &models_path,
+        serde_json::to_string_pretty(&models).expect("serialize production models"),
+    )
+    .expect("write hydro_production_models.json");
+    assert!(!tmp.path().join("system/fpha_hyperplanes.parquet").exists());
+
+    let system =
+        cobre_io::load_case(tmp.path()).expect("load_case must accept the precomputed copy");
+    let hydro_models = prepare_hydro_models(&system, tmp.path(), false)
+        .expect("a precomputed plant with no turbine capacity needs no hyperplanes");
+    let summary = cobre_sddp::build_hydro_model_summary(&hydro_models, &system);
+    assert_eq!(
+        (summary.n_constant, summary.n_fpha),
+        (1, 0),
+        "D57 precomputed: the plant must be reported as constant, not FPHA"
+    );
+    assert_eq!(
+        hydro_models.provenance.production_sources,
+        vec![(
+            EntityId::from(0),
+            cobre_sddp::ProductionModelSource::NoTurbineCapacity
+        )]
+    );
+
+    let result = run_deterministic(tmp.path());
+    assert!(
+        result.final_gap.abs() < 1e-6,
+        "D57 precomputed: gap={:.2e}",
+        result.final_gap
+    );
+    assert_cost(result.final_lb, computed.final_lb, 1e-2, "D57 precomputed");
+}
+
 /// Chronological-blocks telescoping ⇒ parallel bound-agreement anchor.
 ///
 /// Pins the "telescoping ⇒ parallel agreement when interiors are inert" contract
@@ -6196,8 +6254,9 @@ mod chronological_telescoping {
     }
 
     /// Train the parallel-block system under `config` (built deterministically),
-    /// panicking on any training error.
-    fn train_result(config: &Config) -> cobre_sddp::TrainingResult {
+    /// panicking on any training error, and return the trained setup with the
+    /// result.
+    fn train_setup(config: &Config) -> (cobre_sddp::StudySetup, cobre_sddp::TrainingResult) {
         let mut setup = build_setup_in_code(build_system(BlockMode::Parallel), config);
         let comm = StubComm;
         let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
@@ -6209,7 +6268,11 @@ mod chronological_telescoping {
             "training error: {:?}",
             outcome.error
         );
-        outcome.result
+        (setup, outcome.result)
+    }
+
+    fn train_result(config: &Config) -> cobre_sddp::TrainingResult {
+        train_setup(config).1
     }
 
     fn enumerated_config_with_rules(rules: Vec<StoppingRuleConfig>) -> Config {
@@ -6220,12 +6283,9 @@ mod chronological_telescoping {
         config
     }
 
-    /// An enumerated + expectation study with a `Gap { tolerance }` rule stops via
-    /// the gap rule — before the iteration cap — once the clamped canonical-R$
-    /// `UB_exact − LB` first drops to within the tolerance.
-    #[test]
-    fn enumerated_gap_rule_stops_when_exact_gap_within_tolerance() {
-        // Reference run: iteration limit only → converged exact bounds set the scale.
+    /// The enumerated `[IterationLimit{20}, Gap{tolerance}]` config and its
+    /// absolute tolerance, scaled from an iteration-limit-only reference run.
+    fn gap_stop_config() -> (Config, f64) {
         let ref_result = train_result(&enumerated_config_with_rules(vec![
             StoppingRuleConfig::IterationLimit { limit: 20 },
         ]));
@@ -6234,13 +6294,23 @@ mod chronological_telescoping {
         // 0.1% of the converged bound: above the LP-tolerance floor (so the gap
         // reaches it) yet a real threshold the exact gap must cross.
         let tolerance = 1e-3 * ref_result.final_ub.abs().max(1.0);
-        let result = train_result(&enumerated_config_with_rules(vec![
+        let config = enumerated_config_with_rules(vec![
             StoppingRuleConfig::IterationLimit { limit: 20 },
             StoppingRuleConfig::Gap {
                 tolerance: Some(tolerance),
                 relative_tolerance: None,
             },
-        ]));
+        ]);
+        (config, tolerance)
+    }
+
+    /// An enumerated + expectation study with a `Gap { tolerance }` rule stops via
+    /// the gap rule — before the iteration cap — once the clamped canonical-R$
+    /// `UB_exact − LB` first drops to within the tolerance.
+    #[test]
+    fn enumerated_gap_rule_stops_when_exact_gap_within_tolerance() {
+        let (config, tolerance) = gap_stop_config();
+        let result = train_result(&config);
 
         assert_eq!(
             result.reason, "gap",
@@ -6255,6 +6325,74 @@ mod chronological_telescoping {
         assert!(
             gap <= tolerance,
             "the clamped canonical-R$ gap {gap} must be within tolerance {tolerance}"
+        );
+    }
+
+    #[test]
+    fn gap_stopped_training_reports_convergence_achieved() {
+        let (config, _) = gap_stop_config();
+        let (setup, result) = train_setup(&config);
+
+        assert_eq!(result.reason, "gap");
+        assert!(
+            setup.build_training_output(&result, &[]).converged,
+            "a run stopped by the gap rule must report convergence"
+        );
+    }
+
+    /// Under `All` the 50-iteration stalling window cannot fill within the
+    /// 3-iteration cap, so the run exhausts its budget with no configured stop.
+    #[test]
+    fn exhausted_iteration_budget_reports_iteration_limit_without_convergence() {
+        let mut config = enumerated_config_with_rules(vec![
+            StoppingRuleConfig::IterationLimit { limit: 3 },
+            StoppingRuleConfig::BoundStalling {
+                tolerance: 1e-12,
+                iterations: 50,
+            },
+        ]);
+        config.training.stopping_mode = cobre_io::config::StoppingMode::All;
+        let (setup, result) = train_setup(&config);
+
+        assert_eq!(
+            (result.iterations, result.reason.as_str()),
+            (3, "iteration_limit")
+        );
+        assert!(
+            !setup.build_training_output(&result, &[]).converged,
+            "an exhausted iteration budget must not report convergence"
+        );
+    }
+
+    /// Under `All`, the iteration limit caps the run instead of joining the
+    /// conjunction: the other rules end it as soon as they hold, and the cap
+    /// ends it, recorded as `iteration_limit`, when they never do.
+    #[test]
+    fn all_mode_stops_on_its_other_rules_and_runs_to_the_iteration_limit_otherwise() {
+        let train_all = |stalling_tolerance: f64, stalling_iterations: u32| {
+            let mut config = enumerated_config_with_rules(vec![
+                StoppingRuleConfig::IterationLimit { limit: 10 },
+                StoppingRuleConfig::BoundStalling {
+                    tolerance: stalling_tolerance,
+                    iterations: stalling_iterations,
+                },
+            ]);
+            config.training.stopping_mode = cobre_io::config::StoppingMode::All;
+            train_result(&config)
+        };
+
+        // No relative LB change reaches a 1e12 tolerance, so the rule triggers
+        // exactly when its 4-entry window fills.
+        let stalled = train_all(1e12, 4);
+        assert_eq!(
+            (stalled.iterations, stalled.reason.as_str()),
+            (4, "bound_stalling")
+        );
+
+        let capped = train_all(1e-12, 50);
+        assert_eq!(
+            (capped.iterations, capped.reason.as_str()),
+            (10, "iteration_limit")
         );
     }
 
@@ -9556,6 +9694,7 @@ mod enumerated_external {
             cut_activity_tolerance: 0.0,
             budget: None,
             export_states: false,
+            checkpoint_schedule: None,
             scalar_parameters: Vec::new(),
             training_solver_backward: None,
             training_solver_forward: None,
@@ -10392,6 +10531,7 @@ mod enumerated_checkpoint {
                 training_block_mode: "parallel".to_string(),
                 training_block_mode_per_stage: vec![],
                 cost_scale_factor: None,
+                lower_bound_history: Vec::new(),
             },
         );
 

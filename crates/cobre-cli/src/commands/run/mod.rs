@@ -1,16 +1,24 @@
 //! `cobre run <CASE_DIR>` subcommand: load, train the SDDP policy, optionally
 //! simulate, and write outputs.
 
+use cobre_core::System;
+use cobre_io::Config;
 use cobre_io::DistributionInfo;
 use cobre_io::HostLayout;
 use cobre_io::OutputContext;
+use cobre_io::PolicyMode;
+use cobre_io::SetupTimings;
 use cobre_io::now_iso8601;
 use cobre_sddp::SolverStatsDelta;
+use cobre_sddp::StudySetup;
 use cobre_sddp::build_deviation_summary;
+use cobre_sddp::setup::PostTrainingSimulation;
 use cobre_sddp::setup::RunPhasePlan;
+use cobre_sddp::setup::signal_stop_requested;
 use cobre_solver::active_solver_metadata_id;
 
 use crate::progress::RenderMode;
+mod graceful_stop;
 mod outputs;
 mod policy;
 mod setup;
@@ -49,10 +57,11 @@ impl From<CommBackendArg> for BackendKind {
     }
 }
 
+use graceful_stop::{SignalWindow, agree_post_write, failure_code, into_agreed_result};
 use outputs::{WriteTrainingArgs, write_training_outputs};
 use policy::{apply_training_policy, load_policy_for_simulation};
 use setup::{LoadBroadcastResult, broadcast_and_build_setup, run_pre_training, setup_communicator};
-use simulation::run_simulation_phase;
+use simulation::{run_simulation_phase, skip_simulation_phase};
 use training::run_training_phase;
 
 /// Arguments for the `cobre run` subcommand.
@@ -100,14 +109,36 @@ pub(super) struct RunContext<C: Communicator> {
     pub(super) solver_version: String,
 }
 
+/// How a `cobre run` that returned no error ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
+pub enum RunOutcome {
+    /// The run finished every configured phase.
+    Completed,
+    /// A signal stopped training, and the training outputs and policy checkpoint were written.
+    StoppedOnRequest,
+}
+
+impl RunOutcome {
+    /// The process exit code for this outcome.
+    #[must_use]
+    pub const fn exit_code(self) -> i32 {
+        match self {
+            Self::Completed => 0,
+            Self::StoppedOnRequest => 5,
+        }
+    }
+}
+
 /// Execute the `run` subcommand (load, train, optionally simulate, write outputs).
 ///
 /// # Errors
 ///
 /// Returns [`CliError`] when loading, training, simulation, or I/O fails.
-pub fn execute(args: &RunArgs) -> Result<(), CliError> {
+pub fn execute(args: &RunArgs) -> Result<RunOutcome, CliError> {
     let ctx = setup_communicator(args)?;
-    let result = execute_inner(&ctx, args);
+    let result = graceful_stop::install(ctx.comm.size() == 1)
+        .and_then(|signals| execute_inner(&ctx, args, signals));
     if let Err(ref e) = result
         && ctx.comm.size() > 1
     {
@@ -120,11 +151,15 @@ pub fn execute(args: &RunArgs) -> Result<(), CliError> {
     result
 }
 
-fn execute_inner<C: Communicator>(ctx: &RunContext<C>, args: &RunArgs) -> Result<(), CliError> {
+fn execute_inner<C: Communicator>(
+    ctx: &RunContext<C>,
+    args: &RunArgs,
+    signals: &SignalWindow,
+) -> Result<RunOutcome, CliError> {
     let LoadBroadcastResult {
         system,
         mut setup,
-        mut root_config,
+        root_config,
         root_estimation_report,
         root_estimation_path,
         training_enabled,
@@ -143,22 +178,67 @@ fn execute_inner<C: Communicator>(ctx: &RunContext<C>, args: &RunArgs) -> Result
     )?;
 
     let hostname = ctx.topology.leader_hostname().to_string();
-    let mpi_world_size = u32::try_from(ctx.topology.world_size).unwrap_or(u32::MAX);
 
     match RunPhasePlan::resolve(training_enabled, setup.simulation_config.n_scenarios > 0) {
-        RunPhasePlan::TrainedThenSimulated => {
-            apply_training_policy(ctx, &system, &mut setup, root_config.as_ref(), policy_mode)?;
-            let training_started_at = now_iso8601();
-            let training = run_training_phase(ctx, &mut setup)?;
-            let training_completed_at = now_iso8601();
+        RunPhasePlan::TrainedThenSimulated => train_then_simulate(
+            ctx,
+            signals,
+            &system,
+            &mut setup,
+            root_config,
+            policy_mode,
+            setup_timings,
+            &hostname,
+        ),
+        RunPhasePlan::SimulateFromPolicy => {
+            let training_result = load_policy_for_simulation(ctx, &system, &mut setup)?;
+            run_simulation_phase(ctx, &system, &mut setup, &training_result, &hostname)?;
+            Ok(RunOutcome::Completed)
+        }
+        RunPhasePlan::Nothing => {
+            if ctx.is_root && !ctx.quiet {
+                let _ = ctx
+                    .stderr
+                    .write_line("Training disabled, simulation disabled — nothing to do.");
+            }
+            Ok(RunOutcome::Completed)
+        }
+    }
+}
 
-            if ctx.is_root {
-                let config = root_config.take().ok_or_else(|| CliError::Internal {
-                    message: "root_config was None on rank 0 — internal invariant violated"
-                        .to_string(),
-                })?;
+fn train_then_simulate<C: Communicator>(
+    ctx: &RunContext<C>,
+    signals: &SignalWindow,
+    system: &System,
+    setup: &mut StudySetup,
+    mut root_config: Option<Config>,
+    policy_mode: PolicyMode,
+    setup_timings: Option<SetupTimings>,
+    hostname: &str,
+) -> Result<RunOutcome, CliError> {
+    apply_training_policy(ctx, system, setup, root_config.as_ref(), policy_mode)?;
+    setup.enable_periodic_checkpoints(system, &ctx.output_dir);
+    let training_started_at = now_iso8601();
+    signals.open();
+    let training = run_training_phase(ctx, setup, signals.shutdown_flag())?;
+    let training_completed_at = now_iso8601();
+
+    let decision = &training.result.stop_decision;
+    let n_scenarios = setup.simulation_config.n_scenarios;
+    let decided_skip = training.error.is_none()
+        && PostTrainingSimulation::resolve(n_scenarios > 0, decision, 0)
+            == PostTrainingSimulation::SkipAfterSignalStop;
+
+    let mpi_world_size = u32::try_from(ctx.topology.world_size).unwrap_or(u32::MAX);
+    let mut local = if ctx.is_root {
+        root_config
+            .take()
+            .ok_or_else(|| CliError::Internal {
+                message: "root_config was None on rank 0 — internal invariant violated".to_string(),
+            })
+            .and_then(|config| {
                 let training_ctx = OutputContext {
-                    hostname: hostname.clone(),
+                    hostname: hostname.to_string(),
                     solver: active_solver_metadata_id().to_string(),
                     solver_version: Some(ctx.solver_version.clone()),
                     started_at: training_started_at,
@@ -175,54 +255,72 @@ fn execute_inner<C: Communicator>(ctx: &RunContext<C>, args: &RunArgs) -> Result
                 };
                 write_training_outputs(&WriteTrainingArgs {
                     output_dir: &ctx.output_dir,
-                    system: &system,
+                    system,
                     config: &config,
                     training_output: &training.output,
-                    setup: &setup,
+                    setup,
                     training_result: &training.result,
                     output_ctx: &training_ctx,
                     quiet: ctx.quiet,
                     stderr: &ctx.stderr,
-                })?;
-            }
+                })
+            })
+    } else {
+        Ok(())
+    };
+    let level = signals.sample_level();
+    // Every rank-0 write of the stop path precedes the agreement, with no
+    // early return: a peer would otherwise wait in the allreduce, or exit
+    // while rank 0 still writes.
+    if decided_skip && ctx.is_root && local.is_ok() {
+        local = skip_simulation_phase(ctx, hostname, n_scenarios);
+    }
+    let agreed = agree_post_write(&ctx.comm, failure_code(&local), level)?;
+    into_agreed_result(local, &agreed)?;
 
-            if let Some(ref training_error) = training.error {
-                if ctx.is_root {
-                    tracing::error!(
-                        "training failed after {} iterations: {training_error}",
-                        training.result.iterations
-                    );
-                    if !ctx.quiet {
-                        let _ = ctx.stderr.write_line(&format!(
-                            "Training failed after {} iterations. Partial outputs written to {}.",
-                            training.result.iterations,
-                            ctx.output_dir.display()
-                        ));
-                    }
-                }
-                return Err(CliError::Internal {
-                    message: format!("training error: {training_error}"),
-                });
-            }
-
-            if setup.simulation_config.n_scenarios > 0 {
-                run_simulation_phase(ctx, &system, &mut setup, &training.result, &hostname)?;
+    if let Some(training_error) = training.error {
+        if ctx.is_root {
+            tracing::error!(
+                "training failed after {} iterations: {training_error}",
+                training.result.iterations
+            );
+            if !ctx.quiet {
+                let _ = ctx.stderr.write_line(&format!(
+                    "Training failed after {} iterations. Partial outputs written to {}.",
+                    training.result.iterations,
+                    ctx.output_dir.display()
+                ));
             }
         }
-        RunPhasePlan::SimulateFromPolicy => {
-            let training_result = load_policy_for_simulation(ctx, &system, &mut setup)?;
-            run_simulation_phase(ctx, &system, &mut setup, &training_result, &hostname)?;
-        }
-        RunPhasePlan::Nothing => {
-            if ctx.is_root && !ctx.quiet {
-                let _ = ctx
-                    .stderr
-                    .write_line("Training disabled, simulation disabled — nothing to do.");
-            }
-        }
+        return Err(CliError::from(training_error));
     }
 
-    Ok(())
+    let signal_stop = signal_stop_requested(decision, agreed.level);
+    if !signal_stop {
+        signals.close()?;
+    }
+
+    match PostTrainingSimulation::resolve(n_scenarios > 0, decision, agreed.level) {
+        PostTrainingSimulation::Run => {
+            run_simulation_phase(ctx, system, setup, &training.result, hostname)?;
+        }
+        PostTrainingSimulation::SkipAfterSignalStop if !decided_skip => {
+            let local = if ctx.is_root {
+                skip_simulation_phase(ctx, hostname, n_scenarios)
+            } else {
+                Ok(())
+            };
+            let late = agree_post_write(&ctx.comm, failure_code(&local), agreed.level)?;
+            into_agreed_result(local, &late)?;
+        }
+        PostTrainingSimulation::SkipAfterSignalStop | PostTrainingSimulation::NotRequested => {}
+    }
+
+    Ok(if signal_stop {
+        RunOutcome::StoppedOnRequest
+    } else {
+        RunOutcome::Completed
+    })
 }
 
 /// Guard `u64 as f64` cast before MPI `allreduce(Sum)`: reject counters ≥ `2^53` that lose precision.
@@ -315,7 +413,7 @@ fn host_layouts(topology: &ExecutionTopology) -> Vec<HostLayout> {
 )]
 mod tests {
     use super::setup::resolve_thread_count;
-    use super::{check_stats_overflow, host_layouts};
+    use super::{RunOutcome, check_stats_overflow, host_layouts};
     use cobre_comm::{BackendKind, ExecutionTopology, HostInfo};
     use cobre_sddp::{SolverStatsDelta, delta_to_stats_row};
 
@@ -367,6 +465,12 @@ mod tests {
             lp_solves,
             ..SolverStatsDelta::default()
         }
+    }
+
+    #[test]
+    fn run_outcome_maps_to_its_exit_code() {
+        assert_eq!(RunOutcome::Completed.exit_code(), 0);
+        assert_eq!(RunOutcome::StoppedOnRequest.exit_code(), 5);
     }
 
     #[test]

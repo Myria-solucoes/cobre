@@ -18,11 +18,12 @@ use pyo3::prelude::*;
 use cobre_io::{
     CheckpointManifest, ENTITY_SLOT_DATE_SENTINEL, EntitySlot, FORMAT_VERSION, GraphManifest,
     HydroSeasonOrders, ManifestEdge, ManifestNode, PolicyBasisRecord, PolicyCutRecord,
-    ProducerBlock, STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL, STAGE_CUTS_NODE_ID_SENTINEL,
-    STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, STAGE_STATES_NODE_ID_SENTINEL, SeasonManifest,
-    StageCutsPayload, StageStatesPayload, StateFamily,
+    ProducerBlock, SOFTWARE_NAME, SOFTWARE_VERSION, STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL,
+    STAGE_CUTS_NODE_ID_SENTINEL, STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
+    STAGE_STATES_NODE_ID_SENTINEL, SeasonManifest, StageCutsPayload, StageStatesPayload,
+    StateFamily,
 };
-use cobre_sddp::{POLICY_COBRE_VERSION, SddpError, reserve_boundary_inflow_lag_slots};
+use cobre_sddp::{SddpError, reserve_boundary_inflow_lag_slots};
 
 use crate::errors::{ErrorSource, convert_error};
 
@@ -241,6 +242,8 @@ pub(crate) struct PyProducerBlock {
     training_block_mode_per_stage: Vec<String>,
     #[pyo3(default)]
     cost_scale_factor: Option<f64>,
+    #[pyo3(default)]
+    lower_bound_history: Vec<f64>,
 }
 
 impl From<PyProducerBlock> for ProducerBlock {
@@ -258,6 +261,7 @@ impl From<PyProducerBlock> for ProducerBlock {
             training_block_mode: p.training_block_mode,
             training_block_mode_per_stage: p.training_block_mode_per_stage,
             cost_scale_factor: p.cost_scale_factor,
+            lower_bound_history: p.lower_bound_history,
         }
     }
 }
@@ -280,7 +284,8 @@ impl From<PyPolicyCheckpointMetadata> for CheckpointManifest {
     fn from(m: PyPolicyCheckpointMetadata) -> Self {
         Self {
             format_version: m.format_version,
-            cobre_version: POLICY_COBRE_VERSION.to_string(),
+            software: Some(SOFTWARE_NAME.to_string()),
+            software_version: SOFTWARE_VERSION.to_string(),
             created_at: m.created_at,
             num_stages: m.num_stages,
             graph_manifest: m
@@ -429,9 +434,9 @@ fn build_stage_cuts_data(
 /// the depth from (a DECOMP-bridge bootstrap). Absent or `0`, the checkpoint is
 /// byte-identical to one written without the argument.
 ///
-/// The checkpoint always records the running cobre version
-/// ([`cobre_sddp::POLICY_COBRE_VERSION`]); a `cobre_version` in `metadata` is
-/// ignored.
+/// The checkpoint always records this build's identity
+/// ([`cobre_io::SoftwareIdentity::THIS_BUILD`]); `software`, `software_version`
+/// or `cobre_version` keys in `metadata` are ignored.
 ///
 /// # Errors
 ///

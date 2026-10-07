@@ -5,15 +5,7 @@
 //! lag chain and the mid-period accumulator, plus the annual-component
 //! monthly-exclusive restriction.
 //!
-//! | # | Rule                                                                    | `ErrorKind`               |
-//! |---|--------------------------------------------------------------------------|---------------------------|
-//! | 1 | Lag slots `1..=max_AR_order` require full record coverage (`coverage == 1.0`) | `BusinessRuleViolation` |
-//! | 2 | Lag slots `max_AR_order < s <= L_state - n_fin` require the same full coverage; slots `s > L_state - n_fin` are provably never read (advisory only) | `BusinessRuleViolation` / `ModelQuality` (warning) |
-//! | 3 | A `recent_observations` conditioning window extends past the study start, into the solved study itself | `InvalidValue` |
-//! | 4 | The in-progress period `[period_start, study_start)` is covered strictly between 0 and 1 | `ModelQuality` (warning) |
-//! | 5 | The first study stage's season is unresolvable while PAR seeding is active (`L_state > 0`) | `ModelQuality` (warning) |
-//! | 6 | Study supplies an inflow annual component (`inflow_annual_components` non-empty) while `season_map.cycle_type` is not `Monthly` | `BusinessRuleViolation` |
-//! | 7 | A realized inflow record (`inflow_history` or `recent_observations`) is negative — accepted, since incremental inflow is a difference | `ModelQuality` (warning) |
+//! Its rules are `semantic.5a.29` to `semantic.5a.34a` in [`RULES`](crate::validation::rules::RULES).
 
 use std::collections::HashMap;
 
@@ -23,9 +15,8 @@ use cobre_stochastic::season_cast::{
     RealizedWindow, cast, merge_layered_windows, nth_previous_occurrence, season_period_window,
 };
 
-use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
+use super::super::{ValidationContext, rules, schema::ParsedData};
 
-/// Rules 29-34 (see the module table above for the row-to-check mapping).
 pub(super) fn validate_inflow_seeding(data: &ParsedData, ctx: &mut ValidationContext) {
     let merged_by_hydro = merged_windows_by_hydro(data);
     warn_unresolvable_first_stage_season(data, ctx);
@@ -36,7 +27,7 @@ pub(super) fn validate_inflow_seeding(data: &ParsedData, ctx: &mut ValidationCon
     check_annual_component_monthly_only(data, ctx);
 }
 
-/// Row 7: reports realized inflows below zero. One warning per file, naming the
+/// Reports realized inflows below zero. One warning per file, naming the
 /// count and the worst offender — a handful of lossy reaches is legitimate
 /// incremental inflow, a sign-flipped series is not, and only the magnitude
 /// separates them.
@@ -48,8 +39,8 @@ fn report_negative_realized_inflows(data: &ParsedData, ctx: &mut ValidationConte
             return;
         };
         let count = negatives.len();
-        ctx.add_warning(
-            ErrorKind::ModelQuality,
+        ctx.emit(
+            &rules::SEMANTIC_INFLOW_SEED_NEGATIVE_RECORD,
             file,
             None::<String>,
             format!(
@@ -81,7 +72,7 @@ fn report_negative_realized_inflows(data: &ParsedData, ctx: &mut ValidationConte
     );
 }
 
-/// Row 6: rejects a study supplying an inflow annual component
+/// Rejects a study supplying an inflow annual component
 /// (`inflow_annual_components` non-empty) under a non-`Monthly` season cycle.
 /// PAR(p)-A is monthly-exclusive by design — a permanent restriction.
 fn check_annual_component_monthly_only(data: &ParsedData, ctx: &mut ValidationContext) {
@@ -99,8 +90,8 @@ fn check_annual_component_monthly_only(data: &ParsedData, ctx: &mut ValidationCo
         SeasonCycleType::Monthly => return,
     };
 
-    ctx.add_error(
-        ErrorKind::BusinessRuleViolation,
+    ctx.emit(
+        &rules::SEMANTIC_INFLOW_SEED_ANNUAL_COMPONENT_NOT_MONTHLY,
         "scenarios/inflow_annual_component.parquet",
         None::<String>,
         format!(
@@ -241,7 +232,7 @@ fn merged_windows_for_hydro_reference(
     merge_layered_windows(&record, &conditioning)
 }
 
-/// Rows 1-2: PAR lag-slot coverage. Slots `1..=max(max_AR_order, L_state -
+/// PAR lag-slot coverage. Slots `1..=max(max_AR_order, L_state -
 /// n_fin)` must have `coverage == 1.0` (a gap errors, naming the slot and the
 /// affected hydros); slots beyond that are provably never read by the
 /// terminal boundary, so a gap there is advisory only.
@@ -308,8 +299,8 @@ fn check_slot_coverage(
             .join(", ");
 
         if k <= full_coverage_upper {
-            ctx.add_error(
-                ErrorKind::BusinessRuleViolation,
+            ctx.emit(
+                &rules::SEMANTIC_INFLOW_SEED_READ_SLOT_UNCOVERED,
                 "scenarios/inflow_history.parquet",
                 None::<String>,
                 format!(
@@ -319,8 +310,8 @@ fn check_slot_coverage(
                 ),
             );
         } else {
-            ctx.add_warning(
-                ErrorKind::ModelQuality,
+            ctx.emit(
+                &rules::SEMANTIC_INFLOW_SEED_UNREAD_SLOT_UNCOVERED,
                 "scenarios/inflow_history.parquet",
                 None::<String>,
                 format!(
@@ -333,7 +324,7 @@ fn check_slot_coverage(
     }
 }
 
-/// Row 3: rejects `recent_observations` extending past study start
+/// Rejects `recent_observations` extending past study start
 /// (mirrors `travel_time.rs` defluence ban).
 fn check_conditioning_window_bound(data: &ParsedData, ctx: &mut ValidationContext) {
     let Some(study_start) = first_study_stage(data).map(|s| s.start_date) else {
@@ -343,8 +334,8 @@ fn check_conditioning_window_bound(data: &ParsedData, ctx: &mut ValidationContex
         if obs.end_date <= study_start {
             continue;
         }
-        ctx.add_error(
-            ErrorKind::InvalidValue,
+        ctx.emit(
+            &rules::SEMANTIC_INFLOW_SEED_CONDITIONING_PAST_STUDY_START,
             "initial_conditions.json",
             Some(format!("Hydro {}", obs.hydro_id.0)),
             format!(
@@ -357,7 +348,7 @@ fn check_conditioning_window_bound(data: &ParsedData, ctx: &mut ValidationContex
     }
 }
 
-/// Row 4: the in-progress period `[period_start, study_start)` covered
+/// The in-progress period `[period_start, study_start)` covered
 /// strictly between 0 and 1 is legitimate (that is the accumulator's
 /// purpose) but worth a per-hydro advisory naming the fraction; full or zero
 /// coverage is silent.
@@ -388,8 +379,8 @@ fn check_inprogress_partial_coverage(
             continue;
         }
         let hydro_id = hydro.id.0;
-        ctx.add_warning(
-            ErrorKind::ModelQuality,
+        ctx.emit(
+            &rules::SEMANTIC_INFLOW_SEED_PARTIAL_CURRENT_PERIOD,
             "scenarios/inflow_history.parquet",
             Some(format!("Hydro {hydro_id}")),
             format!(
@@ -402,7 +393,7 @@ fn check_inprogress_partial_coverage(
     }
 }
 
-/// Row 5: warns when the first stage's season is unresolvable
+/// Warns when the first stage's season is unresolvable
 /// (mirrors `derive_inflow_seeds` zero-seed path). Distinct from Layer 5b's
 /// schema validity check.
 fn warn_unresolvable_first_stage_season(data: &ParsedData, ctx: &mut ValidationContext) {
@@ -429,8 +420,8 @@ fn warn_unresolvable_first_stage_season(data: &ParsedData, ctx: &mut ValidationC
         .map(|h| format!("hydro {}", h.id.0))
         .collect::<Vec<_>>()
         .join(", ");
-    ctx.add_warning(
-        ErrorKind::ModelQuality,
+    ctx.emit(
+        &rules::SEMANTIC_INFLOW_SEED_FIRST_SEASON_UNRESOLVED,
         "initial_conditions.json",
         None::<String>,
         format!(
@@ -453,6 +444,7 @@ mod tests {
     use super::*;
     use crate::scenarios::InflowAnnualComponentRow;
     use crate::test_support::*;
+    use crate::validation::ErrorKind;
     use cobre_core::{RecentObservation, SeasonCycleType, SeasonMap};
 
     fn d(y: i32, m: u32, day: u32) -> chrono::NaiveDate {

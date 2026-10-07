@@ -27,16 +27,16 @@
 
 use chrono::NaiveDate;
 use cobre_io::{
-    EntitySlot, GraphManifest, PolicyCutRecord, ProducerBlock, StageCutsPayload, encode_slot_date,
-    write_policy_checkpoint,
+    EntitySlot, GraphManifest, PolicyCutRecord, ProducerBlock, SoftwareIdentity, StageCutsPayload,
+    encode_slot_date, write_policy_checkpoint,
 };
 use cobre_sddp::test_support::{
     anticipated_slot, anticipated_slot_at, anticipated_slot_over, chain_graph_manifest,
     inflow_lag_slot, inflow_lag_slot_at, storage_slot, transit_bucket_slot_over, ymd,
 };
 use cobre_sddp::{
-    BoundaryInjection, BoundaryLoadRequest, FullFcf, POLICY_COBRE_VERSION, PolicyStageManifest,
-    load_boundary_cuts, validate_policy_load,
+    BoundaryInjection, BoundaryLoadRequest, FullFcf, PolicyStageManifest, load_boundary_cuts,
+    validate_policy_load,
 };
 
 /// A single `HydroInflowLag` slot dated at the fixed `2031-01-01` reference —
@@ -301,14 +301,15 @@ fn full_fcf_manifest_check_unaffected_by_boundary_reconcile_wiring() {
         graph: &empty_graph,
     };
 
-    let full_fcf_result = validate_policy_load::<FullFcf>(POLICY_COBRE_VERSION, &source, &current);
+    let full_fcf_result =
+        validate_policy_load::<FullFcf>(SoftwareIdentity::THIS_BUILD, &source, &current);
     assert!(
         full_fcf_result.is_err(),
         "FullFcf's exact per-slot match must still hard-reject: {full_fcf_result:?}"
     );
 
     let boundary_result =
-        validate_policy_load::<BoundaryInjection>(POLICY_COBRE_VERSION, &source, &current);
+        validate_policy_load::<BoundaryInjection>(SoftwareIdentity::THIS_BUILD, &source, &current);
     assert!(
         boundary_result.is_ok(),
         "BoundaryInjection defers slot identity to reconcile::build_rebind, not this check: \

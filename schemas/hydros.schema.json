@@ -2,7 +2,7 @@
   "$defs": {
     "RawDiversionChannel": {
       "additionalProperties": false,
-      "description": "Intermediate type for the `diversion` sub-object.",
+      "description": "The `diversion` sub-object.",
       "properties": {
         "downstream_id": {
           "description": "Identifier of the downstream hydro plant receiving diverted water.",
@@ -10,7 +10,7 @@
           "type": "integer"
         },
         "max_flow_m3s": {
-          "description": "Maximum diversion flow capacity [m³/s].",
+          "description": "Maximum diversion flow capacity (m³/s).",
           "format": "double",
           "type": "number"
         }
@@ -22,7 +22,7 @@
       "type": "object"
     },
     "RawEfficiency": {
-      "description": "Tagged-union intermediate type for the `efficiency` sub-object.",
+      "description": "The `efficiency` sub-object.",
       "oneOf": [
         {
           "description": "Constant efficiency across all operating points.",
@@ -47,10 +47,10 @@
     },
     "RawEvaporation": {
       "additionalProperties": false,
-      "description": "Intermediate type for the `evaporation` sub-object.",
+      "description": "The `evaporation` sub-object.",
       "properties": {
         "coefficients_mm": {
-          "description": "Monthly evaporation coefficients [mm/month], one per calendar month.\nIndex 0 = January, index 11 = December.",
+          "description": "Monthly evaporation coefficients (mm/month), one per calendar month.\nIndex 0 = January, index 11 = December.",
           "items": {
             "format": "double",
             "type": "number"
@@ -59,7 +59,7 @@
         },
         "reference_volumes_hm3": {
           "default": null,
-          "description": "Monthly reservoir reference volumes \\[hm³\\] used as the linearization\nreference point for evaporation, one per calendar month.\nIndex 0 = January, index 11 = December.\nAbsent = no reference volume override; the calling algorithm uses its\nown default (e.g., mid-point of the storage range).",
+          "description": "Monthly reservoir reference volumes (hm³) used as the linearization\nreference point for evaporation, one per calendar month.\nIndex 0 = January, index 11 = December.\nAbsent = no reference volume override; the calling algorithm uses its\nown default (e.g., mid-point of the storage range).",
           "items": {
             "format": "double",
             "type": "number"
@@ -77,11 +77,11 @@
     },
     "RawFillingConfig": {
       "additionalProperties": false,
-      "description": "Intermediate type for the `filling` sub-object.",
+      "description": "The `filling` sub-object.",
       "properties": {
         "filling_min_rate_m3s": {
           "default": 0.0,
-          "description": "Minimum accumulation rate applied during filling [m³/s].\nAbsent = passive filling (no minimum rate, defaults to 0.0 per spec).",
+          "description": "Minimum accumulation rate applied during filling (m³/s).\nAbsent = passive filling (no minimum rate, defaults to 0.0 per spec).",
           "format": "double",
           "type": "number"
         },
@@ -97,29 +97,29 @@
       "type": "object"
     },
     "RawGeneration": {
-      "description": "Tagged-union intermediate type for the `generation` sub-object.\n\nUses `#[serde(tag = \"model\")]` (internally-tagged) to dispatch on the\n`\"model\"` field value. Each variant carries only the fields relevant to\nthat model. The `productivity_mw_per_m3s` field is NOT accepted here —\nproductivity coefficients are read from `system/hydro_production_models.json`\nand are associated per `(hydro, stage)` outside this file.\nA `hydros.json` input that includes `productivity_mw_per_m3s` in its\n`generation` block will be rejected with a parse error.",
+      "description": "The `generation` sub-object.\n\nThe `model` key selects the production model, and each model accepts only\nits own fields. The `productivity_mw_per_m3s` field is NOT accepted here —\nproductivity coefficients are read from `system/hydro_production_models.json`\nand are associated per `(hydro, stage)` outside this file.\nA `hydros.json` input that includes `productivity_mw_per_m3s` in its\n`generation` block will be rejected with a parse error.",
       "oneOf": [
         {
           "additionalProperties": false,
           "description": "Constant productivity: `power = productivity * turbined_m3s`.\n\nThe productivity coefficient is read from\n`system/hydro_production_models.json` per `(hydro, stage)`. It is not\naccepted in `hydros.json`; supplying `productivity_mw_per_m3s` here\nproduces a hard parse error.",
           "properties": {
             "max_generation_mw": {
-              "description": "Maximum electrical generation \\[MW\\].",
+              "description": "Maximum electrical generation (MW).",
               "format": "double",
               "type": "number"
             },
             "max_turbined_m3s": {
-              "description": "Maximum turbined flow [m³/s].",
+              "description": "Maximum turbined flow (m³/s).",
               "format": "double",
               "type": "number"
             },
             "min_generation_mw": {
-              "description": "Minimum electrical generation \\[MW\\].",
+              "description": "Minimum electrical generation (MW).",
               "format": "double",
               "type": "number"
             },
             "min_turbined_m3s": {
-              "description": "Minimum turbined flow [m³/s].",
+              "description": "Minimum turbined flow (m³/s).",
               "format": "double",
               "type": "number"
             },
@@ -142,22 +142,22 @@
           "description": "Head-dependent productivity linearized around an operating point.\n\nThe productivity coefficient is read from\n`system/hydro_production_models.json` per `(hydro, stage)`. It is not\naccepted in `hydros.json`; supplying `productivity_mw_per_m3s` here\nproduces a hard parse error.",
           "properties": {
             "max_generation_mw": {
-              "description": "Maximum electrical generation \\[MW\\].",
+              "description": "Maximum electrical generation (MW).",
               "format": "double",
               "type": "number"
             },
             "max_turbined_m3s": {
-              "description": "Maximum turbined flow [m³/s].",
+              "description": "Maximum turbined flow (m³/s).",
               "format": "double",
               "type": "number"
             },
             "min_generation_mw": {
-              "description": "Minimum electrical generation \\[MW\\].",
+              "description": "Minimum electrical generation (MW).",
               "format": "double",
               "type": "number"
             },
             "min_turbined_m3s": {
-              "description": "Minimum turbined flow [m³/s].",
+              "description": "Minimum turbined flow (m³/s).",
               "format": "double",
               "type": "number"
             },
@@ -180,22 +180,22 @@
           "description": "Full production function with head-area-productivity tables (FPHA model).\n\nProductivity is derived from the FPHA tables in\n`system/hydro_production_models.json`. The `productivity_mw_per_m3s`\nfield is not accepted here or in any other `generation` variant.",
           "properties": {
             "max_generation_mw": {
-              "description": "Maximum electrical generation \\[MW\\].",
+              "description": "Maximum electrical generation (MW).",
               "format": "double",
               "type": "number"
             },
             "max_turbined_m3s": {
-              "description": "Maximum turbined flow [m³/s].",
+              "description": "Maximum turbined flow (m³/s).",
               "format": "double",
               "type": "number"
             },
             "min_generation_mw": {
-              "description": "Minimum electrical generation \\[MW\\].",
+              "description": "Minimum electrical generation (MW).",
               "format": "double",
               "type": "number"
             },
             "min_turbined_m3s": {
-              "description": "Minimum turbined flow [m³/s].",
+              "description": "Minimum turbined flow (m³/s).",
               "format": "double",
               "type": "number"
             },
@@ -216,7 +216,7 @@
       ]
     },
     "RawHydraulicLosses": {
-      "description": "Tagged-union intermediate type for the `hydraulic_losses` sub-object.",
+      "description": "The `hydraulic_losses` sub-object.",
       "oneOf": [
         {
           "description": "Losses as a fraction of net head.",
@@ -245,7 +245,7 @@
               "type": "string"
             },
             "value_m": {
-              "description": "Fixed head loss \\[m\\].",
+              "description": "Fixed head loss (m).",
               "format": "double",
               "type": "number"
             }
@@ -260,7 +260,7 @@
     },
     "RawHydro": {
       "additionalProperties": false,
-      "description": "Intermediate type for a single hydro plant entry.",
+      "description": "A single hydro plant entry.",
       "properties": {
         "diversion": {
           "anyOf": [
@@ -373,7 +373,7 @@
               "type": "null"
             }
           ],
-          "description": "Entity-level penalty overrides. Absent = all penalties use global defaults."
+          "description": "Entity-level penalty overrides. When absent, every penalty uses the `hydro` section of `penalties.json`."
         },
         "reservoir": {
           "$ref": "#/$defs/RawReservoir",
@@ -381,7 +381,7 @@
         },
         "specific_productivity_mw_per_m3s_per_m": {
           "default": null,
-          "description": "Specific productivity `ρ_esp` \\[MW / ((m³/s) · m)\\].\n\n**Resolution cascade** (first source that supplies a non-`null` value wins):\n\n1. Per-`(hydro, stage)` row in `system/hydro_energy_productivity.parquet`\n   (loaded at study setup time by the solver).\n2. This field — a single value applied uniformly across all stages.\n\nAbsent or `null` means this fallback level is skipped.  If the cascade\nfinds no value for a hydro whose generation model requires one\n(`constant_productivity` or `linearized_head`), study setup fails with an\nexplicit error.",
+          "description": "Specific productivity `ρ_esp` (MW / ((m³/s) · m)).\n\n**Resolution cascade** (first source that supplies a non-`null` value wins):\n\n1. Per-`(hydro, stage)` row in `system/hydro_energy_productivity.parquet`\n   (loaded at study setup time by the solver).\n2. This field — a single value applied uniformly across all stages.\n\nAbsent or `null` means this fallback level is skipped.  If the cascade\nfinds no value for a hydro whose generation model requires one\n(`constant_productivity` or `linearized_head`), study setup fails with an\nexplicit error.",
           "format": "double",
           "type": [
             "number",
@@ -401,7 +401,7 @@
         },
         "travel_time_hours": {
           "default": null,
-          "description": "Travel time on the cascade arc to `downstream_id` \\[hours\\]. Absent or\nnull = instantaneous (v1 excludes diversion and pumping arcs).",
+          "description": "Travel time on the cascade arc to `downstream_id` (hours). Absent or\nnull = instantaneous (v1 excludes diversion and pumping arcs).",
           "format": "double",
           "type": [
             "number",
@@ -429,10 +429,11 @@
     },
     "RawHydroPenaltyOverrides": {
       "additionalProperties": false,
-      "description": "Intermediate type for entity-level hydro penalty overrides.\n\nAll 11 fields are `Option<f64>`. Absent fields default to `None`,\nmeaning the global default for that penalty is used.\n\nJSON field names mirror `HydroPenalties` and `HydroPenaltyOverrides` field names.",
+      "description": "Entity-level hydro penalty overrides.\n\nEach field is named after a field of the `hydro` section of `penalties.json`; an absent field falls back to that section's value.",
       "properties": {
         "diversion_cost": {
           "default": null,
+          "description": "Diversion flow penalty ($/(m³/s·h)).",
           "format": "double",
           "type": [
             "number",
@@ -441,6 +442,7 @@
         },
         "evaporation_violation_cost": {
           "default": null,
+          "description": "Symmetric evaporation violation penalty of this plant, applied in both\ndirections ($/(m³/s·h)).",
           "format": "double",
           "type": [
             "number",
@@ -449,6 +451,7 @@
         },
         "filling_target_violation_cost": {
           "default": null,
+          "description": "Filling-target violation penalty ($/hm³).",
           "format": "double",
           "type": [
             "number",
@@ -457,6 +460,7 @@
         },
         "generation_violation_below_cost": {
           "default": null,
+          "description": "Generation below-minimum violation penalty ($/`MWh`).",
           "format": "double",
           "type": [
             "number",
@@ -465,6 +469,7 @@
         },
         "inflow_nonnegativity_cost": {
           "default": null,
+          "description": "Inflow non-negativity penalty ($/(m³/s·h)).",
           "format": "double",
           "type": [
             "number",
@@ -473,6 +478,7 @@
         },
         "outflow_violation_above_cost": {
           "default": null,
+          "description": "Outflow above-maximum violation penalty ($/(m³/s·h)).",
           "format": "double",
           "type": [
             "number",
@@ -481,6 +487,7 @@
         },
         "outflow_violation_below_cost": {
           "default": null,
+          "description": "Outflow below-minimum violation penalty ($/(m³/s·h)).",
           "format": "double",
           "type": [
             "number",
@@ -489,6 +496,7 @@
         },
         "spillage_cost": {
           "default": null,
+          "description": "Spillage penalty ($/(m³/s·h)).",
           "format": "double",
           "type": [
             "number",
@@ -497,6 +505,7 @@
         },
         "storage_violation_below_cost": {
           "default": null,
+          "description": "Storage below-minimum violation penalty ($/hm³).",
           "format": "double",
           "type": [
             "number",
@@ -505,6 +514,7 @@
         },
         "turbined_cost": {
           "default": null,
+          "description": "Turbined-flow regularization cost ($/(m³/s·h)).",
           "format": "double",
           "type": [
             "number",
@@ -513,6 +523,7 @@
         },
         "turbined_violation_below_cost": {
           "default": null,
+          "description": "Turbined-flow below-minimum violation penalty ($/(m³/s·h)).",
           "format": "double",
           "type": [
             "number",
@@ -521,6 +532,7 @@
         },
         "water_withdrawal_violation_cost": {
           "default": null,
+          "description": "Symmetric water withdrawal violation penalty of this plant, applied in\nboth directions ($/(m³/s·h)).",
           "format": "double",
           "type": [
             "number",
@@ -532,10 +544,10 @@
     },
     "RawOutflow": {
       "additionalProperties": false,
-      "description": "Intermediate type for the `outflow` sub-object.",
+      "description": "The `outflow` sub-object.",
       "properties": {
         "max_outflow_m3s": {
-          "description": "Maximum total outflow [m³/s]. `null` = no upper bound.",
+          "description": "Maximum total outflow (m³/s). `null` = no upper bound.",
           "format": "double",
           "type": [
             "number",
@@ -543,7 +555,7 @@
           ]
         },
         "min_outflow_m3s": {
-          "description": "Minimum total outflow [m³/s].",
+          "description": "Minimum total outflow (m³/s).",
           "format": "double",
           "type": "number"
         }
@@ -555,15 +567,15 @@
     },
     "RawReservoir": {
       "additionalProperties": false,
-      "description": "Intermediate type for the `reservoir` sub-object.",
+      "description": "The `reservoir` sub-object.",
       "properties": {
         "max_storage_hm3": {
-          "description": "Maximum operational storage \\[hm³\\].",
+          "description": "Maximum operational storage (hm³).",
           "format": "double",
           "type": "number"
         },
         "min_storage_hm3": {
-          "description": "Minimum operational storage (dead volume) \\[hm³\\].",
+          "description": "Minimum operational storage (dead volume) (hm³).",
           "format": "double",
           "type": "number"
         }
@@ -575,7 +587,7 @@
       "type": "object"
     },
     "RawTailrace": {
-      "description": "Tagged-union intermediate type for the `tailrace` sub-object.\n\nUses `#[serde(tag = \"type\")]` internally-tagged on the `\"type\"` field.",
+      "description": "The `tailrace` sub-object. The `type` key selects the tailrace model.",
       "oneOf": [
         {
           "description": "Polynomial tailrace curve.",
@@ -624,15 +636,15 @@
     },
     "RawTailracePoint": {
       "additionalProperties": false,
-      "description": "Intermediate type for a single piecewise tailrace breakpoint.",
+      "description": "A single piecewise tailrace breakpoint.",
       "properties": {
         "height_m": {
-          "description": "Downstream water level (tailrace height) at this outflow \\[m\\].",
+          "description": "Downstream water level (tailrace height) at this outflow (m).",
           "format": "double",
           "type": "number"
         },
         "outflow_m3s": {
-          "description": "Total outflow at this point [m³/s].",
+          "description": "Total outflow at this point (m³/s).",
           "format": "double",
           "type": "number"
         }
@@ -645,7 +657,7 @@
     },
     "RawUnitGroup": {
       "additionalProperties": false,
-      "description": "Intermediate type for a single declared entry in the `unit_groups` array.",
+      "description": "A single declared entry in the `unit_groups` array.",
       "properties": {
         "bus_id": {
           "description": "Bus to which this group's generation is injected.",
@@ -658,22 +670,22 @@
           "type": "integer"
         },
         "max_generation_mw": {
-          "description": "Maximum electrical generation \\[MW\\].",
+          "description": "Maximum electrical generation (MW).",
           "format": "double",
           "type": "number"
         },
         "max_turbined_m3s": {
-          "description": "Maximum turbined flow [m³/s].",
+          "description": "Maximum turbined flow (m³/s).",
           "format": "double",
           "type": "number"
         },
         "min_generation_mw": {
-          "description": "Minimum electrical generation \\[MW\\].",
+          "description": "Minimum electrical generation (MW).",
           "format": "double",
           "type": "number"
         },
         "min_turbined_m3s": {
-          "description": "Minimum turbined flow [m³/s].",
+          "description": "Minimum turbined flow (m³/s).",
           "format": "double",
           "type": "number"
         },
@@ -696,7 +708,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Top-level intermediate type for `hydros.json`.\n\nPrivate — only used during deserialization. Not re-exported.",
+  "description": "Root object of `hydros.json`.",
   "properties": {
     "$schema": {
       "description": "`$schema` field — informational, not validated.",

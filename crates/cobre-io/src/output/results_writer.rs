@@ -8,9 +8,11 @@ use super::dictionary::write_dictionaries;
 use super::error::OutputError;
 use super::manifest::{
     MetadataBounds, MetadataConfiguration, MetadataConvergence, MetadataIterations,
-    MetadataProblemDimensions, MetadataRowPool, MetadataScenarios, OutputContext,
-    SimulationMetadata, TrainingMetadata, write_simulation_metadata, write_training_metadata,
+    MetadataProblemDimensions, MetadataRowPool, MetadataScenarios, MetadataSimulationSolveStats,
+    OutputContext, RunStatus, SimulationMetadata, TrainingMetadata, write_simulation_metadata,
+    write_training_metadata,
 };
+use super::software::{SOFTWARE_NAME, SOFTWARE_VERSION};
 use super::training_writer::TrainingParquetWriter;
 use super::{SimulationOutput, TrainingOutput};
 use crate::Config;
@@ -48,14 +50,15 @@ pub fn write_training_results(
     let max_iterations = extract_max_iterations(config);
 
     let metadata = TrainingMetadata {
-        cobre_version: env!("CARGO_PKG_VERSION").to_string(),
+        software: SOFTWARE_NAME.to_string(),
+        software_version: SOFTWARE_VERSION.to_string(),
         hostname: ctx.hostname.clone(),
         solver: ctx.solver.clone(),
         solver_version: ctx.solver_version.clone(),
         started_at: ctx.started_at.clone(),
         completed_at: ctx.completed_at.clone(),
         duration_seconds: training_output.total_time_ms as f64 / 1_000.0,
-        status: "complete".to_string(),
+        status: training_output.status,
         configuration: MetadataConfiguration {
             seed: config.training.tree_seed,
             max_iterations,
@@ -105,11 +108,10 @@ pub fn write_training_results(
     };
     write_training_metadata(&output_dir.join("training/metadata.json"), &metadata)?;
 
-    std::fs::write(output_dir.join("training/_SUCCESS"), b"")
-        .map_err(|e| OutputError::io(output_dir.join("training/_SUCCESS"), e))?;
-
     Ok(())
 }
+
+pub(crate) const SIMULATION_METADATA_FILE: &str = "simulation/metadata.json";
 
 /// Write simulation artifacts to the output directory.
 ///
@@ -119,21 +121,61 @@ pub fn write_training_results(
 /// # Errors
 ///
 /// Returns [`OutputError`] if metadata serialization or file I/O fails.
-#[allow(clippy::cast_precision_loss)]
 pub fn write_simulation_results(
     output_dir: &Path,
     simulation_output: &SimulationOutput,
     ctx: &OutputContext,
 ) -> Result<(), OutputError> {
-    let metadata = SimulationMetadata {
-        cobre_version: env!("CARGO_PKG_VERSION").to_string(),
+    let metadata = simulation_metadata(simulation_output, RunStatus::Complete, ctx);
+    write_simulation_metadata(&output_dir.join(SIMULATION_METADATA_FILE), &metadata)?;
+
+    Ok(())
+}
+
+/// Write the metadata of a simulation that was skipped before any scenario
+/// ran: `status` partial, `n_scenarios` in total and none completed.
+///
+/// Creates the `simulation/` directory. Writes no `_SUCCESS` marker; that is
+/// the caller's last write.
+///
+/// # Errors
+///
+/// Returns [`OutputError`] if the directory cannot be created, or if metadata
+/// serialization or file I/O fails.
+pub fn write_skipped_simulation_results(
+    output_dir: &Path,
+    n_scenarios: u32,
+    ctx: &OutputContext,
+) -> Result<(), OutputError> {
+    create_output_dir(&output_dir.join("simulation"))?;
+    let skipped = SimulationOutput {
+        n_scenarios,
+        completed: 0,
+        failed: 0,
+        total_time_ms: 0,
+        cost: None,
+        solve_stats: MetadataSimulationSolveStats::default(),
+    };
+    let metadata = simulation_metadata(&skipped, RunStatus::Partial, ctx);
+    write_simulation_metadata(&output_dir.join(SIMULATION_METADATA_FILE), &metadata)
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn simulation_metadata(
+    simulation_output: &SimulationOutput,
+    status: RunStatus,
+    ctx: &OutputContext,
+) -> SimulationMetadata {
+    SimulationMetadata {
+        software: SOFTWARE_NAME.to_string(),
+        software_version: SOFTWARE_VERSION.to_string(),
         hostname: ctx.hostname.clone(),
         solver: ctx.solver.clone(),
         solver_version: ctx.solver_version.clone(),
         started_at: ctx.started_at.clone(),
         completed_at: ctx.completed_at.clone(),
         duration_seconds: simulation_output.total_time_ms as f64 / 1_000.0,
-        status: "complete".to_string(),
+        status,
         scenarios: MetadataScenarios {
             total: simulation_output.n_scenarios,
             completed: simulation_output.completed,
@@ -142,13 +184,7 @@ pub fn write_simulation_results(
         cost: simulation_output.cost.clone(),
         solve_stats: simulation_output.solve_stats.clone(),
         distribution: ctx.distribution.clone(),
-    };
-    write_simulation_metadata(&output_dir.join("simulation/metadata.json"), &metadata)?;
-
-    std::fs::write(output_dir.join("simulation/_SUCCESS"), b"")
-        .map_err(|e| OutputError::io(output_dir.join("simulation/_SUCCESS"), e))?;
-
-    Ok(())
+    }
 }
 
 /// Write the training result tables and, when supplied, the simulation
@@ -170,6 +206,46 @@ pub fn write_results(
         write_simulation_results(output_dir, sim, ctx)?;
     }
     Ok(())
+}
+
+const SUCCESS_MARKER_FILE: &str = "_SUCCESS";
+
+/// Write the empty `_SUCCESS` marker into a phase directory.
+///
+/// The marker means its phase finished writing, so each phase-writer calls this
+/// as its last write. `phase_dir` is not created: a marker in a directory the
+/// phase never wrote to would be false. A simulation scenario whose partition
+/// could not be written is counted in `scenarios.failed` in
+/// `simulation/metadata.json` and does not withhold the marker.
+///
+/// # Errors
+///
+/// Returns [`OutputError::IoError`] when `phase_dir` does not exist or the
+/// marker cannot be created.
+pub fn write_success_marker(phase_dir: &Path) -> Result<(), OutputError> {
+    let marker_path = phase_dir.join(SUCCESS_MARKER_FILE);
+    std::fs::write(&marker_path, b"").map_err(|e| OutputError::io(&marker_path, e))
+}
+
+/// Remove the `_SUCCESS` marker from a phase directory.
+///
+/// Callers invoke this before the phase's first write, so a reused output
+/// directory never shows the previous run's marker beside files the new run
+/// is still writing, and a run that fails mid-phase leaves no marker. A missing
+/// marker or a missing `phase_dir` is success.
+///
+/// # Errors
+///
+/// Returns [`OutputError::IoError`] when the marker exists but cannot be
+/// removed (for example, `_SUCCESS` is a directory): keeping it would keep a
+/// false marker.
+pub fn remove_success_marker(phase_dir: &Path) -> Result<(), OutputError> {
+    let marker_path = phase_dir.join(SUCCESS_MARKER_FILE);
+    match std::fs::remove_file(&marker_path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(OutputError::io(&marker_path, e)),
+    }
 }
 
 fn extract_max_iterations(config: &Config) -> Option<u32> {
@@ -247,6 +323,7 @@ mod tests {
             iterations_completed: n_records as u32,
             converged: true,
             termination_reason: "gap tolerance reached".to_string(),
+            status: RunStatus::Complete,
             total_time_ms: 5_000,
             cut_stats: RowPoolStatistics {
                 total_generated: 200,
@@ -350,24 +427,22 @@ mod tests {
     }
 
     #[test]
-    fn write_results_creates_success_marker() {
+    fn write_results_writes_no_success_marker() {
         let tmp = tempfile::tempdir().unwrap();
         let training = make_training_output(0);
 
         write_results(
             tmp.path(),
             &training,
-            None,
+            Some(&make_simulation_output()),
             &make_system(),
             &make_config(),
             &make_output_context(),
         )
         .expect("write_results must succeed");
 
-        assert!(
-            tmp.path().join("training/_SUCCESS").is_file(),
-            "training/_SUCCESS must exist after write_results"
-        );
+        assert!(!tmp.path().join("training/_SUCCESS").exists());
+        assert!(!tmp.path().join("simulation/_SUCCESS").exists());
     }
 
     #[test]
@@ -510,60 +585,6 @@ mod tests {
             15,
             "convergence schema must have 15 columns"
         );
-
-        assert!(
-            tmp.path().join("training/_SUCCESS").is_file(),
-            "training/_SUCCESS must exist even with 0 records"
-        );
-    }
-
-    #[test]
-    fn write_results_simulation_success_marker_conditional() {
-        let tmp = tempfile::tempdir().unwrap();
-        let training = make_training_output(0);
-        let simulation = SimulationOutput {
-            n_scenarios: 10,
-            completed: 10,
-            failed: 0,
-            total_time_ms: 0,
-            cost: None,
-            solve_stats: MetadataSimulationSolveStats::default(),
-        };
-
-        write_results(
-            tmp.path(),
-            &training,
-            Some(&simulation),
-            &make_system(),
-            &make_config(),
-            &make_output_context(),
-        )
-        .expect("write_results must succeed");
-
-        assert!(
-            tmp.path().join("simulation/_SUCCESS").is_file(),
-            "simulation/_SUCCESS must exist when simulation_output is Some"
-        );
-        assert!(
-            tmp.path().join("training/_SUCCESS").is_file(),
-            "training/_SUCCESS must exist"
-        );
-
-        let tmp2 = tempfile::tempdir().unwrap();
-        write_results(
-            tmp2.path(),
-            &training,
-            None,
-            &make_system(),
-            &make_config(),
-            &make_output_context(),
-        )
-        .expect("write_results must succeed");
-
-        assert!(
-            !tmp2.path().join("simulation/_SUCCESS").exists(),
-            "simulation/_SUCCESS must NOT exist when simulation_output is None"
-        );
     }
 
     #[test]
@@ -672,7 +693,7 @@ mod tests {
         assert!(tmp.path().join("training/dictionaries").is_dir());
         assert!(tmp.path().join("training/timing").is_dir());
         assert!(tmp.path().join("training/metadata.json").is_file());
-        assert!(tmp.path().join("training/_SUCCESS").is_file());
+        assert!(!tmp.path().join("training/_SUCCESS").exists());
         assert!(
             tmp.path().join("simulation").is_dir(),
             "simulation/ directory must be created by write_training_results"
@@ -680,7 +701,7 @@ mod tests {
     }
 
     #[test]
-    fn write_simulation_results_produces_metadata_and_success() {
+    fn write_simulation_results_produces_metadata() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
         let sim = make_simulation_output();
@@ -689,7 +710,163 @@ mod tests {
             .expect("write_simulation_results must succeed");
 
         assert!(tmp.path().join("simulation/metadata.json").is_file());
-        assert!(tmp.path().join("simulation/_SUCCESS").is_file());
+        assert!(!tmp.path().join("simulation/_SUCCESS").exists());
+    }
+
+    #[test]
+    fn training_metadata_records_the_phase_status() {
+        use crate::output::manifest::read_training_metadata;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut training = make_training_output(2);
+        training.status = RunStatus::Partial;
+
+        write_training_results(
+            tmp.path(),
+            &training,
+            &make_system(),
+            &make_config(),
+            &make_output_context(),
+        )
+        .expect("write_training_results must succeed");
+
+        let metadata = read_training_metadata(&tmp.path().join("training/metadata.json"))
+            .expect("read_training_metadata must succeed");
+        assert_eq!(metadata.status, RunStatus::Partial);
+    }
+
+    #[test]
+    fn simulation_metadata_stays_complete_with_failed_scenarios() {
+        use crate::output::manifest::read_simulation_metadata;
+
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
+        let mut sim = make_simulation_output();
+        sim.completed = 7;
+        sim.failed = 3;
+
+        write_simulation_results(tmp.path(), &sim, &make_output_context())
+            .expect("write_simulation_results must succeed");
+
+        let metadata = read_simulation_metadata(&tmp.path().join("simulation/metadata.json"))
+            .expect("read_simulation_metadata must succeed");
+        assert_eq!(metadata.scenarios.failed, 3);
+        assert_eq!(metadata.status, RunStatus::Complete);
+    }
+
+    #[test]
+    fn skipped_simulation_metadata_is_partial_with_zero_completed_scenarios() {
+        use crate::output::manifest::read_simulation_metadata;
+
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!tmp.path().join("simulation").exists());
+
+        write_skipped_simulation_results(tmp.path(), 100, &make_output_context())
+            .expect("write_skipped_simulation_results must succeed");
+
+        let metadata = read_simulation_metadata(&tmp.path().join("simulation/metadata.json"))
+            .expect("read_simulation_metadata must succeed");
+        assert_eq!(metadata.status, RunStatus::Partial);
+        assert_eq!(metadata.scenarios.total, 100);
+        assert_eq!(metadata.scenarios.completed, 0);
+        assert_eq!(metadata.scenarios.failed, 0);
+        assert!(metadata.cost.is_none());
+        assert_eq!(metadata.duration_seconds, 0.0);
+        assert!(!tmp.path().join("simulation/_SUCCESS").exists());
+    }
+
+    #[test]
+    fn training_results_writer_leaves_no_success_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        write_training_results(
+            tmp.path(),
+            &make_training_output(2),
+            &make_system(),
+            &make_config(),
+            &make_output_context(),
+        )
+        .expect("write_training_results must succeed");
+
+        assert!(
+            !tmp.path().join("training/_SUCCESS").exists(),
+            "training/_SUCCESS belongs to the caller's phase-writer, not write_training_results"
+        );
+    }
+
+    #[test]
+    fn simulation_results_writer_leaves_no_success_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
+
+        write_simulation_results(
+            tmp.path(),
+            &make_simulation_output(),
+            &make_output_context(),
+        )
+        .expect("write_simulation_results must succeed");
+
+        assert!(
+            !tmp.path().join("simulation/_SUCCESS").exists(),
+            "simulation/_SUCCESS belongs to the caller's phase-writer, not write_simulation_results"
+        );
+    }
+
+    #[test]
+    fn success_marker_writer_creates_an_empty_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        write_success_marker(tmp.path()).expect("write_success_marker must succeed");
+
+        let marker = std::fs::metadata(tmp.path().join("_SUCCESS")).expect("_SUCCESS must exist");
+        assert!(marker.is_file());
+        assert_eq!(marker.len(), 0);
+    }
+
+    #[test]
+    fn success_marker_writer_fails_without_creating_a_missing_phase_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let phase_dir = tmp.path().join("training");
+
+        let err = write_success_marker(&phase_dir).expect_err("a missing phase dir must fail");
+
+        assert!(
+            matches!(&err, OutputError::IoError { path, .. } if path.ends_with("_SUCCESS")),
+            "expected an IoError on the marker path, got {err:?}"
+        );
+        assert!(!phase_dir.exists(), "the phase dir must not be created");
+    }
+
+    #[test]
+    fn success_marker_remover_deletes_an_existing_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("_SUCCESS"), b"").unwrap();
+
+        remove_success_marker(tmp.path()).expect("remove_success_marker must succeed");
+
+        assert!(!tmp.path().join("_SUCCESS").exists());
+    }
+
+    #[test]
+    fn success_marker_remover_accepts_a_missing_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        remove_success_marker(tmp.path()).expect("a phase dir without a marker must succeed");
+        remove_success_marker(&tmp.path().join("training"))
+            .expect("a missing phase dir must succeed");
+    }
+
+    #[test]
+    fn success_marker_remover_reports_a_marker_it_cannot_remove() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("_SUCCESS")).unwrap();
+
+        let err = remove_success_marker(tmp.path()).expect_err("a directory marker must fail");
+
+        assert!(
+            matches!(&err, OutputError::IoError { path, .. } if path.ends_with("_SUCCESS")),
+            "expected an IoError on the marker path, got {err:?}"
+        );
     }
 
     #[test]
@@ -720,14 +897,6 @@ mod tests {
         .expect("write_training_results must succeed");
         write_simulation_results(tmp_split.path(), &sim, &ctx)
             .expect("write_simulation_results must succeed");
-
-        let combined_training_success = tmp_combined.path().join("training/_SUCCESS").is_file();
-        let split_training_success = tmp_split.path().join("training/_SUCCESS").is_file();
-        assert_eq!(combined_training_success, split_training_success);
-
-        let combined_sim_success = tmp_combined.path().join("simulation/_SUCCESS").is_file();
-        let split_sim_success = tmp_split.path().join("simulation/_SUCCESS").is_file();
-        assert_eq!(combined_sim_success, split_sim_success);
 
         let combined_metadata = tmp_combined.path().join("training/metadata.json").is_file();
         let split_metadata = tmp_split.path().join("training/metadata.json").is_file();

@@ -10,12 +10,12 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{Float64Builder, Int8Builder, Int32Builder, RecordBatch};
-use arrow::datatypes::{DataType, Schema};
+use arrow::datatypes::DataType;
 use cobre_core::System;
 
 use crate::output::atomic::{write_bytes_atomic, write_parquet_atomic};
 use crate::output::error::OutputError;
-use crate::output::schemas::{OUTPUT_SCHEMAS, bounds_schema};
+use crate::output::schemas::{OUTPUT_SCHEMAS, SchemaRegistryEntry, bounds_schema};
 #[cfg(test)]
 use crate::output::schemas::{hydro_bus_generation_schema, hydros_schema};
 
@@ -211,12 +211,11 @@ fn write_entities_csv(path: &Path, system: &System) -> Result<(), OutputError> {
 
 // ─── variables.csv ───────────────────────────────────────────────────────────
 
-/// Every `(file, schema)` pair `variables.csv` documents — the single owner of
-/// the list, shared with the no-empty-description test that guards it.
-fn variables_csv_schemas() -> Vec<(&'static str, Schema)> {
+/// Every `(file, entry)` pair `variables.csv` documents.
+fn variables_csv_schemas() -> Vec<(&'static str, &'static SchemaRegistryEntry)> {
     OUTPUT_SCHEMAS
         .iter()
-        .filter_map(|entry| entry.csv_label.map(|label| (label, (entry.schema_fn)())))
+        .filter_map(|entry| entry.csv_label.map(|label| (label, entry)))
         .collect()
 }
 
@@ -229,15 +228,15 @@ fn write_variables_csv(path: &Path) -> Result<(), OutputError> {
     wtr.write_record(["file", "column", "type", "unit", "description", "nullable"])
         .map_err(|e| OutputError::io(&file_path, std::io::Error::other(e)))?;
 
-    for (schema_name, schema) in &variables_csv_schemas() {
-        for field in schema.fields() {
+    for (label, entry) in &variables_csv_schemas() {
+        for field in (entry.schema_fn)().fields() {
             let type_str = arrow_type_str(field.data_type());
-            let unit = unit_for(schema_name, field.name());
-            let description = description_for(schema_name, field.name());
+            let unit = unit_for(entry.name, field.name());
+            let description = description_for(entry.name, field.name());
             let nullable = if field.is_nullable() { "true" } else { "false" };
 
             wtr.write_record([
-                *schema_name,
+                *label,
                 field.name().as_str(),
                 type_str,
                 unit,
@@ -266,510 +265,1211 @@ fn arrow_type_str(dt: &DataType) -> &'static str {
     }
 }
 
-/// Return the physical unit string for a given (file, column) pair.
-///
-/// Returns `""` for dimensionless columns or columns without a defined unit.
-// Rationale: one authoritative (file, column) → unit lookup table; identical
-// arms are intentional (same unit recurs across schemas), so splitting or
-// collapsing arms would degrade it as a catalog.
-#[allow(clippy::too_many_lines, clippy::match_same_arms)]
-fn unit_for(file: &str, column: &str) -> &'static str {
-    match column {
-        "scenario_id"
-        | "stage_id"
-        | "node_id"
-        | "block_id"
-        | "lag"
-        | "iteration"
-        | "rank"
-        | "forward_passes"
-        | "scenarios_processed" => return "",
-        "generation_mw"
-        | "available_mw"
-        | "curtailment_mw"
-        | "direct_flow_mw"
-        | "reverse_flow_mw"
-        | "net_flow_mw"
-        | "losses_mw"
-        | "load_mw"
-        | "deficit_mw"
-        | "excess_mw"
-        | "spot_price"
-        | "pumped_flow_m3s"
-        | "power_consumption_mw"
-        | "anticipated_committed_mw"
-        | "anticipated_decision_mw"
-        | "power_mw" => return "MW",
-        "generation_mwh"
-        | "curtailment_mwh"
-        | "net_flow_mwh"
-        | "losses_mwh"
-        | "load_mwh"
-        | "deficit_mwh"
-        | "excess_mwh"
-        | "energy_consumption_mwh"
-        | "energy_mwh" => return "MWh",
-        "turbined_m3s"
-        | "spillage_m3s"
-        | "outflow_m3s"
-        | "evaporation_m3s"
-        | "diverted_inflow_m3s"
-        | "diverted_outflow_m3s"
-        | "incremental_inflow_m3s"
-        | "inflow_m3s"
-        | "turbined_slack_m3s"
-        | "outflow_slack_below_m3s"
-        | "outflow_slack_above_m3s"
-        | "evaporation_violation_pos_m3s"
-        | "evaporation_violation_neg_m3s"
-        | "inflow_nonnegativity_slack_m3s"
-        | "water_withdrawal_violation_pos_m3s"
-        | "water_withdrawal_violation_neg_m3s"
-        | "pumped_volume_hm3"
-        | "value_m3s" => return "m3/s",
-        "storage_initial_hm3"
-        | "storage_final_hm3"
-        | "storage_violation_below_hm3"
-        | "filling_target_violation_hm3"
-        | "in_transit_volume_hm3"
-        | "delayed_arrival_hm3" => return "hm3",
-        "total_cost"
-        | "immediate_cost"
-        | "discounted_immediate_cost"
-        | "future_cost"
-        | "thermal_cost"
-        | "anticipated_thermal_cost"
-        | "contract_cost"
-        | "deficit_cost"
-        | "excess_cost"
-        | "storage_violation_cost"
-        | "filling_target_cost"
-        | "hydro_violation_cost"
-        | "outflow_violation_below_cost"
-        | "outflow_violation_above_cost"
-        | "turbined_violation_cost"
-        | "generation_violation_cost"
-        | "evaporation_violation_cost"
-        | "withdrawal_violation_cost"
-        | "inflow_penalty_cost"
-        | "generic_violation_cost"
-        | "spillage_cost"
-        | "turbined_cost"
-        | "curtailment_cost"
-        | "exchange_cost"
-        | "pumping_cost"
-        | "generation_cost"
-        | "total_cost_convergence"
-        | "pumping_cost_csv"
-        | "price_per_mwh"
-        | "slack_cost" => return "$",
-        "time_forward_ms"
-        | "time_backward_ms"
-        | "time_total_ms"
-        | "forward_solve_ms"
-        | "forward_sample_ms"
-        | "backward_solve_ms"
-        | "backward_cut_ms"
-        | "cut_selection_ms"
-        | "mpi_allreduce_ms"
-        | "mpi_broadcast_ms"
-        | "io_write_ms"
-        | "state_exchange_ms"
-        | "cut_batch_build_ms"
-        | "bwd_setup_ms"
-        | "bwd_load_imbalance_ms"
-        | "bwd_scheduling_overhead_ms"
-        | "fwd_setup_ms"
-        | "fwd_load_imbalance_ms"
-        | "fwd_scheduling_overhead_ms"
-        | "overhead_ms"
-        | "lazy_scoring_ms"
-        | "forward_time_ms"
-        | "backward_time_ms"
-        | "communication_time_ms"
-        | "idle_time_ms"
-        | "solve_time_ms"
-        | "load_model_time_ms"
-        | "set_bounds_time_ms"
-        | "basis_set_time_ms"
-        | "selection_time_ms" => return "ms",
-        _ => {}
-    }
-    match (file, column) {
-        ("hydros", "water_value_per_hm3") => "$/hm3",
-        ("hydros", "equivalent_productivity_mw_per_m3s") => "MW/(m3/s)",
-        ("hydros", "accumulated_productivity_mw_per_m3s") => "MW/(m3/s)",
-        ("hydros", "integrated_equivalent_productivity_mw_per_m3s") => "MW/(m3/s)",
-        ("hydros", "integrated_accumulated_productivity_mw_per_m3s") => "MW/(m3/s)",
-        ("hydros", "incremental_inflow_energy_mw") => "MW",
-        ("hydros", "stored_energy_initial_mwh") => "MWh",
-        ("hydros", "stored_energy_final_mwh") => "MWh",
-        ("hydros", "stored_energy_initial_mw") => "MW",
-        ("hydros", "stored_energy_final_mw") => "MW",
-        ("hydros", "generation_slack_mw") => "MW",
-        _ => "",
-    }
+const VARIES: &str = "varies";
+
+const UNIT_SUFFIXES: [(&str, &str); 7] = [
+    ("_mwh", "MWh"),
+    ("_mw", "MW"),
+    ("_hm3", "hm3"),
+    ("_m3s", "m3/s"),
+    ("_ms", "ms"),
+    ("_percent", "%"),
+    ("_cost", "$"),
+];
+
+const NAMED_UNITS: &[(&str, &str, &str)] = &[
+    ("buses", "spot_price", "$/MWh"),
+    ("contracts", "price_per_mwh", "$/MWh"),
+    ("hydros", "water_value_per_hm3", "$/hm3"),
+    ("convergence", "lower_bound", "$"),
+    ("convergence", "upper_bound", "$"),
+    ("convergence", "upper_bound_std", "$"),
+    ("fpha_hyperplanes", "gamma_0", "MW"),
+    ("fpha_hyperplanes", "gamma_v", "MW/hm3"),
+    ("fpha_hyperplanes", "gamma_q", "MW/(m3/s)"),
+    ("fpha_hyperplanes", "gamma_s", "MW/(m3/s)"),
+    ("fpha_deviation_points", "v", "hm3"),
+    ("fpha_deviation_points", "q", "m3/s"),
+    ("fpha_deviation_points", "fph_exact", "MW"),
+    ("fpha_deviation_points", "fpha_fitted", "MW"),
+    ("fpha_deviation_points", "deviation", "MW"),
+    ("bounds", "bound_value", VARIES),
+    ("generic_violations", "slack_value", VARIES),
+    ("generic_constraint_echo", "coefficient", VARIES),
+    ("generic_constraint_echo", "bound_lower", VARIES),
+    ("generic_constraint_echo", "bound_upper", VARIES),
+    ("generic_constraint_echo", "slack_penalty", VARIES),
+];
+
+fn suffix_unit(name: &str) -> &'static str {
+    UNIT_SUFFIXES
+        .iter()
+        .find(|(suffix, _)| name.ends_with(suffix))
+        .map_or("", |&(_, unit)| unit)
 }
 
-/// Return a short description for a given (file, column) pair.
-///
-/// Returns `""` for columns without a registered description.
-// Rationale: one authoritative (file, column) → description lookup table;
-// identical arms are intentional, so collapsing them would hide additions and
-// per-schema divergence.
-#[allow(clippy::too_many_lines, clippy::match_same_arms)]
-fn description_for(file: &str, column: &str) -> &'static str {
-    // scenario_id/node_id handled above; file-specific arms below are unreachable.
-    match column {
-        "scenario_id" => return "0-based scenario identifier",
-        "node_id" => return "Declared node id visited at this stage",
-        _ => {}
+/// Unit of `column` in the registry schema named `schema`: `""` when the
+/// column has no unit, [`VARIES`] when the unit depends on the row.
+fn unit_for(schema: &str, column: &str) -> &'static str {
+    if let Some(&(_, _, unit)) = NAMED_UNITS
+        .iter()
+        .find(|&&(s, c, _)| s == schema && c == column)
+    {
+        return unit;
     }
-    match (file, column) {
-        ("paths", "stage_id") => "Stage index",
-        ("costs", "stage_id") => "Stage index",
-        ("costs", "block_id") => "Block index within stage (nullable)",
-        ("costs", "total_cost") => "Total stage cost",
-        ("costs", "immediate_cost") => "Immediate (operation) cost",
-        ("costs", "future_cost") => "Expected future cost (envelope value)",
-        ("costs", "discount_factor") => "Discount factor applied to this stage",
-        ("costs", "thermal_cost") => "Total thermal generation cost",
-        ("costs", "anticipated_thermal_cost") => {
-            "Total anticipated (forward-committed) thermal generation cost"
-        }
-        ("costs", "contract_cost") => "Total contract cost",
-        ("costs", "deficit_cost") => "Total load-deficit penalty cost",
-        ("costs", "excess_cost") => "Total excess-generation cost",
-        ("costs", "storage_violation_cost") => "Total storage violation penalty",
-        ("costs", "filling_target_cost") => "Total filling-target violation cost",
-        ("costs", "hydro_violation_cost") => "Total hydro constraint violation cost",
-        ("costs", "outflow_violation_below_cost") => "Cost of minimum outflow violations",
-        ("costs", "outflow_violation_above_cost") => "Cost of maximum outflow violations",
-        ("costs", "turbined_violation_cost") => "Cost of minimum turbining violations",
-        ("costs", "generation_violation_cost") => "Cost of minimum generation violations",
-        ("costs", "evaporation_violation_cost") => "Cost of evaporation constraint violations",
-        ("costs", "withdrawal_violation_cost") => "Cost of water withdrawal constraint violations",
-        ("costs", "inflow_penalty_cost") => "Total inflow non-negativity penalty",
-        ("costs", "generic_violation_cost") => "Total generic constraint violation cost",
-        ("costs", "spillage_cost") => "Total spillage regularization cost",
-        ("costs", "turbined_cost") => "Total turbined regularization cost",
-        ("costs", "curtailment_cost") => "Total curtailment cost",
-        ("costs", "exchange_cost") => "Total exchange regularization cost",
-        ("costs", "pumping_cost") => "Total pumping cost",
-        ("hydros", "stage_id") => "Stage index",
-        ("hydros", "block_id") => "Block index within stage (nullable)",
-        ("hydros", "hydro_id") => "Hydro plant identifier",
-        ("hydros", "turbined_m3s") => "Turbined flow",
-        ("hydros", "spillage_m3s") => "Spilled flow",
-        ("hydros", "outflow_m3s") => "Total outflow (turbined + spilled)",
-        ("hydros", "evaporation_m3s") => "Evaporation loss (nullable)",
-        ("hydros", "diverted_inflow_m3s") => "Diverted inflow received (nullable)",
-        ("hydros", "diverted_outflow_m3s") => "Diverted outflow sent (nullable)",
-        ("hydros", "incremental_inflow_m3s") => "Incremental (local) inflow",
-        ("hydros", "inflow_m3s") => "Total inflow including upstream contributions",
-        ("hydros", "storage_initial_hm3") => "Reservoir storage at start of stage",
-        ("hydros", "storage_final_hm3") => "Reservoir storage at end of stage",
-        ("hydros", "generation_mw") => "Hydro generation",
-        ("hydros", "generation_mwh") => "Hydro energy generated",
-        ("hydros", "equivalent_productivity_mw_per_m3s") => {
-            "Equivalent productivity `ρ_eq` (always populated)"
-        }
-        ("hydros", "accumulated_productivity_mw_per_m3s") => {
-            "Accumulated productivity `ρ_acum` along downstream cascade"
-        }
-        ("hydros", "integrated_equivalent_productivity_mw_per_m3s") => {
-            "Equivalent productivity `ρ_eq` averaged over the reservoir storage range"
-        }
-        ("hydros", "integrated_accumulated_productivity_mw_per_m3s") => {
-            "Storage-range averaged productivity summed along the downstream cascade"
-        }
-        ("hydros", "incremental_inflow_energy_mw") => {
-            "Incremental natural energy inflow (`ρ_acum` · incremental inflow)"
-        }
-        ("hydros", "stored_energy_initial_mwh") => "Stored energy at start of block",
-        ("hydros", "stored_energy_final_mwh") => "Stored energy at end of block",
-        ("hydros", "stored_energy_initial_mw") => {
-            "Stored energy at start of block, averaged over the stage's total hours"
-        }
-        ("hydros", "stored_energy_final_mw") => {
-            "Stored energy at end of block, averaged over the stage's total hours"
-        }
-        ("hydros", "spillage_cost") => "Spillage regularization cost",
-        ("hydros", "water_value_per_hm3") => {
-            "Marginal water value: the dual of the row's own water-balance constraint \
-             (each block's own row in chronological stages; the stage row, repeated on \
-             every block row, in parallel stages)"
-        }
-        ("hydros", "storage_binding_code") => "Storage bound binding code",
-        ("hydros", "operative_state_code") => "Operative state code",
-        ("hydros", "turbined_slack_m3s") => "Turbined minimum slack",
-        ("hydros", "outflow_slack_below_m3s") => "Outflow below-minimum slack",
-        ("hydros", "outflow_slack_above_m3s") => "Outflow above-maximum slack",
-        ("hydros", "generation_slack_mw") => "Generation minimum slack",
-        ("hydros", "storage_violation_below_hm3") => "Storage below dead-volume violation",
-        ("hydros", "filling_target_violation_hm3") => "Filling target violation",
-        ("hydros", "evaporation_violation_pos_m3s") => "Over-evaporation constraint violation",
-        ("hydros", "evaporation_violation_neg_m3s") => "Under-evaporation constraint violation",
-        ("hydros", "inflow_nonnegativity_slack_m3s") => "Inflow non-negativity slack",
-        ("hydros", "water_withdrawal_violation_pos_m3s") => "Over-withdrawal constraint violation",
-        ("hydros", "water_withdrawal_violation_neg_m3s") => "Under-withdrawal constraint violation",
-        ("hydro_bus_generation", "stage_id") => "Stage index",
-        ("hydro_bus_generation", "block_id") => "Block index within stage (nullable)",
-        ("hydro_bus_generation", "hydro_id") => "Hydro plant identifier",
-        ("hydro_bus_generation", "bus_id") => "Bus identifier",
-        ("hydro_bus_generation", "turbined_m3s") => "Turbined flow",
-        ("hydro_bus_generation", "generation_mw") => "Hydro generation",
-        ("hydro_bus_generation", "generation_mwh") => "Hydro energy generated",
-        ("thermals", "stage_id") => "Stage index",
-        ("thermals", "block_id") => "Block index within stage (nullable)",
-        ("thermals", "thermal_id") => "Thermal plant identifier",
-        ("thermals", "generation_mw") => "Thermal generation",
-        ("thermals", "generation_mwh") => "Thermal energy generated",
-        ("thermals", "generation_cost") => "Thermal generation cost",
-        ("thermals", "is_anticipated") => "Whether plant uses anticipated dispatch",
-        ("thermals", "anticipated_committed_mw") => "Anticipated committed capacity (nullable)",
-        ("thermals", "anticipated_decision_mw") => "Anticipated dispatch decision (nullable)",
-        ("thermals", "operative_state_code") => "Operative state code",
-        ("exchanges", "stage_id") => "Stage index",
-        ("exchanges", "block_id") => "Block index within stage (nullable)",
-        ("exchanges", "line_id") => "Transmission line identifier",
-        ("exchanges", "direct_flow_mw") => "Flow in direct direction",
-        ("exchanges", "reverse_flow_mw") => "Flow in reverse direction",
-        ("exchanges", "net_flow_mw") => "Net flow (direct minus reverse)",
-        ("exchanges", "net_flow_mwh") => "Net energy exchanged",
-        ("exchanges", "losses_mw") => "Transmission losses",
-        ("exchanges", "losses_mwh") => "Transmission energy losses",
-        ("exchanges", "exchange_cost") => "Exchange regularization cost",
-        ("exchanges", "operative_state_code") => "Operative state code",
-        ("buses", "stage_id") => "Stage index",
-        ("buses", "block_id") => "Block index within stage (nullable)",
-        ("buses", "bus_id") => "Bus identifier",
-        ("buses", "load_mw") => "Load demand",
-        ("buses", "load_mwh") => "Load energy demand",
-        ("buses", "deficit_mw") => "Unmet demand (deficit)",
-        ("buses", "deficit_mwh") => "Unmet energy demand",
-        ("buses", "excess_mw") => "Excess generation absorbed",
-        ("buses", "excess_mwh") => "Excess energy absorbed",
-        ("buses", "spot_price") => "Bus spot price (dual of balance constraint)",
-        ("pumping_stations", "stage_id") => "Stage index",
-        ("pumping_stations", "block_id") => "Block index within stage (nullable)",
-        ("pumping_stations", "pumping_station_id") => "Pumping station identifier",
-        ("pumping_stations", "pumped_flow_m3s") => "Pumped water flow",
-        ("pumping_stations", "pumped_volume_hm3") => "Pumped water volume",
-        ("pumping_stations", "power_consumption_mw") => "Electrical power consumed",
-        ("pumping_stations", "energy_consumption_mwh") => "Electrical energy consumed",
-        ("pumping_stations", "pumping_cost") => "Pumping operation cost",
-        ("pumping_stations", "operative_state_code") => "Operative state code",
-        ("contracts", "stage_id") => "Stage index",
-        ("contracts", "block_id") => "Block index within stage (nullable)",
-        ("contracts", "contract_id") => "Contract identifier",
-        ("contracts", "power_mw") => "Contracted power",
-        ("contracts", "energy_mwh") => "Contracted energy",
-        ("contracts", "price_per_mwh") => "Effective contract price",
-        ("contracts", "total_cost") => "Total contract cost",
-        ("contracts", "operative_state_code") => "Operative state code",
-        ("non_controllables", "stage_id") => "Stage index",
-        ("non_controllables", "block_id") => "Block index within stage (nullable)",
-        ("non_controllables", "non_controllable_id") => "Non-controllable source identifier",
-        ("non_controllables", "generation_mw") => "Non-controllable generation dispatched",
-        ("non_controllables", "generation_mwh") => "Non-controllable energy generated",
-        ("non_controllables", "available_mw") => "Available generation capacity",
-        ("non_controllables", "curtailment_mw") => "Curtailed generation",
-        ("non_controllables", "curtailment_mwh") => "Curtailed energy",
-        ("non_controllables", "curtailment_cost") => "Curtailment cost",
-        ("non_controllables", "operative_state_code") => "Operative state code",
-        ("inflow_lags", "stage_id") => "Stage index",
-        ("inflow_lags", "hydro_id") => "Hydro plant identifier",
-        ("inflow_lags", "lag_index") => "AR lag index (1-based)",
-        ("inflow_lags", "inflow_m3s") => "Historical inflow for this lag",
-        ("in_transit", "stage_id") => "Stage index",
-        ("in_transit", "hydro_id") => "Downstream hydro plant identifier",
-        ("in_transit", "lag") => "Maturity bucket index (1-based)",
-        ("in_transit", "in_transit_volume_hm3") => {
-            "Outgoing in-transit water volume at this maturity"
-        }
-        ("in_transit", "delayed_arrival_hm3") => {
-            "Water delivered this stage (non-zero only at lag 1)"
-        }
-        ("transit_seed", "hydro_id") => {
-            "Upstream entity identifier whose release the window covers"
-        }
-        ("transit_seed", "start_date") => "Start of the release window (inclusive)",
-        ("transit_seed", "end_date") => "End of the release window (exclusive)",
-        ("transit_seed", "value_m3s") => "Mean release rate over the window",
-        ("generic_violations", "stage_id") => "Stage index",
-        ("generic_violations", "block_id") => "Block index within stage (nullable)",
-        ("generic_violations", "constraint_id") => "Generic constraint identifier",
-        ("generic_violations", "slack_value") => "Constraint slack value",
-        ("generic_violations", "slack_cost") => "Constraint slack penalty cost",
-        ("scenario_summary", "probability") => {
-            "Per-scenario leaf-path probability under a declared census; NULL under sampled selection"
-        }
-        ("scenario_summary", "discounted_immediate_cost") => {
-            "Per-scenario discounted immediate cost; excludes the future-cost term that \
-             costs.parquet total_cost includes"
-        }
-        ("convergence", "iteration") => "Iteration number (1-based)",
-        ("convergence", "lower_bound") => "Lower bound on the optimal value",
-        ("convergence", "upper_bound") => {
-            "Upper bound estimate (sample mean under a sampled forward, exact \
-             probability-weighted bound under an enumerated forward)"
-        }
-        ("convergence", "upper_bound_std") => {
-            "Std deviation of upper bound (NULL under an exact bound)"
-        }
-        ("convergence", "upper_bound_kind") => {
-            "Upper bound regime: statistical (sampled forward) or exact (enumerated forward)"
-        }
-        ("convergence", "gap_percent") => "Relative optimality gap in percent (nullable)",
-        ("convergence", "cuts_added") => "Cuts added in this iteration",
-        ("convergence", "cuts_removed") => "Cuts removed in this iteration",
-        ("convergence", "cuts_active") => "Total active cuts after iteration",
-        ("convergence", "time_forward_ms") => "Forward-pass wall-clock time",
-        ("convergence", "time_backward_ms") => "Backward-pass wall-clock time",
-        ("convergence", "time_total_ms") => "Total iteration wall-clock time",
-        ("convergence", "forward_passes") => "Number of forward-pass scenarios",
-        ("convergence", "lp_solves") => "Total LP solves in iteration",
-        ("convergence", "mean_rows_in_lp") => {
-            "Mean resident rows loaded per lazy-selection LP solve this iteration \
-             (0 when no lazy selection ran)"
-        }
-        ("iteration_timing", "iteration") => "Iteration number (1-based)",
-        ("iteration_timing", "rank") => {
-            "MPI rank that produced this row. Always set; \
-             single-rank runs use 0."
-        }
-        ("iteration_timing", "worker_id") => {
-            "Worker thread index within the rank's pool. NULL on \
-             rank-aggregated rows that carry rank-only timings (cut_selection, \
-             mpi_allreduce, cut_sync, lower_bound, state_exchange, cut_batch_build, \
-             load_imbalance / scheduling_overhead, overhead). Set on per-worker \
-             rows that carry parallel-region timings (forward_wall, backward_wall, \
-             fwd_setup, bwd_setup, lazy_scoring)."
-        }
-        ("iteration_timing", "forward_wall_ms") => "Forward pass wall-clock time",
-        ("iteration_timing", "backward_wall_ms") => "Backward pass wall-clock time",
-        ("iteration_timing", "cut_selection_ms") => "Row-selection time",
-        ("iteration_timing", "mpi_allreduce_ms") => "MPI allreduce time",
-        ("iteration_timing", "cut_sync_ms") => "Per-stage row-sync allgatherv time",
-        ("iteration_timing", "lower_bound_ms") => "Lower bound evaluation time",
-        ("iteration_timing", "state_exchange_ms") => "State exchange allgatherv time",
-        ("iteration_timing", "cut_batch_build_ms") => "Row-batch assembly time",
-        ("iteration_timing", "bwd_setup_ms") => "Thread-pool setup time before backward pass",
-        ("iteration_timing", "bwd_load_imbalance_ms") => {
-            "Estimated load imbalance across backward pass worker threads"
-        }
-        ("iteration_timing", "bwd_scheduling_overhead_ms") => {
-            "Scheduling and synchronisation overhead in the backward pass"
-        }
-        ("iteration_timing", "fwd_setup_ms") => "Thread-pool setup time before forward pass",
-        ("iteration_timing", "fwd_load_imbalance_ms") => {
-            "Estimated load imbalance across forward pass worker threads"
-        }
-        ("iteration_timing", "fwd_scheduling_overhead_ms") => {
-            "Scheduling and synchronisation overhead in the forward pass"
-        }
-        ("iteration_timing", "overhead_ms") => {
-            "Residual iteration time not attributed to any phase"
-        }
-        ("iteration_timing", "lazy_scoring_ms") => {
-            "Per-worker time spent in lazy candidate scoring inside the \
-             lazy-selection solve; 0 when that solve path is not used. A \
-             sub-component of the forward/backward phases."
-        }
-        ("rank_timing", "iteration") => "Iteration number (1-based)",
-        ("rank_timing", "rank") => "MPI rank",
-        ("rank_timing", "forward_time_ms") => "Forward-pass time for this rank",
-        ("rank_timing", "backward_time_ms") => "Backward-pass time for this rank",
-        ("rank_timing", "communication_time_ms") => "Communication time for this rank",
-        ("rank_timing", "idle_time_ms") => "Idle time for this rank",
-        ("rank_timing", "lp_solves") => "LP solves on this rank",
-        ("rank_timing", "scenarios_processed") => "Scenarios processed by this rank",
-        ("cut_selection", "iteration") => "Iteration number (1-based)",
-        ("cut_selection", "stage_id") => "Declared study stage id",
-        ("cut_selection", "cuts_populated") => "Total cuts ever generated at this stage",
-        ("cut_selection", "cuts_active_before") => "Active cuts before selection ran",
-        ("cut_selection", "cuts_deactivated") => "Cuts deactivated by selection",
-        ("cut_selection", "cuts_reactivated") => {
-            "Cuts reactivated (previously deactivated, re-entered LP)"
-        }
-        ("cut_selection", "cuts_active_after") => "Active cuts after selection",
-        ("cut_selection", "selection_time_ms") => "Wall-clock time for selection at this stage",
-        ("cut_selection", "budget_evicted") => {
-            "Cuts evicted by budget enforcement (null when budget disabled)"
-        }
-        ("cut_selection", "active_after_budget") => {
-            "Active cuts after budget enforcement (null when budget disabled)"
-        }
-        ("solver_iterations", "iteration") => {
-            "Training iteration number (1-based); NULL on a simulation row"
-        }
-        ("solver_iterations", "scenario_id") => {
-            "Simulation trajectory id (0-based); NULL on a training row"
-        }
-        ("solver_iterations", "phase") => {
-            "Solver phase (forward, backward, lower_bound, simulation)"
-        }
-        ("solver_iterations", "stage_id") => {
-            "Declared study stage id (NULL for the lower_bound and simulation phases)"
-        }
-        ("solver_iterations", "lp_solves") => "Number of LP solves",
-        ("solver_iterations", "lp_successes") => "Solves that returned optimal",
-        ("solver_iterations", "lp_retries") => "Solves requiring retry escalation",
-        ("solver_iterations", "lp_failures") => "Solves that exhausted all retry levels",
-        ("solver_iterations", "retry_attempts") => "Total retry attempts across all solves",
-        ("solver_iterations", "basis_offered") => {
-            "Number of warm-start solve calls (basis-offered)"
-        }
-        ("solver_iterations", "basis_consistency_failures") => {
-            "Number of warm-start solve calls rejected because isBasisConsistent returned false"
-        }
-        ("solver_iterations", "simplex_iterations") => "Total simplex iterations",
-        ("solver_iterations", "solve_time_ms") => "Cumulative solve wall-clock time",
-        ("solver_iterations", "load_model_time_ms") => "Cumulative load_model call time",
-        ("solver_iterations", "set_bounds_time_ms") => "Cumulative set_bounds call time",
-        ("solver_iterations", "basis_set_time_ms") => "Cumulative set_basis call time",
-        ("solver_iterations", "opening_index") => {
-            "Opening (noise realization) index within the stage, for backward-pass \
-             rows. NULL for forward, lower_bound, and simulation rows — these phases \
-             do not have an opening dimension. Backward rows range 0..n_openings."
-        }
-        ("solver_iterations", "rank") => {
-            "MPI rank that produced this row. NULL for rank-aggregated rows."
-        }
-        ("solver_iterations", "worker_id") => {
-            "Worker thread index within the rank's pool that produced this row. \
-             NULL for rank-aggregated rows."
-        }
-        ("retry_histogram", "iteration") => "Iteration number (1-based) or scenario ID (0-based)",
-        ("retry_histogram", "phase") => "Solver phase (forward, backward, lower_bound, simulation)",
-        ("retry_histogram", "stage_id") => {
-            "Declared study stage id (NULL for the forward, lower_bound, and simulation phases)"
-        }
-        ("retry_histogram", "retry_level") => "Retry escalation level (0-based)",
-        ("retry_histogram", "count") => "Number of solves recovered at this level",
-        ("bounds", "hydro_id") => {
-            "Owning plant id for a hydro-unit-group row (entity_type_code 8). \
-             NULL for the five plant-level entity families."
-        }
-        ("hydro_energy_productivity", "hydro_id") => "Hydro plant identifier",
-        ("hydro_energy_productivity", "stage_id") => {
-            "Stage index; null for a per-hydro default across all stages"
-        }
-        ("hydro_energy_productivity", "equivalent_productivity_mw_per_m3s") => {
-            "Equivalent productivity override"
-        }
-        ("hydro_energy_productivity", "reference_volume_hm3") => {
-            "Reference storage volume for the productivity override"
-        }
-        ("hydro_energy_productivity", "reference_outflow_m3s") => {
-            "Reference outflow for the productivity override"
-        }
-        ("hydro_energy_productivity", "specific_productivity_mw_per_m3s_per_m") => {
-            "Specific productivity (per metre of head) override"
-        }
-        _ => "",
+    if let Some((numerator, denominator)) = column.rsplit_once("_per_") {
+        return match (suffix_unit(numerator), denominator) {
+            ("MW", "m3s") => "MW/(m3/s)",
+            ("m3/s", "hm3") => "(m3/s)/hm3",
+            _ => "",
+        };
     }
+    suffix_unit(column)
+}
+
+const DESCRIPTIONS: &[(&str, &str, &str)] = &[
+    ("paths", "stage_id", "Stage index"),
+    ("costs", "stage_id", "Stage index"),
+    ("costs", "block_id", "Block index within stage (nullable)"),
+    ("costs", "total_cost", "Total stage cost"),
+    ("costs", "immediate_cost", "Immediate (operation) cost"),
+    (
+        "costs",
+        "future_cost",
+        "Expected future cost (envelope value)",
+    ),
+    (
+        "costs",
+        "discount_factor",
+        "Discount factor applied to this stage",
+    ),
+    ("costs", "thermal_cost", "Total thermal generation cost"),
+    (
+        "costs",
+        "anticipated_thermal_cost",
+        "Total anticipated (forward-committed) thermal generation cost",
+    ),
+    ("costs", "contract_cost", "Total contract cost"),
+    ("costs", "deficit_cost", "Total load-deficit penalty cost"),
+    ("costs", "excess_cost", "Total excess-generation cost"),
+    (
+        "costs",
+        "storage_violation_cost",
+        "Total storage violation penalty",
+    ),
+    (
+        "costs",
+        "filling_target_cost",
+        "Total filling-target violation cost",
+    ),
+    (
+        "costs",
+        "hydro_violation_cost",
+        "Total hydro constraint violation cost",
+    ),
+    (
+        "costs",
+        "outflow_violation_below_cost",
+        "Cost of minimum outflow violations",
+    ),
+    (
+        "costs",
+        "outflow_violation_above_cost",
+        "Cost of maximum outflow violations",
+    ),
+    (
+        "costs",
+        "turbined_violation_cost",
+        "Cost of minimum turbining violations",
+    ),
+    (
+        "costs",
+        "generation_violation_cost",
+        "Cost of minimum generation violations",
+    ),
+    (
+        "costs",
+        "evaporation_violation_cost",
+        "Cost of evaporation constraint violations",
+    ),
+    (
+        "costs",
+        "withdrawal_violation_cost",
+        "Cost of water withdrawal constraint violations",
+    ),
+    (
+        "costs",
+        "inflow_penalty_cost",
+        "Total inflow non-negativity penalty",
+    ),
+    (
+        "costs",
+        "generic_violation_cost",
+        "Total generic constraint violation cost",
+    ),
+    (
+        "costs",
+        "spillage_cost",
+        "Total spillage regularization cost",
+    ),
+    (
+        "costs",
+        "turbined_cost",
+        "Total turbined regularization cost",
+    ),
+    ("costs", "curtailment_cost", "Total curtailment cost"),
+    (
+        "costs",
+        "exchange_cost",
+        "Total exchange regularization cost",
+    ),
+    ("costs", "pumping_cost", "Total pumping cost"),
+    ("hydros", "stage_id", "Stage index"),
+    ("hydros", "block_id", "Block index within stage (nullable)"),
+    ("hydros", "hydro_id", "Hydro plant identifier"),
+    ("hydros", "turbined_m3s", "Turbined flow"),
+    ("hydros", "spillage_m3s", "Spilled flow"),
+    (
+        "hydros",
+        "outflow_m3s",
+        "Total outflow (turbined + spilled)",
+    ),
+    ("hydros", "evaporation_m3s", "Evaporation loss (nullable)"),
+    (
+        "hydros",
+        "diverted_inflow_m3s",
+        "Diverted inflow received (nullable)",
+    ),
+    (
+        "hydros",
+        "diverted_outflow_m3s",
+        "Diverted outflow sent (nullable)",
+    ),
+    (
+        "hydros",
+        "incremental_inflow_m3s",
+        "Incremental (local) inflow",
+    ),
+    (
+        "hydros",
+        "inflow_m3s",
+        "Incremental (local) inflow, the same value as incremental_inflow_m3s",
+    ),
+    (
+        "hydros",
+        "storage_initial_hm3",
+        "Reservoir storage at start of stage",
+    ),
+    (
+        "hydros",
+        "storage_final_hm3",
+        "Reservoir storage at end of stage",
+    ),
+    ("hydros", "generation_mw", "Hydro generation"),
+    ("hydros", "generation_mwh", "Hydro energy generated"),
+    (
+        "hydros",
+        "equivalent_productivity_mw_per_m3s",
+        "Equivalent productivity `ρ_eq` (always populated)",
+    ),
+    (
+        "hydros",
+        "accumulated_productivity_mw_per_m3s",
+        "Accumulated productivity `ρ_acum` along downstream cascade",
+    ),
+    (
+        "hydros",
+        "integrated_equivalent_productivity_mw_per_m3s",
+        "Equivalent productivity `ρ_eq` averaged over the reservoir storage range",
+    ),
+    (
+        "hydros",
+        "integrated_accumulated_productivity_mw_per_m3s",
+        "Storage-range averaged productivity summed along the downstream cascade",
+    ),
+    (
+        "hydros",
+        "incremental_inflow_energy_mw",
+        "Incremental natural energy inflow (`ρ_acum` · incremental inflow)",
+    ),
+    (
+        "hydros",
+        "stored_energy_initial_mwh",
+        "Stored energy at start of block",
+    ),
+    (
+        "hydros",
+        "stored_energy_final_mwh",
+        "Stored energy at end of block",
+    ),
+    (
+        "hydros",
+        "stored_energy_initial_mw",
+        "Stored energy at start of block, averaged over the stage's total hours",
+    ),
+    (
+        "hydros",
+        "stored_energy_final_mw",
+        "Stored energy at end of block, averaged over the stage's total hours",
+    ),
+    ("hydros", "spillage_cost", "Spillage regularization cost"),
+    (
+        "hydros",
+        "water_value_per_hm3",
+        "Marginal water value: the dual of the row's own water-balance constraint \
+         (each block's own row in chronological stages; the stage row, repeated on \
+         every block row, in parallel stages)",
+    ),
+    (
+        "hydros",
+        "storage_binding_code",
+        "Storage bound binding code",
+    ),
+    ("hydros", "operative_state_code", "Operative state code"),
+    ("hydros", "turbined_slack_m3s", "Turbined minimum slack"),
+    (
+        "hydros",
+        "outflow_slack_below_m3s",
+        "Outflow below-minimum slack",
+    ),
+    (
+        "hydros",
+        "outflow_slack_above_m3s",
+        "Outflow above-maximum slack",
+    ),
+    ("hydros", "generation_slack_mw", "Generation minimum slack"),
+    (
+        "hydros",
+        "storage_violation_below_hm3",
+        "Storage below dead-volume violation",
+    ),
+    (
+        "hydros",
+        "filling_target_violation_hm3",
+        "Filling target violation",
+    ),
+    (
+        "hydros",
+        "evaporation_violation_pos_m3s",
+        "Over-evaporation constraint violation",
+    ),
+    (
+        "hydros",
+        "evaporation_violation_neg_m3s",
+        "Under-evaporation constraint violation",
+    ),
+    (
+        "hydros",
+        "inflow_nonnegativity_slack_m3s",
+        "Inflow non-negativity slack",
+    ),
+    (
+        "hydros",
+        "water_withdrawal_violation_pos_m3s",
+        "Over-withdrawal constraint violation",
+    ),
+    (
+        "hydros",
+        "water_withdrawal_violation_neg_m3s",
+        "Under-withdrawal constraint violation",
+    ),
+    ("hydro_bus_generation", "stage_id", "Stage index"),
+    (
+        "hydro_bus_generation",
+        "block_id",
+        "Block index within stage (nullable)",
+    ),
+    ("hydro_bus_generation", "hydro_id", "Hydro plant identifier"),
+    ("hydro_bus_generation", "bus_id", "Bus identifier"),
+    ("hydro_bus_generation", "turbined_m3s", "Turbined flow"),
+    ("hydro_bus_generation", "generation_mw", "Hydro generation"),
+    (
+        "hydro_bus_generation",
+        "generation_mwh",
+        "Hydro energy generated",
+    ),
+    ("thermals", "stage_id", "Stage index"),
+    (
+        "thermals",
+        "block_id",
+        "Block index within stage (nullable)",
+    ),
+    ("thermals", "thermal_id", "Thermal plant identifier"),
+    ("thermals", "generation_mw", "Thermal generation"),
+    ("thermals", "generation_mwh", "Thermal energy generated"),
+    ("thermals", "generation_cost", "Thermal generation cost"),
+    (
+        "thermals",
+        "is_anticipated",
+        "Whether plant uses anticipated dispatch",
+    ),
+    (
+        "thermals",
+        "anticipated_committed_mw",
+        "Anticipated committed capacity (nullable)",
+    ),
+    (
+        "thermals",
+        "anticipated_decision_mw",
+        "Anticipated dispatch decision (nullable)",
+    ),
+    ("thermals", "operative_state_code", "Operative state code"),
+    ("exchanges", "stage_id", "Stage index"),
+    (
+        "exchanges",
+        "block_id",
+        "Block index within stage (nullable)",
+    ),
+    ("exchanges", "line_id", "Transmission line identifier"),
+    ("exchanges", "direct_flow_mw", "Flow in direct direction"),
+    ("exchanges", "reverse_flow_mw", "Flow in reverse direction"),
+    (
+        "exchanges",
+        "net_flow_mw",
+        "Net flow (direct minus reverse)",
+    ),
+    ("exchanges", "net_flow_mwh", "Net energy exchanged"),
+    ("exchanges", "losses_mw", "Transmission losses"),
+    ("exchanges", "losses_mwh", "Transmission energy losses"),
+    ("exchanges", "exchange_cost", "Exchange regularization cost"),
+    ("exchanges", "operative_state_code", "Operative state code"),
+    ("buses", "stage_id", "Stage index"),
+    ("buses", "block_id", "Block index within stage (nullable)"),
+    ("buses", "bus_id", "Bus identifier"),
+    ("buses", "load_mw", "Load demand"),
+    ("buses", "load_mwh", "Load energy demand"),
+    ("buses", "deficit_mw", "Unmet demand (deficit)"),
+    ("buses", "deficit_mwh", "Unmet energy demand"),
+    ("buses", "excess_mw", "Excess generation absorbed"),
+    ("buses", "excess_mwh", "Excess energy absorbed"),
+    (
+        "buses",
+        "spot_price",
+        "Bus spot price (dual of balance constraint)",
+    ),
+    ("pumping_stations", "stage_id", "Stage index"),
+    (
+        "pumping_stations",
+        "block_id",
+        "Block index within stage (nullable)",
+    ),
+    (
+        "pumping_stations",
+        "pumping_station_id",
+        "Pumping station identifier",
+    ),
+    ("pumping_stations", "pumped_flow_m3s", "Pumped water flow"),
+    (
+        "pumping_stations",
+        "pumped_volume_hm3",
+        "Pumped water volume",
+    ),
+    (
+        "pumping_stations",
+        "power_consumption_mw",
+        "Electrical power consumed",
+    ),
+    (
+        "pumping_stations",
+        "energy_consumption_mwh",
+        "Electrical energy consumed",
+    ),
+    ("pumping_stations", "pumping_cost", "Pumping operation cost"),
+    (
+        "pumping_stations",
+        "operative_state_code",
+        "Operative state code",
+    ),
+    ("contracts", "stage_id", "Stage index"),
+    (
+        "contracts",
+        "block_id",
+        "Block index within stage (nullable)",
+    ),
+    ("contracts", "contract_id", "Contract identifier"),
+    ("contracts", "power_mw", "Contracted power"),
+    ("contracts", "energy_mwh", "Contracted energy"),
+    ("contracts", "price_per_mwh", "Effective contract price"),
+    ("contracts", "total_cost", "Total contract cost"),
+    ("contracts", "operative_state_code", "Operative state code"),
+    ("non_controllables", "stage_id", "Stage index"),
+    (
+        "non_controllables",
+        "block_id",
+        "Block index within stage (nullable)",
+    ),
+    (
+        "non_controllables",
+        "non_controllable_id",
+        "Non-controllable source identifier",
+    ),
+    (
+        "non_controllables",
+        "generation_mw",
+        "Non-controllable generation dispatched",
+    ),
+    (
+        "non_controllables",
+        "generation_mwh",
+        "Non-controllable energy generated",
+    ),
+    (
+        "non_controllables",
+        "available_mw",
+        "Available generation capacity",
+    ),
+    (
+        "non_controllables",
+        "curtailment_mw",
+        "Curtailed generation",
+    ),
+    ("non_controllables", "curtailment_mwh", "Curtailed energy"),
+    ("non_controllables", "curtailment_cost", "Curtailment cost"),
+    (
+        "non_controllables",
+        "operative_state_code",
+        "Operative state code",
+    ),
+    ("inflow_lags", "stage_id", "Stage index"),
+    ("inflow_lags", "hydro_id", "Hydro plant identifier"),
+    (
+        "inflow_lags",
+        "lag_index",
+        "AR lag index (0-based; 0 = most recent past period)",
+    ),
+    (
+        "inflow_lags",
+        "inflow_m3s",
+        "Historical inflow for this lag",
+    ),
+    ("in_transit", "stage_id", "Stage index"),
+    (
+        "in_transit",
+        "hydro_id",
+        "Downstream hydro plant identifier",
+    ),
+    ("in_transit", "lag", "Maturity bucket index (1-based)"),
+    (
+        "in_transit",
+        "in_transit_volume_hm3",
+        "Outgoing in-transit water volume at this maturity",
+    ),
+    (
+        "in_transit",
+        "delayed_arrival_hm3",
+        "Water delivered this stage (non-zero only at lag 1)",
+    ),
+    (
+        "transit_seed",
+        "hydro_id",
+        "Upstream entity identifier whose release the window covers",
+    ),
+    (
+        "transit_seed",
+        "start_date",
+        "Start of the release window (inclusive)",
+    ),
+    (
+        "transit_seed",
+        "end_date",
+        "End of the release window (exclusive)",
+    ),
+    (
+        "transit_seed",
+        "value_m3s",
+        "Mean release rate over the window",
+    ),
+    ("generic_violations", "stage_id", "Stage index"),
+    (
+        "generic_violations",
+        "block_id",
+        "Block index within stage (nullable)",
+    ),
+    (
+        "generic_violations",
+        "constraint_id",
+        "Generic constraint identifier",
+    ),
+    (
+        "generic_violations",
+        "slack_value",
+        "Constraint slack value; its unit is that of the constraint identified by constraint_id",
+    ),
+    (
+        "generic_violations",
+        "slack_cost",
+        "Constraint slack penalty cost",
+    ),
+    (
+        "scenario_summary",
+        "probability",
+        "Per-scenario leaf-path probability under a declared census; NULL under sampled selection",
+    ),
+    (
+        "scenario_summary",
+        "discounted_immediate_cost",
+        "Per-scenario discounted immediate cost; excludes the future-cost term that \
+         costs.parquet total_cost includes",
+    ),
+    ("convergence", "iteration", "Iteration number (1-based)"),
+    (
+        "convergence",
+        "lower_bound",
+        "Lower bound on the optimal value",
+    ),
+    (
+        "convergence",
+        "upper_bound",
+        "Upper bound estimate (sample mean under a sampled forward, exact \
+         probability-weighted bound under an enumerated forward)",
+    ),
+    (
+        "convergence",
+        "upper_bound_std",
+        "Std deviation of upper bound (NULL under an exact bound)",
+    ),
+    (
+        "convergence",
+        "upper_bound_kind",
+        "Upper bound regime: statistical (sampled forward) or exact (enumerated forward)",
+    ),
+    (
+        "convergence",
+        "gap_percent",
+        "Relative optimality gap in percent (nullable)",
+    ),
+    ("convergence", "cuts_added", "Cuts added in this iteration"),
+    (
+        "convergence",
+        "cuts_removed",
+        "Cuts removed in this iteration",
+    ),
+    (
+        "convergence",
+        "cuts_active",
+        "Total active cuts after iteration",
+    ),
+    (
+        "convergence",
+        "time_forward_ms",
+        "Forward-pass wall-clock time",
+    ),
+    (
+        "convergence",
+        "time_backward_ms",
+        "Backward-pass wall-clock time",
+    ),
+    (
+        "convergence",
+        "time_total_ms",
+        "Total iteration wall-clock time",
+    ),
+    (
+        "convergence",
+        "forward_passes",
+        "Number of forward-pass scenarios",
+    ),
+    ("convergence", "lp_solves", "Total LP solves in iteration"),
+    (
+        "convergence",
+        "mean_rows_in_lp",
+        "Mean resident rows loaded per lazy-selection LP solve this iteration \
+         (0 when no lazy selection ran)",
+    ),
+    (
+        "iteration_timing",
+        "iteration",
+        "Iteration number (1-based)",
+    ),
+    (
+        "iteration_timing",
+        "rank",
+        "MPI rank that produced this row. Always set; \
+         single-rank runs use 0.",
+    ),
+    (
+        "iteration_timing",
+        "worker_id",
+        "Worker thread index within the rank's pool. NULL on \
+         rank-aggregated rows that carry rank-only timings (cut_selection, \
+         mpi_allreduce, cut_sync, lower_bound, state_exchange, cut_batch_build, \
+         load_imbalance / scheduling_overhead, overhead). Set on per-worker \
+         rows that carry parallel-region timings (forward_wall, backward_wall, \
+         fwd_setup, bwd_setup, lazy_scoring).",
+    ),
+    (
+        "iteration_timing",
+        "forward_wall_ms",
+        "Forward pass wall-clock time",
+    ),
+    (
+        "iteration_timing",
+        "backward_wall_ms",
+        "Backward pass wall-clock time",
+    ),
+    ("iteration_timing", "cut_selection_ms", "Row-selection time"),
+    ("iteration_timing", "mpi_allreduce_ms", "MPI allreduce time"),
+    (
+        "iteration_timing",
+        "cut_sync_ms",
+        "Per-stage row-sync allgatherv time",
+    ),
+    (
+        "iteration_timing",
+        "lower_bound_ms",
+        "Lower bound evaluation time",
+    ),
+    (
+        "iteration_timing",
+        "state_exchange_ms",
+        "State exchange allgatherv time",
+    ),
+    (
+        "iteration_timing",
+        "cut_batch_build_ms",
+        "Row-batch assembly time",
+    ),
+    (
+        "iteration_timing",
+        "bwd_setup_ms",
+        "Thread-pool setup time before backward pass",
+    ),
+    (
+        "iteration_timing",
+        "bwd_load_imbalance_ms",
+        "Estimated load imbalance across backward pass worker threads",
+    ),
+    (
+        "iteration_timing",
+        "bwd_scheduling_overhead_ms",
+        "Scheduling and synchronisation overhead in the backward pass",
+    ),
+    (
+        "iteration_timing",
+        "fwd_setup_ms",
+        "Thread-pool setup time before forward pass",
+    ),
+    (
+        "iteration_timing",
+        "fwd_load_imbalance_ms",
+        "Estimated load imbalance across forward pass worker threads",
+    ),
+    (
+        "iteration_timing",
+        "fwd_scheduling_overhead_ms",
+        "Scheduling and synchronisation overhead in the forward pass",
+    ),
+    (
+        "iteration_timing",
+        "overhead_ms",
+        "Residual iteration time not attributed to any phase",
+    ),
+    (
+        "iteration_timing",
+        "lazy_scoring_ms",
+        "Per-worker time spent in lazy candidate scoring inside the \
+         lazy-selection solve; 0 when that solve path is not used. A \
+         sub-component of the forward/backward phases.",
+    ),
+    ("row_selection", "iteration", "Iteration number (1-based)"),
+    ("row_selection", "stage_id", "Declared study stage id"),
+    (
+        "row_selection",
+        "cuts_populated",
+        "Total cuts ever generated at this stage",
+    ),
+    (
+        "row_selection",
+        "cuts_active_before",
+        "Active cuts before selection ran",
+    ),
+    (
+        "row_selection",
+        "cuts_deactivated",
+        "Cuts deactivated by selection",
+    ),
+    (
+        "row_selection",
+        "cuts_reactivated",
+        "Cuts reactivated (previously deactivated, re-entered LP)",
+    ),
+    (
+        "row_selection",
+        "cuts_active_after",
+        "Active cuts after selection",
+    ),
+    (
+        "row_selection",
+        "selection_time_ms",
+        "Wall-clock time for selection at this stage",
+    ),
+    (
+        "row_selection",
+        "budget_evicted",
+        "Cuts evicted by budget enforcement (null when budget disabled)",
+    ),
+    (
+        "row_selection",
+        "active_after_budget",
+        "Active cuts after budget enforcement (null when budget disabled)",
+    ),
+    (
+        "solver_iterations",
+        "iteration",
+        "Training iteration number (1-based); NULL on a simulation row",
+    ),
+    (
+        "solver_iterations",
+        "scenario_id",
+        "Simulation trajectory id (0-based); NULL on a training row",
+    ),
+    (
+        "solver_iterations",
+        "phase",
+        "Solver phase (forward, backward, lower_bound, simulation)",
+    ),
+    (
+        "solver_iterations",
+        "stage_id",
+        "Declared study stage id (NULL for the lower_bound and simulation phases)",
+    ),
+    ("solver_iterations", "lp_solves", "Number of LP solves"),
+    (
+        "solver_iterations",
+        "lp_successes",
+        "Solves that returned optimal",
+    ),
+    (
+        "solver_iterations",
+        "lp_retries",
+        "Solves requiring retry escalation",
+    ),
+    (
+        "solver_iterations",
+        "lp_failures",
+        "Solves that exhausted all retry levels",
+    ),
+    (
+        "solver_iterations",
+        "retry_attempts",
+        "Total retry attempts across all solves",
+    ),
+    (
+        "solver_iterations",
+        "basis_offered",
+        "Number of warm-start solve calls (basis-offered)",
+    ),
+    (
+        "solver_iterations",
+        "basis_consistency_failures",
+        "Number of warm-start solve calls rejected because isBasisConsistent returned false",
+    ),
+    (
+        "solver_iterations",
+        "simplex_iterations",
+        "Total simplex iterations",
+    ),
+    (
+        "solver_iterations",
+        "solve_time_ms",
+        "Cumulative solve wall-clock time",
+    ),
+    (
+        "solver_iterations",
+        "load_model_time_ms",
+        "Cumulative load_model call time",
+    ),
+    (
+        "solver_iterations",
+        "set_bounds_time_ms",
+        "Cumulative set_bounds call time",
+    ),
+    (
+        "solver_iterations",
+        "basis_set_time_ms",
+        "Cumulative set_basis call time",
+    ),
+    (
+        "solver_iterations",
+        "opening_index",
+        "Opening (noise realization) index within the stage, for backward-pass \
+         rows. NULL for forward, lower_bound, and simulation rows — these phases \
+         do not have an opening dimension. Backward rows range 0..n_openings.",
+    ),
+    (
+        "solver_iterations",
+        "rank",
+        "MPI rank that produced this row. NULL for rank-aggregated rows.",
+    ),
+    (
+        "solver_iterations",
+        "worker_id",
+        "Worker thread index within the rank's pool that produced this row. \
+         NULL for rank-aggregated rows.",
+    ),
+    (
+        "retry_histogram",
+        "iteration",
+        "Iteration number (1-based) or scenario ID (0-based)",
+    ),
+    (
+        "retry_histogram",
+        "phase",
+        "Solver phase (forward, backward, lower_bound, simulation)",
+    ),
+    (
+        "retry_histogram",
+        "stage_id",
+        "Declared study stage id (NULL for the forward, lower_bound, and simulation phases)",
+    ),
+    (
+        "retry_histogram",
+        "retry_level",
+        "Retry escalation level (0-based)",
+    ),
+    (
+        "retry_histogram",
+        "count",
+        "Number of solves recovered at this level",
+    ),
+    (
+        "fixed_delivery",
+        "thermal_id",
+        "Anticipated thermal plant identifier",
+    ),
+    (
+        "fixed_delivery",
+        "start_date",
+        "First delivery date of the fixed commitment window",
+    ),
+    (
+        "fixed_delivery",
+        "end_date",
+        "Last delivery date of the fixed commitment window",
+    ),
+    (
+        "fixed_delivery",
+        "value_mw",
+        "Committed delivery of the fixed window",
+    ),
+    (
+        "anticipated_lanes",
+        "stage_id",
+        "Stage of the lane's in-study decider",
+    ),
+    (
+        "anticipated_lanes",
+        "thermal_id",
+        "Thermal plant identifier owning the lane",
+    ),
+    (
+        "anticipated_lanes",
+        "delivery_date",
+        "YYYYMM01 anchor of the lane's resolved post-study delivery stage",
+    ),
+    (
+        "anticipated_lanes",
+        "deposited_decision_mw",
+        "Commitment decision deposited into the lane",
+    ),
+    (
+        "anticipated_lanes",
+        "carried_committed_mw",
+        "Committed value carried by the lane",
+    ),
+    ("generic_constraint_echo", "stage_id", "Study stage id"),
+    (
+        "generic_constraint_echo",
+        "block_id",
+        "Block id; NULL on a collapsed stage-level row",
+    ),
+    (
+        "generic_constraint_echo",
+        "constraint_id",
+        "Generic constraint id",
+    ),
+    (
+        "generic_constraint_echo",
+        "constraint_name",
+        "Generic constraint name",
+    ),
+    (
+        "generic_constraint_echo",
+        "term_index",
+        "Term position in the resolved left-hand side; NULL on a term-less \
+         constraint's placeholder row",
+    ),
+    (
+        "generic_constraint_echo",
+        "variable_kind",
+        "Kind of the term's variable, such as thermal_generation; NULL on a placeholder row",
+    ),
+    (
+        "generic_constraint_echo",
+        "variable",
+        "Rendered label of the term's variable; NULL on a placeholder row",
+    ),
+    (
+        "generic_constraint_echo",
+        "coefficient",
+        "Resolved term coefficient, NULL on a placeholder row; its unit converts the \
+         unit of the variable named by variable_kind into the unit of the constraint \
+         identified by constraint_id",
+    ),
+    (
+        "generic_constraint_echo",
+        "bound_lower",
+        "Lower interval endpoint, NULL when unbounded below; its unit is that of the \
+         constraint identified by constraint_id",
+    ),
+    (
+        "generic_constraint_echo",
+        "bound_upper",
+        "Upper interval endpoint, NULL when unbounded above; its unit is that of the \
+         constraint identified by constraint_id",
+    ),
+    (
+        "generic_constraint_echo",
+        "derived_shape",
+        "Shape label derived from which interval endpoints are finite",
+    ),
+    (
+        "generic_constraint_echo",
+        "slack_enabled",
+        "Whether the constraint carries a slack term",
+    ),
+    (
+        "generic_constraint_echo",
+        "slack_penalty",
+        "Penalty per unit of slack, NULL when slack is disabled; its unit is $ per unit \
+         of the constraint identified by constraint_id",
+    ),
+    (
+        "bounds",
+        "entity_type_code",
+        "Entity type code (see codes.json)",
+    ),
+    (
+        "bounds",
+        "entity_id",
+        "Entity identifier within its entity type",
+    ),
+    (
+        "bounds",
+        "hydro_id",
+        "Owning plant id for a hydro-unit-group row (entity_type_code 8). \
+         NULL for the five plant-level entity families.",
+    ),
+    ("bounds", "stage_id", "Stage id"),
+    (
+        "bounds",
+        "block_id",
+        "Block id; NULL for a stage-level bound",
+    ),
+    (
+        "bounds",
+        "bound_type_code",
+        "Bound type code (see codes.json)",
+    ),
+    (
+        "bounds",
+        "bound_value",
+        "Resolved bound value; its unit is that of the bound type identified by bound_type_code",
+    ),
+    ("fpha_hyperplanes", "hydro_id", "Hydro plant identifier"),
+    (
+        "fpha_hyperplanes",
+        "stage_id",
+        "Stage id; NULL when the plane is valid for all stages",
+    ),
+    (
+        "fpha_hyperplanes",
+        "plane_id",
+        "Plane index within the hydro (and stage)",
+    ),
+    ("fpha_hyperplanes", "gamma_0", "Intercept coefficient"),
+    ("fpha_hyperplanes", "gamma_v", "Stored-volume coefficient"),
+    ("fpha_hyperplanes", "gamma_q", "Turbined-flow coefficient"),
+    ("fpha_hyperplanes", "gamma_s", "Spillage coefficient"),
+    (
+        "fpha_hyperplanes",
+        "kappa",
+        "Correction factor; 1.0 when absent",
+    ),
+    (
+        "fpha_hyperplanes",
+        "valid_v_min_hm3",
+        "Minimum of the stored-volume range the plane is valid for",
+    ),
+    (
+        "fpha_hyperplanes",
+        "valid_v_max_hm3",
+        "Maximum of the stored-volume range the plane is valid for",
+    ),
+    (
+        "fpha_hyperplanes",
+        "valid_q_max_m3s",
+        "Maximum turbined flow the plane is valid for",
+    ),
+    ("evaporation_models", "hydro_id", "Hydro plant identifier"),
+    (
+        "evaporation_models",
+        "stage_id",
+        "Stage id; NULL when the model is valid for all stages",
+    ),
+    (
+        "evaporation_models",
+        "intercept_m3s",
+        "Constant evaporation-outflow term of the linearized evaporation model",
+    ),
+    (
+        "evaporation_models",
+        "volume_slope_m3s_per_hm3",
+        "Stored-volume slope of the linearized evaporation model",
+    ),
+    (
+        "evaporation_models",
+        "reference_volume_hm3",
+        "Stored volume the linearized evaporation model is fitted around",
+    ),
+    (
+        "evaporation_models",
+        "source",
+        "Provenance of the reference volume, such as user_supplied or default_midpoint",
+    ),
+    (
+        "fpha_deviation_points",
+        "hydro_id",
+        "Hydro plant identifier",
+    ),
+    (
+        "fpha_deviation_points",
+        "stage_id",
+        "Stage id; NULL when the fit is valid for all stages",
+    ),
+    (
+        "fpha_deviation_points",
+        "v",
+        "Stored volume of the fit grid point",
+    ),
+    (
+        "fpha_deviation_points",
+        "q",
+        "Turbined flow of the fit grid point",
+    ),
+    (
+        "fpha_deviation_points",
+        "fph_exact",
+        "Exact production at the grid point",
+    ),
+    (
+        "fpha_deviation_points",
+        "fpha_fitted",
+        "Production of the fitted hyperplanes at the grid point",
+    ),
+    (
+        "fpha_deviation_points",
+        "deviation",
+        "Fitted minus exact production",
+    ),
+    (
+        "fpha_deviation_points",
+        "relative",
+        "Absolute deviation relative to the grid's peak exact production (dimensionless)",
+    ),
+    ("noise_openings", "stage_id", "Stage index (0-based)"),
+    (
+        "noise_openings",
+        "opening_index",
+        "Opening index within the stage (0-based)",
+    ),
+    (
+        "noise_openings",
+        "entity_index",
+        "Entity index within the noise vector (0-based)",
+    ),
+    (
+        "noise_openings",
+        "value",
+        "Noise realisation for the stage, opening and entity",
+    ),
+    (
+        "inflow_seasonal_stats",
+        "hydro_id",
+        "Hydro plant identifier",
+    ),
+    ("inflow_seasonal_stats", "stage_id", "Stage id"),
+    ("inflow_seasonal_stats", "mean_m3s", "Seasonal mean inflow"),
+    (
+        "inflow_seasonal_stats",
+        "std_m3s",
+        "Seasonal standard deviation of inflow",
+    ),
+    (
+        "inflow_ar_coefficients",
+        "hydro_id",
+        "Hydro plant identifier",
+    ),
+    ("inflow_ar_coefficients", "stage_id", "Stage id"),
+    ("inflow_ar_coefficients", "lag", "AR lag (1-based)"),
+    (
+        "inflow_ar_coefficients",
+        "coefficient",
+        "Standardized AR coefficient (dimensionless)",
+    ),
+    (
+        "inflow_annual_component",
+        "hydro_id",
+        "Hydro plant identifier",
+    ),
+    ("inflow_annual_component", "stage_id", "Stage id"),
+    (
+        "inflow_annual_component",
+        "annual_coefficient",
+        "Annual component coefficient (dimensionless)",
+    ),
+    (
+        "inflow_annual_component",
+        "annual_mean_m3s",
+        "Mean of the rolling 12-month average inflow",
+    ),
+    (
+        "inflow_annual_component",
+        "annual_std_m3s",
+        "Standard deviation of the rolling 12-month average inflow",
+    ),
+    ("load_seasonal_stats", "bus_id", "Bus identifier"),
+    ("load_seasonal_stats", "stage_id", "Stage id"),
+    (
+        "load_seasonal_stats",
+        "mean_mw",
+        "Seasonal mean load demand",
+    ),
+    (
+        "load_seasonal_stats",
+        "std_mw",
+        "Seasonal standard deviation of load demand",
+    ),
+];
+
+const SHARED_COLUMN_DESCRIPTIONS: &[(&str, &str)] = &[
+    ("scenario_id", "0-based scenario identifier"),
+    ("node_id", "Declared node id visited at this stage"),
+];
+
+/// Description of `column` in the registry schema named `schema`, or `""`
+/// when none is registered.
+fn description_for(schema: &str, column: &str) -> &'static str {
+    if let Some(&(_, _, text)) = DESCRIPTIONS
+        .iter()
+        .find(|&&(s, c, _)| s == schema && c == column)
+    {
+        return text;
+    }
+    SHARED_COLUMN_DESCRIPTIONS
+        .iter()
+        .find(|&&(c, _)| c == column)
+        .map_or("", |&(_, text)| text)
 }
 
 // ─── bounds.parquet ──────────────────────────────────────────────────────────
@@ -1345,20 +2045,6 @@ mod tests {
             ThermalBlockBounds, ThermalStageBounds,
         },
     };
-
-    #[test]
-    fn every_listed_schema_column_has_a_nonempty_description() {
-        for (file, schema) in &variables_csv_schemas() {
-            for field in schema.fields() {
-                let description = description_for(file, field.name());
-                assert!(
-                    !description.is_empty(),
-                    "variables.csv column '{file}.{}' has an empty description",
-                    field.name()
-                );
-            }
-        }
-    }
 
     // ── Fixtures ─────────────────────────────────────────────────────────────
 
@@ -2289,8 +2975,71 @@ mod tests {
 
         let row_count = rdr.records().count();
         assert_eq!(
-            row_count, 262,
-            "variables.csv must have exactly 262 data rows (one per column across all schemas)"
+            row_count, 248,
+            "variables.csv must have exactly 248 data rows (one per column across all schemas)"
+        );
+    }
+
+    #[test]
+    fn variables_csv_has_no_per_rank_timing_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_variables_csv(tmp.path()).expect("write_variables_csv must succeed");
+
+        let content = std::fs::read_to_string(tmp.path().join("variables.csv")).unwrap();
+        let mut rdr = csv::Reader::from_reader(content.as_bytes());
+
+        let per_rank_rows = rdr
+            .records()
+            .filter(|r| r.as_ref().unwrap().get(0).unwrap() == "rank_timing")
+            .count();
+        assert_eq!(
+            per_rank_rows, 0,
+            "variables.csv must not describe a per-rank timing file no run writes; \
+             found {per_rank_rows} per-rank timing rows"
+        );
+    }
+
+    #[test]
+    fn variables_csv_documents_only_files_a_run_writes() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_variables_csv(tmp.path()).expect("write_variables_csv must succeed");
+
+        let content = std::fs::read_to_string(tmp.path().join("variables.csv")).unwrap();
+        let mut rdr = csv::Reader::from_reader(content.as_bytes());
+
+        let mut labels: Vec<String> = Vec::new();
+        for rec in rdr.records() {
+            let file = rec.unwrap().get(0).unwrap().to_string();
+            if !labels.contains(&file) {
+                labels.push(file);
+            }
+        }
+        assert_eq!(
+            labels,
+            [
+                "costs",
+                "hydros",
+                "hydro_bus_generation",
+                "thermals",
+                "exchanges",
+                "buses",
+                "pumping_stations",
+                "contracts",
+                "non_controllables",
+                "inflow_lags",
+                "in_transit",
+                "transit_seed",
+                "generic_violations",
+                "paths",
+                "scenario_summary",
+                "convergence",
+                "iteration_timing",
+                "cut_selection",
+                "solver_iterations",
+                "retry_histogram",
+            ],
+            "every variables.csv file label must name an output a run writes, never a case \
+             input under system/, scenarios/ or constraints/"
         );
     }
 
@@ -3125,6 +3874,605 @@ mod tests {
         assert_eq!(unit_for("hydros", "stored_energy_final_mwh"), "MWh");
     }
 
+    fn registry_columns() -> Vec<(&'static SchemaRegistryEntry, String)> {
+        OUTPUT_SCHEMAS
+            .iter()
+            .flat_map(|entry| {
+                (entry.schema_fn)()
+                    .fields()
+                    .iter()
+                    .map(|field| (entry, field.name().clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    const ORACLE_SUFFIXES: &[(&str, &str)] = &[
+        ("_mwh", "MWh"),
+        ("_mw", "MW"),
+        ("_hm3", "hm3"),
+        ("_m3s", "m3/s"),
+        ("_ms", "ms"),
+        ("_percent", "%"),
+        ("_cost", "$"),
+    ];
+    const PINNED_UNITS: &[(&str, &str, &str)] = &[
+        ("buses", "spot_price", "$/MWh"),
+        ("contracts", "price_per_mwh", "$/MWh"),
+        ("hydros", "water_value_per_hm3", "$/hm3"),
+        ("convergence", "lower_bound", "$"),
+        ("convergence", "upper_bound", "$"),
+        ("convergence", "upper_bound_std", "$"),
+        ("fpha_hyperplanes", "gamma_0", "MW"),
+        ("fpha_hyperplanes", "gamma_v", "MW/hm3"),
+        ("fpha_hyperplanes", "gamma_q", "MW/(m3/s)"),
+        ("fpha_hyperplanes", "gamma_s", "MW/(m3/s)"),
+        ("fpha_deviation_points", "v", "hm3"),
+        ("fpha_deviation_points", "q", "m3/s"),
+        ("fpha_deviation_points", "fph_exact", "MW"),
+        ("fpha_deviation_points", "fpha_fitted", "MW"),
+        ("fpha_deviation_points", "deviation", "MW"),
+        ("bounds", "bound_value", "varies"),
+        ("generic_violations", "slack_value", "varies"),
+        ("generic_constraint_echo", "coefficient", "varies"),
+        ("generic_constraint_echo", "bound_lower", "varies"),
+        ("generic_constraint_echo", "bound_upper", "varies"),
+        ("generic_constraint_echo", "slack_penalty", "varies"),
+        ("hydros", "equivalent_productivity_mw_per_m3s", "MW/(m3/s)"),
+        ("hydros", "accumulated_productivity_mw_per_m3s", "MW/(m3/s)"),
+        (
+            "hydros",
+            "integrated_equivalent_productivity_mw_per_m3s",
+            "MW/(m3/s)",
+        ),
+        (
+            "hydros",
+            "integrated_accumulated_productivity_mw_per_m3s",
+            "MW/(m3/s)",
+        ),
+        (
+            "evaporation_models",
+            "volume_slope_m3s_per_hm3",
+            "(m3/s)/hm3",
+        ),
+    ];
+    const NO_UNIT_COLUMNS: &[(&str, &[&str])] = &[
+        (
+            "costs",
+            &[
+                "scenario_id",
+                "stage_id",
+                "node_id",
+                "block_id",
+                "discount_factor",
+            ],
+        ),
+        (
+            "hydros",
+            &[
+                "scenario_id",
+                "stage_id",
+                "node_id",
+                "block_id",
+                "hydro_id",
+                "storage_binding_code",
+                "operative_state_code",
+            ],
+        ),
+        (
+            "hydro_bus_generation",
+            &[
+                "scenario_id",
+                "stage_id",
+                "node_id",
+                "block_id",
+                "hydro_id",
+                "bus_id",
+            ],
+        ),
+        (
+            "thermals",
+            &[
+                "scenario_id",
+                "stage_id",
+                "node_id",
+                "block_id",
+                "thermal_id",
+                "is_anticipated",
+                "operative_state_code",
+            ],
+        ),
+        (
+            "exchanges",
+            &[
+                "scenario_id",
+                "stage_id",
+                "node_id",
+                "block_id",
+                "line_id",
+                "operative_state_code",
+            ],
+        ),
+        (
+            "buses",
+            &["scenario_id", "stage_id", "node_id", "block_id", "bus_id"],
+        ),
+        (
+            "pumping_stations",
+            &[
+                "scenario_id",
+                "stage_id",
+                "node_id",
+                "block_id",
+                "pumping_station_id",
+                "operative_state_code",
+            ],
+        ),
+        (
+            "contracts",
+            &[
+                "scenario_id",
+                "stage_id",
+                "node_id",
+                "block_id",
+                "contract_id",
+                "operative_state_code",
+            ],
+        ),
+        (
+            "non_controllables",
+            &[
+                "scenario_id",
+                "stage_id",
+                "node_id",
+                "block_id",
+                "non_controllable_id",
+                "operative_state_code",
+            ],
+        ),
+        (
+            "inflow_lags",
+            &[
+                "scenario_id",
+                "stage_id",
+                "node_id",
+                "hydro_id",
+                "lag_index",
+            ],
+        ),
+        (
+            "in_transit",
+            &["scenario_id", "stage_id", "node_id", "hydro_id", "lag"],
+        ),
+        (
+            "transit_seed",
+            &["scenario_id", "hydro_id", "start_date", "end_date"],
+        ),
+        (
+            "generic_violations",
+            &[
+                "scenario_id",
+                "stage_id",
+                "node_id",
+                "block_id",
+                "constraint_id",
+            ],
+        ),
+        ("paths", &["scenario_id", "stage_id", "node_id"]),
+        ("scenario_summary", &["scenario_id", "probability"]),
+        (
+            "convergence",
+            &[
+                "iteration",
+                "upper_bound_kind",
+                "cuts_added",
+                "cuts_removed",
+                "cuts_active",
+                "forward_passes",
+                "lp_solves",
+                "mean_rows_in_lp",
+            ],
+        ),
+        ("iteration_timing", &["iteration", "rank", "worker_id"]),
+        (
+            "row_selection",
+            &[
+                "iteration",
+                "stage_id",
+                "cuts_populated",
+                "cuts_active_before",
+                "cuts_deactivated",
+                "cuts_reactivated",
+                "cuts_active_after",
+                "budget_evicted",
+                "active_after_budget",
+            ],
+        ),
+        (
+            "solver_iterations",
+            &[
+                "iteration",
+                "scenario_id",
+                "phase",
+                "stage_id",
+                "opening_index",
+                "rank",
+                "worker_id",
+                "lp_solves",
+                "lp_successes",
+                "lp_retries",
+                "lp_failures",
+                "retry_attempts",
+                "basis_offered",
+                "basis_consistency_failures",
+                "simplex_iterations",
+            ],
+        ),
+        (
+            "retry_histogram",
+            &["iteration", "phase", "stage_id", "retry_level", "count"],
+        ),
+        ("fixed_delivery", &["thermal_id", "start_date", "end_date"]),
+        (
+            "anticipated_lanes",
+            &[
+                "scenario_id",
+                "stage_id",
+                "node_id",
+                "thermal_id",
+                "delivery_date",
+            ],
+        ),
+        (
+            "generic_constraint_echo",
+            &[
+                "stage_id",
+                "block_id",
+                "constraint_id",
+                "constraint_name",
+                "term_index",
+                "variable_kind",
+                "variable",
+                "derived_shape",
+                "slack_enabled",
+            ],
+        ),
+        (
+            "bounds",
+            &[
+                "entity_type_code",
+                "entity_id",
+                "hydro_id",
+                "stage_id",
+                "block_id",
+                "bound_type_code",
+            ],
+        ),
+        (
+            "fpha_hyperplanes",
+            &["hydro_id", "stage_id", "plane_id", "kappa"],
+        ),
+        ("evaporation_models", &["hydro_id", "stage_id", "source"]),
+        (
+            "fpha_deviation_points",
+            &["hydro_id", "stage_id", "relative"],
+        ),
+        (
+            "noise_openings",
+            &["stage_id", "opening_index", "entity_index", "value"],
+        ),
+        ("inflow_seasonal_stats", &["hydro_id", "stage_id"]),
+        (
+            "inflow_ar_coefficients",
+            &["hydro_id", "stage_id", "lag", "coefficient"],
+        ),
+        (
+            "inflow_annual_component",
+            &["hydro_id", "stage_id", "annual_coefficient"],
+        ),
+        ("load_seasonal_stats", &["bus_id", "stage_id"]),
+    ];
+
+    #[test]
+    fn every_registry_column_has_a_classified_unit() {
+        let oracle_suffix_unit = |column: &str| {
+            ORACLE_SUFFIXES
+                .iter()
+                .find(|(suffix, _)| column.ends_with(suffix))
+                .copied()
+        };
+        let pinned_unit = |schema: &str, column: &str| {
+            PINNED_UNITS
+                .iter()
+                .find(|&&(s, c, _)| s == schema && c == column)
+                .map(|&(_, _, unit)| unit)
+        };
+        let is_no_unit = |schema: &str, column: &str| {
+            NO_UNIT_COLUMNS
+                .iter()
+                .any(|&(s, columns)| s == schema && columns.contains(&column))
+        };
+
+        let columns = registry_columns();
+        let mut problems: Vec<String> = Vec::new();
+        let mut powered_suffixes: Vec<&str> = Vec::new();
+
+        for (entry, column) in &columns {
+            let (schema, column) = (entry.name, column.as_str());
+            let pinned = pinned_unit(schema, column);
+            let no_unit = is_no_unit(schema, column);
+            if pinned.is_some() && no_unit {
+                problems.push(format!(
+                    "{schema}.{column}: both pinned and listed as no-unit"
+                ));
+            }
+            let expected = if let Some(unit) = pinned {
+                unit
+            } else if no_unit {
+                if let Some((suffix, _)) = oracle_suffix_unit(column) {
+                    problems.push(format!(
+                        "{schema}.{column}: listed as no-unit but ends in unit suffix {suffix:?}"
+                    ));
+                }
+                ""
+            } else if column.contains("_per_") {
+                problems.push(format!("{schema}.{column}: unpinned `_per_` column"));
+                continue;
+            } else if let Some((suffix, unit)) = oracle_suffix_unit(column) {
+                powered_suffixes.push(suffix);
+                unit
+            } else {
+                problems.push(format!("{schema}.{column}: unclassified column"));
+                continue;
+            };
+            let actual = unit_for(schema, column);
+            if actual != expected {
+                problems.push(format!(
+                    "{schema}.{column}: unit_for returned {actual:?}, expected {expected:?}"
+                ));
+            }
+        }
+
+        let names_registry_column = |schema: &str, column: &str| {
+            columns
+                .iter()
+                .any(|(entry, c)| entry.name == schema && c == column)
+        };
+        for &(schema, column, _) in PINNED_UNITS {
+            if !names_registry_column(schema, column) {
+                problems.push(format!(
+                    "PINNED_UNITS row {schema}.{column} names no registry column"
+                ));
+            }
+        }
+        for &(schema, no_unit_columns) in NO_UNIT_COLUMNS {
+            for &column in no_unit_columns {
+                if !names_registry_column(schema, column) {
+                    problems.push(format!(
+                        "NO_UNIT_COLUMNS entry {schema}.{column} names no registry column"
+                    ));
+                }
+            }
+        }
+        for &(suffix, _) in ORACLE_SUFFIXES {
+            if !powered_suffixes.contains(&suffix) {
+                problems.push(format!(
+                    "oracle suffix {suffix:?} matches no plain registry column"
+                ));
+            }
+        }
+
+        assert!(
+            problems.is_empty(),
+            "{} unit classification problem(s):\n{}",
+            problems.len(),
+            problems.join("\n")
+        );
+    }
+
+    #[test]
+    fn every_registry_unit_is_in_the_unit_vocabulary() {
+        const UNIT_VOCABULARY: &[&str] = &[
+            "",
+            "MW",
+            "MWh",
+            "m3/s",
+            "hm3",
+            "$",
+            "$/MWh",
+            "$/hm3",
+            "MW/(m3/s)",
+            "MW/hm3",
+            "(m3/s)/hm3",
+            "%",
+            "ms",
+            "varies",
+        ];
+        let problems: Vec<String> = registry_columns()
+            .iter()
+            .filter_map(|(entry, column)| {
+                let unit = unit_for(entry.name, column);
+                (!UNIT_VOCABULARY.contains(&unit)).then(|| {
+                    format!(
+                        "{}.{column}: unit {unit:?} is outside the vocabulary",
+                        entry.name
+                    )
+                })
+            })
+            .collect();
+        assert!(
+            problems.is_empty(),
+            "{} unit(s) outside the vocabulary:\n{}",
+            problems.len(),
+            problems.join("\n")
+        );
+    }
+
+    #[test]
+    fn named_units_rows_name_registry_columns() {
+        let columns = registry_columns();
+        let mut problems: Vec<String> = Vec::new();
+        for (i, &(schema, column, _)) in NAMED_UNITS.iter().enumerate() {
+            if !columns
+                .iter()
+                .any(|(entry, c)| entry.name == schema && c == column)
+            {
+                problems.push(format!(
+                    "NAMED_UNITS row {schema}.{column} names no registry column"
+                ));
+            }
+            if NAMED_UNITS[..i]
+                .iter()
+                .any(|&(s, c, _)| s == schema && c == column)
+            {
+                problems.push(format!("NAMED_UNITS row {schema}.{column} appears twice"));
+            }
+        }
+        assert!(
+            problems.is_empty(),
+            "{} NAMED_UNITS problem(s):\n{}",
+            problems.len(),
+            problems.join("\n")
+        );
+    }
+
+    #[test]
+    fn every_registry_column_has_a_description() {
+        let problems: Vec<String> = registry_columns()
+            .iter()
+            .filter(|(entry, column)| description_for(entry.name, column).is_empty())
+            .map(|(entry, column)| format!("{}.{column}", entry.name))
+            .collect();
+        assert!(
+            problems.is_empty(),
+            "{} registry column(s) without a description:\n{}",
+            problems.len(),
+            problems.join("\n")
+        );
+    }
+
+    #[test]
+    fn description_rows_name_registry_columns() {
+        let columns = registry_columns();
+        let mut problems: Vec<String> = Vec::new();
+        for (i, &(schema, column, _)) in DESCRIPTIONS.iter().enumerate() {
+            if !columns
+                .iter()
+                .any(|(entry, c)| entry.name == schema && c == column)
+            {
+                problems.push(format!(
+                    "DESCRIPTIONS row {schema}.{column} names no registry column"
+                ));
+            }
+            if DESCRIPTIONS[..i]
+                .iter()
+                .any(|&(s, c, _)| s == schema && c == column)
+            {
+                problems.push(format!("DESCRIPTIONS row {schema}.{column} appears twice"));
+            }
+        }
+        for (i, &(column, _)) in SHARED_COLUMN_DESCRIPTIONS.iter().enumerate() {
+            if !columns.iter().any(|(_, c)| c == column) {
+                problems.push(format!(
+                    "SHARED_COLUMN_DESCRIPTIONS column {column} is in no registry schema"
+                ));
+            }
+            if SHARED_COLUMN_DESCRIPTIONS[..i]
+                .iter()
+                .any(|&(c, _)| c == column)
+            {
+                problems.push(format!(
+                    "SHARED_COLUMN_DESCRIPTIONS column {column} appears twice"
+                ));
+            }
+        }
+        assert!(
+            problems.is_empty(),
+            "{} description table problem(s):\n{}",
+            problems.len(),
+            problems.join("\n")
+        );
+    }
+
+    #[test]
+    fn every_varies_column_names_the_column_that_sets_its_unit() {
+        const VARIES_COLUMNS: &[(&str, &str, &[&str])] = &[
+            ("bounds", "bound_value", &["bound_type_code"]),
+            ("generic_violations", "slack_value", &["constraint_id"]),
+            (
+                "generic_constraint_echo",
+                "coefficient",
+                &["variable_kind", "constraint_id"],
+            ),
+            ("generic_constraint_echo", "bound_lower", &["constraint_id"]),
+            ("generic_constraint_echo", "bound_upper", &["constraint_id"]),
+            (
+                "generic_constraint_echo",
+                "slack_penalty",
+                &["constraint_id"],
+            ),
+        ];
+
+        let columns = registry_columns();
+        let names_registry_column = |schema: &str, column: &str| {
+            columns
+                .iter()
+                .any(|(entry, c)| entry.name == schema && c == column)
+        };
+        let mut problems: Vec<String> = Vec::new();
+        for (entry, column) in &columns {
+            if unit_for(entry.name, column) == VARIES
+                && !VARIES_COLUMNS
+                    .iter()
+                    .any(|&(s, c, _)| s == entry.name && c == column)
+            {
+                problems.push(format!(
+                    "{}.{column}: unexpected `varies` column",
+                    entry.name
+                ));
+            }
+        }
+        for &(schema, column, determiners) in VARIES_COLUMNS {
+            if !names_registry_column(schema, column) || unit_for(schema, column) != VARIES {
+                problems.push(format!(
+                    "{schema}.{column}: expected a registry column with unit `varies`"
+                ));
+            }
+            let description = description_for(schema, column);
+            for &determiner in determiners {
+                if !names_registry_column(schema, determiner) {
+                    problems.push(format!(
+                        "{schema}.{column}: {determiner} is not a column of {schema}"
+                    ));
+                }
+                if !description.contains(determiner) {
+                    problems.push(format!(
+                        "{schema}.{column}: description {description:?} does not name \
+                         {determiner}"
+                    ));
+                }
+            }
+        }
+        assert!(
+            problems.is_empty(),
+            "{} `varies` problem(s):\n{}",
+            problems.len(),
+            problems.join("\n")
+        );
+    }
+
+    #[test]
+    fn a_schema_specific_description_takes_precedence_over_the_shared_column_text() {
+        assert_eq!(
+            description_for("solver_iterations", "scenario_id"),
+            "Simulation trajectory id (0-based); NULL on a training row"
+        );
+        assert_eq!(
+            description_for("costs", "scenario_id"),
+            "0-based scenario identifier"
+        );
+    }
+
     #[test]
     fn new_energy_columns_have_descriptions() {
         assert!(
@@ -3150,11 +4498,24 @@ mod tests {
     }
 
     #[test]
-    fn old_productivity_field_returns_default_unit() {
-        assert_eq!(
-            unit_for("hydros", "productivity_mw_per_m3s"),
-            "",
-            "removed column must fall through to the default empty-string arm"
+    fn hydros_inflow_m3s_description_states_the_incremental_inflow() {
+        let desc = description_for("hydros", "inflow_m3s");
+        assert!(
+            desc.starts_with("Incremental (local) inflow")
+                && !desc.contains("Total")
+                && !desc.contains("upstream"),
+            "hydros.inflow_m3s holds the incremental (local) inflow, got: {desc:?}"
+        );
+    }
+
+    #[test]
+    fn inflow_lags_lag_index_description_states_zero_based_order() {
+        let desc = description_for("inflow_lags", "lag_index");
+        assert!(
+            desc.contains("0-based")
+                && desc.contains("0 = most recent")
+                && !desc.contains("1-based"),
+            "inflow_lags.lag_index is 0-based with 0 = the most recent past period, got: {desc:?}"
         );
     }
 

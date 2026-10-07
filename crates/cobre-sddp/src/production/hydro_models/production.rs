@@ -67,11 +67,12 @@ type ResolveProductionResult = (
 /// | `source: "computed"` with missing tailrace/losses/efficiency    | [`SddpError::Validation`]  |
 /// | `source: "computed"` with no geometry rows for the hydro        | [`SddpError::Validation`]  |
 /// | FPHA fitting pipeline error                                     | [`SddpError::Validation`]  |
-/// | `gamma_v <= 0` for any precomputed hyperplane                   | [`SddpError::Validation`]  |
+/// | `gamma_v < 0` for any precomputed hyperplane                    | [`SddpError::Validation`]  |
 /// | `gamma_s > 0` for any precomputed hyperplane                    | [`SddpError::Validation`]  |
-/// | `gamma_q <= 0` for any precomputed hyperplane                   | [`SddpError::Validation`]  |
+/// | `gamma_q < 0` for any precomputed hyperplane                    | [`SddpError::Validation`]  |
 /// | `kappa` not in `(0, 1]` for precomputed hyperplane              | [`SddpError::Validation`]  |
 /// | Zero hyperplanes for an FPHA hydro at any stage                 | [`SddpError::Validation`]  |
+/// | No precomputed hyperplane with `gamma_q > 0` for an FPHA hydro at a stage | [`SddpError::Validation`]  |
 pub fn resolve_production_models_from_artifacts(
     system: &System,
     artifacts: &CaseArtifacts,
@@ -186,7 +187,7 @@ pub fn resolve_production_models_from_artifacts(
     for (hydro, fit) in system.hydros().iter().zip(fits) {
         if fit.provenance.1 == ProductionModelSource::NoTurbineCapacity {
             tracing::warn!(
-                "hydro {} (id={}) requests computed FPHA but has no turbine capacity \
+                "hydro {} (id={}) requests FPHA but has no turbine capacity \
                  (max_turbined_m3s = {}); modeling it with zero productivity",
                 hydro.name,
                 hydro.id.0,
@@ -254,12 +255,25 @@ struct PerHydroFit {
     deviation_point_rows: Vec<FphaDeviationPointRow>,
 }
 
-/// At or below this turbine capacity the fitting grid's flow axis collapses onto
-/// `q = 0` and no plane survives, so a computed-FPHA plant resolves to zero
-/// productivity instead. A zero MW capacity alone is NOT degenerate: fitting
-/// drops a non-positive ceiling and the generation column's own bound holds
-/// output at zero.
-const MIN_FITTABLE_MAX_TURBINED_M3S: f64 = 1e-9;
+fn no_turbine_capacity_fit(hydro_id: EntityId, n_stages: usize) -> PerHydroFit {
+    PerHydroFit {
+        stage_models: vec![
+            ResolvedProductionModel::ConstantProductivity { productivity: 0.0 };
+            n_stages
+        ],
+        provenance: (hydro_id, ProductionModelSource::NoTurbineCapacity),
+        export_rows: Vec::new(),
+        fpha_deviations: Vec::new(),
+        deviation_point_rows: Vec::new(),
+    }
+}
+
+fn has_hyperplane_rows(
+    hyperplane_map: &HashMap<(EntityId, Option<i32>), Vec<&FphaHyperplaneRow>>,
+    hydro_id: EntityId,
+) -> bool {
+    hyperplane_map.keys().any(|(id, _)| *id == hydro_id)
+}
 
 /// Resolve every study-stage production model for ONE hydro, returning the
 /// per-hydro result by value with no shared `&mut` capture.
@@ -290,20 +304,19 @@ fn fit_one_hydro(
 
     let source = determine_source(hydro, config_entry)?;
 
-    if source == ProductionModelSource::ComputedFromGeometry
-        && hydro.max_turbined_m3s <= MIN_FITTABLE_MAX_TURBINED_M3S
-    {
-        validate_computed_prerequisites(hydro, geometry_map)?;
-        return Ok(PerHydroFit {
-            stage_models: vec![
-                ResolvedProductionModel::ConstantProductivity { productivity: 0.0 };
-                n_stages
-            ],
-            provenance: (hydro.id, ProductionModelSource::NoTurbineCapacity),
-            export_rows: Vec::new(),
-            fpha_deviations: Vec::new(),
-            deviation_point_rows: Vec::new(),
-        });
+    if !hydro.has_turbine_capacity() {
+        match source {
+            ProductionModelSource::ComputedFromGeometry => {
+                validate_computed_prerequisites(hydro, geometry_map)?;
+                return Ok(no_turbine_capacity_fit(hydro.id, n_stages));
+            }
+            ProductionModelSource::PrecomputedHyperplanes
+                if !has_hyperplane_rows(hyperplane_map, hydro.id) =>
+            {
+                return Ok(no_turbine_capacity_fit(hydro.id, n_stages));
+            }
+            _ => {}
+        }
     }
 
     let mut export_rows: Vec<FphaHyperplaneRow> = Vec::new();
@@ -1055,7 +1068,8 @@ fn resolve_stage<'a>(
 ///
 /// Stage-specific rows `(hydro_id, Some(stage.id))` take priority over the global
 /// `(hydro_id, None)` all-stage rows. Each `FphaPlane` intercept is the pre-scaled
-/// `gamma_0 * kappa`.
+/// `gamma_0 * kappa`. At least one row must have `gamma_q > 0`, otherwise generation
+/// would not depend on turbined flow.
 fn build_fpha_model(
     hydro: &Hydro,
     stage: &Stage,
@@ -1091,6 +1105,14 @@ fn build_fpha_model(
         });
     }
 
+    if !rows.iter().any(|row| row.gamma_q > 0.0) {
+        return Err(SddpError::Validation(format!(
+            "hydro {} (id={}) stage {}: no hyperplane has gamma_q > 0, so generation \
+             would not depend on turbined flow",
+            hydro.name, hydro.id.0, stage.id
+        )));
+    }
+
     Ok(ResolvedProductionModel::Fpha { planes })
 }
 
@@ -1103,7 +1125,8 @@ fn build_fpha_model(
 /// - `gamma_v >= 0` — higher storage must not decrease generation; zero is valid
 ///   for constant-head plants where head does not depend on volume
 /// - `gamma_s <= 0` — spillage reduces generation
-/// - `gamma_q > 0` — more turbined flow → more generation
+/// - `gamma_q >= 0` — more turbined flow must not decrease generation; zero is valid
+///   where the capacity ceiling flattens the surface
 /// - `kappa ∈ (0, 1]` — correction factor range
 fn validate_hyperplane_row(
     hydro: &Hydro,
@@ -1131,9 +1154,9 @@ fn validate_hyperplane_row(
         )));
     }
 
-    if row.gamma_q <= 0.0 {
+    if row.gamma_q < 0.0 {
         return Err(SddpError::Validation(format!(
-            "{ctx}: gamma_q must be > 0 (more turbined flow → more generation), \
+            "{ctx}: gamma_q must be >= 0 (more turbined flow must not decrease generation), \
              got gamma_q = {}",
             row.gamma_q
         )));

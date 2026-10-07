@@ -17,9 +17,7 @@ use std::path::Path;
 
 use crate::LoadError;
 
-/// Top-level intermediate type for `penalties.json`.
-///
-/// Private — only used during deserialization. Not re-exported.
+/// Root object of `penalties.json`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -41,76 +39,85 @@ pub(crate) struct RawPenalties {
     non_controllable_source: RawNcsPenalties,
 }
 
-/// Intermediate type for the `bus` section.
+/// The `bus` section.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawBusPenalties {
     /// Piecewise-linear deficit cost segments.
     deficit_segments: Vec<RawDeficitSegment>,
-    /// Excess generation cost \[$/`MWh`\].
+    /// Excess generation cost ($/`MWh`).
     excess_cost: f64,
 }
 
-/// Intermediate type for one deficit segment entry.
+/// One deficit segment entry.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawDeficitSegment {
     /// MW depth of this segment. `null` means the segment is unbounded (last segment).
     depth_mw: Option<f64>,
-    /// Cost per `MWh` of deficit in this segment \[$/`MWh`\].
+    /// Cost per `MWh` of deficit in this segment ($/`MWh`).
     cost: f64,
 }
 
-/// Intermediate type for the `line` section.
+/// The `line` section.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawLinePenalties {
-    /// Exchange cost \[$/`MWh`\].
+    /// Exchange cost ($/`MWh`).
     exchange_cost: f64,
 }
 
-/// Intermediate type for the `hydro` section.
-///
-/// All fields end with `_cost` because these are penalty cost values. The
-/// shared postfix is intentional and mirrors both the JSON schema and the
-/// [`HydroPenalties`] struct field names.
+/// The `hydro` section: the default penalty costs of every hydro plant.
 #[allow(clippy::struct_field_names)]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawHydroPenalties {
+    /// Spillage penalty ($/(m³/s·h)).
     spillage_cost: f64,
+    /// Turbined-flow regularization cost ($/(m³/s·h)).
     turbined_cost: f64,
+    /// Diversion flow penalty ($/(m³/s·h)).
     diversion_cost: f64,
+    /// Storage below-minimum violation penalty ($/hm³).
     storage_violation_below_cost: f64,
+    /// Filling-target violation penalty ($/hm³).
     filling_target_violation_cost: f64,
+    /// Turbined-flow below-minimum violation penalty ($/(m³/s·h)).
     turbined_violation_below_cost: f64,
+    /// Outflow below-minimum violation penalty ($/(m³/s·h)).
     outflow_violation_below_cost: f64,
+    /// Outflow above-maximum violation penalty ($/(m³/s·h)).
     outflow_violation_above_cost: f64,
+    /// Generation below-minimum violation penalty ($/`MWh`).
     generation_violation_below_cost: f64,
+    /// Symmetric evaporation violation penalty, the default of both directional
+    /// evaporation costs ($/(m³/s·h)).
     evaporation_violation_cost: f64,
+    /// Symmetric water withdrawal violation penalty, the default of both
+    /// directional withdrawal costs ($/(m³/s·h)).
     water_withdrawal_violation_cost: f64,
-    /// Optional directional over-withdrawal cost. Defaults to symmetric.
+    /// Over-withdrawal penalty ($/(m³/s·h)). Defaults to `water_withdrawal_violation_cost`.
     water_withdrawal_violation_pos_cost: Option<f64>,
-    /// Optional directional under-withdrawal cost. Defaults to symmetric.
+    /// Under-withdrawal penalty ($/(m³/s·h)). Defaults to `water_withdrawal_violation_cost`.
     water_withdrawal_violation_neg_cost: Option<f64>,
-    /// Optional directional over-evaporation cost. Defaults to symmetric.
+    /// Over-evaporation penalty ($/(m³/s·h)). Defaults to `evaporation_violation_cost`.
     evaporation_violation_pos_cost: Option<f64>,
-    /// Optional directional under-evaporation cost. Defaults to symmetric.
+    /// Under-evaporation penalty ($/(m³/s·h)). Defaults to `evaporation_violation_cost`.
     evaporation_violation_neg_cost: Option<f64>,
-    /// Optional inflow non-negativity cost. Defaults to 1000.0.
+    /// Inflow non-negativity penalty ($/(m³/s·h)). Defaults to 1000.0.
     inflow_nonnegativity_cost: Option<f64>,
 }
 
-/// Intermediate type for the `non_controllable_source` section.
+/// The `non_controllable_source` section.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawNcsPenalties {
-    /// Curtailment cost \[$/`MWh`\].
+    /// Curtailment cost ($/`MWh`).
     curtailment_cost: f64,
 }
 

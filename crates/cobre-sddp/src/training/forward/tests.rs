@@ -632,6 +632,7 @@ fn ac_two_scenarios_three_stages_fixed_solution() {
             training_enumerated: false,
             max_iterations: 100,
             start_iteration: 0,
+            resume_lower_bound_history: Vec::new(),
             n_fwd_threads: 1,
             stopping_rules: StoppingRuleSet {
                 rules: vec![StoppingRule::IterationLimit { limit: 100 }],
@@ -646,7 +647,7 @@ fn ac_two_scenarios_three_stages_fixed_solution() {
         },
         events: EventConfig {
             event_sender: None,
-            checkpoint_interval: None,
+            periodic_checkpoint: None,
             shutdown_flag: None,
             export_states: false,
         },
@@ -741,6 +742,7 @@ fn ac_infeasible_at_stage_1_scenario_0_returns_infeasible_error() {
             training_enumerated: false,
             max_iterations: 100,
             start_iteration: 0,
+            resume_lower_bound_history: Vec::new(),
             n_fwd_threads: 1,
             stopping_rules: StoppingRuleSet {
                 rules: vec![StoppingRule::IterationLimit { limit: 100 }],
@@ -755,7 +757,7 @@ fn ac_infeasible_at_stage_1_scenario_0_returns_infeasible_error() {
         },
         events: EventConfig {
             event_sender: None,
-            checkpoint_interval: None,
+            periodic_checkpoint: None,
             shutdown_flag: None,
             export_states: false,
         },
@@ -854,6 +856,7 @@ fn cost_statistics_accumulated_correctly() {
             training_enumerated: false,
             max_iterations: 100,
             start_iteration: 0,
+            resume_lower_bound_history: Vec::new(),
             n_fwd_threads: 1,
             stopping_rules: StoppingRuleSet {
                 rules: vec![StoppingRule::IterationLimit { limit: 100 }],
@@ -868,7 +871,7 @@ fn cost_statistics_accumulated_correctly() {
         },
         events: EventConfig {
             event_sender: None,
-            checkpoint_interval: None,
+            periodic_checkpoint: None,
             shutdown_flag: None,
             export_states: false,
         },
@@ -1398,7 +1401,8 @@ fn nested_ub_recursion_is_nested_not_end_of_horizon() {
         alpha: 0.5,
         lambda: 1.0,
     };
-    let nested = nested_ub_recursion(&topology, &global, 3, &cum_d, cvar);
+    let mut scratch = super::stats_aggregation::NestedUbRecursionScratch::default();
+    let nested = nested_ub_recursion(&topology, &global, 3, &cum_d, cvar, &mut scratch);
     assert!(
         (nested - 200.0).abs() < 1e-12,
         "nested pure CVaR_0.5 must be 200.0, got {nested}"
@@ -1418,10 +1422,54 @@ fn nested_ub_recursion_is_nested_not_end_of_horizon() {
     );
 
     // Expectation collapses the recursion to the plain probability-weighted total.
-    let expectation = nested_ub_recursion(&topology, &global, 3, &cum_d, RiskMeasure::Expectation);
+    let expectation = nested_ub_recursion(
+        &topology,
+        &global,
+        3,
+        &cum_d,
+        RiskMeasure::Expectation,
+        &mut scratch,
+    );
     assert!(
         (expectation - 75.0).abs() < 1e-12,
         "Expectation must collapse to Σ wᵢ·total = 75.0, got {expectation}"
+    );
+}
+
+#[test]
+fn nested_ub_recursion_applies_the_probability_floor() {
+    use super::stats_aggregation::{NestedUbRecursionScratch, nested_ub_recursion};
+    use crate::setup::node_graph::{NestedUbTopology, NodePos, TypedVec};
+
+    let parent: TypedVec<NodePos, Option<NodePos>> = vec![
+        None,
+        Some(NodePos(0)),
+        Some(NodePos(0)),
+        Some(NodePos(0)),
+        Some(NodePos(0)),
+    ]
+    .into();
+    let leaf = [NodePos(1), NodePos(2), NodePos(3), NodePos(4)];
+    let weight = [0.25_f64; 4];
+    let global = [0.0, 10.0, 0.0, 20.0, 0.0, 30.0, 0.0, 40.0];
+    let cum_d = [1.0_f64, 1.0];
+    let topology = NestedUbTopology::new(&parent, &leaf, &weight);
+
+    let cvar = RiskMeasure::CVaR {
+        alpha: 0.5,
+        lambda: 0.5,
+    };
+    let nested = nested_ub_recursion(
+        &topology,
+        &global,
+        2,
+        &cum_d,
+        cvar,
+        &mut NestedUbRecursionScratch::default(),
+    );
+    assert!(
+        (nested - 30.0).abs() < 1e-12,
+        "the floored nested bound over the 4-leaf fan must be 30.0, got {nested}"
     );
 }
 
@@ -1442,6 +1490,7 @@ fn run_one_iteration(
             training_enumerated: false,
             max_iterations: 100,
             start_iteration: 0,
+            resume_lower_bound_history: Vec::new(),
             n_fwd_threads: 1,
             stopping_rules: StoppingRuleSet {
                 rules: vec![StoppingRule::IterationLimit { limit: 100 }],
@@ -1456,7 +1505,7 @@ fn run_one_iteration(
         },
         events: EventConfig {
             event_sender: None,
-            checkpoint_interval: None,
+            periodic_checkpoint: None,
             shutdown_flag: None,
             export_states: false,
         },
@@ -2126,6 +2175,7 @@ fn none_method_unchanged_with_truncation_code_present() {
             training_enumerated: false,
             max_iterations: 100,
             start_iteration: 0,
+            resume_lower_bound_history: Vec::new(),
             n_fwd_threads: 1,
             stopping_rules: StoppingRuleSet {
                 rules: vec![StoppingRule::IterationLimit { limit: 100 }],
@@ -2140,7 +2190,7 @@ fn none_method_unchanged_with_truncation_code_present() {
         },
         events: EventConfig {
             event_sender: None,
-            checkpoint_interval: None,
+            periodic_checkpoint: None,
             shutdown_flag: None,
             export_states: false,
         },

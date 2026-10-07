@@ -84,11 +84,10 @@ mod boundary_cuts {
             &stage_active_indices,
             &stage_manifests,
         );
-        let (basis_col, basis_row) = convert_basis_cache(result);
+        let (basis_col, basis_row) = convert_basis_cache(&result.basis_cache);
         let stage_bases = build_stage_basis_records(
-            fcf,
-            result,
-            &setup.inputs.node_graph,
+            &result.basis_cache,
+            result.iterations,
             &basis_col,
             &basis_row,
         );
@@ -109,6 +108,7 @@ mod boundary_cuts {
                 training_block_mode: "parallel".to_string(),
                 training_block_mode_per_stage: vec![],
                 cost_scale_factor: None,
+                lower_bound_history: Vec::new(),
             },
         );
         write_policy_checkpoint(policy_dir, &stage_cuts, &stage_bases, &metadata, &[])
@@ -1218,7 +1218,7 @@ mod basis_reconstruct_churn {
         config.training.stopping_rules =
             Some(vec![StoppingRuleConfig::IterationLimit { limit: 2 }]);
 
-        setup.set_start_iteration(1);
+        setup.set_resume_point(1, Vec::new());
 
         let mut solver2 = ActiveSolver::new().expect("ActiveSolver phase2 must succeed");
 
@@ -1259,7 +1259,7 @@ mod basis_reconstruct_churn {
             );
             let deactivated_fcf = std::mem::replace(&mut setup.fcf, placeholder_fcf);
             setup2.replace_fcf(deactivated_fcf);
-            setup2.set_start_iteration(1);
+            setup2.set_resume_point(1, Vec::new());
 
             let outcome2 = setup2
                 .train(&mut solver2, &comm, 1, ActiveSolver::new, None, None)
@@ -1575,7 +1575,8 @@ mod warm_start {
     use cobre_io::config::StoppingRuleConfig;
     use cobre_io::output::policy::{read_policy_checkpoint, write_policy_checkpoint};
     use cobre_sddp::{
-        FutureCostFunction, StudySetup, hydro_models::prepare_hydro_models,
+        FutureCostFunction, SolverStatsDelta, StoredBasisMisfit, StudySetup,
+        build_basis_cache_from_checkpoint, hydro_models::prepare_hydro_models,
         setup::prepare_stochastic,
     };
     use cobre_solver::ActiveSolver;
@@ -1628,11 +1629,10 @@ mod warm_start {
             &stage_active_indices,
             &stage_manifests,
         );
-        let (basis_col, basis_row) = convert_basis_cache(result);
+        let (basis_col, basis_row) = convert_basis_cache(&result.basis_cache);
         let stage_bases = build_stage_basis_records(
-            fcf,
-            result,
-            &setup.inputs.node_graph,
+            &result.basis_cache,
+            result.iterations,
             &basis_col,
             &basis_row,
         );
@@ -1653,6 +1653,7 @@ mod warm_start {
                 training_block_mode: "parallel".to_string(),
                 training_block_mode_per_stage: vec![],
                 cost_scale_factor: None,
+                lower_bound_history: Vec::new(),
             },
         );
         write_policy_checkpoint(policy_dir, &stage_cuts, &stage_bases, &metadata, &[])
@@ -1739,8 +1740,10 @@ mod warm_start {
         )
         .expect("warm-start FCF");
         setup_phase2.replace_fcf(warm_fcf);
-        setup_phase2
-            .set_start_iteration(u64::from(checkpoint.metadata.producer.completed_iterations));
+        setup_phase2.set_resume_point(
+            u64::from(checkpoint.metadata.producer.completed_iterations),
+            checkpoint.metadata.producer.lower_bound_history.clone(),
+        );
 
         let mut solver_phase2 = ActiveSolver::new().expect("ActiveSolver");
         let outcome_phase2 = setup_phase2
@@ -1759,6 +1762,62 @@ mod warm_start {
             "resumed LB ({}) must be >= phase-1 LB ({})",
             result_phase2.final_lb,
             lb_phase1
+        );
+    }
+
+    #[test]
+    fn exported_basis_records_count_the_cut_rows_each_basis_was_captured_with() {
+        use cobre_sddp::policy_export::{build_stage_basis_records, convert_basis_cache};
+
+        let case_dir = d01_case_dir();
+        let mut config =
+            cobre_io::parse_config(&case_dir.join("config.json")).expect("config must parse");
+        config.training.stopping_rules =
+            Some(vec![StoppingRuleConfig::IterationLimit { limit: 5 }]);
+
+        let mut setup = build_setup(&case_dir, &config);
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver");
+        let outcome = setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("train");
+        assert!(outcome.error.is_none());
+        let result = outcome.result;
+
+        let (basis_col, basis_row) = convert_basis_cache(&result.basis_cache);
+        let records = build_stage_basis_records(
+            &result.basis_cache,
+            result.iterations,
+            &basis_col,
+            &basis_row,
+        );
+        assert!(
+            !records.is_empty(),
+            "training must capture at least one basis"
+        );
+
+        for rec in &records {
+            let cb = result.basis_cache[rec.stage_id as usize]
+                .as_ref()
+                .expect("every record comes from a captured basis");
+            assert_eq!(
+                rec.num_cut_rows as usize,
+                cb.basis.row_status.len() - cb.base_row_count,
+                "node {} must record the cut rows its basis was captured with",
+                rec.stage_id
+            );
+        }
+
+        let root = records
+            .iter()
+            .find(|rec| rec.stage_id == 0)
+            .expect("the root node's basis is exported");
+        let root_pool_populated = setup.fcf.pools[0].populated();
+        assert!(
+            (root.num_cut_rows as usize) < root_pool_populated,
+            "the root basis is captured before the last backward pass, so it must carry fewer \
+             cut rows ({}) than its pool holds at export ({root_pool_populated})",
+            root.num_cut_rows
         );
     }
 
@@ -1841,6 +1900,118 @@ mod warm_start {
         assert!(
             total_active_after > fresh_active,
             "warm-start training should produce more total cuts"
+        );
+    }
+
+    #[test]
+    fn warm_start_skips_a_stored_basis_with_too_few_basic_entries_instead_of_aborting() {
+        const MISFIT_NODE: u32 = 1;
+        const MISFIT_STAGE: i32 = 1;
+        const OTHER_STAGE: i32 = 0;
+
+        let case_dir = d01_case_dir();
+        let config =
+            cobre_io::parse_config(&case_dir.join("config.json")).expect("config must parse");
+
+        let mut setup_fresh = build_setup(&case_dir, &config);
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver");
+        let fresh_outcome = setup_fresh
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("train");
+        assert!(fresh_outcome.error.is_none());
+
+        let tmpdir = tempfile::tempdir().expect("tempdir");
+        let policy_dir = tmpdir.path().join("policy");
+        write_test_checkpoint(&policy_dir, &setup_fresh, &fresh_outcome.result, 42);
+
+        let mut checkpoint = read_policy_checkpoint(&policy_dir).expect("read checkpoint");
+        assert!(
+            checkpoint.stage_bases.len() >= 2,
+            "the checkpoint must store a basis for the root and for the misfit node"
+        );
+        let misfit = checkpoint
+            .stage_bases
+            .iter_mut()
+            .find(|record| record.stage_id == MISFIT_NODE)
+            .expect("the misfit node's basis is stored");
+        misfit.column_status.fill(0);
+        misfit.row_status.fill(0);
+
+        let mut setup_warm = build_setup(&case_dir, &config);
+        let proof = cobre_sddp::test_support::trivial_full_fcf_proof(
+            checkpoint.stage_cuts[0].state_dimension,
+            checkpoint.metadata.num_stages,
+        );
+        let pool_state_dimensions: Vec<usize> = setup_warm
+            .fcf
+            .pools
+            .iter()
+            .map(|p| p.state_dimension)
+            .collect();
+        let visit_bounds: Vec<u64> = setup_warm
+            .fcf
+            .pools
+            .iter()
+            .map(|p| u64::from(p.visit_stride))
+            .collect();
+        let warm_fcf = FutureCostFunction::new_with_warm_start(
+            &proof,
+            &checkpoint.stage_cuts,
+            &pool_state_dimensions,
+            &visit_bounds,
+            setup_warm.loop_params.forward_passes,
+            setup_warm.loop_params.max_iterations.saturating_add(1),
+        )
+        .expect("warm-start FCF");
+        setup_warm.replace_fcf(warm_fcf);
+
+        let load = build_basis_cache_from_checkpoint(
+            &checkpoint.stage_bases,
+            &checkpoint.stage_cuts,
+            &setup_warm,
+        );
+        let unused = load.unused.expect("the misfit record must be reported");
+        assert_eq!(unused.count, 1);
+        assert!(
+            matches!(unused.first_reason, StoredBasisMisfit::BasicCount { .. }),
+            "{:?}",
+            unused.first_reason
+        );
+        setup_warm.set_warm_start_basis_cache(load.cache);
+
+        let mut solver_warm = ActiveSolver::new().expect("ActiveSolver");
+        let warm_outcome = setup_warm
+            .train(&mut solver_warm, &comm, 1, ActiveSolver::new, None, None)
+            .expect("warm-start train");
+        assert!(warm_outcome.error.is_none(), "{:?}", warm_outcome.error);
+
+        let first_iteration_forward_at = |stage_id: i32| {
+            SolverStatsDelta::aggregate(
+                warm_outcome
+                    .result
+                    .solver_stats_log
+                    .iter()
+                    .filter(|e| {
+                        e.phase == "forward" && e.iteration == 1 && e.stage_id == Some(stage_id)
+                    })
+                    .map(|e| &e.delta),
+            )
+        };
+        let at_misfit = first_iteration_forward_at(MISFIT_STAGE);
+        let at_other = first_iteration_forward_at(OTHER_STAGE);
+        assert_eq!(
+            at_misfit.basis_offered, 0,
+            "the dropped node must cold-start in iteration 1"
+        );
+        assert!(
+            at_other.basis_offered > 0,
+            "the admitted node must warm-start in iteration 1"
+        );
+        assert_eq!(
+            at_misfit.basis_consistency_failures + at_other.basis_consistency_failures,
+            0,
+            "no basis offered to the solver may be rejected"
         );
     }
 }
@@ -2788,11 +2959,10 @@ mod range_warm_start_determinism {
             &stage_active_indices,
             &stage_manifests,
         );
-        let (basis_col, basis_row) = convert_basis_cache(result);
+        let (basis_col, basis_row) = convert_basis_cache(&result.basis_cache);
         let stage_bases = build_stage_basis_records(
-            fcf,
-            result,
-            &setup.inputs.node_graph,
+            &result.basis_cache,
+            result.iterations,
             &basis_col,
             &basis_row,
         );
@@ -2813,6 +2983,7 @@ mod range_warm_start_determinism {
                 training_block_mode: "parallel".to_string(),
                 training_block_mode_per_stage: vec![],
                 cost_scale_factor: None,
+                lower_bound_history: Vec::new(),
             },
         );
         write_policy_checkpoint(policy_dir, &stage_cuts, &stage_bases, &metadata, &[])
@@ -3001,8 +3172,10 @@ mod range_warm_start_determinism {
         )
         .expect("warm-start FCF");
         setup_warm.replace_fcf(warm_fcf);
-        setup_warm
-            .set_start_iteration(u64::from(checkpoint.metadata.producer.completed_iterations));
+        setup_warm.set_resume_point(
+            u64::from(checkpoint.metadata.producer.completed_iterations),
+            checkpoint.metadata.producer.lower_bound_history.clone(),
+        );
 
         let mut solver_warm = ActiveSolver::new().expect("ActiveSolver::new");
         let warm_outcome = setup_warm

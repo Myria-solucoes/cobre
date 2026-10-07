@@ -2,7 +2,7 @@
   "$defs": {
     "RawBlock": {
       "additionalProperties": false,
-      "description": "Intermediate type for one load block.",
+      "description": "One load block.",
       "properties": {
         "hours": {
           "description": "Block duration in hours. Must be > 0.0.",
@@ -65,7 +65,7 @@
     },
     "RawNode": {
       "additionalProperties": false,
-      "description": "Intermediate type for one policy-graph node.",
+      "description": "One policy-graph node.",
       "properties": {
         "id": {
           "description": "Unique node id, referenced by `transitions` endpoints when `nodes` is declared.",
@@ -138,7 +138,7 @@
     },
     "RawPolicyGraph": {
       "additionalProperties": false,
-      "description": "Intermediate type for the `policy_graph` sub-object.",
+      "description": "The `policy_graph` sub-object.",
       "properties": {
         "annual_discount_rate": {
           "description": "Global annual discount rate. Must be >= 0.0.",
@@ -171,7 +171,7 @@
       "type": "object"
     },
     "RawPolicyGraphType": {
-      "description": "Horizon type discriminator (`stages.json` `policy_graph.type`).\n\nBoth variants parse; `cyclic` is rejected as reserved during conversion\n(see [`convert_policy_graph_type`]), never at parse, so the reserved message\nfires rather than a generic unknown-variant error.",
+      "description": "Horizon type discriminator (`stages.json` `policy_graph.type`).\n\n`cyclic` is reserved: the loader rejects it with a message that says so.",
       "oneOf": [
         {
           "const": "finite_horizon",
@@ -187,7 +187,7 @@
     },
     "RawPreStudyStage": {
       "additionalProperties": false,
-      "description": "Intermediate type for a pre-study stage entry (negative IDs).",
+      "description": "A pre-study stage entry (negative IDs).",
       "properties": {
         "end_date": {
           "description": "End date as ISO 8601 string.",
@@ -240,11 +240,11 @@
           "type": "object"
         }
       ],
-      "description": "Intermediate untagged union for the `risk_measure` field.\n\nThe JSON value can be:\n- A string: `\"expectation\"`\n- An object: `{\"cvar\": {\"alpha\": 0.95, \"lambda\": 0.5}}`\n\n`#[serde(untagged)]` tries each variant in declaration order.\nThe `Expectation` string variant must come first so it is tried before\nthe `CVaR` object variant."
+      "description": "The `risk_measure` value, one of:\n- the string `\"expectation\"`;\n- an object such as `{\"cvar\": {\"alpha\": 0.95, \"lambda\": 0.5}}`."
     },
     "RawSeasonDefinitions": {
       "additionalProperties": false,
-      "description": "Intermediate type for the `season_definitions` sub-object.",
+      "description": "The `season_definitions` sub-object.",
       "properties": {
         "cycle_type": {
           "description": "Cycle type: `\"monthly\"`, `\"weekly\"`, or `\"custom\"`.",
@@ -266,7 +266,7 @@
     },
     "RawSeasonEntry": {
       "additionalProperties": false,
-      "description": "Intermediate type for one season entry.",
+      "description": "One season entry.",
       "properties": {
         "day_end": {
           "default": null,
@@ -324,7 +324,7 @@
     },
     "RawStage": {
       "additionalProperties": false,
-      "description": "Intermediate type for a study stage entry.",
+      "description": "A study stage entry.",
       "properties": {
         "annual_discount_rate_override": {
           "default": null,
@@ -411,7 +411,7 @@
     },
     "RawStateVariables": {
       "additionalProperties": false,
-      "description": "Intermediate type for the `state_variables` sub-object.",
+      "description": "The `state_variables` sub-object.",
       "properties": {
         "inflow_lags": {
           "default": false,
@@ -428,7 +428,7 @@
     },
     "RawTransition": {
       "additionalProperties": false,
-      "description": "Intermediate type for one policy graph transition.",
+      "description": "One policy graph transition.",
       "properties": {
         "annual_discount_rate_override": {
           "default": null,
@@ -465,7 +465,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Top-level intermediate type for `stages.json`.\n\nPrivate — only used during deserialization. Not re-exported.",
+  "description": "Root object of `stages.json`.",
   "properties": {
     "$schema": {
       "description": "`$schema` field — informational, not validated.",
@@ -484,10 +484,6 @@
         "$ref": "#/$defs/RawPreStudyStage"
       },
       "type": "array"
-    },
-    "scenario_source": {
-      "default": null,
-      "description": "Detection field: present when a `stages.json` still contains the old\n`scenario_source` key. `parse_stages` rejects it with a clear migration\nerror directing the user to move the field to `config.json`."
     },
     "season_definitions": {
       "anyOf": [

@@ -276,8 +276,6 @@ pub struct StochasticContext {
     entity_order: Box<[EntityId]>,
     base_seed: u64,
     /// Seed for `OutOfSample` forward-pass noise, independent of `base_seed`.
-    /// `None` means unconfigured; the `ForwardSampler` factory validates
-    /// presence before constructing an `OutOfSample` sampler.
     forward_seed: Option<u64>,
     class_dimensions: ClassDimensions,
     provenance: StochasticProvenance,
@@ -333,7 +331,10 @@ impl StochasticContext {
         self.base_seed
     }
 
-    /// Returns the `OutOfSample` forward-pass noise seed (see `forward_seed`).
+    /// Returns the `OutOfSample` forward-pass noise seed supplied at build time.
+    ///
+    /// The context never reads it; callers pass it to
+    /// [`ForwardSamplerConfig::forward_seed`](crate::ForwardSamplerConfig::forward_seed).
     #[must_use]
     pub fn forward_seed(&self) -> Option<u64> {
         self.forward_seed
@@ -601,18 +602,18 @@ pub fn build_inflow_par(
         .collect();
     let stage_index = stage_id_to_index(&study_stages);
     let hydro_ids: Vec<EntityId> = system.hydros().iter().map(|h| h.id).collect();
-    let cycle_len = system
-        .policy_graph()
-        .season_map
-        .as_ref()
-        .map(|sm| sm.seasons.len());
+    let season_map = system.policy_graph().season_map.as_ref();
 
-    let par_lp =
-        PrecomputedPar::build(system.inflow_models(), &study_stages, &hydro_ids, cycle_len)?;
+    let par_lp = PrecomputedPar::build(
+        system.inflow_models(),
+        system.stages(),
+        &hydro_ids,
+        season_map,
+    )?;
     if inflow_scheme == Some(SamplingScheme::External) {
         let external_models =
             external_ar0_inflow_models(system, &hydro_ids, &study_stages, &stage_index, &par_lp);
-        PrecomputedPar::build(&external_models, &study_stages, &hydro_ids, cycle_len)
+        PrecomputedPar::build(&external_models, system.stages(), &hydro_ids, season_map)
     } else {
         Ok(par_lp)
     }

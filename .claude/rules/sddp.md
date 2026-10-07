@@ -451,6 +451,47 @@ warm start still invokes `reconstruct_basis`), plus
 `run_stage_solve_terminal_static_shape_mismatch_is_treated_as_cold` (the
 node-tag and shape guards each drop to cold), all in `solve/stage_solve.rs`.
 
+### A stored basis records its own cut-row count
+
+Each checkpoint `StageBasis` record carries `num_cut_rows =
+row_status.len() - base_row_count`, the trailing cut rows of the captured basis
+itself. Writing the node's pool count (`populated()`) instead is the
+wrong-but-compiling alternative: it overstates the basis's cut rows, because a
+forward-pass capture precedes that iteration's backward pass, which appends cuts
+to the pool afterwards. `FORMAT_VERSION` 3 marks this meaning. The loader still
+takes the template row count from the current LP (`node_dims`), never from the
+record. Read: `policy/policy_export.rs` (`build_stage_basis_records`). Pinned by
+`build_stage_basis_records_writes_each_basis_own_trailing_cut_row_count`
+(`policy/policy_export.rs`) and
+`exported_basis_records_count_the_cut_rows_each_basis_was_captured_with`
+(`tests/cut_basis.rs`).
+
+The load uses a stored basis for its node only when it fits that node's LP
+exactly. `admit_stored_basis` checks, in order, `found_cols == template_cols`,
+`found_rows == template_rows + num_cut_rows`, and a basic count (column and row
+statuses decoding to `Basic`) equal to `found_rows`. A record that fails is not
+used for its node and the load proceeds: its slot stays `None`, and
+`UnusedStoredBases` owns the one aggregated warning, `stored bases not used: …`.
+The basic count is checked because `reconstruct_basis` assumes it and a deficit
+aborts the run with `BasisShapeMismatch` (`cut/basis_reconstruct.rs`, "Basic-count
+invariant"); `reconstruct_basis` is never called for a dropped node, so the
+append-only pool and slot identity are untouched. The wrong-but-compiling
+alternatives: refusing the load over a basis, which only warm-starts a solve;
+admitting on shape alone, which lets a basic-count deficit reach
+`reconstruct_basis`; and adding a cold retry after `reconstruct_basis` fails,
+which hides a record this rule should have dropped. Read: `policy/policy_load.rs`
+(`build_basis_cache_for_nodes`, `admit_stored_basis`, `StoredBasisLoad`),
+`policy/full_fcf_load.rs` (`check_full_fcf_load`). Pinned by
+`stored_basis_whose_basic_count_differs_from_its_rows_is_dropped` and
+`unused_stored_bases_report_is_independent_of_record_order`
+(`policy/policy_load.rs`),
+`warm_start_skips_a_stored_basis_with_too_few_basic_entries_instead_of_aborting`
+(`tests/cut_basis.rs`),
+`simulation_only_loads_a_policy_with_a_wider_stored_basis_and_warns`
+(`crates/cobre-cli/tests/cli_run.rs`) and
+`test_load_policy_with_a_wider_stored_basis_loads_and_warns_once`
+(`crates/cobre-python/tests/test_policy_load_validation.py`).
+
 ## A stored basis warm-starts only at its own node (node-tag)
 
 A `CapturedBasis` carries the declared `node_id` it was captured at
@@ -488,9 +529,7 @@ Pinned directly by `run_stage_solve_cross_node_stored_basis_is_treated_as_cold`
 drops to cold instead of erroring) and its DCS companion in `cut/dcs.rs`; the
 reproducibility the check protects is pinned by the `opening_order_determinism`
 gate in `tests/mpi_wire.rs` (bitwise `final_lb` across thread and rank shapes).
-The CLP/HiGHS basis-validation asymmetry itself is unpinned by any test;
-recorded in `docs/design/reserved-seams-and-deferred-debt.md`'s deferred-debt
-register.
+The CLP/HiGHS basis-validation asymmetry itself is unpinned by any test.
 
 ### Simulation pool-fill re-tags a shared-pool sibling basis, never pool-matches
 
@@ -505,7 +544,9 @@ WITHOUT weakening the node-tag filter above: the filter still matches `node_id` 
 node exactly, and the re-tag is sound ONLY because same-`pool_id` nodes share one
 frozen template, so a sibling's basis has identical column/cut-row shape and is
 structurally valid at the target leaf. Reuse routes through the tolerant
-slot-identity `reconstruct_basis` path, which re-validates shape.
+slot-identity `reconstruct_basis` path, which re-validates shape. A slot the
+stored-basis admit rule leaves empty is filled the same way, so a dropped
+enumerated leaf may warm from a fitting sibling.
 
 Relaxing the filter to a pool-id match instead of re-tagging — the exact
 wrong-but-compiling alternative the paragraph above forbids — would let a basis
@@ -650,6 +691,37 @@ Read: `training/backward/by_node.rs`
 computation, the `run` swap). Pinned by
 `hardest_first_claim_order_is_result_neutral` in `tests/mpi_wire.rs`
 (hardest-first on vs off, bitwise `final_lb`).
+
+## CVaR weights are the probability floor plus the pure-CVaR allocation
+
+`ρ^{λ,α}[Z] = (1−λ)·E[Z] + λ·CVaR_α[Z]` is realized by one weight kernel in
+`convergence/risk_measure.rs`, the only body behind both
+`compute_cvar_weights_into` and `compute_cvar_weights_from_costs_into`:
+`μ_ω = (1−λ)·p_ω + λ·ν_ω`, where `ν` is the pure `CVaR_α` greedy allocation (cap
+`p_ω/α`, total mass 1, openings visited by cost descending then canonical index
+ascending via `sort_unstable_by` on the pre-allocated scratch). Every opening keeps at
+least `(1−λ)·p_ω` and at most `(1−λ)·p_ω + λ·p_ω/α`. The same kernel feeds
+`RiskMeasure::aggregate_cut_into` (every backward scheduler), `evaluate_risk_into`
+(the nested upper bound) and the root lower bound, so LB and UB sit under one measure.
+
+A single greedy whose per-opening cap is `(1−λ)·p_ω + λ·p_ω/α`, with no floor, is
+the wrong-but-compiling alternative: it is a consistent pure `CVaR` at
+`α' = α/(λ + α(1−λ))`, so LB and UB still bracket each other and no bracketing test
+catches it. It agrees with the correct kernel at `λ = 1`, at `λ = 0` and on every
+two-opening fan; only three or more openings with `0 < λ < 1`, where the floor binds,
+discriminate. Switching one consumer without the others opens a spurious LB/UB gap.
+
+Read: `convergence/risk_measure.rs` (the kernel and its two entry points),
+`training/lower_bound.rs` (`lb_aggregate_and_broadcast`),
+`training/forward/stats_aggregation.rs` (`nested_ub_recursion`). Pinned by
+`cvar_weights_match_analytic_table` (equiprobable `10/20/30/40` at `α = λ = 0.5`
+gives `30.0`; the cap-only form gives `31.25`),
+`cvar_weights_match_rockafellar_uryasev_oracle`,
+`cvar_cost_ties_break_by_canonical_index`,
+`cvar_weights_reduce_bitwise_at_lambda_endpoints`,
+`aggregate_cut_into_applies_the_probability_floor`,
+`nested_ub_recursion_applies_the_probability_floor` and
+`lower_bound_aggregation_applies_the_probability_floor`.
 
 ## Joint risk is applied once over the flattened successor×opening vector
 
@@ -1006,26 +1078,32 @@ A checkpoint predating `FORMAT_VERSION` is pinned by
 `boundary_load_rejects_pre_format_version_checkpoint`, also in
 `tests/boundary_self_describing_clean_break.rs`.
 
-### A policy written by another Cobre version is refused first
+### A policy written by other software, or another version, is refused first
 
 The first check of `validate_policy_load`, for every `PolicyLoadKind` and
-ahead of its check matrix, refuses a source whose recorded `cobre_version`
-(the checkpoint's `manifest.bin` `CheckpointManifest` root) is not exactly
-`POLICY_COBRE_VERSION`, the version this build stamps into every checkpoint
-it writes: the trainer's `write_checkpoint` and `cobre.write_policy_checkpoint`,
-which ignores a caller-supplied version. The refusal is
-`SddpError::PolicyVersionMismatch`, naming both versions. Only same-version
-loads are supported; a looser rule (a version range, a `major.minor` match,
-a per-study predicate) is the wrong-but-compiling alternative, since cuts
-and stored bases of another version describe that version's LP. The version
-is checkpoint provenance, not a study-global fact, so reading it from the
-root on a `BoundaryInjection` load does not widen the season-descriptor
-carve-out below. Every step after `validate_policy_load` (the check matrix,
-the boundary rebind, FCF construction and stored-basis decoding) sees only
-same-version checkpoints.
+ahead of its check matrix, refuses a source whose recorded writer (the
+checkpoint's `manifest.bin` `CheckpointManifest` root: `software` and
+`software_version`, read through `CheckpointManifest::written_by`) is not
+exactly `SoftwareIdentity::THIS_BUILD`, the identity this build stamps into
+every checkpoint it writes: the trainer's `write_checkpoint` and
+`cobre.write_policy_checkpoint`, which ignores a caller-supplied identity. A
+checkpoint that recorded no `software` is refused like one from another
+program. The refusal is `SddpError::PolicySoftwareMismatch`, naming both
+writers. Only same-software, same-version loads are supported; a looser rule
+(a version range, a `major.minor` match, a per-study predicate, or comparing
+the version alone) is the wrong-but-compiling alternative, since cuts and
+stored bases from another version or another program describe that writer's
+LP, and a product built from this code can carry the same version string.
+The identity is checkpoint provenance, not a study-global fact, so reading it
+from the root on a `BoundaryInjection` load does not widen the
+season-descriptor carve-out below. Every step after `validate_policy_load`
+(the check matrix, the boundary rebind, FCF construction and stored-basis
+decoding) sees only checkpoints this build wrote.
 
-Read: `policy/policy_load.rs` (`validate_policy_load`, `POLICY_COBRE_VERSION`).
-Pinned by `policy_version_refused_for_every_kind`,
+Read: `policy/policy_load.rs` (`validate_policy_load`) and
+`cobre_io::SoftwareIdentity`. Pinned by `policy_version_refused_for_every_kind`,
+`policy_from_other_software_refused_at_the_same_version`,
+`policy_without_recorded_software_refused`,
 `policy_version_checked_before_the_layout` and
 `policy_version_refused_at_boundary_load` in `policy/policy_load.rs`, and by
 `warm_start_refuses_a_policy_written_by_another_version` and
@@ -1789,6 +1867,35 @@ precomputed `arc_arrival_density` table entry verbatim) is the direct pin for
 the fixed-delivery-density clause itself; the parallel-fill regression (the
 maturing bucket keeps a single `-1.0` regardless of the table's contents)
 pins that `fill_parallel_water_entries` never reads it.
+
+### Maturing transit into a `PreFilling` plant follows the short-circuit target
+
+A plant `h` that is `PreFilling` at the stage its lag-1 bucket `b_1^in(h)`
+matures (in a validated study, a stage at or after its `exit_stage_id`) puts
+that bucket's REAL incoming column onto the rows of
+`resolve_shortcircuit_target(h)`: `-1.0` on the target's row in `Parallel`,
+`-arrival_density[k]` (`resolve_bucket_arrival_density` for `h`) on the
+target's block rows in `Chronological`. `h`'s frozen identity row gets nothing.
+With no non-`PreFilling` downstream (sink) nothing is routed and the water
+leaves at the system outlet. Wrong-but-compiling alternatives: leaving the
+column on no row loses the water and makes `b_1(h)`'s cut coefficient
+structurally zero; routing onto the immediate `downstream(h)` corrupts that
+plant's frozen row when it is itself `PreFilling`; a synthesized coefficient
+instead of the real column breaks the `rc / col_scale` subgradient. The
+`hydro_inflow` generic-constraint term mirrors the same route, counting the
+routed bucket at `arrival_density[blk] / τ(blk)`.
+Read: `lp/builder/entries.rs` (`push_maturing_bucket_coupling`,
+`fill_prefilling_shortcircuit`), `lp/builder/hydro_state.rs`
+(`resolve_shortcircuit_target`), `lp/builder/generic_constraints.rs`
+(`resolve_hydro_inflow`, `push_maturing_bucket_rate`). Pinned by
+`prefilling_plants_maturing_bucket_lands_on_the_short_circuit_target_row`,
+`prefilling_plants_maturing_bucket_spreads_by_arrival_density_on_the_target_block_rows`
+and `prefilling_plants_maturing_bucket_at_a_sink_lands_on_no_row` (entries.rs),
+`exited_plant_transit_reaches_the_next_operating_plant_at_the_hand_derived_cost`
+(hand-derived lower bound 2380 $ and a -10 $/hm³ bucket cut coefficient) and
+`exited_plant_transit_conserves_every_released_hm3` (`filling_commissioning.rs`),
+and `hydro_inflow_rows_count_an_exited_plants_maturing_transit_water_on_a_parallel_stage`
+(`hydro_inflow_travel_time.rs`).
 
 ## Anticipated thermal commitments
 

@@ -1,8 +1,8 @@
 //! Error types for the `cobre-sddp` crate.
 
 use cobre_comm::CommError;
-use cobre_io::LoadError;
 use cobre_io::scenarios::estimation::EstimationError;
+use cobre_io::{LoadError, OutputError, SOFTWARE_NAME, SOFTWARE_VERSION, policy_checkpoint_remedy};
 use cobre_solver::SolverError;
 use cobre_stochastic::StochasticError;
 
@@ -98,40 +98,103 @@ pub enum SddpError {
         expected: u32,
     },
 
-    /// A policy checkpoint was written by a different cobre version than the
-    /// running one; only same-version policies load.
+    /// A policy checkpoint was not written by this build: only checkpoints from
+    /// the same software at the same version load.
     #[error(
-        "policy was written by cobre {policy_version}, but this is cobre {running}; a policy \
-         loads only in the cobre version that wrote it: retrain it, or re-export it, with \
-         cobre {running}",
-        running = crate::POLICY_COBRE_VERSION
+        "policy was written by {writer}, but this is {SOFTWARE_NAME} {SOFTWARE_VERSION}; a \
+         policy loads only in the software and version that wrote it: {remedy}",
+        writer = describe_writer(.policy_software.as_deref(), .policy_version),
+        remedy = policy_checkpoint_remedy()
     )]
-    PolicyVersionMismatch {
-        /// The `cobre_version` the checkpoint's manifest records.
+    PolicySoftwareMismatch {
+        /// The `software` the checkpoint's manifest records, if any.
+        policy_software: Option<String>,
+        /// The `software_version` the checkpoint's manifest records.
         policy_version: String,
     },
 
-    /// A stored basis in a policy checkpoint does not match the dimensions of the
-    /// LP it would warm-start.
-    #[error(
-        "stored basis for node {node_id} does not match its LP: the LP has {expected_cols} \
-         columns and {expected_template_rows} template rows, the stored basis has {found_cols} \
-         columns and {found_rows} rows with {found_cut_rows} recorded cut rows; retrain the policy"
-    )]
-    StoredBasisDimensionMismatch {
-        /// The node the stored basis was captured at.
-        node_id: i32,
-        /// Column count of the node's current LP template.
-        expected_cols: usize,
-        /// Column count the stored basis carries.
-        found_cols: usize,
-        /// Row count of the node's current LP template, before any cut rows.
-        expected_template_rows: usize,
-        /// Row count the stored basis carries.
-        found_rows: usize,
-        /// Cut-row count the checkpoint recorded for this basis.
-        found_cut_rows: usize,
+    /// A checkpoint written during training could not be committed.
+    #[error("checkpoint write at iteration {iteration} failed: {source}")]
+    CheckpointWrite {
+        /// The iteration whose checkpoint failed.
+        iteration: u64,
+        /// The underlying write failure.
+        #[source]
+        source: OutputError,
     },
+}
+
+fn describe_writer(software: Option<&str>, version: &str) -> String {
+    match (software.filter(|name| !name.is_empty()), version) {
+        (Some(name), "") => format!("{name}, which recorded no version"),
+        (Some(name), version) => format!("{name} {version}"),
+        (None, "") => "software that recorded no name or version".to_string(),
+        (None, version) => format!("software that recorded no name, version {version}"),
+    }
+}
+
+/// What a failure means to the person running the study.
+///
+/// Front ends derive their exit codes and exception classes from
+/// [`SddpError::class`], so they cannot keep separate lists of which failures
+/// refuse the user's data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorClass {
+    /// The case data or configuration is refused.
+    InvalidInput,
+    /// A stored policy cannot be used by this build or with this case.
+    IncompatiblePolicy,
+    /// The operating system refused a read or write.
+    Io,
+    /// An LP solve failed.
+    Solver,
+    /// A software or environment fault.
+    Internal,
+}
+
+impl SddpError {
+    /// The [`ErrorClass`] of this error.
+    #[must_use]
+    pub fn class(&self) -> ErrorClass {
+        match self {
+            Self::Stochastic(
+                StochasticError::InvalidParParameters { .. }
+                | StochasticError::InvalidCorrelation { .. }
+                | StochasticError::InsufficientData { .. }
+                | StochasticError::UnsupportedNoiseMethod { .. }
+                | StochasticError::DimensionExceedsCapacity { .. }
+                | StochasticError::MissingScenarioSource { .. },
+            )
+            | Self::Validation(_)
+            | Self::Io(
+                LoadError::ParseError { .. }
+                | LoadError::SchemaError { .. }
+                | LoadError::ConstraintError { .. },
+            )
+            | Self::CheckpointWrite {
+                source: OutputError::ForeignEntry { .. },
+                ..
+            } => ErrorClass::InvalidInput,
+            Self::PolicySoftwareMismatch { .. } => ErrorClass::IncompatiblePolicy,
+            Self::Io(LoadError::IoError { .. })
+            | Self::CheckpointWrite {
+                source: OutputError::IoError { .. },
+                ..
+            } => ErrorClass::Io,
+            Self::Infeasible { .. } | Self::Solver(_) => ErrorClass::Solver,
+            Self::Communication(_)
+            | Self::Simulation(_)
+            | Self::WireVersionMismatch { .. }
+            | Self::BasisShapeMismatch { .. }
+            | Self::CheckpointWrite {
+                source:
+                    OutputError::SerializationError { .. }
+                    | OutputError::SchemaError { .. }
+                    | OutputError::ManifestError { .. },
+                ..
+            } => ErrorClass::Internal,
+        }
+    }
 }
 
 impl From<EstimationError> for SddpError {
@@ -154,9 +217,9 @@ impl From<FphaFittingError> for SddpError {
 
 #[cfg(test)]
 mod tests {
-    use super::SddpError;
+    use super::{ErrorClass, SddpError};
     use cobre_comm::CommError;
-    use cobre_io::LoadError;
+    use cobre_io::{LoadError, OutputError, SOFTWARE_NAME, SOFTWARE_VERSION};
     use cobre_solver::SolverError;
     use cobre_stochastic::StochasticError;
     use std::path::PathBuf;
@@ -241,28 +304,73 @@ mod tests {
     }
 
     #[test]
-    fn display_policy_version_mismatch_names_both_versions() {
-        let err = SddpError::PolicyVersionMismatch {
+    fn display_policy_software_mismatch_names_both_writers() {
+        let err = SddpError::PolicySoftwareMismatch {
+            policy_software: Some("another-program".to_string()),
             policy_version: "0.0.1".to_string(),
         };
         let msg = err.to_string();
-        assert!(msg.contains("0.0.1"), "{msg}");
-        assert!(msg.contains(crate::POLICY_COBRE_VERSION), "{msg}");
+        assert!(msg.contains("another-program 0.0.1"), "{msg}");
+        assert!(
+            msg.contains(&format!("{SOFTWARE_NAME} {SOFTWARE_VERSION}")),
+            "{msg}"
+        );
     }
 
     #[test]
-    fn display_stored_basis_dimension_mismatch_names_node_and_all_dimensions() {
-        let err = SddpError::StoredBasisDimensionMismatch {
-            node_id: 3,
-            expected_cols: 4,
-            found_cols: 5,
-            expected_template_rows: 3,
-            found_rows: 6,
-            found_cut_rows: 2,
+    fn display_policy_software_mismatch_without_a_recorded_name() {
+        let err = SddpError::PolicySoftwareMismatch {
+            policy_software: None,
+            policy_version: "0.0.1".to_string(),
         };
         let msg = err.to_string();
-        for needle in ["3", "4", "5", "6", "2"] {
-            assert!(msg.contains(needle), "{msg}");
+        assert!(msg.contains("recorded no name, version 0.0.1"), "{msg}");
+    }
+
+    #[test]
+    fn display_policy_software_mismatch_tells_the_user_to_rerun_the_producing_program() {
+        let err = SddpError::PolicySoftwareMismatch {
+            policy_software: Some("another-program".to_string()),
+            policy_version: "0.0.1".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "policy was written by another-program 0.0.1, but this is {SOFTWARE_NAME} \
+                 {SOFTWARE_VERSION}; a policy loads only in the software and version that \
+                 wrote it: re-run the program that produced it with {SOFTWARE_NAME} \
+                 {SOFTWARE_VERSION}; for a converted boundary policy, convert it again"
+            )
+        );
+    }
+
+    #[test]
+    fn display_policy_software_mismatch_names_an_unrecorded_name_or_version() {
+        let cases = [
+            (
+                Some("cobre"),
+                "",
+                "policy was written by cobre, which recorded no version, but this is ",
+            ),
+            (
+                None,
+                "",
+                "policy was written by software that recorded no name or version, but this is ",
+            ),
+            (
+                Some(""),
+                "0.0.1",
+                "policy was written by software that recorded no name, version 0.0.1, but this is ",
+            ),
+        ];
+        for (software, version, expected_prefix) in cases {
+            let msg = SddpError::PolicySoftwareMismatch {
+                policy_software: software.map(str::to_string),
+                policy_version: version.to_string(),
+            }
+            .to_string();
+            assert!(msg.starts_with(expected_prefix), "{msg}");
+            assert!(!msg.contains(" ,") && !msg.contains("by  "), "{msg}");
         }
     }
 
@@ -344,16 +452,9 @@ mod tests {
                 encoded: 0,
                 expected: 1,
             },
-            SddpError::PolicyVersionMismatch {
+            SddpError::PolicySoftwareMismatch {
+                policy_software: None,
                 policy_version: "0.0.1".to_string(),
-            },
-            SddpError::StoredBasisDimensionMismatch {
-                node_id: 0,
-                expected_cols: 100,
-                found_cols: 90,
-                expected_template_rows: 50,
-                found_rows: 45,
-                found_cut_rows: 10,
             },
         ];
         for err in &variants {
@@ -384,20 +485,185 @@ mod tests {
                 encoded: 0,
                 expected: 1,
             },
-            SddpError::PolicyVersionMismatch {
+            SddpError::PolicySoftwareMismatch {
+                policy_software: None,
                 policy_version: "0.0.1".to_string(),
-            },
-            SddpError::StoredBasisDimensionMismatch {
-                node_id: 0,
-                expected_cols: 100,
-                found_cols: 90,
-                expected_template_rows: 50,
-                found_rows: 45,
-                found_cut_rows: 10,
             },
         ];
         for err in &variants {
             assert!(!format!("{err:?}").is_empty());
         }
+    }
+
+    #[test]
+    fn stochastic_refusals_classify_as_invalid_input() {
+        let refusals = [
+            StochasticError::InvalidParParameters {
+                hydro_id: 1,
+                stage_id: 2,
+                reason: "bad order".to_string(),
+            },
+            StochasticError::InvalidCorrelation {
+                profile_name: "test".to_string(),
+                reason: "bad value".to_string(),
+            },
+            StochasticError::InsufficientData {
+                context: "no data".to_string(),
+            },
+            StochasticError::UnsupportedNoiseMethod {
+                method: "sobol".to_string(),
+                stage_id: 0,
+                reason: "unsupported".to_string(),
+            },
+            StochasticError::DimensionExceedsCapacity {
+                dim: 10,
+                max_dim: 4,
+                method: "sobol".to_string(),
+            },
+            StochasticError::MissingScenarioSource {
+                scheme: "historical".to_string(),
+                reason: "no history".to_string(),
+            },
+        ];
+        for refusal in refusals {
+            let err = SddpError::Stochastic(refusal);
+            assert_eq!(err.class(), ErrorClass::InvalidInput, "{err}");
+        }
+    }
+
+    #[test]
+    fn every_error_variant_has_its_class() {
+        let table = [
+            (
+                SddpError::Stochastic(StochasticError::InsufficientData {
+                    context: "no data".to_string(),
+                }),
+                ErrorClass::InvalidInput,
+            ),
+            (
+                SddpError::Validation("bad config".to_string()),
+                ErrorClass::InvalidInput,
+            ),
+            (
+                SddpError::Io(LoadError::ParseError {
+                    path: PathBuf::from("config.json"),
+                    message: "unexpected end of input".to_string(),
+                }),
+                ErrorClass::InvalidInput,
+            ),
+            (
+                SddpError::Io(LoadError::SchemaError {
+                    path: PathBuf::from("system/buses.json"),
+                    field: "voltage".to_string(),
+                    message: "must be positive".to_string(),
+                }),
+                ErrorClass::InvalidInput,
+            ),
+            (
+                SddpError::Io(LoadError::ConstraintError {
+                    description: "cycle".to_string(),
+                }),
+                ErrorClass::InvalidInput,
+            ),
+            (
+                SddpError::PolicySoftwareMismatch {
+                    policy_software: None,
+                    policy_version: "0.0.1".to_string(),
+                },
+                ErrorClass::IncompatiblePolicy,
+            ),
+            (
+                SddpError::Io(LoadError::IoError {
+                    path: PathBuf::from("system/hydros.json"),
+                    source: std::io::Error::other("permission denied"),
+                }),
+                ErrorClass::Io,
+            ),
+            (
+                SddpError::Infeasible {
+                    stage: 0,
+                    iteration: 1,
+                    scenario: 0,
+                },
+                ErrorClass::Solver,
+            ),
+            (
+                SddpError::Solver(SolverError::Infeasible),
+                ErrorClass::Solver,
+            ),
+            (
+                SddpError::Communication(CommError::InvalidCommunicator),
+                ErrorClass::Internal,
+            ),
+            (
+                SddpError::Simulation("output channel closed".to_string()),
+                ErrorClass::Internal,
+            ),
+            (
+                SddpError::WireVersionMismatch {
+                    encoded: 0,
+                    expected: 1,
+                },
+                ErrorClass::Internal,
+            ),
+            (
+                SddpError::BasisShapeMismatch {
+                    num_row: 10,
+                    total_basic: 9,
+                    col_basic: 4,
+                    row_basic: 5,
+                },
+                ErrorClass::Internal,
+            ),
+            (
+                SddpError::CheckpointWrite {
+                    iteration: 4,
+                    source: OutputError::IoError {
+                        path: PathBuf::from("out/policy.staging"),
+                        source: std::io::Error::other("no space left on device"),
+                    },
+                },
+                ErrorClass::Io,
+            ),
+            (
+                SddpError::CheckpointWrite {
+                    iteration: 4,
+                    source: OutputError::ForeignEntry {
+                        dir: PathBuf::from("out/policy"),
+                        entry: PathBuf::from("out/policy/notes.txt"),
+                    },
+                },
+                ErrorClass::InvalidInput,
+            ),
+            (
+                SddpError::CheckpointWrite {
+                    iteration: 4,
+                    source: OutputError::SerializationError {
+                        entity: "stage_cuts".to_string(),
+                        message: "buffer too large".to_string(),
+                    },
+                },
+                ErrorClass::Internal,
+            ),
+        ];
+        for (err, class) in table {
+            assert_eq!(err.class(), class, "{err}");
+        }
+    }
+
+    #[test]
+    fn display_checkpoint_write_names_the_iteration_and_the_write_failure() {
+        let err = SddpError::CheckpointWrite {
+            iteration: 7,
+            source: OutputError::IoError {
+                path: PathBuf::from("out/policy.staging"),
+                source: std::io::Error::other("no space left on device"),
+            },
+        };
+        assert_eq!(
+            err.to_string(),
+            "checkpoint write at iteration 7 failed: I/O error accessing out/policy.staging: \
+             no space left on device"
+        );
     }
 }

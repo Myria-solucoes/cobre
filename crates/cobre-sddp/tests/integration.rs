@@ -19,7 +19,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 
 use chrono::NaiveDate;
@@ -42,8 +42,9 @@ use cobre_stochastic::{
 };
 
 use cobre_sddp::{
-    SddpError, SolverProfiles, StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
-    config::{CutManagementConfig, EventConfig, LoopConfig},
+    SddpError, SolverProfiles, StopMask, StoppingMode, StoppingRule, StoppingRuleSet,
+    TrainingConfig,
+    config::{CutManagementConfig, EventConfig, LoopConfig, ShutdownSource},
     context::TrainingContext,
     cut::fcf::FutureCostFunction,
     horizon_mode::HorizonMode,
@@ -51,6 +52,7 @@ use cobre_sddp::{
     inflow_method::InflowNonNegativityMethod,
     lead_time::AnticipatedResolution,
     risk_measure::RiskMeasure,
+    setup::PostTrainingSimulation,
     test_support::{StageContextFixture, equipment_free_geometry, permissive_state_boxes},
     train,
 };
@@ -81,18 +83,21 @@ fn study_dims() -> StudyDimensions {
     StudyDimensions::default()
 }
 
-/// Communicator wrapper that sets `flag` to `true` on the first `allgatherv`
-/// call, simulating a shutdown signal arriving mid-iteration-1. On subsequent
-/// calls it behaves identically to [`StubComm`].
+/// Communicator wrapper that stores `level` into `flag` on the first
+/// `allgatherv` call (iteration 1's forward sync), simulating a shutdown
+/// request arriving mid-iteration-1. On subsequent calls it behaves
+/// identically to [`StubComm`].
 struct ShutdownComm {
-    flag: Arc<AtomicBool>,
+    flag: Arc<AtomicUsize>,
+    level: usize,
     allgatherv_calls: AtomicUsize,
 }
 
 impl ShutdownComm {
-    fn new(flag: Arc<AtomicBool>) -> Self {
+    fn new(flag: Arc<AtomicUsize>, level: usize) -> Self {
         Self {
             flag,
+            level,
             allgatherv_calls: AtomicUsize::new(0),
         }
     }
@@ -108,7 +113,7 @@ impl Communicator for ShutdownComm {
     ) -> Result<(), CommError> {
         recv[..send.len()].clone_from_slice(send);
         if self.allgatherv_calls.fetch_add(1, Ordering::Relaxed) == 0 {
-            self.flag.store(true, Ordering::Relaxed);
+            self.flag.store(self.level, Ordering::Relaxed);
         }
         Ok(())
     }
@@ -550,6 +555,7 @@ fn run_one_deterministic_pass(
                 training_enumerated: false,
                 max_iterations: 10,
                 start_iteration: 0,
+                resume_lower_bound_history: Vec::new(),
                 n_fwd_threads: 1,
                 stopping_rules: iteration_limit(limit),
             },
@@ -561,7 +567,7 @@ fn run_one_deterministic_pass(
             },
             events: EventConfig {
                 event_sender: None,
-                checkpoint_interval: None,
+                periodic_checkpoint: None,
                 shutdown_flag: None,
                 export_states: false,
             },
@@ -610,6 +616,7 @@ fn train_converges_with_mock_solver() {
             training_enumerated: false,
             max_iterations: 10,
             start_iteration: 0,
+            resume_lower_bound_history: Vec::new(),
             n_fwd_threads: 1,
             stopping_rules: iteration_limit(10),
         },
@@ -621,7 +628,7 @@ fn train_converges_with_mock_solver() {
         },
         events: EventConfig {
             event_sender: None,
-            checkpoint_interval: None,
+            periodic_checkpoint: None,
             shutdown_flag: None,
             export_states: false,
         },
@@ -707,6 +714,7 @@ fn train_lb_monotonically_nondecreasing() {
             training_enumerated: false,
             max_iterations: 20,
             start_iteration: 0,
+            resume_lower_bound_history: Vec::new(),
             n_fwd_threads: 1,
             stopping_rules: iteration_limit(6),
         },
@@ -718,7 +726,7 @@ fn train_lb_monotonically_nondecreasing() {
         },
         events: EventConfig {
             event_sender: Some(tx),
-            checkpoint_interval: None,
+            periodic_checkpoint: None,
             shutdown_flag: None,
             export_states: false,
         },
@@ -793,6 +801,7 @@ fn train_emits_correct_event_sequence() {
             training_enumerated: false,
             max_iterations: 10,
             start_iteration: 0,
+            resume_lower_bound_history: Vec::new(),
             n_fwd_threads: 1,
             stopping_rules: iteration_limit(3),
         },
@@ -804,7 +813,7 @@ fn train_emits_correct_event_sequence() {
         },
         events: EventConfig {
             event_sender: Some(tx),
-            checkpoint_interval: None,
+            periodic_checkpoint: None,
             shutdown_flag: None,
             export_states: false,
         },
@@ -893,6 +902,7 @@ fn train_stops_at_iteration_limit() {
                 training_enumerated: false,
                 max_iterations: 10,
                 start_iteration: 0,
+                resume_lower_bound_history: Vec::new(),
                 n_fwd_threads: 1,
                 stopping_rules: iteration_limit(3),
             },
@@ -904,7 +914,7 @@ fn train_stops_at_iteration_limit() {
             },
             events: EventConfig {
                 event_sender: None,
-                checkpoint_interval: None,
+                periodic_checkpoint: None,
                 shutdown_flag: None,
                 export_states: false,
             },
@@ -943,20 +953,24 @@ fn train_stops_at_iteration_limit() {
     assert_eq!(result.result.reason, "iteration_limit");
 }
 
-#[test]
-fn train_stops_on_graceful_shutdown() {
+/// Train under the production rule shape (`[IterationLimit{iteration_limit}]`)
+/// with a shutdown request of `level` stored during iteration 1. Returns the
+/// outcome and the shutdown flag training read.
+fn train_with_a_shutdown_during_iteration_1(
+    iteration_limit: u64,
+    level: usize,
+) -> (cobre_sddp::TrainingOutcome, Arc<AtomicUsize>) {
     let fx = Fixture::new(2);
     let mut fcf = make_fcf(fx.n_stages);
     let mut solver = MockSolver::with_fixed(100.0);
 
-    let shutdown_flag = Arc::new(AtomicBool::new(false));
-    let comm = ShutdownComm::new(Arc::clone(&shutdown_flag));
+    let shutdown_flag = Arc::new(AtomicUsize::new(0));
+    let comm = ShutdownComm::new(Arc::clone(&shutdown_flag), level);
 
     let rules = StoppingRuleSet {
-        rules: vec![
-            StoppingRule::GracefulShutdown,
-            StoppingRule::IterationLimit { limit: 20 },
-        ],
+        rules: vec![StoppingRule::IterationLimit {
+            limit: iteration_limit,
+        }],
         mode: StoppingMode::Any,
     };
 
@@ -964,14 +978,15 @@ fn train_stops_on_graceful_shutdown() {
     let geometry = equipment_free_geometry(&[1usize, 1]);
     let stage_ctx_fixture = StageContextFixture::new(&fx.templates, &state_boxes, &geometry);
     let stage_ctx = stage_ctx_fixture.ctx();
-    let result = train(
+    let outcome = train(
         &mut solver,
         TrainingConfig {
             loop_config: LoopConfig {
                 forward_passes: 1,
                 training_enumerated: false,
-                max_iterations: 20,
+                max_iterations: iteration_limit,
                 start_iteration: 0,
+                resume_lower_bound_history: Vec::new(),
                 n_fwd_threads: 1,
                 stopping_rules: rules,
             },
@@ -983,7 +998,7 @@ fn train_stops_on_graceful_shutdown() {
             },
             events: EventConfig {
                 event_sender: None,
-                checkpoint_interval: None,
+                periodic_checkpoint: None,
                 shutdown_flag: Some(Arc::clone(&shutdown_flag)),
                 export_states: false,
             },
@@ -1017,9 +1032,101 @@ fn train_stops_on_graceful_shutdown() {
         SolverProfiles::default(),
     )
     .unwrap();
+    (outcome, shutdown_flag)
+}
+
+#[test]
+fn train_stops_on_graceful_shutdown() {
+    let (result, _) =
+        train_with_a_shutdown_during_iteration_1(20, ShutdownSource::Cooperative.level());
 
     assert_eq!(result.result.reason, "graceful_shutdown");
-    assert!(result.result.iterations <= 2);
+    assert_eq!(result.result.iterations, 1);
+    assert!(result.result.stop_decision.ended_by_shutdown());
+    assert!(
+        !result
+            .result
+            .stop_decision
+            .mask()
+            .contains(StopMask::SIGNAL)
+    );
+}
+
+#[test]
+fn train_records_a_signal_shutdown_source() {
+    let (result, _) = train_with_a_shutdown_during_iteration_1(20, ShutdownSource::Signal.level());
+
+    assert_eq!(result.result.reason, "graceful_shutdown");
+    assert_eq!(result.result.iterations, 1);
+    assert!(
+        result
+            .result
+            .stop_decision
+            .mask()
+            .contains(StopMask::SIGNAL)
+    );
+}
+
+#[test]
+fn signal_stop_skips_the_configured_simulation() {
+    let (outcome, _) = train_with_a_shutdown_during_iteration_1(20, ShutdownSource::Signal.level());
+    let decision = outcome.result.stop_decision;
+
+    assert_eq!(outcome.result.reason, "graceful_shutdown");
+    assert_eq!(outcome.result.iterations, 1);
+    assert!(decision.mask().contains(StopMask::SIGNAL));
+    assert_eq!(
+        PostTrainingSimulation::resolve(true, &decision, 0),
+        PostTrainingSimulation::SkipAfterSignalStop
+    );
+}
+
+#[test]
+fn coincident_signal_stop_reports_the_rule_and_skips_the_simulation() {
+    let (outcome, _) = train_with_a_shutdown_during_iteration_1(1, ShutdownSource::Signal.level());
+    let decision = outcome.result.stop_decision;
+
+    assert_eq!(outcome.result.reason, "iteration_limit");
+    assert!(decision.configured_stop());
+    assert!(!decision.ended_by_shutdown());
+    assert!(decision.mask().contains(StopMask::SIGNAL));
+    assert_eq!(
+        PostTrainingSimulation::resolve(true, &decision, 0),
+        PostTrainingSimulation::SkipAfterSignalStop
+    );
+}
+
+#[test]
+fn callback_stop_keeps_the_configured_simulation() {
+    let (outcome, _) =
+        train_with_a_shutdown_during_iteration_1(20, ShutdownSource::Cooperative.level());
+    let decision = outcome.result.stop_decision;
+
+    assert_eq!(outcome.result.reason, "graceful_shutdown");
+    assert!(!decision.mask().contains(StopMask::SIGNAL));
+    assert_eq!(
+        PostTrainingSimulation::resolve(true, &decision, 0),
+        PostTrainingSimulation::Run
+    );
+}
+
+#[test]
+fn signal_after_the_final_stop_decision_skips_the_configured_simulation() {
+    let (outcome, shutdown_flag) = train_with_a_shutdown_during_iteration_1(1, 0);
+    let decision = outcome.result.stop_decision;
+    shutdown_flag.fetch_max(ShutdownSource::Signal.level(), Ordering::Relaxed);
+
+    assert_eq!(outcome.result.reason, "iteration_limit");
+    assert!(decision.configured_stop());
+    assert!(!decision.mask().contains(StopMask::SIGNAL));
+    assert_eq!(
+        PostTrainingSimulation::resolve(true, &decision, 0),
+        PostTrainingSimulation::Run
+    );
+    assert_eq!(
+        PostTrainingSimulation::resolve(true, &decision, shutdown_flag.load(Ordering::Relaxed)),
+        PostTrainingSimulation::SkipAfterSignalStop
+    );
 }
 
 #[test]
@@ -1041,6 +1148,7 @@ fn train_propagates_infeasible_error() {
                 training_enumerated: false,
                 max_iterations: 10,
                 start_iteration: 0,
+                resume_lower_bound_history: Vec::new(),
                 n_fwd_threads: 1,
                 stopping_rules: iteration_limit(10),
             },
@@ -1052,7 +1160,7 @@ fn train_propagates_infeasible_error() {
             },
             events: EventConfig {
                 event_sender: None,
-                checkpoint_interval: None,
+                periodic_checkpoint: None,
                 shutdown_flag: None,
                 export_states: false,
             },
@@ -1120,6 +1228,7 @@ fn d17_level1_cut_selection_convergence() {
             training_enumerated: false,
             max_iterations: 10,
             start_iteration: 0,
+            resume_lower_bound_history: Vec::new(),
             n_fwd_threads: 1,
             stopping_rules: iteration_limit(10),
         },
@@ -1134,7 +1243,7 @@ fn d17_level1_cut_selection_convergence() {
         },
         events: EventConfig {
             event_sender: Some(tx),
-            checkpoint_interval: None,
+            periodic_checkpoint: None,
             shutdown_flag: None,
             export_states: false,
         },
@@ -1265,6 +1374,7 @@ fn d17_level1_cut_selection_reconstruction() {
                 training_enumerated: false,
                 max_iterations: 10,
                 start_iteration: 0,
+                resume_lower_bound_history: Vec::new(),
                 n_fwd_threads: 1,
                 stopping_rules: iteration_limit(10),
             },
@@ -1279,7 +1389,7 @@ fn d17_level1_cut_selection_reconstruction() {
             },
             events: EventConfig {
                 event_sender: None,
-                checkpoint_interval: None,
+                periodic_checkpoint: None,
                 shutdown_flag: None,
                 export_states: false,
             },
@@ -1348,6 +1458,7 @@ fn d18_lml1_cut_selection_convergence() {
             training_enumerated: false,
             max_iterations: 10,
             start_iteration: 0,
+            resume_lower_bound_history: Vec::new(),
             n_fwd_threads: 1,
             stopping_rules: iteration_limit(10),
         },
@@ -1362,7 +1473,7 @@ fn d18_lml1_cut_selection_convergence() {
         },
         events: EventConfig {
             event_sender: Some(tx),
-            checkpoint_interval: None,
+            periodic_checkpoint: None,
             shutdown_flag: None,
             export_states: false,
         },
@@ -1538,6 +1649,7 @@ fn frozen_backward_pass_smoke_test() {
                 training_enumerated: false,
                 max_iterations: n_iter,
                 start_iteration: 0,
+                resume_lower_bound_history: Vec::new(),
                 n_fwd_threads: 1,
                 stopping_rules: iteration_limit(n_iter),
             },
@@ -1549,7 +1661,7 @@ fn frozen_backward_pass_smoke_test() {
             },
             events: EventConfig {
                 event_sender: None,
-                checkpoint_interval: None,
+                periodic_checkpoint: None,
                 shutdown_flag: None,
                 export_states: false,
             },

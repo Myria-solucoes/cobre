@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import pathlib
 import shutil
+from typing import Any
 
 import pyarrow.parquet as pq
 import pytest
@@ -93,7 +94,8 @@ def test_training_manifest_structure(run_output: pathlib.Path) -> None:
     """metadata.json has expected top-level keys."""
     manifest = json.loads((run_output / "training" / "metadata.json").read_text())
     assert isinstance(manifest, dict)
-    assert "cobre_version" in manifest
+    assert manifest["software"] == "cobre"
+    assert "software_version" in manifest
     assert "status" in manifest
     assert "convergence" in manifest
 
@@ -250,3 +252,316 @@ def test_d28_convergence_has_iterations(d28_output: pathlib.Path) -> None:
     conv_path = d28_output / "training" / "convergence.parquet"
     table = pq.read_table(conv_path)
     assert len(table) > 0, "convergence.parquet must have at least one row"
+
+
+# ---------------------------------------------------------------------------
+# Phase success markers
+# ---------------------------------------------------------------------------
+
+
+def _run_1dtoy_with_a_directory_at(output_dir: pathlib.Path, blocked: str) -> None:
+    import cobre.errors
+    import cobre.run
+
+    (output_dir / blocked).mkdir(parents=True)
+    with pytest.raises(cobre.errors.CaseIoError):
+        cobre.run.run(VALID_CASE, output_dir=str(output_dir))
+
+
+def test_run_writes_no_training_marker_when_the_last_training_write_fails(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A failed training write leaves no training/_SUCCESS beside the files written before it."""
+    _run_1dtoy_with_a_directory_at(tmp_path, "training/solver/retry_histogram.parquet.tmp")
+
+    assert (tmp_path / "training" / "metadata.json").is_file()
+    assert not (tmp_path / "training" / "_SUCCESS").exists()
+
+
+def test_run_writes_no_simulation_marker_when_the_last_simulation_write_fails(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A failed simulation metadata write leaves no simulation/_SUCCESS."""
+    _run_1dtoy_with_a_directory_at(tmp_path, "simulation/metadata.json.tmp")
+
+    assert not (tmp_path / "simulation" / "_SUCCESS").exists()
+    assert not (tmp_path / "simulation" / "metadata.json").exists()
+    assert (tmp_path / "simulation" / "scenario_summary.parquet").is_file()
+    assert (tmp_path / "training" / "_SUCCESS").is_file()
+
+
+def _seed_empty_markers(output_dir: pathlib.Path, *phases: str) -> None:
+    for phase in phases:
+        (output_dir / phase).mkdir(parents=True, exist_ok=True)
+        (output_dir / phase / "_SUCCESS").touch()
+
+
+def _marker_states(output_dir: pathlib.Path) -> tuple[bool, bool]:
+    return (
+        (output_dir / "training" / "_SUCCESS").exists(),
+        (output_dir / "simulation" / "_SUCCESS").exists(),
+    )
+
+
+def test_run_clears_stale_markers_before_training(tmp_path: pathlib.Path) -> None:
+    """A run into a reused directory shows neither stale marker while it trains."""
+    import cobre.run
+
+    _seed_empty_markers(tmp_path, "training", "simulation")
+    observed: list[tuple[bool, bool]] = []
+
+    def on_iteration(_event: dict[str, Any]) -> None:
+        observed.append(_marker_states(tmp_path))
+
+    cobre.run.run(VALID_CASE, output_dir=str(tmp_path), on_iteration=on_iteration)
+
+    assert observed, "on_iteration was never called"
+    assert set(observed) == {(False, False)}
+    assert _marker_states(tmp_path) == (True, True)
+
+
+def test_simulate_clears_stale_marker_before_its_first_write(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A simulate() whose first write fails leaves no stale simulation/_SUCCESS."""
+    import cobre
+    import cobre.errors
+
+    study = cobre.Study(VALID_CASE, output_dir=str(tmp_path / "trained"))
+    policy = study.train()
+    target = tmp_path / "target"
+    _seed_empty_markers(target, "simulation")
+    (target / "simulation" / "costs").touch()
+
+    with pytest.raises(cobre.errors.CobreError):
+        study.simulate(policy, output_dir=str(target))
+
+    assert not (target / "simulation" / "_SUCCESS").exists()
+
+
+def test_study_train_clears_only_its_own_marker(tmp_path: pathlib.Path) -> None:
+    """Study.train() hides the stale training marker and keeps the simulation one."""
+    import cobre
+
+    _seed_empty_markers(tmp_path, "training", "simulation")
+    study = cobre.Study(VALID_CASE, output_dir=str(tmp_path))
+    assert _marker_states(tmp_path) == (True, True)
+    observed: list[tuple[bool, bool]] = []
+
+    def on_iteration(_event: dict[str, Any]) -> None:
+        observed.append(_marker_states(tmp_path))
+
+    study.train(on_iteration=on_iteration)
+
+    assert observed, "on_iteration was never called"
+    assert set(observed) == {(False, True)}
+    assert _marker_states(tmp_path) == (True, True)
+
+
+def test_load_policy_then_simulate_elsewhere_keeps_the_trained_markers(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Loading a policy from X and simulating into Y leaves X's markers in place."""
+    import cobre
+    import cobre.results
+    import cobre.run
+
+    trained = tmp_path / "trained"
+    elsewhere = tmp_path / "elsewhere"
+    cobre.run.run(VALID_CASE, output_dir=str(trained))
+
+    study = cobre.Study(VALID_CASE, output_dir=str(trained))
+    policy = study.load_policy()
+    study.simulate(policy, output_dir=str(elsewhere))
+
+    assert _marker_states(trained) == (True, True)
+    assert (elsewhere / "simulation" / "_SUCCESS").is_file()
+    cobre.results.load_results(str(trained))
+
+
+def _seed_file(path: pathlib.Path, content: str = "") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+
+
+def test_run_clears_stale_simulation_outputs_before_training(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A run into a reused directory shows no earlier simulation output while it trains."""
+    import cobre.run
+
+    sim = tmp_path / "simulation"
+    stale = {
+        sim / "costs" / "scenario_id=9999" / "data.parquet": "",
+        sim / "solver" / "iterations.parquet": "stale",
+        sim / "paths.parquet": "stale",
+        sim / "metadata.json": "{}",
+    }
+    for path, content in stale.items():
+        _seed_file(path, content)
+    _seed_file(sim / "solver" / "stale.txt")
+    observed: list[tuple[bool, ...]] = []
+
+    def on_iteration(_event: dict[str, Any]) -> None:
+        observed.append(tuple(path.exists() for path in stale))
+
+    cobre.run.run(VALID_CASE, output_dir=str(tmp_path), on_iteration=on_iteration)
+
+    assert observed, "on_iteration was never called"
+    assert set(observed) == {(False, False, False, False)}
+    assert (sim / "costs" / "scenario_id=0000" / "data.parquet").is_file()
+    assert (sim / "solver" / "stale.txt").is_file()
+    assert (sim / "_SUCCESS").is_file()
+    pq.read_table(sim / "paths.parquet")
+    pq.read_table(sim / "solver" / "iterations.parquet")
+
+
+def test_simulate_clears_stale_outputs_before_writing(tmp_path: pathlib.Path) -> None:
+    """simulate() into a reused directory drops earlier partitions and keeps foreign files."""
+    import cobre
+
+    study = cobre.Study(VALID_CASE, output_dir=str(tmp_path / "trained"))
+    policy = study.train()
+    target = tmp_path / "target"
+    sim = target / "simulation"
+    _seed_file(sim / "costs" / "scenario_id=9999" / "data.parquet")
+    _seed_file(sim / "pumping_stations" / "scenario_id=0000" / "data.parquet")
+    _seed_file(sim / "solver" / "stale.txt")
+    _seed_file(sim / "notes.txt")
+
+    study.simulate(policy, output_dir=str(target))
+
+    assert not (sim / "costs" / "scenario_id=9999").exists()
+    assert not (sim / "pumping_stations").exists()
+    for kept in (
+        "costs/scenario_id=0000/data.parquet",
+        "solver/stale.txt",
+        "notes.txt",
+        "_SUCCESS",
+    ):
+        assert (sim / kept).is_file(), f"simulation/{kept} must exist"
+
+
+# ---------------------------------------------------------------------------
+# Conditional training outputs
+# ---------------------------------------------------------------------------
+
+# The conditional training outputs 1dtoy never writes.
+_STALE_CONDITIONAL_TRAINING_OUTPUTS = (
+    "training/cut_selection/iterations.parquet",
+    "hydro_models/fpha_hyperplanes.parquet",
+    "hydro_models/evaporation_models.parquet",
+    "hydro_models/fpha_deviation_points.parquet",
+    "generic_constraints/resolved_echo.parquet",
+    "anticipated/fixed_deliveries.parquet",
+)
+
+
+def _rewrite_config(case_dir: pathlib.Path, edit: Any) -> None:
+    config_path = case_dir / "config.json"
+    config = json.loads(config_path.read_text())
+    edit(config)
+    config_path.write_text(json.dumps(config))
+
+
+def test_run_clears_stale_training_outputs_before_training(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A run into a reused directory shows no earlier conditional training output while it trains."""
+    import cobre.run
+
+    stale = [tmp_path / relative for relative in _STALE_CONDITIONAL_TRAINING_OUTPUTS]
+    for path in stale:
+        _seed_file(path, "stale")
+    observed: list[tuple[bool, ...]] = []
+
+    def on_iteration(_event: dict[str, Any]) -> None:
+        observed.append(tuple(path.exists() for path in stale))
+
+    cobre.run.run(VALID_CASE, output_dir=str(tmp_path), on_iteration=on_iteration)
+
+    assert observed, "on_iteration was never called"
+    assert set(observed) == {(False,) * len(stale)}
+    assert (tmp_path / "training" / "_SUCCESS").is_file()
+
+
+def test_study_train_clears_stale_training_outputs(tmp_path: pathlib.Path) -> None:
+    """Study() keeps an earlier run's conditional training outputs; train() removes them."""
+    import cobre
+
+    stale = [
+        tmp_path / "hydro_models" / "fpha_hyperplanes.parquet",
+        tmp_path / "training" / "cut_selection" / "iterations.parquet",
+    ]
+    for path in stale:
+        _seed_file(path, "stale")
+    study = cobre.Study(VALID_CASE, output_dir=str(tmp_path))
+    assert all(path.is_file() for path in stale)
+
+    study.train()
+
+    assert not any(path.exists() for path in stale)
+    assert (tmp_path / "training" / "_SUCCESS").is_file()
+
+
+def test_run_clears_cut_selection_output_after_cut_selection_is_disabled(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A rerun without cut selection leaves no training/cut_selection/ from the first run."""
+    import cobre.run
+
+    case_dir = tmp_path / "case"
+    output_dir = tmp_path / "output"
+    shutil.copytree(VALID_CASE, case_dir)
+
+    def enable_cut_selection(config: dict[str, Any]) -> None:
+        config["training"]["stopping_rules"] = [{"type": "iteration_limit", "limit": 6}]
+        config["training"]["cut_selection"] = {
+            "selection": {"method": "level1", "check_frequency": 2}
+        }
+        config["simulation"]["enabled"] = False
+
+    _rewrite_config(case_dir, enable_cut_selection)
+    cobre.run.run(str(case_dir), output_dir=str(output_dir))
+    assert (output_dir / "training" / "cut_selection" / "iterations.parquet").is_file()
+
+    _rewrite_config(case_dir, lambda config: config["training"].pop("cut_selection"))
+    cobre.run.run(str(case_dir), output_dir=str(output_dir))
+
+    assert (output_dir / "training" / "_SUCCESS").is_file()
+    assert not (output_dir / "training" / "cut_selection").exists()
+
+
+def test_warm_start_rerun_reads_the_policy_the_training_clear_keeps(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A warm-start rerun into the same directory reads the policy the first run wrote."""
+    import cobre.run
+
+    cobre.run.run(VALID_CASE, output_dir=str(tmp_path))
+    cobre.run.run(
+        VALID_CASE,
+        output_dir=str(tmp_path),
+        config_overrides={"policy.mode": "warm_start"},
+    )
+
+    assert (tmp_path / "training" / "_SUCCESS").is_file()
+
+
+def test_simulation_only_run_keeps_training_outputs(tmp_path: pathlib.Path) -> None:
+    """A run with training disabled removes no training output."""
+    import cobre.run
+
+    cobre.run.run(VALID_CASE, output_dir=str(tmp_path))
+    seeded = tmp_path / "hydro_models" / "fpha_hyperplanes.parquet"
+    _seed_file(seeded, "stale")
+
+    cobre.run.run(
+        VALID_CASE,
+        output_dir=str(tmp_path),
+        config_overrides={"training.enabled": False},
+    )
+
+    assert seeded.is_file()
+    assert (tmp_path / "training" / "solver" / "iterations.parquet").is_file()
+    assert (tmp_path / "training" / "_SUCCESS").is_file()

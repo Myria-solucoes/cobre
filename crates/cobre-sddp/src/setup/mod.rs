@@ -72,8 +72,8 @@ pub use node_graph::{
     OpeningSource, StageIdx, Traversal, TypedVec,
 };
 pub use params::{
-    BoundaryStateRequirements, DEFAULT_COST_SCALE_FACTOR, DEFAULT_FORWARD_PASSES,
-    DEFAULT_MAX_ITERATIONS, DEFAULT_SEED, SimulationEnumeratedRequest, StudyParams,
+    BoundaryStateRequirements, DEFAULT_COST_SCALE_FACTOR, DEFAULT_FORWARD_PASSES, DEFAULT_SEED,
+    SimulationEnumeratedRequest, StudyParams,
 };
 pub use scenario_library_set::{PhaseLibraries, ScenarioLibraries};
 pub use solve_inputs::SolveInputs;
@@ -101,7 +101,7 @@ use cobre_stochastic::{
 use crate::{
     InflowNonNegativityMethod,
     block_clock::M3S_TO_HM3,
-    config::{CutManagementConfig, EventParams},
+    config::{CutManagementConfig, EventParams, ShutdownSource},
     cut::FutureCostFunction,
     cut_selection::CutSelectionStrategy,
     energy_conversion::{EnergyConversionSet, build_energy_conversion_set},
@@ -116,10 +116,11 @@ use crate::{
         AnticipatedLocal, AnticipatedPlants, CutStateProjection, HydroCellIndex, HydroSys,
         StateSpace, StudyDimensions, ThermalSys,
     },
+    policy::orchestration::PeriodicCheckpoint,
     risk_measure::{RiskMeasure, uniform_effective_measure},
     simulation::EntityCounts,
     simulation::extraction::TransitSeedArc,
-    stopping_rule::{StoppingRule, StoppingRuleSet},
+    stopping_rule::{StopDecision, StopMask, StoppingRule, StoppingRuleSet},
     time_value::{DeliveryCalendar, TimeValue},
     workspace::CapturedBasis,
 };
@@ -210,10 +211,13 @@ pub struct StudySetup {
 
     /// Pure-data event flags (output-side).
     ///
-    /// Runtime handles (`event_sender`, `shutdown_flag`) and deferred fields
-    /// (`checkpoint_interval`) are excluded and supplied per-call in
-    /// [`StudySetup::train`].
+    /// Runtime handles (`event_sender`, `shutdown_flag`) are excluded and
+    /// supplied per-call in [`StudySetup::train`].
     pub(crate) events: EventParams,
+
+    /// Set by [`StudySetup::enable_periodic_checkpoints`]; every
+    /// [`StudySetup::train`] call writes it on its schedule.
+    pub(crate) periodic_checkpoint: Option<PeriodicCheckpoint>,
 
     /// Resolved backward-pass solver profile (`training.solver.backward`, layered
     /// over the current per-phase constant — see
@@ -403,8 +407,12 @@ impl StudySetup {
             config.training_enumerated,
         )?;
 
-        let (loop_params, simulation_config) =
-            resolve_phase_configs(&node_graph, &config, simulation_profile)?;
+        let (loop_params, simulation_config) = resolve_phase_configs(
+            &node_graph,
+            &config,
+            simulation_profile,
+            stochastic_pipeline::forward_seed_for(simulation_source),
+        )?;
 
         let (fcf, cut_state_layouts) =
             build_future_cost_function(system, &stage_data.state, &node_graph, &loop_params);
@@ -461,7 +469,9 @@ impl StudySetup {
             policy_path: config.policy_path,
             events: EventParams {
                 export_states: config.export_states,
+                checkpoint_schedule: config.checkpoint_schedule,
             },
+            periodic_checkpoint: None,
             backward_profile,
             forward_profile,
             backward_scheduler: config.backward_scheduler,
@@ -484,8 +494,8 @@ impl StudySetup {
 /// pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunPhasePlan {
-    /// Training runs; whether simulation follows is a separate post-training
-    /// check the caller still makes.
+    /// Training runs; [`PostTrainingSimulation::resolve`] decides whether
+    /// simulation follows.
     TrainedThenSimulated,
     /// Training is disabled; simulation runs from a stored policy.
     SimulateFromPolicy,
@@ -525,6 +535,211 @@ mod run_phase_plan_tests {
             RunPhasePlan::SimulateFromPolicy
         );
         assert_eq!(RunPhasePlan::resolve(false, false), RunPhasePlan::Nothing);
+    }
+}
+
+/// What a trained run does about its configured simulation, matched by both
+/// L4 entry points after the training outputs are written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostTrainingSimulation {
+    /// The configured simulation runs.
+    Run,
+    /// A signal stopped the run; the simulation is recorded as partial with no scenario run.
+    SkipAfterSignalStop,
+    /// No simulation was configured.
+    NotRequested,
+}
+
+impl PostTrainingSimulation {
+    /// Resolves the decision from whether simulation was requested, training's
+    /// final stop `decision`, and `post_write_level`, the shutdown level the
+    /// entry point sampled once after writing the training outputs (`0` is no
+    /// request, otherwise a [`ShutdownSource::level`]).
+    ///
+    /// A requested simulation is skipped when [`signal_stop_requested`] holds,
+    /// whatever rule, budget or cooperative request ended training; a
+    /// cooperative request alone keeps the simulation.
+    #[must_use]
+    pub fn resolve(
+        simulate_requested: bool,
+        decision: &StopDecision,
+        post_write_level: usize,
+    ) -> Self {
+        if !simulate_requested {
+            return Self::NotRequested;
+        }
+        if signal_stop_requested(decision, post_write_level) {
+            Self::SkipAfterSignalStop
+        } else {
+            Self::Run
+        }
+    }
+}
+
+/// Whether a signal stopped the run, through the stop decision or the post-write level.
+#[must_use]
+pub fn signal_stop_requested(decision: &StopDecision, post_write_level: usize) -> bool {
+    decision.mask().contains(StopMask::SIGNAL)
+        || ShutdownSource::from_level(post_write_level) == Some(ShutdownSource::Signal)
+}
+
+#[cfg(test)]
+mod post_training_simulation_tests {
+    use super::PostTrainingSimulation::{self, NotRequested, Run, SkipAfterSignalStop};
+    use super::signal_stop_requested;
+    use crate::config::ShutdownSource;
+    use crate::{
+        ConvergenceMonitor, StopDecision, StopMask, StoppingMode, StoppingRule, StoppingRuleSet,
+        SyncResult,
+    };
+
+    fn first_iteration_decision(
+        iteration_limit: u64,
+        iteration_budget: u64,
+        shutdown: Option<ShutdownSource>,
+    ) -> StopDecision {
+        let rules = StoppingRuleSet {
+            rules: vec![StoppingRule::IterationLimit {
+                limit: iteration_limit,
+            }],
+            mode: StoppingMode::Any,
+        };
+        let mut monitor = ConvergenceMonitor::with_iteration_budget(rules, iteration_budget);
+        if let Some(source) = shutdown {
+            monitor.set_shutdown(source);
+        }
+        monitor.update(
+            100.0,
+            &SyncResult {
+                global_ub_mean: 110.0,
+                global_ub_std: 1.0,
+                ci_95_half_width: 0.5,
+                sync_time_ms: 0,
+            },
+            0.0,
+        )
+    }
+
+    #[test]
+    fn post_training_simulation_resolve_truth_table() {
+        let no_stop = first_iteration_decision(100, 100, None);
+        let configured_stop = first_iteration_decision(1, 100, None);
+        let budget_stop = first_iteration_decision(100, 1, None);
+        let cooperative_stop =
+            first_iteration_decision(100, 100, Some(ShutdownSource::Cooperative));
+        let signal_stop = first_iteration_decision(100, 100, Some(ShutdownSource::Signal));
+        let coincident_signal_stop = first_iteration_decision(1, 100, Some(ShutdownSource::Signal));
+
+        assert!(!no_stop.should_stop());
+        assert!(configured_stop.configured_stop());
+        assert!(budget_stop.mask().contains(StopMask::BUDGET_EXHAUSTED));
+        assert!(!budget_stop.configured_stop());
+        assert!(cooperative_stop.ended_by_shutdown());
+        assert!(signal_stop.ended_by_shutdown());
+        assert!(coincident_signal_stop.configured_stop());
+        assert!(coincident_signal_stop.mask().contains(StopMask::SIGNAL));
+
+        let levels = [
+            0,
+            ShutdownSource::Cooperative.level(),
+            ShutdownSource::Signal.level(),
+        ];
+        let cases = [
+            ("no stop", no_stop, [Run, Run, SkipAfterSignalStop]),
+            (
+                "configured stop",
+                configured_stop,
+                [Run, Run, SkipAfterSignalStop],
+            ),
+            ("budget stop", budget_stop, [Run, Run, SkipAfterSignalStop]),
+            (
+                "cooperative shutdown",
+                cooperative_stop,
+                [Run, Run, SkipAfterSignalStop],
+            ),
+            (
+                "signal shutdown",
+                signal_stop,
+                [
+                    SkipAfterSignalStop,
+                    SkipAfterSignalStop,
+                    SkipAfterSignalStop,
+                ],
+            ),
+            (
+                "signal at a configured stop",
+                coincident_signal_stop,
+                [
+                    SkipAfterSignalStop,
+                    SkipAfterSignalStop,
+                    SkipAfterSignalStop,
+                ],
+            ),
+        ];
+        for (name, decision, expected_when_requested) in cases {
+            for (level, expected) in levels.into_iter().zip(expected_when_requested) {
+                assert_eq!(
+                    PostTrainingSimulation::resolve(false, &decision, level),
+                    NotRequested,
+                    "{name}, post-write level {level}, not requested"
+                );
+                assert_eq!(
+                    PostTrainingSimulation::resolve(true, &decision, level),
+                    expected,
+                    "{name}, post-write level {level}, requested"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn signal_stop_requested_truth_table() {
+        let levels = [
+            0,
+            ShutdownSource::Cooperative.level(),
+            ShutdownSource::Signal.level(),
+        ];
+        let cases = [
+            (
+                "no stop",
+                first_iteration_decision(100, 100, None),
+                [false, false, true],
+            ),
+            (
+                "configured stop",
+                first_iteration_decision(1, 100, None),
+                [false, false, true],
+            ),
+            (
+                "budget stop",
+                first_iteration_decision(100, 1, None),
+                [false, false, true],
+            ),
+            (
+                "cooperative shutdown",
+                first_iteration_decision(100, 100, Some(ShutdownSource::Cooperative)),
+                [false, false, true],
+            ),
+            (
+                "signal shutdown",
+                first_iteration_decision(100, 100, Some(ShutdownSource::Signal)),
+                [true, true, true],
+            ),
+            (
+                "signal at a configured stop",
+                first_iteration_decision(1, 100, Some(ShutdownSource::Signal)),
+                [true, true, true],
+            ),
+        ];
+        for (name, decision, expected_per_level) in cases {
+            for (level, expected) in levels.into_iter().zip(expected_per_level) {
+                assert_eq!(
+                    signal_stop_requested(&decision, level),
+                    expected,
+                    "{name}, post-write level {level}"
+                );
+            }
+        }
     }
 }
 
@@ -1437,11 +1652,14 @@ fn build_checked_node_graph(
 /// # Errors
 ///
 /// Propagates [`resolve_enumerated_training_count`]'s and
-/// [`resolve_enumerated_simulation_count`]'s admissibility and overflow errors.
+/// [`resolve_enumerated_simulation_count`]'s admissibility and overflow errors,
+/// and [`max_iterations_from_rules`]'s error for a rule set with no
+/// `IterationLimit` rule.
 fn resolve_phase_configs(
     node_graph: &NodeGraph,
     config: &StudyParams,
     simulation_profile: ActiveProfile,
+    simulation_forward_seed: Option<u64>,
 ) -> Result<(LoopParams, SimulationConfig), SddpError> {
     // Resolves any `enumerated`-declared phase's actual count now that the
     // graph exists — config load could only signal the request, never the
@@ -1463,7 +1681,7 @@ fn resolve_phase_configs(
         SimulationEnumeratedRequest::Enumerated => resolve_enumerated_simulation_count(node_graph)?,
         SimulationEnumeratedRequest::Sampled => config.n_scenarios,
     };
-    let max_iterations = max_iterations_from_rules(&config.stopping_rule_set);
+    let max_iterations = max_iterations_from_rules(&config.stopping_rule_set)?;
 
     Ok((
         LoopParams {
@@ -1472,12 +1690,14 @@ fn resolve_phase_configs(
             training_enumerated: config.training_enumerated,
             max_iterations,
             start_iteration: 0,
+            resume_lower_bound_history: Vec::new(),
             stopping_rules: config.stopping_rule_set.clone(),
         },
         SimulationConfig {
             n_scenarios,
             io_channel_capacity: config.io_channel_capacity,
             profile: simulation_profile,
+            forward_seed: simulation_forward_seed,
         },
     ))
 }
@@ -1920,11 +2140,12 @@ fn assert_external_library_widths(
     Ok(())
 }
 
-/// Return the maximum iteration budget from the stopping rule set.
+/// The run's iteration budget: the largest `IterationLimit` limit. Used for FCF pre-sizing.
 ///
-/// Used for FCF pre-sizing. If no iteration limit is present, returns
-/// [`DEFAULT_MAX_ITERATIONS`].
-fn max_iterations_from_rules(rules: &StoppingRuleSet) -> u64 {
+/// # Errors
+///
+/// Returns [`SddpError::Validation`] when the rule set has no `IterationLimit` rule.
+fn max_iterations_from_rules(rules: &StoppingRuleSet) -> Result<u64, SddpError> {
     rules
         .rules
         .iter()
@@ -1936,7 +2157,12 @@ fn max_iterations_from_rules(rules: &StoppingRuleSet) -> u64 {
             }
         })
         .max()
-        .unwrap_or(DEFAULT_MAX_ITERATIONS)
+        .ok_or_else(|| {
+            SddpError::Validation(
+                "the stopping rule set has no iteration_limit rule; every run needs one for its iteration budget"
+                    .to_string(),
+            )
+        })
 }
 
 /// Build the per-study-stage risk measures from the system's stage risk configs.
@@ -2121,8 +2347,7 @@ fn rule_is_gap(rule: &StoppingRule) -> bool {
         } => true,
         StoppingRule::IterationLimit { .. }
         | StoppingRule::TimeLimit { .. }
-        | StoppingRule::BoundStalling { .. }
-        | StoppingRule::GracefulShutdown => false,
+        | StoppingRule::BoundStalling { .. } => false,
     }
 }
 
