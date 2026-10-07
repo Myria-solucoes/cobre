@@ -39,3 +39,7 @@ python scripts/benchmarks/verify_runtime_018.py --cli target/release/cobre --cas
 
 These checks exercise numerical correctness and persistence. They do not measure
 performance at convergence or replace a platform canary with real decks.
+
+The native ARM64 test link also verifies Qhull archive ordering with GNU ld.
+The wrapper must precede the archive providing its symbols; success with LLD
+on x86_64 alone does not prove this build contract.

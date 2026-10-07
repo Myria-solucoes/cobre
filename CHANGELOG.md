@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Myria runtime
 
+- Link the Qhull wrapper before its static provider, fixing native ARM64 builds
+  with GNU ld. The native release test link is the regression gate.
+
 - Port the Myria runtime implementation onto the official Cobre 0.18 sources,
   retaining native policy format 3, typed validation and graceful interruption.
 - Distinguish policy/output identity as `cobre-myria` / `0.18.0-myria.1`.
