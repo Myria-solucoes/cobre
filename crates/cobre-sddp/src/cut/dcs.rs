@@ -45,6 +45,9 @@ pub struct DcsParams {
     /// Maximum number of cuts added per inner iteration (`>= 1`).
     pub nadic: u32,
 
+    /// Optional ceiling for deterministic batch growth inside one solve.
+    pub adaptive_max_added_per_round: Option<u32>,
+
     /// Violation tolerance for accepting a candidate cut (`> 0`, and at least
     /// the LP dual-feasibility tolerance).
     pub epsilon_viol: f64,
@@ -62,6 +65,7 @@ impl Default for DcsParams {
         Self {
             k1: None,
             k2: 5,
+            adaptive_max_added_per_round: None,
             nadic: 10,
             epsilon_viol: 1e-10,
             start_iteration: 2,
@@ -82,11 +86,13 @@ impl DcsParams {
                 k1,
                 k2,
                 nadic,
+                adaptive_max_added_per_round,
                 epsilon_viol,
                 start_iteration,
             } => Some(Self {
                 k1: *k1,
                 k2: *k2,
+                adaptive_max_added_per_round: *adaptive_max_added_per_round,
                 nadic: *nadic,
                 epsilon_viol: *epsilon_viol,
                 start_iteration: *start_iteration,
@@ -280,7 +286,7 @@ pub fn score_violated_candidates(
         scratch.unscaled_state.push(x_raw);
     }
 
-    for (slot, _intercept, coefficients) in pool.active_cuts() {
+    for (slot, _, _) in pool.active_cuts() {
         if let Some(k1) = params.k1 {
             let age = current_iteration.saturating_sub(pool.metadata(slot).iteration_generated);
             if age >= u64::from(k1) {
@@ -292,25 +298,40 @@ pub fn score_violated_candidates(
             continue;
         }
 
-        scratch.cand_coef_block.extend_from_slice(coefficients);
         #[allow(clippy::cast_possible_truncation)]
         scratch.cand_slots.push(slot as u32);
     }
 
     let k_rows = scratch.cand_slots.len();
-
-    scratch.alpha.resize(k_rows, 0.0);
+    let use_pool_matrix = k_rows.saturating_mul(2) > pool.populated();
+    let rows = if use_pool_matrix {
+        pool.populated()
+    } else {
+        k_rows
+    };
+    let coefficients = if use_pool_matrix {
+        pool.coefficients_prefix()
+    } else {
+        for &slot in &scratch.cand_slots {
+            scratch
+                .cand_coef_block
+                .extend_from_slice(pool.coefficient_row(slot as usize));
+        }
+        &scratch.cand_coef_block
+    };
+    scratch.alpha.resize(rows, 0.0);
     gemm_block(
-        &scratch.cand_coef_block,
+        coefficients,
         &scratch.unscaled_state,
-        k_rows,
+        rows,
         n_state,
         1,
         &mut scratch.alpha,
     );
 
     for (i, &slot) in scratch.cand_slots.iter().enumerate() {
-        let alpha = pool.intercept(slot as usize) + scratch.alpha[i];
+        let row = if use_pool_matrix { slot as usize } else { i };
+        let alpha = pool.intercept(slot as usize) + scratch.alpha[row];
         let v = alpha - theta_raw;
         if v > params.epsilon_viol {
             scratch.violations.push((v, slot));
@@ -319,13 +340,13 @@ pub fn score_violated_candidates(
 
     let violated_count = scratch.violations.len();
 
-    // Descending violation, ascending-slot tie-break (D5): total_cmp, never
-    // partial_cmp().unwrap().
-    scratch
-        .violations
-        .sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
-
     let take = (params.nadic as usize).min(violated_count);
+    let order = |a: &(f64, u32), b: &(f64, u32)| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1));
+    // Slot tie-breaking keeps the selected prefix independent of partition order.
+    if take < violated_count {
+        scratch.violations.select_nth_unstable_by(take, order);
+    }
+    scratch.violations[..take].sort_unstable_by(order);
     out_selected.extend(scratch.violations[..take].iter().map(|&(_, slot)| slot));
 
     violated_count
@@ -637,6 +658,7 @@ pub fn lazy_solve_preloaded<S: SolverInterface>(
         }
     };
 
+    let mut round_params = *params;
     for _ in 0..params.max_inner_iterations {
         let t0 = Instant::now();
         let violated = score_violated_candidates(
@@ -646,7 +668,7 @@ pub fn lazy_solve_preloaded<S: SolverInterface>(
             view.primal,
             col_scale,
             &scratch.row_map,
-            params,
+            &round_params,
             current_iteration,
             &mut scratch.scoring,
             &mut scratch.out_selected,
@@ -674,28 +696,26 @@ pub fn lazy_solve_preloaded<S: SolverInterface>(
             &mut scratch.batch,
         );
         view = solve_mapped(solver, None, ctx)?;
+        if let Some(cap) = params.adaptive_max_added_per_round {
+            round_params.nadic = round_params.nadic.saturating_mul(2).min(cap);
+        }
     }
 
-    // TC fallback (cap hit with violations remaining): add ALL remaining
-    // candidates (effective nadic = ∞) and solve once, preserving exactness.
-    let mut all_params = *params;
-    all_params.nadic = u32::MAX;
-    let t0 = Instant::now();
-    let remaining = score_violated_candidates(
-        pool,
-        state,
-        cut_state,
-        view.primal,
-        col_scale,
-        &scratch.row_map,
-        &all_params,
-        current_iteration,
-        &mut scratch.scoring,
-        &mut scratch.out_selected,
-    );
-    scratch.scoring_time_seconds += t0.elapsed().as_secs_f64();
+    // Nonviolated rows can bind after reoptimization; the fallback loads all eligible rows.
     let _ = view;
-    if remaining > 0 {
+    scratch.out_selected.clear();
+    for (slot, _, _) in pool.active_cuts() {
+        if params.k1.is_some_and(|window| {
+            current_iteration.saturating_sub(pool.metadata(slot).iteration_generated)
+                >= u64::from(window)
+        }) || scratch.row_map.lp_row_for_slot(slot).is_some()
+        {
+            continue;
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        scratch.out_selected.push(slot as u32);
+    }
+    if !scratch.out_selected.is_empty() {
         append_slots_to_lp(
             solver,
             pool,
@@ -802,6 +822,7 @@ mod tests {
             DcsParams {
                 k1: None,
                 k2: 5,
+                adaptive_max_added_per_round: None,
                 nadic: 10,
                 epsilon_viol: 1e-10,
                 start_iteration: 2,
@@ -817,6 +838,7 @@ mod tests {
         let strategy = CutSelectionStrategy::Dynamic {
             k1: Some(20),
             k2: 7,
+            adaptive_max_added_per_round: None,
             nadic: 3,
             epsilon_viol: 1e-9,
             start_iteration: 4,
@@ -828,6 +850,7 @@ mod tests {
             DcsParams {
                 k1: Some(20),
                 k2: 7,
+                adaptive_max_added_per_round: None,
                 nadic: 3,
                 epsilon_viol: 1e-9,
                 start_iteration: 4,
@@ -839,6 +862,7 @@ mod tests {
         let strategy_inf = CutSelectionStrategy::Dynamic {
             k1: None,
             k2: 5,
+            adaptive_max_added_per_round: None,
             nadic: 10,
             epsilon_viol: 1e-10,
             start_iteration: 2,
@@ -1467,12 +1491,8 @@ mod tests {
         );
     }
 
-    /// A scoring pass issues exactly ONE batched GEMM over all `k` eligible
-    /// candidates, not `k` single-row calls. Observed via the gather buffers: all
-    /// `k` candidates are in `cand_slots` / `cand_coef_block` (k_rows × n_state)
-    /// and `alpha` holds exactly `k` activities after the single call.
     #[test]
-    fn batched_scoring_single_gemm_per_pass() {
+    fn dense_scoring_borrows_pool_matrix_without_coefficient_copy() {
         let idx = indexer();
         let mut pool = empty_pool();
         // Three active, non-resident, in-window candidates (k = 3).
@@ -1499,6 +1519,7 @@ mod tests {
         );
 
         let k = 3;
+        assert_eq!(out, vec![2, 0, 1]);
         assert_eq!(scratch.cand_slots.len(), k, "all k candidates gathered");
         assert_eq!(
             scratch.cand_slots,
@@ -1507,8 +1528,8 @@ mod tests {
         );
         assert_eq!(
             scratch.cand_coef_block.len(),
-            k * N_STATE,
-            "coef block is exactly k_rows × n_state — one batched GEMM input"
+            0,
+            "dense scoring borrows the immutable pool matrix"
         );
         assert_eq!(
             scratch.alpha.len(),
@@ -2375,13 +2396,70 @@ mod tests {
         );
     }
 
-    /// max_inner_iterations = 1 forces the TC fallback after one inner add; it
-    /// must terminate and still return the all-cuts-equivalent optimum.
-    ///
-    /// The cap-hit fallback scores the live primal, appends remaining
-    /// violated slots, and solves once to return — preserving the all-cuts
-    /// optimum. The TC path issues initial + one capped add/resolve + the final
-    /// TC solve = 3.
+    #[test]
+    fn fallback_includes_cuts_not_violated_until_reoptimization() {
+        let indexer = lazy_indexer();
+        let mut pool = CutPool::new(16, 1, 16, 0);
+        pool.add_cut(NodeId(0), 0, 0, 2.0, &[-2.0]);
+        pool.add_cut(NodeId(0), 0, 1, 0.0, &[1.0]);
+        let mut core = core_template();
+        core.col_lower[0] = 0.0;
+        core.col_upper[0] = 1.0;
+        core.col_lower[LAZY_THETA_COL] = 0.0;
+        core.objective[0] = 0.5;
+        let mut solver = active_profiled();
+        solver.load_model(&core);
+        let mut scratch = DcsSolveScratch::default();
+        lazy_solve_preloaded(
+            &mut solver,
+            &core,
+            &pool,
+            &indexer,
+            &cut_state(&indexer),
+            &[],
+            None,
+            &[],
+            &lazy_params(1, 0),
+            &mut scratch,
+            ctx(),
+        )
+        .expect("fallback solve");
+        let result = scratch.result_view();
+        assert!((result.objective - 1.0).abs() < 1e-8);
+        assert!((result.primal[0] - 2.0 / 3.0).abs() < 1e-8);
+        assert!(result.primal[LAZY_THETA_COL] + 1e-8 >= result.primal[0]);
+    }
+
+    #[test]
+    fn adaptive_batches_preserve_full_lp_value() {
+        let indexer = lazy_indexer();
+        let pool = make_three_cut_pool();
+        let (expected, _) = solve_all_cuts(&pool, &indexer);
+        for limit in [0, 1, 10] {
+            let mut solver = active_profiled();
+            let core = core_template();
+            solver.load_model(&core);
+            let mut scratch = DcsSolveScratch::default();
+            let mut params = lazy_params(1, limit);
+            params.adaptive_max_added_per_round = Some(8);
+            lazy_solve_preloaded(
+                &mut solver,
+                &core,
+                &pool,
+                &indexer,
+                &cut_state(&indexer),
+                &[],
+                None,
+                &[],
+                &params,
+                &mut scratch,
+                ctx(),
+            )
+            .unwrap();
+            assert!((scratch.result_view().objective - expected).abs() < 1e-8);
+        }
+    }
+
     #[test]
     fn lazy_solve_tc_fallback_terminates() {
         let indexer = lazy_indexer();

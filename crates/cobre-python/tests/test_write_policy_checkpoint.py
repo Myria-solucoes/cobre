@@ -128,8 +128,8 @@ def test_write_policy_checkpoint_stamps_the_running_software(
     )
 
     loaded = cobre.results.load_policy(str(tmp_path))
-    assert loaded["metadata"]["software"] == "cobre"
-    assert loaded["metadata"]["software_version"] == cobre.__version__
+    assert loaded["metadata"]["software"] == "cobre-myria"
+    assert loaded["metadata"]["software_version"] == "0.18.0-myria.1"
 
 
 def test_write_policy_checkpoint_cost_scale_factor_omitted_reads_as_none(

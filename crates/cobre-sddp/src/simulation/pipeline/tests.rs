@@ -1858,6 +1858,7 @@ mod dcs_simulation {
         DcsParams {
             k1: None,
             k2: 2,
+            adaptive_max_added_per_round: None,
             nadic: 10,
             epsilon_viol: 1e-10,
             start_iteration: 2,
@@ -2088,6 +2089,7 @@ mod dcs_simulation {
         let dynamic = CutSelectionStrategy::Dynamic {
             k1: None,
             k2: 5,
+            adaptive_max_added_per_round: None,
             nadic: 10,
             epsilon_viol: 1e-10,
             start_iteration: 2,

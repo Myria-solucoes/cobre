@@ -23,6 +23,7 @@ on:
   # bindings, so platform-specific failures (e.g. a Windows-only test) are
   # caught before a release tag rather than in the post-tag publish. The
   # publish job is gated to tag-push / workflow_dispatch, so PRs never publish.
+      - "!v*-myria.*"
   pull_request:
     paths:
       - "crates/cobre-python/**"

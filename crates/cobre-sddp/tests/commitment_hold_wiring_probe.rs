@@ -173,6 +173,8 @@ fn build_config() -> Config {
             cost_scale_factor: None,
         },
         training: TrainingConfig {
+            forward_schedule: None,
+            backward_selection: None,
             enabled: true,
             tree_seed: Some(42),
             stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 1 }]),

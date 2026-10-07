@@ -323,7 +323,10 @@ fn sampled_trunk_fan_bound_closes_under_by_scenario_and_by_node() {
 
     let mut by_node_setup =
         trunk_fan_setup(T_TRUNK, FAN_K, SAMPLED_FORWARD_PASSES, MAX_ITERATIONS).setup;
-    by_node_setup.set_scheduler(BackwardScheduler::ByNode { block_size: None });
+    by_node_setup.set_scheduler(BackwardScheduler::ByNode {
+        block_size: None,
+        point_block_size: None,
+    });
     let (lb_by_node, ub_by_node, _) = train_and_collect(&mut by_node_setup, 1);
 
     assert!(

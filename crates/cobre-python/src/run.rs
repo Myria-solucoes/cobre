@@ -44,7 +44,7 @@ use crate::errors::{
 use crate::study::resolve_output_dir;
 use cobre_io::LoadError;
 
-use cobre_comm::LocalBackend;
+use cobre_comm::{AffinityPolicy, AffinityReport, LocalBackend, WorkerAffinity};
 use cobre_core::System;
 use cobre_core::TrainingEvent::IterationSummary;
 use cobre_io::Config;
@@ -61,6 +61,7 @@ use cobre_io::OutputContext;
 use cobre_io::PolicyMode::Fresh;
 use cobre_io::PolicyMode::Resume;
 use cobre_io::PolicyMode::WarmStart;
+use cobre_io::RankAffinity;
 use cobre_io::ReportEntry;
 use cobre_io::SetupTimings;
 use cobre_io::SolverStatsRow;
@@ -261,17 +262,69 @@ pub(crate) fn validated_threads(threads: Option<u32>) -> PyResult<Option<u32>> {
 /// silently falling back to an implicit pool.
 pub(crate) fn run_in_scoped_pool<T>(
     threads: Option<u32>,
-    f: impl FnOnce(usize) -> T + Send,
+    cpu_bind: AffinityPolicy,
+    f: impl FnOnce(usize, &RankAffinity) -> T + Send,
 ) -> Result<T, String>
 where
     T: Send,
 {
     let n = resolved_thread_count(threads);
+    let affinity = WorkerAffinity::prepare(cpu_bind, n)
+        .map_err(|e| format!("CPU affinity setup failed: {e}"))?;
+    let worker_affinity = affinity.clone();
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(n)
+        .start_handler(move |worker_index| worker_affinity.bind_worker(worker_index))
         .build()
         .map_err(|e| format!("{INTERNAL_ERROR_PREFIX}: rayon pool construction failed: {e}"))?;
-    Ok(pool.install(|| f(n)))
+    pool.broadcast(|_| {});
+    affinity
+        .verify()
+        .map_err(|e| format!("CPU affinity setup failed: {e}"))?;
+    let rank_affinity = rank_affinity_from_report(affinity.report());
+    Ok(pool.install(|| f(n, &rank_affinity)))
+}
+
+pub(crate) fn rank_affinity_from_report(report: &AffinityReport) -> RankAffinity {
+    RankAffinity {
+        rank: 0,
+        policy: report.policy.as_str().to_string(),
+        online_processing_units: report
+            .online_processing_units
+            .map(|value| u32::try_from(value).unwrap_or(u32::MAX)),
+        visible_processing_units: report
+            .visible_processing_units
+            .map(|value| u32::try_from(value).unwrap_or(u32::MAX)),
+        physical_cores: report
+            .physical_cores
+            .map(|value| u32::try_from(value).unwrap_or(u32::MAX)),
+        numa_nodes: report
+            .numa_nodes
+            .map(|value| u32::try_from(value).unwrap_or(u32::MAX)),
+        visible_cpus: report
+            .visible_cpus
+            .iter()
+            .map(|&cpu| u32::try_from(cpu).unwrap_or(u32::MAX))
+            .collect(),
+        memory_policy: report.memory_policy.clone(),
+        memory_policy_nodes: report
+            .memory_policy_nodes
+            .iter()
+            .map(|&node| u32::try_from(node).unwrap_or(u32::MAX))
+            .collect(),
+        allowed_memory_nodes: report
+            .allowed_memory_nodes
+            .iter()
+            .map(|&node| u32::try_from(node).unwrap_or(u32::MAX))
+            .collect(),
+        memory_discovery_error: report.memory_discovery_error.clone(),
+        worker_cpus: report
+            .worker_cpus
+            .iter()
+            .map(|&cpu| u32::try_from(cpu).unwrap_or(u32::MAX))
+            .collect(),
+        discovery_error: report.discovery_error.clone(),
+    }
 }
 
 pub(crate) fn resolved_thread_count(threads: Option<u32>) -> usize {
@@ -506,8 +559,12 @@ fn drain_training_events(
 
 /// [`DistributionInfo`] for a single-process (non-MPI) run, shared by the
 /// training and simulation `OutputContext` sites.
-fn single_process_distribution(n_threads: usize) -> DistributionInfo {
+fn single_process_distribution(
+    n_threads: usize,
+    affinity: Option<&RankAffinity>,
+) -> DistributionInfo {
     DistributionInfo {
+        rank_affinity: affinity.cloned().into_iter().collect(),
         backend: "local".to_string(),
         world_size: 1,
         ranks_participated: 1,
@@ -534,6 +591,7 @@ pub(crate) fn write_training_outputs(
     setup_timings: &SetupTimings,
     seed: u64,
     n_threads: usize,
+    rank_affinity: &RankAffinity,
 ) -> Result<(), String> {
     write_checkpoint(
         &output_dir.join(&setup.policy_path),
@@ -555,7 +613,7 @@ pub(crate) fn write_training_outputs(
         solver_version: Some(active_solver_version()),
         started_at: training.started_at.clone(),
         completed_at: now_iso8601(),
-        distribution: single_process_distribution(n_threads),
+        distribution: single_process_distribution(n_threads, Some(rank_affinity)),
         setup: Some(setup_timings.clone()),
         // Mirrors the CLI write site so Python and CLI emit the same
         // `production_fit_deviation` section.
@@ -623,6 +681,7 @@ pub(crate) fn run_simulation_phase_py(
     system: &System,
     training_result: &TrainingResult,
     n_threads: usize,
+    rank_affinity: &RankAffinity,
 ) -> Result<SimSummary, PhaseError> {
     remove_success_marker(&output_dir.join("simulation"))
         .map_err(|e| format!("{OUTPUT_WRITE_ERROR_PREFIX}: stale simulation marker: {e}"))?;
@@ -776,7 +835,7 @@ pub(crate) fn run_simulation_phase_py(
         solver_version: Some(active_solver_version()),
         started_at: sim_started_at,
         completed_at: now_iso8601(),
-        distribution: single_process_distribution(n_threads),
+        distribution: single_process_distribution(n_threads, Some(rank_affinity)),
         setup: None,
         // training-only.
         production_fit_deviation: None,
@@ -803,7 +862,7 @@ pub(crate) fn write_skipped_simulation_py(
         solver_version: Some(active_solver_version()),
         started_at: now.clone(),
         completed_at: now,
-        distribution: single_process_distribution(n_threads),
+        distribution: single_process_distribution(n_threads, None),
         setup: None,
         production_fit_deviation: None,
     };
@@ -1138,6 +1197,7 @@ pub(crate) fn apply_training_policy_mode(
 /// reflects what actually ran. `None` and an empty map both reproduce the
 /// no-override path.
 #[allow(clippy::needless_pass_by_value)]
+#[cfg(test)]
 pub(crate) fn run_via_study(
     case_dir: &Path,
     output_dir: PathBuf,
@@ -1145,9 +1205,28 @@ pub(crate) fn run_via_study(
     overrides: Option<Map<String, Value>>,
     on_iteration: Option<Py<PyAny>>,
 ) -> Result<RunSummary, RunError> {
+    run_via_study_with_affinity(
+        case_dir,
+        output_dir,
+        threads,
+        overrides,
+        on_iteration,
+        AffinityPolicy::None,
+    )
+}
+
+pub(crate) fn run_via_study_with_affinity(
+    case_dir: &Path,
+    output_dir: PathBuf,
+    threads: Option<u32>,
+    overrides: Option<Map<String, Value>>,
+    on_iteration: Option<Py<PyAny>>,
+    cpu_bind: AffinityPolicy,
+) -> Result<RunSummary, RunError> {
     use crate::study::Study;
 
     let mut study = Study::new_native(case_dir, Some(output_dir.clone()), threads, overrides)?;
+    study.cpu_bind = cpu_bind;
 
     let should_simulate = study.simulation_enabled();
     // Fixed at Study construction and never mutated by train_native/simulate_native
@@ -1434,7 +1513,7 @@ fn iteration_summary_to_dict<'py>(
 // so the `PathBuf`/`Py<PyAny>` arguments cannot be borrowed at this boundary.
 #[allow(clippy::needless_pass_by_value)]
 #[pyfunction]
-#[pyo3(signature = (case_dir, output_dir=None, threads=None, config_overrides=None, on_iteration=None))]
+#[pyo3(signature = (case_dir, output_dir=None, threads=None, config_overrides=None, on_iteration=None, cpu_bind=None))]
 pub fn run(
     py: Python<'_>,
     case_dir: PathBuf,
@@ -1442,6 +1521,7 @@ pub fn run(
     threads: Option<u32>,
     config_overrides: Option<Bound<'_, PyDict>>,
     on_iteration: Option<Py<PyAny>>,
+    cpu_bind: Option<String>,
 ) -> PyResult<Py<PyAny>> {
     if !case_dir.exists() {
         return Err(PyOSError::new_err(format!(
@@ -1451,6 +1531,11 @@ pub fn run(
     }
 
     let threads = validated_threads(threads)?;
+    let cpu_bind = cpu_bind
+        .as_deref()
+        .unwrap_or("none")
+        .parse::<AffinityPolicy>()
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let resolved_output = resolve_output_dir(&case_dir, output_dir);
 
@@ -1459,7 +1544,14 @@ pub fn run(
         .transpose()?;
 
     let result: Result<RunSummary, RunError> = py.detach(move || {
-        run_via_study(&case_dir, resolved_output, threads, overrides, on_iteration)
+        run_via_study_with_affinity(
+            &case_dir,
+            resolved_output,
+            threads,
+            overrides,
+            on_iteration,
+            cpu_bind,
+        )
     });
 
     match result {
@@ -1535,6 +1627,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
 
+    use cobre_comm::AffinityPolicy;
+    use cobre_io::RankAffinity;
     use cobre_sddp::config::ShutdownSource;
     use cobre_sddp::setup::prepare_stochastic;
     use cobre_sddp::{
@@ -1560,6 +1654,24 @@ mod tests {
             .parent()
             .expect("crates parent")
             .join(relative)
+    }
+
+    fn unbound_rank_affinity() -> RankAffinity {
+        RankAffinity {
+            rank: 0,
+            policy: "none".to_string(),
+            online_processing_units: None,
+            visible_processing_units: None,
+            physical_cores: None,
+            numa_nodes: None,
+            visible_cpus: Vec::new(),
+            memory_policy: None,
+            memory_policy_nodes: Vec::new(),
+            allowed_memory_nodes: Vec::new(),
+            memory_discovery_error: None,
+            worker_cpus: Vec::new(),
+            discovery_error: None,
+        }
     }
 
     /// `build_study_setup` is Python-free, so its happy path can be exercised
@@ -2037,8 +2149,8 @@ mod tests {
     /// requests yield distinct values regardless of call order.
     #[test]
     fn scoped_pool_honors_per_call_thread_count() {
-        let first = run_in_scoped_pool(Some(2), |n| n);
-        let second = run_in_scoped_pool(Some(3), |n| n);
+        let first = run_in_scoped_pool(Some(2), AffinityPolicy::None, |n, _| n);
+        let second = run_in_scoped_pool(Some(3), AffinityPolicy::None, |n, _| n);
 
         assert_eq!(
             first,

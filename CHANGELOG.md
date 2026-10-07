@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Myria runtime
+
+- Port the Myria runtime implementation onto the official Cobre 0.18 sources,
+  retaining native policy format 3, typed validation and graceful interruption.
+- Distinguish policy/output identity as `cobre-myria` / `0.18.0-myria.1`.
+- Regularize only automatically fitted non-stationary PAR coefficients and
+  report repairs through CLI and Python validation. Correct historical season
+  coverage outside the study horizon.
+- Preserve opt-in progressive forward populations, selected backward points,
+  adaptive dynamic cut selection, cross-point warm starts and CPU placement.
+  Exact defaults remain unchanged. Reuse frozen LP matrices with reset solver
+  state, dynamically schedule whole-point work and avoid stable-sort allocation.
+- Exclude unoccupied cut slots and omit invalid cached bases from sparse policy
+  exports. See [Myria runtime](docs/guide/myria-runtime-018.md) and
+  [optimized training](docs/guide/optimized-training.md).
+
+
 ## [0.18.0] - 2026-10-07
 
 ### Added

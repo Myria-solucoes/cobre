@@ -1255,6 +1255,8 @@ pub mod output {
                 cost_scale_factor: None,
             },
             training: TrainingConfig {
+                forward_schedule: None,
+                backward_selection: None,
                 enabled: true,
                 tree_seed: None,
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 10 }]),
@@ -1294,6 +1296,7 @@ pub mod output {
             started_at: "2026-01-17T08:00:00Z".to_string(),
             completed_at: "2026-01-17T12:30:00Z".to_string(),
             distribution: DistributionInfo {
+                rank_affinity: Vec::new(),
                 backend: "local".to_string(),
                 world_size: 1,
                 ranks_participated: 1,
@@ -1344,6 +1347,8 @@ mod tests {
             schema: None,
             modeling: ModelingConfig::default(),
             training: TrainingConfig {
+                forward_schedule: None,
+                backward_selection: None,
                 enabled: true,
                 tree_seed: None,
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 100 }]),

@@ -69,6 +69,7 @@ pub struct CutPool {
     /// Per-slot activity flags. `false` excludes the cut from LP construction and
     /// evaluation; the slot is retained so the layout stays deterministic.
     active: Vec<bool>,
+    occupied: Vec<bool>,
 
     /// High-water mark of populated slots; bounds iteration so trailing
     /// unpopulated slots are skipped.
@@ -153,6 +154,7 @@ impl CutPool {
             intercepts: vec![0.0; capacity],
             metadata: vec![default_meta; capacity],
             active: vec![false; capacity],
+            occupied: vec![false; capacity],
             populated_count: 0,
             capacity,
             state_dimension,
@@ -257,6 +259,7 @@ impl CutPool {
             "add_cut: slot {slot} is already active (double-insert)"
         );
         self.active[slot] = true;
+        self.occupied[slot] = true;
         self.cached_active_count += 1;
         self.metadata[slot] = CutMetadata {
             iteration_generated: iteration,
@@ -421,6 +424,10 @@ impl CutPool {
     #[inline]
     pub fn populated(&self) -> usize {
         self.populated_count
+    }
+
+    pub(crate) fn is_occupied(&self, slot: usize) -> bool {
+        self.occupied[slot]
     }
 
     /// Read a single slot's activity flag.
@@ -854,6 +861,7 @@ impl CutPool {
             intercepts,
             metadata,
             active,
+            occupied: vec![true; capacity],
             populated_count: capacity,
             capacity,
             state_dimension,
@@ -950,6 +958,7 @@ impl CutPool {
             intercepts,
             metadata,
             active,
+            occupied: (0..capacity).map(|i| i < warm_start_count).collect(),
             populated_count: warm_start_count,
             capacity,
             state_dimension,
@@ -1008,6 +1017,7 @@ impl CutPool {
             },
         );
         self.active.resize(new_capacity, false);
+        self.occupied.resize(new_capacity, false);
         self.capacity = new_capacity;
     }
 }

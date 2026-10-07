@@ -395,6 +395,8 @@ fn full_config() -> Config {
             cost_scale_factor: Some(COST_SCALE_FACTOR),
         },
         training: TrainingConfig {
+            forward_schedule: None,
+            backward_selection: None,
             enabled: true,
             tree_seed: Some(42),
             stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {

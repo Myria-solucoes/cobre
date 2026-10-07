@@ -116,6 +116,7 @@ impl StudySetup {
         let training_config = TrainingConfig {
             loop_config: LoopConfig {
                 forward_passes: self.loop_params.forward_passes,
+                forward_schedule: self.loop_params.forward_schedule,
                 training_enumerated: self.loop_params.training_enumerated,
                 max_iterations: self.loop_params.max_iterations,
                 start_iteration: self.loop_params.start_iteration,
@@ -125,6 +126,7 @@ impl StudySetup {
             },
             cut_management: CutManagementConfig {
                 cut_selection: self.inputs.cut_management.cut_selection.clone(),
+                backward_selection: self.inputs.cut_management.backward_selection,
                 budget: self.inputs.cut_management.budget,
                 cut_activity_tolerance: self.inputs.cut_management.cut_activity_tolerance,
                 risk_measures: self.inputs.cut_management.risk_measures.clone(),

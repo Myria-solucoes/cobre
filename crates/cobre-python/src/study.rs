@@ -21,6 +21,7 @@ use pyo3::exceptions::{PyIndexError, PyOSError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
+use cobre_comm::AffinityPolicy;
 use cobre_io::remove_conditional_training_outputs;
 use cobre_io::remove_success_marker;
 use cobre_sddp::policy::full_fcf_load::{
@@ -107,6 +108,8 @@ pub struct Study {
     case_dir: PathBuf,
     /// The requested thread count, stored for later `train`/`simulate` calls.
     threads: Option<u32>,
+    /// Worker CPU-binding policy reused by every scoped pool.
+    pub(crate) cpu_bind: AffinityPolicy,
 }
 
 /// The output of [`Study::train`]: an in-memory trained-policy handle.
@@ -323,6 +326,7 @@ impl Study {
             output_dir: resolved_output,
             case_dir: case_dir.to_path_buf(),
             threads,
+            cpu_bind: AffinityPolicy::None,
         })
     }
 
@@ -364,7 +368,7 @@ impl Study {
         let config = &self.config;
 
         let phase_result: Result<(TrainingPhaseResult, Option<PyErr>), PhaseError> =
-            run_in_scoped_pool(threads, |n| {
+            run_in_scoped_pool(threads, self.cpu_bind, |n, rank_affinity| {
                 remove_success_marker(&output_dir.join("training")).map_err(|e| {
                     format!("{OUTPUT_WRITE_ERROR_PREFIX}: stale training marker: {e}")
                 })?;
@@ -390,6 +394,7 @@ impl Study {
                     &setup_timings,
                     seed,
                     n,
+                    rank_affinity,
                 )?;
 
                 Ok::<_, PhaseError>((training, callback_error))
@@ -462,8 +467,8 @@ impl Study {
         let system = self.system.as_ref();
         let training_result = &policy.training_result;
 
-        run_in_scoped_pool(threads, |n| {
-            run_simulation_phase_py(setup, &out_dir, system, training_result, n)
+        run_in_scoped_pool(threads, self.cpu_bind, |n, rank_affinity| {
+            run_simulation_phase_py(setup, &out_dir, system, training_result, n, rank_affinity)
         })?
     }
 
@@ -488,8 +493,9 @@ impl Study {
     /// `training/model_provenance.json`, `training/hydro_models.json`, and the
     /// stochastic exports when enabled) to `output_dir`.
     ///
-    /// `output_dir` defaults to `case_dir/output` when `None`. `threads` is
-    /// stored for later `train`/`simulate` calls and is not used during load.
+    /// `output_dir` defaults to `case_dir/output` when `None`. `threads` and
+    /// `cpu_bind` are stored for later `train`/`simulate` calls and are not used
+    /// during load.
     /// `config_overrides` is a flat dotted-key mapping (e.g.
     /// `{"training.tree_seed": 7}`) converted under the GIL before the load runs
     /// with the GIL released.
@@ -512,7 +518,7 @@ impl Study {
     /// - Raises `SolverError` (a `RuntimeError`) on any other preprocessing or
     ///   construction failure.
     #[new]
-    #[pyo3(signature = (case_dir, output_dir=None, threads=None, config_overrides=None))]
+    #[pyo3(signature = (case_dir, output_dir=None, threads=None, config_overrides=None, cpu_bind=None))]
     // needless_pass_by_value: PyO3's from-Python extraction hands over owned
     // values, so the `PathBuf`/`Bound` arguments cannot be borrowed here.
     #[allow(clippy::needless_pass_by_value)]
@@ -522,6 +528,7 @@ impl Study {
         output_dir: Option<PathBuf>,
         threads: Option<u32>,
         config_overrides: Option<Bound<'_, PyDict>>,
+        cpu_bind: Option<String>,
     ) -> PyResult<Self> {
         if !case_dir.exists() {
             return Err(PyOSError::new_err(format!(
@@ -531,13 +538,22 @@ impl Study {
         }
 
         let threads = crate::run::validated_threads(threads)?;
+        let cpu_bind = cpu_bind
+            .as_deref()
+            .unwrap_or("none")
+            .parse::<AffinityPolicy>()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
         let overrides = config_overrides
             .map(|dict| pydict_to_json_map(&dict))
             .transpose()?;
 
-        py.detach(|| Self::new_native(&case_dir, output_dir, threads, overrides))
-            .map_err(phase_error_to_pyerr)
+        py.detach(|| {
+            let mut study = Self::new_native(&case_dir, output_dir, threads, overrides)?;
+            study.cpu_bind = cpu_bind;
+            Ok(study)
+        })
+        .map_err(phase_error_to_pyerr)
     }
 
     /// The resolved output directory as a string.

@@ -535,6 +535,7 @@ fn run_programmatic(
     };
 
     let config = StudyParams {
+        backward_selection: None,
         seed: 42,
         forward_passes,
         training_enumerated: false,
@@ -881,6 +882,7 @@ fn run_with_setup(
     };
 
     let config = StudyParams {
+        backward_selection: None,
         seed: 42,
         forward_passes,
         training_enumerated: false,

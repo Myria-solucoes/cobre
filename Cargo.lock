@@ -585,6 +585,8 @@ version = "0.18.0"
 dependencies = [
  "ferrompi",
  "gethostname",
+ "libc",
+ "rayon",
  "thiserror",
 ]
 

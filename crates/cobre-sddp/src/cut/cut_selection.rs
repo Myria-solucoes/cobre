@@ -188,6 +188,8 @@ pub enum CutSelectionStrategy {
         /// Number of most-violated candidate cuts considered per round. Must be
         /// `>= 1`.
         nadic: u32,
+        /// Optional deterministic growth ceiling for row additions.
+        adaptive_max_added_per_round: Option<u32>,
 
         /// Absolute violation tolerance for accepting a candidate cut. Must be
         /// `> 0`.
@@ -342,7 +344,11 @@ impl CutSelectionStrategy {
         }
 
         let eligible: Vec<bool> = (0..populated)
-            .map(|k| k >= warm_start && pool.metadata(k).iteration_generated < current_iteration)
+            .map(|k| {
+                pool.is_occupied(k)
+                    && k >= warm_start
+                    && pool.metadata(k).iteration_generated < current_iteration
+            })
             .collect();
         let n_eligible = eligible.iter().filter(|&&e| e).count();
         if n_eligible < 2 {
@@ -385,7 +391,11 @@ impl CutSelectionStrategy {
                     for (k, &intercept) in intercepts.iter().enumerate().take(populated) {
                         let row = k * m_len;
                         for col in 0..m_len {
-                            v_block_active[row + col] += intercept;
+                            v_block_active[row + col] = if pool.is_occupied(k) {
+                                v_block_active[row + col] + intercept
+                            } else {
+                                f64::NEG_INFINITY
+                            };
                         }
                     }
 
@@ -562,6 +572,7 @@ pub fn parse_cut_selection_config(
             seed_window,
             candidate_recency,
             max_added_per_round,
+            adaptive_max_added_per_round,
             violation_tolerance,
         } => {
             if start_iteration == 0 {
@@ -585,6 +596,9 @@ pub fn parse_cut_selection_config(
                 );
             }
 
+            if adaptive_max_added_per_round.is_some_and(|cap| cap < max_added_per_round) {
+                return Err("adaptive_max_added_per_round must be >= max_added_per_round".into());
+            }
             if violation_tolerance <= 0.0 {
                 return Err(
                     "cut_selection.violation_tolerance must be > 0 for method='dynamic'"
@@ -595,6 +609,7 @@ pub fn parse_cut_selection_config(
             Ok(Some(CutSelectionStrategy::Dynamic {
                 k1: candidate_recency,
                 k2: seed_window,
+                adaptive_max_added_per_round,
                 nadic: max_added_per_round,
                 epsilon_viol: violation_tolerance,
                 start_iteration: u64::from(start_iteration),
@@ -2141,6 +2156,7 @@ mod tests {
                 CutSelectionStrategy::Dynamic {
                     k1: None,
                     k2: 5,
+                    adaptive_max_added_per_round: None,
                     nadic: 10,
                     epsilon_viol,
                     start_iteration: 2,
@@ -2160,6 +2176,7 @@ mod tests {
                 start_iteration: 2,
                 seed_window: 7,
                 candidate_recency: Some(20),
+                adaptive_max_added_per_round: None,
                 max_added_per_round: 3,
                 violation_tolerance: 1e-9,
             }),
@@ -2174,6 +2191,7 @@ mod tests {
                 CutSelectionStrategy::Dynamic {
                     k1: Some(20),
                     k2: 7,
+                    adaptive_max_added_per_round: None,
                     nadic: 3,
                     epsilon_viol,
                     start_iteration: 2,
@@ -2191,6 +2209,7 @@ mod tests {
                 start_iteration: 2,
                 seed_window: 5,
                 candidate_recency: None,
+                adaptive_max_added_per_round: None,
                 max_added_per_round: 10,
                 violation_tolerance: -1.0,
             }),
@@ -2213,6 +2232,7 @@ mod tests {
                 start_iteration: 2,
                 seed_window: 5,
                 candidate_recency: Some(0),
+                adaptive_max_added_per_round: None,
                 max_added_per_round: 10,
                 violation_tolerance: 1e-10,
             }),
@@ -2234,6 +2254,7 @@ mod tests {
                 start_iteration: 5,
                 seed_window: 7,
                 candidate_recency: Some(20),
+                adaptive_max_added_per_round: None,
                 max_added_per_round: 3,
                 violation_tolerance: 1e-9,
             }),
@@ -2248,6 +2269,7 @@ mod tests {
                 CutSelectionStrategy::Dynamic {
                     k1: Some(20),
                     k2: 7,
+                    adaptive_max_added_per_round: None,
                     nadic: 3,
                     epsilon_viol,
                     start_iteration: 5,
@@ -2266,6 +2288,7 @@ mod tests {
                 start_iteration: 0,
                 seed_window: 5,
                 candidate_recency: None,
+                adaptive_max_added_per_round: None,
                 max_added_per_round: 10,
                 violation_tolerance: 1e-10,
             }),
@@ -2287,6 +2310,7 @@ mod tests {
                 start_iteration: 2,
                 seed_window: 5,
                 candidate_recency: None,
+                adaptive_max_added_per_round: None,
                 max_added_per_round: 0,
                 violation_tolerance: 1e-10,
             }),
@@ -2330,6 +2354,7 @@ mod tests {
         let strategy = CutSelectionStrategy::Dynamic {
             k1: None,
             k2: 5,
+            adaptive_max_added_per_round: None,
             nadic: 10,
             epsilon_viol: 1e-10,
             start_iteration: 2,
@@ -2349,6 +2374,7 @@ mod tests {
         let strategy = CutSelectionStrategy::Dynamic {
             k1: None,
             k2: 5,
+            adaptive_max_added_per_round: None,
             nadic: 10,
             epsilon_viol: 1e-10,
             start_iteration: 2,
@@ -2372,5 +2398,25 @@ mod tests {
         let via_select = strategy.select(&pool, &[0.0], 10);
         assert!(via_select.updates.is_empty());
         assert!(via_select.reactivations.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod sparse_tests {
+    use super::*;
+
+    #[test]
+    fn selection_does_not_reactivate_unwritten_zero_cuts() {
+        let mut pool = CutPool::new(12, 1, 4, 0);
+        pool.add_cut(NodeId(0), 1, 0, -1.0, &[0.0]);
+        pool.add_cut(NodeId(0), 2, 0, -2.0, &[0.0]);
+        let strategy = CutSelectionStrategy::Lml1 {
+            check_frequency: 1,
+            tie_tolerance: 1e-10,
+        };
+        let selected = strategy.select_for_stage(&pool, &[0.0], 1, 3, 0);
+        assert!(selected.reactivations.is_empty());
+        assert_eq!(selected.updates, vec![8]);
+        assert!(!selected.updates.contains(&4));
     }
 }

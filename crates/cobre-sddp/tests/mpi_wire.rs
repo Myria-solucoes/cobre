@@ -837,15 +837,13 @@ mod by_node_scheduler_determinism {
     //! `hardest_first_claim_order_is_result_neutral` is the direct hardest-first-on-vs-off gate.
     //! `by_node_degenerates_on_single_opening` and
     //! `by_node_handles_non_uniform_cut_projection` are the two places a genuinely
-    //! executed by-node run (`process_stage_backward_by_node`'s own claim loop, not the
-    //! DCS bypass below) is compared directly against the by-scenario path's `final_lb`: the
+    //! executed by-node run (`process_stage_backward_by_node`'s own claim loop) is compared directly against the by-scenario path's `final_lb`: the
     //! former on a single-opening deterministic case whose resolved
     //! opening-block count is `1` (a by-scenario-equivalent unit), the latter on a
     //! case whose per-stage cut-state projection dimension varies across
-    //! stages. `by_node_falls_back_to_by_scenario_under_active_dcs` also compares
-    //! two labeled runs, but both execute the SAME by-scenario code path
-    //! under active DCS, so it pins the fallback dispatch rather than the by-node scheduler's
-    //! own arithmetic; `by_node_generates_one_cut_per_trial_state` pins cut-count
+    //! stages. `by_node_active_dcs_matches_reference` also compares
+    //! both schedulers numerically under expectation and `CVaR`, while requiring exact
+    //! equality across worker counts for the by-node path; `by_node_generates_one_cut_per_trial_state` pins cut-count
     //! parity; `by_node_populates_backward_wall_ms` pins the telemetry surface.
     //! The scratch arena's no-alloc property is pinned primarily by
     //! `by_node_scratch`'s `by_node_scratch_capacity_stable_across_training`; the 5-way
@@ -903,6 +901,7 @@ mod by_node_scheduler_determinism {
                 start_iteration: 1,
                 seed_window: 5,
                 candidate_recency: None,
+                adaptive_max_added_per_round: Some(40),
                 max_added_per_round: 10,
                 violation_tolerance: 1e-10,
             });
@@ -989,7 +988,13 @@ mod by_node_scheduler_determinism {
     /// `by_node_degenerates_on_single_opening`), so at least one
     /// stage's resolved block count must reach `>= 2`.
     fn assert_has_multi_block_stage(case_dir: &Path) {
-        let probe = fresh_setup(case_dir, BackwardScheduler::ByNode { block_size: None });
+        let probe = fresh_setup(
+            case_dir,
+            BackwardScheduler::ByNode {
+                block_size: None,
+                point_block_size: None,
+            },
+        );
         let tree_view = probe.inputs.stochastic.tree_view();
         let has_multi_block_stage = (0..probe.num_stages())
             .any(|stage| resolved_block_count(tree_view.n_openings(stage)) >= 2);
@@ -1025,7 +1030,13 @@ mod by_node_scheduler_determinism {
         comm: &impl Communicator,
         risk_measures: Option<Vec<RiskMeasure>>,
     ) -> f64 {
-        let mut setup = fresh_setup(case_dir, BackwardScheduler::ByNode { block_size: None });
+        let mut setup = fresh_setup(
+            case_dir,
+            BackwardScheduler::ByNode {
+                block_size: None,
+                point_block_size: None,
+            },
+        );
         if let Some(risk_measures) = risk_measures {
             setup.set_risk_measures(risk_measures);
         }
@@ -1083,8 +1094,14 @@ mod by_node_scheduler_determinism {
     )]
     fn by_node_scheduler_determinism_cvar() {
         let case_dir = fixture_case_dir();
-        let num_stages =
-            fresh_setup(case_dir, BackwardScheduler::ByNode { block_size: None }).num_stages();
+        let num_stages = fresh_setup(
+            case_dir,
+            BackwardScheduler::ByNode {
+                block_size: None,
+                point_block_size: None,
+            },
+        )
+        .num_stages();
         let risk_measures = vec![
             RiskMeasure::CVaR {
                 alpha: 0.5,
@@ -1114,8 +1131,13 @@ mod by_node_scheduler_determinism {
 
         let lb_hardest_first_on = run_shape(case_dir, 4, &stub, None);
 
-        let mut setup_hardest_first_off =
-            fresh_setup(case_dir, BackwardScheduler::ByNode { block_size: None });
+        let mut setup_hardest_first_off = fresh_setup(
+            case_dir,
+            BackwardScheduler::ByNode {
+                block_size: None,
+                point_block_size: None,
+            },
+        );
         setup_hardest_first_off.set_hardest_first_claim_order(false);
         let lb_hardest_first_off = train_final_lb(setup_hardest_first_off, 4, &stub);
 
@@ -1148,7 +1170,13 @@ mod by_node_scheduler_determinism {
         let stub = StubComm;
 
         let lb_by_node = train_final_lb(
-            fresh_setup(case_dir, BackwardScheduler::ByNode { block_size: None }),
+            fresh_setup(
+                case_dir,
+                BackwardScheduler::ByNode {
+                    block_size: None,
+                    point_block_size: None,
+                },
+            ),
             1,
             &stub,
         );
@@ -1187,7 +1215,13 @@ mod by_node_scheduler_determinism {
         let stub = StubComm;
 
         let lb_by_node = train_final_lb(
-            fresh_setup(case_dir, BackwardScheduler::ByNode { block_size: None }),
+            fresh_setup(
+                case_dir,
+                BackwardScheduler::ByNode {
+                    block_size: None,
+                    point_block_size: None,
+                },
+            ),
             1,
             &stub,
         );
@@ -1206,30 +1240,135 @@ mod by_node_scheduler_determinism {
     }
 
     #[test]
+    fn progressive_forward_schedulers_cover_nonuniform_states_and_dcs() {
+        use cobre_io::config::training::TrajectorySchedule;
+        for case_dir in [fixture_case_dir(), non_uniform_cut_projection_case_dir()] {
+            for scheduler in [
+                BackwardScheduler::ByScenario {},
+                BackwardScheduler::ByNode {
+                    block_size: None,
+                    point_block_size: None,
+                },
+                BackwardScheduler::ByNode {
+                    block_size: None,
+                    point_block_size: std::num::NonZeroUsize::new(3),
+                },
+            ] {
+                for dynamic in [false, true] {
+                    let mut reference = None;
+                    for threads in [1, 4] {
+                        let mut setup = fresh_setup_with(case_dir, |config| {
+                            config.training.selection =
+                                Some(cobre_io::config::TrainingSelection::Sampled {
+                                    forward_passes: 4,
+                                });
+                            config.training.stopping_rules =
+                                Some(vec![cobre_io::config::StoppingRuleConfig::IterationLimit {
+                                    limit: 6,
+                                }]);
+                            config.training.parallelism.backward_scheduler = scheduler;
+                            config.training.forward_schedule = Some(TrajectorySchedule {
+                                initial_passes: 1.try_into().unwrap(),
+                                growth_interval: 1.try_into().unwrap(),
+                                full_from_iteration: 3.try_into().unwrap(),
+                            });
+                            if dynamic {
+                                config.training.cut_selection.selection =
+                                    Some(SelectionMethod::Dynamic {
+                                        start_iteration: 1,
+                                        seed_window: 1,
+                                        candidate_recency: None,
+                                        max_added_per_round: 2,
+                                        adaptive_max_added_per_round: Some(8),
+                                        violation_tolerance: 1e-10,
+                                    });
+                            }
+                        });
+                        if case_dir == non_uniform_cut_projection_case_dir() {
+                            let dimensions: std::collections::BTreeSet<_> = setup
+                                .fcf
+                                .pools
+                                .iter()
+                                .map(|pool| pool.state_dimension)
+                                .collect();
+                            assert!(
+                                dimensions.len() > 1,
+                                "fixture must have nonuniform state projections"
+                            );
+                        }
+                        setup.set_risk_measures(vec![
+                            RiskMeasure::CVaR {
+                                alpha: 0.5,
+                                lambda: 0.4
+                            };
+                            setup.num_stages()
+                        ]);
+                        let lb = train_final_lb(setup, threads, &StubComm);
+                        assert!(lb.is_finite());
+                        if let Some(expected) = reference {
+                            assert_eq!(lb.to_bits(), expected);
+                        } else {
+                            reference = Some(lb.to_bits());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     #[cfg_attr(
         not(feature = "slow-tests"),
         ignore = "slow: run with --features slow-tests"
     )]
-    fn by_node_falls_back_to_by_scenario_under_active_dcs() {
+    fn by_node_active_dcs_matches_reference() {
         let case_dir = fixture_case_dir();
         let stub = StubComm;
-
-        let lb_by_node = train_final_lb(
-            fresh_setup_with_active_dcs(case_dir, BackwardScheduler::ByNode { block_size: None }),
-            1,
-            &stub,
-        );
-        let lb_by_scenario = train_final_lb(
-            fresh_setup_with_active_dcs(case_dir, BackwardScheduler::ByScenario {}),
-            1,
-            &stub,
-        );
-
-        assert_eq!(
-            lb_by_node.to_bits(),
-            lb_by_scenario.to_bits(),
-            "by_node must degenerate to by_scenario bit-for-bit under active DCS"
-        );
+        for cvar in [false, true] {
+            let make = |scheduler| {
+                let mut setup = fresh_setup_with_active_dcs(case_dir, scheduler);
+                if cvar {
+                    setup.set_risk_measures(vec![
+                        RiskMeasure::CVaR {
+                            alpha: 0.5,
+                            lambda: 1.0
+                        };
+                        setup.num_stages()
+                    ]);
+                }
+                setup
+            };
+            let lb_by_node = train_final_lb(
+                make(BackwardScheduler::ByNode {
+                    block_size: None,
+                    point_block_size: None,
+                }),
+                1,
+                &stub,
+            );
+            for threads in [2, 4] {
+                let parallel = train_final_lb(
+                    make(BackwardScheduler::ByNode {
+                        block_size: None,
+                        point_block_size: None,
+                    }),
+                    threads,
+                    &stub,
+                );
+                assert_eq!(
+                    parallel.to_bits(),
+                    lb_by_node.to_bits(),
+                    "DCS by-node thread invariance, CVaR={cvar}"
+                );
+            }
+            let reference = train_final_lb(make(BackwardScheduler::ByScenario {}), 1, &stub);
+            // Different block warm chains can choose different valid vertices.
+            // Preserve strict worker invariance above; compare schedulers numerically.
+            assert!(
+                (lb_by_node - reference).abs() <= 1e-8 * reference.abs().max(1.0),
+                "DCS schedulers disagree: {lb_by_node} vs {reference}, CVaR={cvar}"
+            );
+        }
     }
 
     #[test]
@@ -1242,7 +1381,13 @@ mod by_node_scheduler_determinism {
         let stub = StubComm;
 
         let rows_by_node = train_rows_generated(
-            fresh_setup_one_iteration(case_dir, BackwardScheduler::ByNode { block_size: None }),
+            fresh_setup_one_iteration(
+                case_dir,
+                BackwardScheduler::ByNode {
+                    block_size: None,
+                    point_block_size: None,
+                },
+            ),
             &stub,
         );
         let rows_by_scenario = train_rows_generated(
@@ -1269,8 +1414,13 @@ mod by_node_scheduler_determinism {
     fn by_node_populates_backward_wall_ms() {
         let case_dir = fixture_case_dir();
         let stub = StubComm;
-        let mut setup =
-            fresh_setup_one_iteration(case_dir, BackwardScheduler::ByNode { block_size: None });
+        let mut setup = fresh_setup_one_iteration(
+            case_dir,
+            BackwardScheduler::ByNode {
+                block_size: None,
+                point_block_size: None,
+            },
+        );
         let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
         let (event_tx, event_rx) = mpsc::channel::<TrainingEvent>();
         let outcome = setup
@@ -1612,7 +1762,10 @@ mod by_node_scratch {
             &HorizonMode::Finite { num_stages },
         );
 
-        state.set_scheduler(BackwardScheduler::ByNode { block_size: None });
+        state.set_scheduler(BackwardScheduler::ByNode {
+            block_size: None,
+            point_block_size: None,
+        });
 
         let arena = state.by_node_scratch_arena();
         assert_eq!(
@@ -1726,6 +1879,7 @@ mod by_node_scratch {
         );
         state.set_scheduler(BackwardScheduler::ByNode {
             block_size: NonZeroUsize::new(1),
+            point_block_size: None,
         });
         let capacity_after_set_scheduler = state.by_node_scratch_arena_capacity();
         assert!(
@@ -1734,6 +1888,7 @@ mod by_node_scratch {
         );
 
         let mut inputs = BackwardPassInputs {
+            backward_selection: None,
             workspaces: &mut workspace_pool.workspaces,
             basis_store: &mut basis_store,
             ctx: &ctx,
@@ -1851,9 +2006,11 @@ mod by_node_scratch {
         );
         state.set_scheduler(BackwardScheduler::ByNode {
             block_size: NonZeroUsize::new(1),
+            point_block_size: None,
         });
 
         let mut inputs = BackwardPassInputs {
+            backward_selection: None,
             workspaces: &mut workspace_pool.workspaces,
             basis_store: &mut basis_store,
             ctx: &ctx,
@@ -2082,9 +2239,8 @@ mod by_node_k_fan_branching {
     //!   plain `cargo test` and to the `mpiexec` world otherwise). Once a multi-rank
     //!   fan makes the by-node cut slots multi-branching, the node-visit-offset slot
     //!   base keeps them collision-free — this is the gate that exercises it.
-    //! - `by_node_falls_back_to_by_scenario_under_active_dcs_on_fan`: an active DCS
-    //!   iteration on a fan takes the by-scenario path exactly as the by-node path
-    //!   does, bit-for-bit.
+    //! - `by_node_active_dcs_matches_reference_on_fan`: an active DCS
+    //!   iteration on a fan integrates every child in either scheduler.
 
     use cobre_comm::{BackendKind, Communicator, LocalBackend, create_communicator};
     use cobre_io::config::BackwardScheduler;
@@ -2097,7 +2253,10 @@ mod by_node_k_fan_branching {
     const K: usize = 8;
     const FORWARD_PASSES: u32 = 6;
     const MAX_ITERATIONS: u32 = 3;
-    const BY_NODE: BackwardScheduler = BackwardScheduler::ByNode { block_size: None };
+    const BY_NODE: BackwardScheduler = BackwardScheduler::ByNode {
+        block_size: None,
+        point_block_size: None,
+    };
 
     /// Train a fresh by-node-forced K-fan at world size `comm.size()` and
     /// `n_threads`, returning the converged `(final_lb, final_ub, final_ub_std)`.
@@ -2240,15 +2399,13 @@ mod by_node_k_fan_branching {
         );
     }
 
-    /// An active DCS iteration on a fan forces the by-scenario path (the by-node
-    /// frozen-LP load is incompatible with DCS's cut-free lazy core), so a
-    /// by-node-configured and a by-scenario-configured DCS run agree bit-for-bit.
+    /// Active DCS integrates all fan successors in either scheduler.
     #[test]
     #[cfg_attr(
         not(feature = "slow-tests"),
         ignore = "slow: run with --features slow-tests"
     )]
-    fn by_node_falls_back_to_by_scenario_under_active_dcs_on_fan() {
+    fn by_node_active_dcs_matches_reference_on_fan() {
         let stub = StubComm;
 
         let mut by_node = dcs_k_fan_setup(3, 6, 25);
@@ -2276,9 +2433,37 @@ mod by_node_k_fan_branching {
         assert_eq!(
             lb_by_node.to_bits(),
             lb_by_scenario.to_bits(),
-            "on a fan under active DCS, by_node must take the by-scenario path bit-for-bit \
+            "DCS scheduler values must agree on this fan \
              ({lb_by_node} vs {lb_by_scenario})"
         );
+    }
+    #[test]
+    fn cross_point_dcs_fan_is_thread_invariant_and_matches_reference_value() {
+        let run = |points, threads| {
+            let mut fixture = dcs_k_fan_setup(3, 7, 25);
+            fixture.setup.set_scheduler(BackwardScheduler::ByNode {
+                block_size: std::num::NonZeroUsize::new(2),
+                point_block_size: std::num::NonZeroUsize::new(points),
+            });
+            let mut solver = ActiveSolver::new().unwrap();
+            let outcome = fixture
+                .setup
+                .train(
+                    &mut solver,
+                    &StubComm,
+                    threads,
+                    ActiveSolver::new,
+                    None,
+                    None,
+                )
+                .unwrap();
+            assert!(outcome.error.is_none());
+            outcome.result.final_lb
+        };
+        let reference = run(1, 1);
+        let tiled = run(3, 1);
+        assert!((reference - tiled).abs() <= 1e-8 * reference.abs().max(1.0));
+        assert_eq!(tiled.to_bits(), run(3, 4).to_bits());
     }
 }
 
@@ -2782,7 +2967,10 @@ mod non_uniform_branching_projection {
     /// `interior_sibling_generated_fan_value_matches_oracle`'s `k_fan_setup(k, 6,
     /// 25)`.
     const MAX_ITERATIONS_ORACLE: u32 = 25;
-    const BY_NODE: BackwardScheduler = BackwardScheduler::ByNode { block_size: None };
+    const BY_NODE: BackwardScheduler = BackwardScheduler::ByNode {
+        block_size: None,
+        point_block_size: None,
+    };
 
     /// Relative + absolute LP tolerance for the oracle-vs-engine value
     /// comparison, identical to `branching_value_oracle.rs`'s `close` (a value
@@ -3011,7 +3199,7 @@ mod branching_gate_roster {
     //! | By-node-on-branching equivalence | `by_node_k_fan_thread_shape_invariance`, `interior_sibling_generated_fan_by_node_matches_oracle`, `water_binding_external_fan_by_node_matches_extensive_form`, `external_distinct_fan_by_node_matches_by_scenario` | `mpi_wire.rs`, `branching_value_oracle.rs` |
     //! | Rank-shape: genuine 2-rank real MPI | `k_fan_branching_rank_invariance::k_fan_final_lb_bitwise_invariant_across_world_size` | `test_mpi_sync_cuts_invariant.rs` |
     //! | Rank-shape: by-node world-size (real MPI when launched under `mpiexec`, single-rank identity under plain `cargo test`) | `by_node_k_fan_final_lb_bitwise_invariant_across_world_size` | `mpi_wire.rs` |
-    //! | DCS fallback under branching | `by_node_falls_back_to_by_scenario_under_active_dcs_on_fan` | `mpi_wire.rs` |
+    //! | DCS by-node under branching | `by_node_active_dcs_matches_reference_on_fan` | `mpi_wire.rs` |
     //!
     //! # Break-one-obligation verification (real, observed results)
     //!
@@ -3034,4 +3222,116 @@ mod branching_gate_roster {
     //! on the touched production files (`training/backward/by_scenario.rs`,
     //! `training/backward_pass_state.rs`, `training/forward/stats_aggregation.rs`,
     //! `simulation/aggregation.rs`) is empty — no scratch mutation survives.
+}
+
+#[cfg(all(feature = "highs", feature = "test-support"))]
+mod scenario_claim_determinism {
+    use std::path::Path;
+
+    use cobre_io::config::training::{TrajectorySchedule, TrialPointSelection};
+    use cobre_io::config::{
+        BackwardScheduler, SelectionMethod, StoppingRuleConfig, TrainingSelection,
+    };
+    use cobre_sddp::RiskMeasure;
+    use cobre_solver::ActiveSolver;
+
+    use crate::common::{StubComm, fresh_setup_with};
+
+    #[test]
+    fn sparse_progressive_claims_preserve_every_cut_and_solve_count() {
+        for dynamic in [false, true] {
+            let mut reference = None;
+            for workers in [1, 3, 8, 3] {
+                let mut setup = fresh_setup_with(Path::new("../../examples/1dtoy"), |config| {
+                    config.training.selection =
+                        Some(TrainingSelection::Sampled { forward_passes: 7 });
+                    config.training.stopping_rules =
+                        Some(vec![StoppingRuleConfig::IterationLimit { limit: 6 }]);
+                    config.training.parallelism.backward_scheduler =
+                        BackwardScheduler::ByScenario {};
+                    config.training.forward_schedule = Some(TrajectorySchedule {
+                        initial_passes: 2.try_into().unwrap(),
+                        growth_interval: 1.try_into().unwrap(),
+                        full_from_iteration: 3.try_into().unwrap(),
+                    });
+                    config.training.backward_selection = Some(TrialPointSelection {
+                        initial_points: 1.try_into().unwrap(),
+                        exploration_points: 1.try_into().unwrap(),
+                        full_every: 3.try_into().unwrap(),
+                        full_from_iteration: 5.try_into().unwrap(),
+                        deduplicate: false,
+                        audit_relative_tolerance: None,
+                    });
+                    if dynamic {
+                        config.training.cut_selection.selection = Some(SelectionMethod::Dynamic {
+                            start_iteration: 1,
+                            seed_window: 1,
+                            candidate_recency: None,
+                            max_added_per_round: 2,
+                            adaptive_max_added_per_round: Some(8),
+                            violation_tolerance: 1e-10,
+                        });
+                    }
+                });
+                setup.set_risk_measures(vec![
+                    RiskMeasure::CVaR {
+                        alpha: 0.5,
+                        lambda: 0.4
+                    };
+                    setup.num_stages()
+                ]);
+                let mut solver = ActiveSolver::new().unwrap();
+                let outcome = setup
+                    .train(
+                        &mut solver,
+                        &StubComm,
+                        workers,
+                        ActiveSolver::new,
+                        None,
+                        None,
+                    )
+                    .unwrap();
+                assert!(outcome.error.is_none(), "{:?}", outcome.error);
+                let cuts: Vec<_> = setup
+                    .fcf
+                    .pools
+                    .iter()
+                    .map(|pool| {
+                        (
+                            pool.intercepts_prefix()
+                                .iter()
+                                .map(|v| v.to_bits())
+                                .collect::<Vec<_>>(),
+                            pool.coefficients_prefix()
+                                .iter()
+                                .map(|v| v.to_bits())
+                                .collect::<Vec<_>>(),
+                            (0..pool.populated())
+                                .map(|slot| pool.is_active(slot))
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .collect();
+                assert!(cuts.iter().any(|(intercepts, _, _)| !intercepts.is_empty()));
+                let solves: u64 = outcome
+                    .result
+                    .solver_stats_log
+                    .iter()
+                    .map(|entry| entry.delta.lp_solves)
+                    .sum();
+                assert!(solves > 0);
+                let signature = (
+                    outcome.result.final_lb.to_bits(),
+                    outcome.result.final_ub.to_bits(),
+                    cuts,
+                    solves,
+                );
+                if let Some(expected) = &reference {
+                    assert_eq!(&signature, expected, "workers={workers}, dynamic={dynamic}");
+                } else {
+                    reference = Some(signature);
+                }
+            }
+        }
+    }
 }

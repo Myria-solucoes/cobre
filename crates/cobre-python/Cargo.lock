@@ -333,6 +333,7 @@ name = "cobre-comm"
 version = "0.18.0"
 dependencies = [
  "gethostname",
+ "libc",
  "thiserror",
 ]
 

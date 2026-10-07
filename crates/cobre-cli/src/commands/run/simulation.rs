@@ -250,7 +250,12 @@ fn simulation_output_context(
         solver_version: Some(ctx.solver_version.clone()),
         started_at,
         completed_at: now_iso8601(),
-        distribution: build_distribution_info(&ctx.topology, ctx.n_threads, mpi_world_size),
+        distribution: build_distribution_info(
+            &ctx.topology,
+            ctx.n_threads,
+            mpi_world_size,
+            &ctx.rank_affinity,
+        ),
         setup: None,
         production_fit_deviation: None,
     }
@@ -645,6 +650,7 @@ mod tests {
             started_at: "2026-01-01T00:00:00Z".to_string(),
             completed_at: "2026-01-01T00:00:00Z".to_string(),
             distribution: DistributionInfo {
+                rank_affinity: Vec::new(),
                 backend: "local".to_string(),
                 world_size: 1,
                 ranks_participated: 1,

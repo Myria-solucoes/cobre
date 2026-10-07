@@ -1,7 +1,7 @@
 //! Training-phase configuration types for `config.json → training`.
 
 use std::fmt;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -65,6 +65,27 @@ pub struct TrainingConfig {
     /// `sampled` arm; absent is a missing-count load error.
     #[cfg_attr(feature = "schema", schemars(required))]
     pub selection: Option<TrainingSelection>,
+
+    /// Experimental point selection; absent preserves exhaustive point processing.
+    #[serde(default)]
+    pub backward_selection: Option<TrialPointSelection>,
+
+    /// Optional trajectory ramp; absent uses the full count in every iteration.
+    #[serde(default)]
+    pub forward_schedule: Option<TrajectorySchedule>,
+}
+
+/// Geometric trajectory growth with an explicit full-population refinement phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct TrajectorySchedule {
+    /// Trajectories in the first iteration.
+    pub initial_passes: NonZeroU32,
+    /// Iterations between doublings.
+    pub growth_interval: NonZeroU64,
+    /// First absolute iteration using the full configured population.
+    pub full_from_iteration: NonZeroU64,
 }
 
 /// Training-phase scenario selection and its method-specific parameters
@@ -230,6 +251,10 @@ pub enum SelectionMethod {
         /// Maximum rows added per lazy-solve round. Must be `>= 1`. Default `10`.
         #[serde(default = "default_max_added_per_round")]
         max_added_per_round: u32,
+        /// Optional ceiling for doubling row additions after each unsuccessful round.
+        /// Must be at least `max_added_per_round`. Absent keeps fixed batches.
+        #[serde(default)]
+        adaptive_max_added_per_round: Option<u32>,
         /// Violation tolerance for accepting a candidate row. Must be `> 0`.
         /// Default `1e-10`.
         #[serde(default = "default_violation_tolerance")]
@@ -406,6 +431,9 @@ pub enum BackwardScheduler {
         /// `min(|Ω_s|, block_size)`.
         #[serde(default)]
         block_size: Option<NonZeroUsize>,
+        /// Trial points per independent warm-start chain. Absent means one.
+        #[serde(default)]
+        point_block_size: Option<NonZeroUsize>,
     },
 }
 
@@ -590,6 +618,7 @@ mod tests {
                 candidate_recency,
                 max_added_per_round,
                 violation_tolerance,
+                ..
             } => {
                 assert_eq!(*start_iteration, 5);
                 assert_eq!(*seed_window, 0);
@@ -825,14 +854,15 @@ mod tests {
             "selection": { "method": "sampled", "forward_passes": 4 },
             "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
             "parallelism": {
-                "backward_scheduler": { "method": "by_node", "block_size": 4 }
+                "backward_scheduler": { "method": "by_node", "block_size": 4, "point_block_size": 3 }
             }
         }"#;
         let cfg: TrainingConfig = serde_json::from_str(json).unwrap();
         assert_eq!(
             cfg.parallelism.backward_scheduler,
             BackwardScheduler::ByNode {
-                block_size: NonZeroUsize::new(4)
+                block_size: NonZeroUsize::new(4),
+                point_block_size: NonZeroUsize::new(3)
             }
         );
     }
@@ -851,7 +881,10 @@ mod tests {
         let cfg: TrainingConfig = serde_json::from_str(json).unwrap();
         assert_eq!(
             cfg.parallelism.backward_scheduler,
-            BackwardScheduler::ByNode { block_size: None }
+            BackwardScheduler::ByNode {
+                block_size: None,
+                point_block_size: None
+            }
         );
     }
 
@@ -1063,4 +1096,39 @@ mod tests {
             } if (rt - 0.01).abs() < f64::EPSILON
         ));
     }
+    #[test]
+    fn trajectory_schedule_requires_positive_fields_and_rejects_unknown_controls() {
+        let valid = serde_json::json!({"initial_passes": 2, "growth_interval": 3, "full_from_iteration": 8});
+        assert!(serde_json::from_value::<super::TrajectorySchedule>(valid.clone()).is_ok());
+        for field in ["initial_passes", "growth_interval", "full_from_iteration"] {
+            let mut invalid = valid.clone();
+            invalid[field] = serde_json::json!(0);
+            assert!(serde_json::from_value::<super::TrajectorySchedule>(invalid).is_err());
+        }
+        let mut invalid = valid;
+        invalid["unknown"] = serde_json::json!(1);
+        assert!(serde_json::from_value::<super::TrajectorySchedule>(invalid).is_err());
+    }
+}
+
+/// Experimental diverse-point budget with full audit and refinement iterations.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct TrialPointSelection {
+    /// Initial number of diverse representatives per node; increases toward full coverage.
+    pub initial_points: NonZeroUsize,
+    /// Additional pseudo-random representatives from the remaining points.
+    pub exploration_points: NonZeroUsize,
+    /// Process every point at each multiple of this iteration interval.
+    pub full_every: NonZeroUsize,
+    /// Process every point from this absolute iteration onward.
+    pub full_from_iteration: NonZeroUsize,
+    /// Collapse bit-identical complete states within each node and iteration.
+    #[serde(default)]
+    pub deduplicate: bool,
+    /// Grow the next point budget when exploratory rows improve the retained envelope
+    /// by more than this fraction of max(1, absolute row value). Absent disables feedback.
+    #[serde(default)]
+    pub audit_relative_tolerance: Option<f64>,
 }

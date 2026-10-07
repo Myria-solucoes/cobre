@@ -6140,6 +6140,8 @@ mod chronological_telescoping {
                 cost_scale_factor: None,
             },
             training: TrainingConfig {
+                forward_schedule: None,
+                backward_selection: None,
                 enabled: true,
                 tree_seed: Some(42),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
@@ -6919,6 +6921,8 @@ mod season_descriptor_checkpoint_round_trip {
                 cost_scale_factor: None,
             },
             training: TrainingConfig {
+                forward_schedule: None,
+                backward_selection: None,
                 enabled: true,
                 tree_seed: Some(42),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
@@ -7292,6 +7296,8 @@ mod boundary_season_gate_round_trip {
                 cost_scale_factor: None,
             },
             training: TrainingConfig {
+                forward_schedule: None,
+                backward_selection: None,
                 enabled: true,
                 tree_seed: Some(42),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
@@ -7649,6 +7655,8 @@ mod transit_arrival_interval_checkpoint_round_trip {
                 cost_scale_factor: None,
             },
             training: TrainingConfig {
+                forward_schedule: None,
+                backward_selection: None,
                 enabled: true,
                 tree_seed: Some(42),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
@@ -8076,6 +8084,8 @@ mod chronological_attribution {
                 cost_scale_factor: None,
             },
             training: TrainingConfig {
+                forward_schedule: None,
+                backward_selection: None,
                 enabled: true,
                 tree_seed: Some(42),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 1 }]),
@@ -9678,6 +9688,8 @@ mod enumerated_external {
         n_scenarios: u32,
     ) -> StudyParams {
         StudyParams {
+            forward_schedule: None,
+            backward_selection: None,
             seed: 42,
             forward_passes: 1,
             training_enumerated: true,
@@ -9783,8 +9795,10 @@ mod enumerated_external {
     /// LB==UB as the by-scenario path.
     #[test]
     fn enumerated_external_chain_lb_equals_ub_by_node() {
-        let (lb, ub) =
-            train_final_bounds(cobre_io::config::BackwardScheduler::ByNode { block_size: None });
+        let (lb, ub) = train_final_bounds(cobre_io::config::BackwardScheduler::ByNode {
+            block_size: None,
+            point_block_size: None,
+        });
         assert!(
             (ub - lb).abs() < 1e-6,
             "by-node enumerated-external forward≡backward must converge LB==UB: \
@@ -11296,6 +11310,8 @@ mod enumerated_cvar_gap {
                 cost_scale_factor: Some(1.0),
             },
             training: TrainingConfig {
+                forward_schedule: None,
+                backward_selection: None,
                 enabled: true,
                 tree_seed: Some(42),
                 stopping_rules: Some(vec![
@@ -11363,6 +11379,122 @@ mod enumerated_cvar_gap {
             "reported gap must be non-negative, got {}",
             r.final_gap
         );
+    }
+
+    #[test]
+    fn progressive_forward_cvar_refines_and_preserves_thread_invariance() {
+        use cobre_io::config::training::TrajectorySchedule;
+        let mut config = enumerated_gap_config();
+        config.training.selection = Some(TrainingSelection::Sampled { forward_passes: 16 });
+        config.training.stopping_rules =
+            Some(vec![StoppingRuleConfig::IterationLimit { limit: 20 }]);
+        let mut reference: Option<f64> = None;
+        let mut progressive_reference = None;
+        for (progressive, threads) in [(false, 1), (true, 1), (true, 4)] {
+            config.training.forward_schedule = progressive.then_some(TrajectorySchedule {
+                initial_passes: 2.try_into().unwrap(),
+                growth_interval: 2.try_into().unwrap(),
+                full_from_iteration: 7.try_into().unwrap(),
+            });
+            let mut setup = build_setup_in_code(build_system(&[CVAR, CVAR]), &config);
+            let mut solver = ActiveSolver::new().unwrap();
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let outcome = setup
+                .train(
+                    &mut solver,
+                    &StubComm,
+                    threads,
+                    ActiveSolver::new,
+                    Some(sender),
+                    None,
+                )
+                .unwrap();
+            assert!(outcome.error.is_none(), "{:?}", outcome.error);
+            let counts: Vec<_> = receiver
+                .try_iter()
+                .filter_map(|event| match event {
+                    cobre_core::TrainingEvent::ForwardPassComplete { scenarios, .. } => {
+                        Some(scenarios)
+                    }
+                    _ => None,
+                })
+                .collect();
+            let mut expected = vec![16; 20];
+            if progressive {
+                expected[..6].copy_from_slice(&[2, 2, 4, 4, 8, 8]);
+            }
+            assert_eq!(counts, expected);
+            for (index, count) in expected.iter().enumerate() {
+                let solves: u64 = outcome
+                    .result
+                    .solver_stats_log
+                    .iter()
+                    .filter(|row| row.phase == "forward" && row.iteration == index as u64 + 1)
+                    .map(|row| row.delta.lp_solves)
+                    .sum();
+                assert_eq!(
+                    solves,
+                    u64::from(*count) * 2,
+                    "inactive trajectories were solved"
+                );
+            }
+            let lb = outcome.result.final_lb;
+            if let Some(expected) = reference {
+                assert!((lb - expected).abs() <= 1e-4 + 1e-6 * lb.abs());
+            } else {
+                reference = Some(lb);
+            }
+            if progressive {
+                if let Some(expected) = progressive_reference {
+                    assert_eq!(lb.to_bits(), expected);
+                } else {
+                    progressive_reference = Some(lb.to_bits());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn selected_sampled_cvar_refines_to_full_point_value_across_threads() {
+        use cobre_io::config::training::TrialPointSelection;
+        use std::num::NonZeroUsize;
+        let mut config = enumerated_gap_config();
+        config.training.selection = Some(TrainingSelection::Sampled { forward_passes: 16 });
+        config.training.stopping_rules =
+            Some(vec![StoppingRuleConfig::IterationLimit { limit: 20 }]);
+        let mut reference: Option<f64> = None;
+        for (selected, threads) in [(false, 1), (true, 1), (true, 4)] {
+            config.training.backward_selection = selected.then_some(TrialPointSelection {
+                deduplicate: true,
+                audit_relative_tolerance: Some(0.01),
+                initial_points: NonZeroUsize::new(2).unwrap(),
+                exploration_points: NonZeroUsize::new(1).unwrap(),
+                full_every: NonZeroUsize::new(4).unwrap(),
+                full_from_iteration: NonZeroUsize::new(12).unwrap(),
+            });
+            let mut setup = build_setup_in_code(build_system(&[CVAR, CVAR]), &config);
+            let mut solver = ActiveSolver::new().unwrap();
+            let outcome = setup
+                .train(
+                    &mut solver,
+                    &StubComm,
+                    threads,
+                    ActiveSolver::new,
+                    None,
+                    None,
+                )
+                .unwrap();
+            assert!(outcome.error.is_none(), "{:?}", outcome.error);
+            let lb = outcome.result.final_lb;
+            if let Some(expected) = reference {
+                assert!(
+                    (lb - expected).abs() <= 1e-4 + 1e-6 * lb.abs(),
+                    "refined CVaR value differs: {lb} vs {expected}, threads={threads}"
+                );
+            } else {
+                reference = Some(lb);
+            }
+        }
     }
 
     /// A gap rule under enumerated forwards but a NON-UNIFORM measure (stage 0

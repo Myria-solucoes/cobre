@@ -582,6 +582,7 @@ mod tests {
             method: "AIC".to_string(),
             white_noise_fallbacks: Vec::new(),
             std_ratio_warnings: Vec::new(),
+            stationarity_fallbacks: Vec::new(),
         };
         let fitting = estimation_report_to_fitting_report(&report);
 
@@ -740,6 +741,7 @@ mod tests {
             method: "AIC".to_string(),
             white_noise_fallbacks: Vec::new(),
             std_ratio_warnings: Vec::new(),
+            stationarity_fallbacks: Vec::new(),
         };
 
         let summary = build_stochastic_summary(&system, &stochastic, Some(&report), 7);
@@ -931,6 +933,7 @@ mod tests {
             method: "AIC".to_string(),
             white_noise_fallbacks: Vec::new(),
             std_ratio_warnings: Vec::new(),
+            stationarity_fallbacks: Vec::new(),
         };
 
         let summary = build_stochastic_summary(&system, &stochastic, Some(&report), 1);
@@ -1166,6 +1169,7 @@ mod tests {
             method: "PACF".to_string(),
             white_noise_fallbacks: Vec::new(),
             std_ratio_warnings: Vec::new(),
+            stationarity_fallbacks: Vec::new(),
         };
 
         let fitting = estimation_report_to_fitting_report(&report);

@@ -40,7 +40,7 @@ terminal_size = "0.4.4"
 
 [features]
 ## Default feature set: build against the HiGHS solver backend.
-default = ["highs"]
+default = ["highs", "affinity"]
 
 ## Select the HiGHS LP solver backend across the dependency graph.
 ##
@@ -53,6 +53,8 @@ highs = ["cobre-solver/highs", "cobre-sddp/highs"]
 clp = ["cobre-solver/clp", "cobre-sddp/clp"]
 
 mpi = ["cobre-comm/mpi"]
+affinity = ["cobre-comm/affinity"]
+numa = ["mpi", "affinity", "cobre-comm/numa"]
 ## Opt-in to the slow test suite: includes every `SLOW_DECKS` deck in the
 ## non-root setup-rebuild two-constructor parity test.
 slow-tests = []

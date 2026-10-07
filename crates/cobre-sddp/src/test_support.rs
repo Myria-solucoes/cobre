@@ -2491,6 +2491,8 @@ pub(crate) fn k_fan_config(forward_passes: u32, max_iterations: u32) -> Config {
             cost_scale_factor: None,
         },
         training: TrainingConfig {
+            forward_schedule: None,
+            backward_selection: None,
             enabled: true,
             tree_seed: Some(K_FAN_TREE_SEED),
             stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
@@ -3378,6 +3380,7 @@ fn k_fan_config_dcs(forward_passes: u32, max_iterations: u32) -> Config {
             start_iteration: 1,
             seed_window: 5,
             candidate_recency: None,
+            adaptive_max_added_per_round: None,
             max_added_per_round: 10,
             violation_tolerance: 1e-10,
         }),

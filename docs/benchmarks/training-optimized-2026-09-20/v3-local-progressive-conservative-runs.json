@@ -1,0 +1,44 @@
+[
+  {
+    "arm": "baseline",
+    "repeat": 0,
+    "threads": 4,
+    "wall_seconds": 20.997674999991432,
+    "exit_code": 0,
+    "command": [
+      "/private/tmp/cobre-optimized-baseline-target/release/cobre",
+      "run",
+      "/private/tmp/cobre-progressive-local-conservative/0-baseline/case",
+      "--output",
+      "/private/tmp/cobre-progressive-local-conservative/0-baseline/output",
+      "--threads",
+      "4",
+      "--comm-backend",
+      "local",
+      "--color",
+      "never"
+    ],
+    "binary_sha256": "53d524a87806985fe5836e4829b342abc78f50471ebea820d24765f80dbc07c9"
+  },
+  {
+    "arm": "candidate",
+    "repeat": 0,
+    "threads": 4,
+    "wall_seconds": 13.75679295900045,
+    "exit_code": 0,
+    "command": [
+      "/private/tmp/cobre-optimized-local-target/release/cobre",
+      "run",
+      "/private/tmp/cobre-progressive-local-conservative/0-candidate/case",
+      "--output",
+      "/private/tmp/cobre-progressive-local-conservative/0-candidate/output",
+      "--threads",
+      "4",
+      "--comm-backend",
+      "local",
+      "--color",
+      "never"
+    ],
+    "binary_sha256": "26bc734436794ccd780831eb4f628d363553482a31cd60a80b0761c79d378671"
+  }
+]

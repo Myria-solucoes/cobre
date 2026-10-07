@@ -150,6 +150,8 @@ fn build_config(iteration_limit: u32) -> Config {
             cost_scale_factor: None,
         },
         training: TrainingConfig {
+            forward_schedule: None,
+            backward_selection: None,
             enabled: true,
             tree_seed: Some(42),
             stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {

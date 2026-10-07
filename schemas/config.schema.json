@@ -34,6 +34,16 @@
             "method": {
               "const": "by_node",
               "type": "string"
+            },
+            "point_block_size": {
+              "default": null,
+              "description": "Trial points per independent warm-start chain. Absent means one.",
+              "format": "uint",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
             }
           },
           "required": [
@@ -861,6 +871,16 @@
           "additionalProperties": false,
           "description": "Dynamic: a per-solve lazy loop that loads only a small resident subset of\nrows per solve while retaining the full pool.",
           "properties": {
+            "adaptive_max_added_per_round": {
+              "default": null,
+              "description": "Optional ceiling for doubling row additions after each unsuccessful round.\nMust be at least `max_added_per_round`. Absent keeps fixed batches.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "candidate_recency": {
               "default": null,
               "description": "Only rows generated within the last `candidate_recency` iterations are\nscored. Absent (default): unbounded, so every pool row is a candidate,\nwhich preserves exactness. A value `n` (must be `>= 1`) makes the loop\ndeliberately inexact — rows older than the window are never added.",
@@ -1129,6 +1149,18 @@
       "additionalProperties": false,
       "description": "Training parameters (`config.json → training`).\n\n`selection` and `stopping_rules` are required; the loader rejects a\nconfiguration that omits either.",
       "properties": {
+        "backward_selection": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrialPointSelection"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Experimental point selection; absent preserves exhaustive point processing."
+        },
         "cut_selection": {
           "$ref": "#/$defs/RowSelectionConfig",
           "default": {
@@ -1142,6 +1174,18 @@
           "default": true,
           "description": "Enable the training phase. When `false`, skip directly to simulation.",
           "type": "boolean"
+        },
+        "forward_schedule": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrajectorySchedule"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional trajectory ramp; absent uses the full count in every iteration."
         },
         "parallelism": {
           "$ref": "#/$defs/ParallelismConfig",
@@ -1294,6 +1338,87 @@
           "type": "number"
         }
       },
+      "type": "object"
+    },
+    "TrajectorySchedule": {
+      "additionalProperties": false,
+      "description": "Geometric trajectory growth with an explicit full-population refinement phase.",
+      "properties": {
+        "full_from_iteration": {
+          "description": "First absolute iteration using the full configured population.",
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "growth_interval": {
+          "description": "Iterations between doublings.",
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "initial_passes": {
+          "description": "Trajectories in the first iteration.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "initial_passes",
+        "growth_interval",
+        "full_from_iteration"
+      ],
+      "type": "object"
+    },
+    "TrialPointSelection": {
+      "additionalProperties": false,
+      "description": "Experimental diverse-point budget with full audit and refinement iterations.",
+      "properties": {
+        "audit_relative_tolerance": {
+          "default": null,
+          "description": "Grow the next point budget when exploratory rows improve the retained envelope\nby more than this fraction of max(1, absolute row value). Absent disables feedback.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "deduplicate": {
+          "default": false,
+          "description": "Collapse bit-identical complete states within each node and iteration.",
+          "type": "boolean"
+        },
+        "exploration_points": {
+          "description": "Additional pseudo-random representatives from the remaining points.",
+          "format": "uint",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "full_every": {
+          "description": "Process every point at each multiple of this iteration interval.",
+          "format": "uint",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "full_from_iteration": {
+          "description": "Process every point from this absolute iteration onward.",
+          "format": "uint",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "initial_points": {
+          "description": "Initial number of diverse representatives per node; increases toward full coverage.",
+          "format": "uint",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "initial_points",
+        "exploration_points",
+        "full_every",
+        "full_from_iteration"
+      ],
       "type": "object"
     },
     "UpperBoundEvaluationConfig": {

@@ -1,11 +1,10 @@
 //! The identity this build stamps into every output it writes.
 
 /// Recorded as `software` in output metadata and policy checkpoints.
-pub const SOFTWARE_NAME: &str = "cobre";
+pub const SOFTWARE_NAME: &str = "cobre-myria";
 
-/// Recorded as `software_version`. The workspace shares one version, so this
-/// crate's version is the product's.
-pub const SOFTWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Fork release identity; deliberately distinct from the upstream ABI version.
+pub const SOFTWARE_VERSION: &str = "0.18.0-myria.1";
 
 /// How to obtain a policy checkpoint this build loads; every refusal that
 /// says how ends with it.

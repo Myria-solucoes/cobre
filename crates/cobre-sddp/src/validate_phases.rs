@@ -358,8 +358,22 @@ pub fn validate_study(request: ValidateRequest<'_>) -> Result<ValidatedStudy, Va
         .transpose()
         .map_err(at(PrepPhase::Boundary))?;
 
-    let (policy_load, warnings) =
+    let (policy_load, mut warnings) =
         policy_load.map_or((None, Vec::new()), |r| (Some(r.summary), r.warnings));
+    if let Some(estimation) = &prepared.estimation_report {
+        for fallback in &estimation.stationarity_fallbacks {
+            warnings.push(ReportEntry {
+                kind: "StationarityRegularized".to_string(),
+                message: format!(
+                    "automatic PAR stationarity regularization applied to hydro_id={} season={}: {} (order {} -> {})",
+                    fallback.hydro_id.0, fallback.season_id, fallback.action,
+                    fallback.original_order, fallback.reduced_order,
+                ),
+                file: "scenarios/inflow_history.parquet".to_string(),
+                entity: Some(format!("hydro_id={}", fallback.hydro_id.0)),
+            });
+        }
+    }
     Ok(ValidatedStudy {
         system: prepared.system,
         boundary,

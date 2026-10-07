@@ -450,6 +450,7 @@ impl StudySetup {
                 horizon,
                 cut_management: CutManagementConfig {
                     cut_selection: config.cut_selection,
+                    backward_selection: config.backward_selection,
                     budget: config.budget,
                     cut_activity_tolerance: config.cut_activity_tolerance,
                     risk_measures,
@@ -1685,6 +1686,7 @@ fn resolve_phase_configs(
 
     Ok((
         LoopParams {
+            forward_schedule: config.forward_schedule,
             seed: config.seed,
             forward_passes,
             training_enumerated: config.training_enumerated,
@@ -3501,6 +3503,7 @@ mod admission_gate_dcs_tests {
             k1: None,
             k2: 1,
             nadic: 1,
+            adaptive_max_added_per_round: None,
             epsilon_viol: 1e-6,
             start_iteration: 1,
         }

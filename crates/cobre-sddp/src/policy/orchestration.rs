@@ -354,12 +354,20 @@ impl CheckpointLayout {
         );
 
         let (basis_col_u8, basis_row_u8) = convert_basis_cache(state.basis_cache);
-        let stage_bases = build_stage_basis_records(
+        let mut stage_bases = build_stage_basis_records(
             state.basis_cache,
             state.iterations,
             &basis_col_u8,
             &basis_row_u8,
         );
+
+        // Sparse selected-point pools are compacted on export. Cached LP row
+        // positions no longer address the exported cuts; resume safely cold.
+        stage_bases.retain(|basis| {
+            let node = NodePos(basis.stage_id as usize);
+            let pool = &fcf.pools[node_graph.nodes[node].pool_id];
+            (0..pool.populated()).all(|slot| pool.is_occupied(slot))
+        });
 
         let warm_start_counts: Vec<u32> = fcf.pools.iter().map(|p| p.warm_start_count).collect();
 

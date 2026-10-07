@@ -69,6 +69,8 @@ fn build_config(iterations: usize) -> Config {
             cost_scale_factor: None,
         },
         training: TrainingConfig {
+            forward_schedule: None,
+            backward_selection: None,
             enabled: true,
             tree_seed: Some(42),
             stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
@@ -464,6 +466,8 @@ mod anticipated_backward_cut {
                 cost_scale_factor: None,
             },
             training: TrainingConfig {
+                forward_schedule: None,
+                backward_selection: None,
                 enabled: true,
                 tree_seed: Some(42),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
@@ -1171,6 +1175,8 @@ mod hm_distribute_conservation {
                 cost_scale_factor: Some(COST_SCALE_FACTOR),
             },
             training: TrainingConfig {
+                forward_schedule: None,
+                backward_selection: None,
                 enabled: true,
                 tree_seed: Some(42),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 1 }]),
@@ -3126,6 +3132,8 @@ mod anticipated_forward_pass {
                 cost_scale_factor: None,
             },
             training: TrainingConfig {
+                forward_schedule: None,
+                backward_selection: None,
                 enabled: true,
                 tree_seed: Some(42),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 1 }]),
@@ -3752,6 +3760,8 @@ mod anticipated_closed_form_lb_k1_single_thermal {
                 cost_scale_factor: None,
             },
             training: TrainingConfig {
+                forward_schedule: None,
+                backward_selection: None,
                 enabled: true,
                 tree_seed: Some(42),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 4 }]),
@@ -4216,6 +4226,8 @@ mod lead_time_single_decider_end_to_end {
                 cost_scale_factor: None,
             },
             training: TrainingConfig {
+                forward_schedule: None,
+                backward_selection: None,
                 enabled: true,
                 tree_seed: Some(42),
                 // 2 iterations reach the closed-form LB; 2 more settle the
@@ -5621,6 +5633,8 @@ mod anticipated_convergence_slow {
         };
 
         let config = StudyParams {
+            forward_schedule: None,
+            backward_selection: None,
             seed: tree_seed,
             forward_passes: FORWARD_PASSES,
             training_enumerated: false,
@@ -6659,6 +6673,8 @@ mod a1c_stage_count_mode_anchor {
                 cost_scale_factor: None,
             },
             training: TrainingConfig {
+                forward_schedule: None,
+                backward_selection: None,
                 enabled: true,
                 tree_seed: Some(42),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
@@ -8025,6 +8041,8 @@ mod anticipated_no_boundary_fixed_value_inertness {
                 cost_scale_factor: None,
             },
             training: TrainingConfig {
+                forward_schedule: None,
+                backward_selection: None,
                 enabled: true,
                 tree_seed: Some(42),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 1 }]),
@@ -8377,6 +8395,8 @@ mod fixed_delivery_output {
                 cost_scale_factor: None,
             },
             training: TrainingConfig {
+                forward_schedule: None,
+                backward_selection: None,
                 enabled: true,
                 tree_seed: Some(42),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 1 }]),

@@ -963,6 +963,7 @@ fn single_stage_system_produces_no_cuts() {
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
     let state_boxes = permissive_state_boxes(n_state, n_stages);
     let result = run_backward_pass(&mut BackwardPassInputs {
+        backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContextFixture::new(
@@ -1046,6 +1047,7 @@ fn two_stage_system_two_trial_states_generates_two_cuts_at_stage_0() {
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
     let state_boxes = permissive_state_boxes(n_state, n_stages);
     let result = run_backward_pass(&mut BackwardPassInputs {
+        backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContextFixture::new(
@@ -1136,6 +1138,7 @@ fn cut_inserted_with_correct_stage_iteration_and_forward_pass_index() {
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
     let state_boxes = permissive_state_boxes(n_state, n_stages);
     let _ = run_backward_pass(&mut BackwardPassInputs {
+        backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContextFixture::new(
@@ -1220,6 +1223,7 @@ fn no_cuts_generated_at_last_stage() {
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
     let state_boxes = permissive_state_boxes(n_state, n_stages);
     let result = run_backward_pass(&mut BackwardPassInputs {
+        backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContextFixture::new(
@@ -1305,6 +1309,7 @@ fn elapsed_ms_is_non_negative() {
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
     let state_boxes = permissive_state_boxes(n_state, n_stages);
     let result = run_backward_pass(&mut BackwardPassInputs {
+        backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContextFixture::new(
@@ -1385,6 +1390,7 @@ fn infeasible_solver_returns_sddp_infeasible_error() {
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
     let state_boxes = permissive_state_boxes(n_state, n_stages);
     let result = run_backward_pass(&mut BackwardPassInputs {
+        backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContextFixture::new(
@@ -1500,6 +1506,7 @@ fn cut_coefficients_and_intercept_match_dual_extraction_formula() {
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
     let state_boxes = permissive_state_boxes(n_state, n_stages);
     let _ = run_backward_pass(&mut BackwardPassInputs {
+        backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContextFixture::new(
@@ -1596,6 +1603,7 @@ fn cut_gradient_sign_physically_correct() {
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
     let state_boxes = permissive_state_boxes(n_state, n_stages);
     let _ = run_backward_pass(&mut BackwardPassInputs {
+        backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContextFixture::new(
@@ -1703,6 +1711,7 @@ fn cut_is_tight_at_trial_state() {
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
     let state_boxes = permissive_state_boxes(n_state, n_stages);
     let _ = run_backward_pass(&mut BackwardPassInputs {
+        backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContextFixture::new(
@@ -1800,6 +1809,7 @@ fn single_rank_backward_pass_with_local_backend_produces_correct_fcf() {
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
     let state_boxes = permissive_state_boxes(n_state, n_stages);
     let result = run_backward_pass(&mut BackwardPassInputs {
+        backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContextFixture::new(
@@ -1908,6 +1918,7 @@ fn forward_pass_index_matches_global_scenario_index() {
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
     let state_boxes = permissive_state_boxes(n_state, n_stages);
     let _ = run_backward_pass(&mut BackwardPassInputs {
+        backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContextFixture::new(
@@ -2002,6 +2013,7 @@ fn warm_start_uses_prepopulated_forward_basis() {
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
     let state_boxes = permissive_state_boxes(n_state, n_stages);
     let _ = run_backward_pass(&mut BackwardPassInputs {
+        backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContextFixture::new(
@@ -2089,6 +2101,7 @@ fn multi_opening_subsequent_openings_use_internal_hotstart() {
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
     let state_boxes = permissive_state_boxes(n_state, n_stages);
     let _ = run_backward_pass(&mut BackwardPassInputs {
+        backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContextFixture::new(
@@ -2182,6 +2195,7 @@ fn backward_solver_error_propagates() {
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
     let state_boxes = permissive_state_boxes(n_state, n_stages);
     let result = run_backward_pass(&mut BackwardPassInputs {
+        backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContextFixture::new(
@@ -2300,6 +2314,7 @@ fn test_backward_pass_parallel_cut_determinism() {
     let ctx = fixture.ctx();
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
     let _ = run_backward_pass(&mut BackwardPassInputs {
+        backward_selection: None,
         workspaces: &mut workspaces_1,
         basis_store: &mut basis_store_1,
         ctx: &ctx,
@@ -2363,6 +2378,7 @@ fn test_backward_pass_parallel_cut_determinism() {
     let mut basis_store_4 = empty_basis_store(exchange.local_count(), n_stages);
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
     let _ = run_backward_pass(&mut BackwardPassInputs {
+        backward_selection: None,
         workspaces: &mut workspaces_4,
         basis_store: &mut basis_store_4,
         ctx: &ctx,
@@ -2730,6 +2746,7 @@ fn backward_pass_load_patches_applied() {
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
     let state_boxes = permissive_state_boxes(n_state, n_stages);
     let _ = run_backward_pass(&mut BackwardPassInputs {
+        backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContextFixture::new(&templates, &state_boxes, &geometry_per_stage)
@@ -2853,6 +2870,7 @@ fn backward_pass_no_load_buses_unchanged() {
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
     let state_boxes = permissive_state_boxes(n_state, n_stages);
     let _ = run_backward_pass(&mut BackwardPassInputs {
+        backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContextFixture::new(
@@ -3013,6 +3031,7 @@ fn backward_pass_cut_coefficients_unaffected() {
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
     let state_boxes = permissive_state_boxes(n_state, n_stages);
     let result = run_backward_pass(&mut BackwardPassInputs {
+        backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContextFixture::new(&templates, &state_boxes, &geometry_per_stage)
@@ -3124,6 +3143,7 @@ fn per_stage_cut_sync_invariant_after_bug1_fix() {
     let mut csb = CutSyncBuffers::new(n_state, forward_passes as usize, 1);
     let state_boxes = permissive_state_boxes(n_state, n_stages);
     let result = run_backward_pass(&mut BackwardPassInputs {
+        backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContextFixture::new(
@@ -3247,6 +3267,7 @@ fn metadata_sync_updates_active_count_and_last_active_iter() {
     // (cuts go to pool[1]), then t=0 (cuts go to pool[0], binding
     // checked against pool[1]).
     let result = run_backward_pass(&mut BackwardPassInputs {
+        backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContextFixture::new(
@@ -3394,6 +3415,7 @@ fn run_backward_pass_with_n_workers(n_workers: usize) -> FutureCostFunction {
     let state_boxes = permissive_state_boxes(n_state, n_stages);
 
     let result = run_backward_pass(&mut BackwardPassInputs {
+        backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContextFixture::new(
@@ -3744,6 +3766,7 @@ fn allgatherv_single_rank_two_workers_stage_stats_has_per_worker_entries() {
     let state_boxes = permissive_state_boxes(n_state, n_stages);
 
     let result = run_backward_pass(&mut BackwardPassInputs {
+        backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContextFixture::new(
@@ -3957,6 +3980,7 @@ fn allgatherv_dual_rank_stub_stage_stats_contains_both_ranks() {
     let state_boxes = permissive_state_boxes(n_state, n_stages);
 
     let result = run_backward_pass(&mut BackwardPassInputs {
+        backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContextFixture::new(
@@ -4621,6 +4645,7 @@ fn handshake_passes_with_local_backend() {
     let state_boxes = permissive_state_boxes(n_state, n_stages);
 
     let result = run_backward_pass(&mut BackwardPassInputs {
+        backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContextFixture::new(
@@ -4770,6 +4795,7 @@ fn handshake_rejects_nonuniform_workers() {
     let state_boxes = permissive_state_boxes(n_state, n_stages);
 
     let result = run_backward_pass(&mut BackwardPassInputs {
+        backward_selection: None,
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContextFixture::new(
@@ -5187,6 +5213,7 @@ fn dcs_params(start_iteration: u64) -> DcsParams {
     DcsParams {
         k1: None,
         k2: 2,
+        adaptive_max_added_per_round: None,
         nadic: 10,
         epsilon_viol: 1e-10,
         start_iteration,
@@ -5295,6 +5322,7 @@ fn from_strategy_gates_the_backward_dcs_field() {
     let dynamic = CutSelectionStrategy::Dynamic {
         k1: None,
         k2: 5,
+        adaptive_max_added_per_round: None,
         nadic: 10,
         epsilon_viol: 1e-10,
         start_iteration: 2,
@@ -5318,6 +5346,7 @@ fn dcs_params_k1(start_iteration: u64, k1: Option<u32>) -> DcsParams {
     DcsParams {
         k1,
         k2: 2,
+        adaptive_max_added_per_round: None,
         nadic: 10,
         epsilon_viol: 1e-10,
         start_iteration,

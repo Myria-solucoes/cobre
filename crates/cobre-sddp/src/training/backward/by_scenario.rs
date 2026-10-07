@@ -62,10 +62,15 @@ impl StageOpeningSolver {
         }
     }
 
-    /// Per-CHILD LP load, issued once after `reset_solver_state()` and before that
-    /// child's opening solves. Each child loads ITS OWN pool's LP, so a fan never
-    /// reuses child 0's LP (the child-0 collapse). One child ⟹ one load per trial
-    /// point ⟹ chain byte-parity.
+    /// Prepare an independent per-child solve chain. Frozen matrices may be reused
+    /// within one node dispatch, only after a backend-guaranteed cold reset.
+    /// Child changes and lazy resident sets require a reload.
+    ///
+    /// - [`StageOpeningSolver::Frozen`]: load the child's frozen all-cuts LP via
+    ///   [`load_backward_lp`].
+    /// - [`StageOpeningSolver::Lazy`]: load the cut-free core and build the metadata
+    ///   seed from the child's pool, then reuse the loaded LP across that child's
+    ///   openings.
     pub(crate) fn prepare<S: SolverInterface + Send>(
         &self,
         ws: &mut SolverWorkspace<S>,
@@ -76,9 +81,17 @@ impl StageOpeningSolver {
     ) {
         match self {
             StageOpeningSolver::Frozen => {
-                load_backward_lp(ws, child);
+                let reuse = ws.backward_accum.loaded_child == Some(child.successor_node)
+                    && ws.solver.reset_loaded_model();
+                if !reuse {
+                    ws.solver.reset_solver_state();
+                    load_backward_lp(ws, child);
+                }
+                ws.backward_accum.loaded_child = Some(child.successor_node);
             }
             StageOpeningSolver::Lazy(params) => {
+                ws.backward_accum.loaded_child = None;
+                ws.solver.reset_solver_state();
                 ws.solver.load_model(ctx.template(succ.successor));
                 build_initial_resident_set(
                     child.successor_pool,
@@ -270,7 +283,7 @@ impl StageOpeningSolver {
     // per-opening scalars (params, raw_noise, x_hat, s, scenario, iteration,
     // omega); no natural grouping reduces caller-side borrows.
     #[allow(clippy::too_many_arguments)]
-    fn solve_lazy<S: SolverInterface + Send>(
+    pub(super) fn solve_lazy<S: SolverInterface + Send>(
         ws: &mut SolverWorkspace<S>,
         ctx: &StageContext<'_>,
         training_ctx: &TrainingContext<'_>,
@@ -432,7 +445,6 @@ pub(crate) fn process_by_scenario_backward<S: SolverInterface + Send>(
         // Fresh cold head per child: each child loads a different LP, so its
         // warm-start chain across its own openings starts clean (CLP determinism).
         // One child ⟹ once per trial point ⟹ chain byte-parity.
-        ws.solver.reset_solver_state();
         opening_solver.prepare(ws, ctx, succ, &child, iteration);
 
         // An External child reads its declared column `eta_slice(s, offset)`
@@ -570,37 +582,36 @@ pub(crate) fn process_by_scenario_backward<S: SolverInterface + Send>(
 ///
 /// # Errors
 /// Returns the first failing worker's [`SddpError`]; on error no cut is committed.
-// Rationale: disjoint borrows (worker_staged, workspaces, fcf, the staged-cut
+// Rationale: disjoint borrows (worker_staged, coefficients, fcf, the staged-cut
 // scratch) plus the node/pool/iteration commit scalars; a struct would add
 // indirection without reducing the caller's borrow count.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn by_scenario_finish<S: SolverInterface>(
-    worker_staged: Vec<Result<(usize, Vec<StagedCut>), SddpError>>,
-    workspaces: &[SolverWorkspace<S>],
+pub(crate) fn by_scenario_finish(
+    worker_staged: Vec<Result<Vec<StagedCut>, SddpError>>,
+    coefficients: &[f64],
     trial_points: &[usize],
     cut_n_state: usize,
     fcf: &mut FutureCostFunction,
     node_id: NodeId,
     pool: usize,
     iteration: u64,
-    staged_cuts_buf: &mut Vec<(usize, StagedCut)>,
+    staged_cuts_buf: &mut Vec<StagedCut>,
 ) -> Result<usize, SddpError> {
     staged_cuts_buf.clear();
     for worker_result in worker_staged {
-        let (w, cuts) = worker_result?;
-        staged_cuts_buf.extend(cuts.into_iter().map(|cut| (w, cut)));
+        staged_cuts_buf.extend(worker_result?);
     }
     // `trial_state_idx` is the SOLE sort key: globally unique across workers
-    // (disjoint contiguous partitions), so the merge order is identical regardless
+    // (exclusive scenario claims), so the merge order is identical regardless
     // of worker index.
-    staged_cuts_buf.sort_by_key(|(_, cut)| cut.trial_state_idx);
+    staged_cuts_buf.sort_unstable_by_key(|cut| cut.trial_state_idx);
     debug_assert_eq!(staged_cuts_buf.len(), trial_points.len());
-    for (w, cut) in &*staged_cuts_buf {
+    for cut in &*staged_cuts_buf {
         let range = cut.coefficients_range.clone();
-        let arena = &workspaces[*w].backward_accum.agg_arena;
+        let arena = coefficients;
         debug_assert!(
             range.len() == cut_n_state && range.end <= arena.len(),
-            "coefficients_range must span exactly the pool's cut n_state and lie within the worker arena"
+            "coefficients_range must span exactly the pool's cut n_state and lie within the shared arena"
         );
         fcf.add_cut(
             node_id,

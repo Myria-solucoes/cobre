@@ -465,6 +465,8 @@ fn make_config() -> Config {
             cost_scale_factor: None,
         },
         training: IoTrainingConfig {
+            forward_schedule: None,
+            backward_selection: None,
             enabled: true,
             tree_seed: None,
             stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 3 }]),
@@ -610,6 +612,7 @@ fn train_simulate_write_cycle() {
     let (tx, rx) = mpsc::channel::<TrainingEvent>();
     let training_config = TrainingConfig {
         loop_config: LoopConfig {
+            forward_schedule: None,
             forward_passes: 1,
             training_enumerated: false,
             max_iterations: 10,
@@ -619,6 +622,7 @@ fn train_simulate_write_cycle() {
             stopping_rules: iteration_limit(3),
         },
         cut_management: CutManagementConfig {
+            backward_selection: None,
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
@@ -861,6 +865,7 @@ fn train_simulate_write_cycle() {
             thread_level: None,
             slurm_job_id: None,
             hosts: Vec::new(),
+            rank_affinity: Vec::new(),
         },
         setup: None,
         production_fit_deviation: None,
@@ -1291,6 +1296,7 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
 
     let training_config = TrainingConfig {
         loop_config: LoopConfig {
+            forward_schedule: None,
             forward_passes: 1,
             training_enumerated: false,
             max_iterations: 1,
@@ -1300,6 +1306,7 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
             stopping_rules: iteration_limit(1),
         },
         cut_management: CutManagementConfig {
+            backward_selection: None,
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
@@ -1447,6 +1454,7 @@ fn enumerated_census_k1_matches_sampled_single_scenario() {
 
     let training_config = TrainingConfig {
         loop_config: LoopConfig {
+            forward_schedule: None,
             forward_passes: 1,
             training_enumerated: false,
             max_iterations: 3,
@@ -1456,6 +1464,7 @@ fn enumerated_census_k1_matches_sampled_single_scenario() {
             stopping_rules: iteration_limit(3),
         },
         cut_management: CutManagementConfig {
+            backward_selection: None,
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,

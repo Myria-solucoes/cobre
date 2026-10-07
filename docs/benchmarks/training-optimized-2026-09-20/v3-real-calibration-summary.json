@@ -1,0 +1,101 @@
+{
+  "candidate": {
+    "completed_runs": 1,
+    "median_wall_seconds": 432.86681061197305,
+    "median_training_seconds": 428.124,
+    "training_seconds_range": [
+      428.124,
+      428.124
+    ],
+    "lp_solves": 37352,
+    "cuts_generated": 1776,
+    "final_lower_bound": 80159746657.00957,
+    "solver_profile_first_repeat": {
+      "phases": {
+        "forward": {
+          "lp_solves": 1792,
+          "simplex_iterations": 3646365,
+          "retry_attempts": 2,
+          "basis_consistency_failures": 0,
+          "solve_time_ms": 264555.91233200044,
+          "load_model_time_ms": 0.0,
+          "set_bounds_time_ms": 642.0090389999999,
+          "basis_set_time_ms": 11.136263000000005
+        },
+        "backward": {
+          "lp_solves": 35520,
+          "simplex_iterations": 18979545,
+          "retry_attempts": 112,
+          "basis_consistency_failures": 0,
+          "solve_time_ms": 2110011.5774740074,
+          "load_model_time_ms": 0.0,
+          "set_bounds_time_ms": 0.0,
+          "basis_set_time_ms": 25.61259600000001
+        },
+        "lower_bound": {
+          "lp_solves": 40,
+          "simplex_iterations": 17846,
+          "retry_attempts": 0,
+          "basis_consistency_failures": 0,
+          "solve_time_ms": 1802.1132399999997,
+          "load_model_time_ms": 0.92689,
+          "set_bounds_time_ms": 14.708021000000006,
+          "basis_set_time_ms": 0.0
+        }
+      },
+      "slowest_stages_by_cumulative_solver_time": [
+        {
+          "phase": "backward",
+          "stage_id": 77,
+          "solve_time_ms": 28093.788808000147
+        },
+        {
+          "phase": "backward",
+          "stage_id": 13,
+          "solve_time_ms": 27782.37036499969
+        },
+        {
+          "phase": "backward",
+          "stage_id": 14,
+          "solve_time_ms": 26652.392715000104
+        },
+        {
+          "phase": "backward",
+          "stage_id": 17,
+          "solve_time_ms": 26418.076445000028
+        },
+        {
+          "phase": "backward",
+          "stage_id": 43,
+          "solve_time_ms": 26411.714925000066
+        },
+        {
+          "phase": "backward",
+          "stage_id": 2,
+          "solve_time_ms": 25636.861116999946
+        },
+        {
+          "phase": "backward",
+          "stage_id": 47,
+          "solve_time_ms": 25603.209589999977
+        },
+        {
+          "phase": "backward",
+          "stage_id": 38,
+          "solve_time_ms": 25096.39824399975
+        },
+        {
+          "phase": "backward",
+          "stage_id": 37,
+          "solve_time_ms": 24760.70415399997
+        },
+        {
+          "phase": "backward",
+          "stage_id": 15,
+          "solve_time_ms": 24581.66542099994
+        }
+      ]
+    },
+    "quality_evaluated": false
+  }
+}

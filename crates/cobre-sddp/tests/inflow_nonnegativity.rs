@@ -482,6 +482,7 @@ fn train_fixture(
         &mut solver,
         TrainingConfig {
             loop_config: LoopConfig {
+                forward_schedule: None,
                 forward_passes: 1,
                 training_enumerated: false,
                 max_iterations: 10,
@@ -494,6 +495,7 @@ fn train_fixture(
                 },
             },
             cut_management: CutManagementConfig {
+                backward_selection: None,
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,

@@ -625,6 +625,18 @@ comparison on `examples/4ree`.
 
 ## By-node scheduler is warm-start-only
 
+The sampled `by_scenario` path also distributes claims dynamically, but its unit
+is a complete trial-point chain. `BasisStore::scenario_slices_mut` transfers a
+disjoint basis slice with the scenario's original index; a worker index must
+never address a basis. Each successor child still resets solver history before
+the first opening. Shared coefficient slots use compact node-relative trial
+positions, and `by_scenario_finish` commits by original trial index. No queue lock
+is held during a solve. Trial indices are unique, so the final sort must not
+allocate stability scratch. `scenario_basis_claims_preserve_sparse_global_indices`
+and `sparse_progressive_claims_preserve_every_cut_and_solve_count` pin sparse
+routing, progressive population, full cut coefficients and solve counts across
+worker counts with frozen and dynamic cut selection.
+
 The live scheduler spellings are `by_scenario` (the default) and `by_node`, both
 under `training.parallelism.backward_scheduler`. The retired `trial_point` /
 `opening_block` spellings are unknown-variant deserialize errors — a clean break
@@ -646,10 +658,11 @@ is produced. Aggregating the arena in claim/solve-position order, or keying it
 on the claim index instead of `(m, ω)`, is the wrong-but-compiling
 alternative — CVaR's tail weighting is order-sensitive, so it silently breaks
 CVaR reproducibility and declaration-order invariance the same way a
-solve-order-keyed aggregation would break the by-scenario path above. An
-active Dynamic Cut Selection iteration always falls back to the by-scenario
-path: the by-node scheduler's frozen-LP load is incompatible with
-DCS's cut-free lazy core.
+solve-order-keyed aggregation would break the by-scenario path above. Dynamic Cut Selection also supports by-node scheduling: each block starts from
+a fresh cut-free core and metadata seed, then carries its resident set only within
+that block. Frozen LPs may retain their matrix across units for the same child,
+but must clear basis/factorization/pricing history and invalidate the cache at
+each node dispatch. Backends without that reset capability reload the model.
 Read: `training/backward/by_node.rs`
 (`process_stage_backward_by_node`'s claim loop,
 `by_node_finish`'s per-`(m, ω)` arena and ascending-m aggregation),
@@ -2562,3 +2575,54 @@ Read: `setup/mod.rs` (`warn_on_boundary_absent_post_study_delivery`,
 `warn_on_boundary_absent_post_study_delivery_fires_once_when_boundary_absent` and
 `warn_on_boundary_absent_post_study_delivery_silent_when_boundary_present`
 (`setup/tests.rs`).
+
+
+## Expectation/CVaR mixture keeps the expectation floor
+
+Both risk-weight entry points in `convergence/risk_measure.rs` initialize
+`mu[i] = (1-lambda)*p[i]` and allocate only `lambda` additional mass, capped
+per scenario by `lambda*p[i]/alpha`. Starting from zero with a full unit of
+mass and only the combined upper bound changes the risk measure and can
+invalidate cuts for the intended objective. The scalar and cut paths share
+this contract, pinned by `cvar_mixture_preserves_expectation_floor_in_value_and_cut`
+and `cvar_mixture_matches_primal_tail_formula_and_envelope`.
+
+## Experimental point selection and sparse pools
+
+`training.forward_schedule` changes the active sampled population at absolute
+iteration numbers. Rank, exchange, trajectory and basis partitions must use that
+same active prefix; capacity and each pool's cut-slot stride stay fixed at the
+configured maximum. Partitioning the full basis capacity while processing a
+shorter trajectory prefix assigns a worker bases from a different scenario window.
+`progressive_forward_cvar_refines_and_preserves_thread_invariance` catches that
+mismatch with fewer active trajectories than workers and checks actual LP counts.
+`progressive_population_excludes_stale_slots_without_reallocating` pins exclusion
+of inactive gathered states. Enumerated training rejects the schedule. A resumed
+schedule uses absolute iterations; early stopping can precede full refinement.
+
+`training.backward_selection` processes a deterministic subset of sampled trial
+points on a single rank, retaining every opening at each selected point. Full
+periodic passes and the configured refinement restore complete coverage; they do
+not certify policy quality. Original scenario identities still address basis
+windows, while generated cuts use compact node-relative positions within each
+iteration's reserved slot stride. Unwritten slots are not cuts: row selection
+must exclude them even if a zero affine function would dominate real negative
+cuts. Policy export skips those slots and omits cached bases for sparse pools,
+because reload compacts them. `export_excludes_unused_slots_between_selected_iterations`
+pins the export rule.
+
+The dynamic-selection fallback must load all eligible missing rows, including
+rows unviolated before its final solve. Loading only currently violated rows can
+return an infeasible solution for the full pool;
+`fallback_includes_cuts_not_violated_until_reoptimization` pins this contract.
+
+## Cross-point warm chains have fixed boundaries
+
+`by_node.point_block_size > 1` groups nearest full states independently of worker
+count. Canonical trial positions survive ordering and the serpentine solve order:
+write the arena by original `(trial_pos, omega)`, never by sorted position. Each
+child/group head resets history; subsequent points may carry basis/factorization
+only within that same child/group. Canonical all-opening risk aggregation remains
+unchanged. Multi-rank and enumerated use are rejected for this experimental mode.
+Pinned by `progressive_forward_schedulers_cover_nonuniform_states_and_dcs`, which
+also covers an uneven final point group, DCS and nonuniform state projections.

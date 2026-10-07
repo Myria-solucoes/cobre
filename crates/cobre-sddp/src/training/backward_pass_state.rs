@@ -4,6 +4,7 @@
 //! [`BackwardPassInputs`] bundles per-call borrowed inputs (no allocation on hot path).
 
 use std::ops::Range;
+use std::sync::Mutex;
 use std::sync::mpsc::Sender;
 use std::time::Instant;
 
@@ -12,9 +13,7 @@ use cobre_core::{TrainingEvent, WorkerPhaseTimings, WorkerTimingPhase};
 use cobre_io::config::BackwardScheduler;
 use cobre_solver::ActiveProfile;
 use cobre_solver::{RowBatch, SolverInterface, SolverStatistics, StageTemplate};
-use rayon::iter::{
-    IndexedParallelIterator, IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator,
-};
+use rayon::iter::{IntoParallelRefMutIterator, ParallelIterator};
 
 use crate::risk_measure::BackwardOutcome;
 #[cfg(test)]
@@ -47,7 +46,7 @@ use crate::{
     training_session::{rank_distribution::RankDistribution, runtime::RuntimeHandles},
     trajectory::TrajectoryRecord,
     visited_states::VisitedStatesArchive,
-    workspace::{BasisStore, BasisStoreSliceMut, ByNodeScratch, SolverWorkspace, WorkspacePool},
+    workspace::{BasisStore, ByNodeScratch, SolverWorkspace, WorkspacePool},
 };
 
 /// Per-iteration argument bundle for [`BackwardPassState::run`].
@@ -100,6 +99,8 @@ pub struct BackwardPassInputs<'a, S: SolverInterface + Send, C: Communicator> {
 
     /// Minimum dual multiplier for a cut to count as binding.
     pub cut_activity_tolerance: f64,
+    /// Optional experimental trial-point budget.
+    pub backward_selection: Option<cobre_io::config::training::TrialPointSelection>,
 
     /// Current training iteration index (1-based), used for cut metadata.
     pub iteration: u64,
@@ -165,6 +166,7 @@ impl<'a, S: SolverInterface + Send, C: Communicator> BackwardPassInputs<'a, S, C
             event_sender: runtime.event_sender(),
             risk_measures: &cut_mgmt.risk_measures,
             cut_activity_tolerance: cut_mgmt.cut_activity_tolerance,
+            backward_selection: cut_mgmt.backward_selection,
             iteration,
             local_work: ranks.my_actual_fwd,
             fwd_offset: ranks.my_fwd_offset,
@@ -184,6 +186,7 @@ impl<'a, S: SolverInterface + Send, C: Communicator> BackwardPassInputs<'a, S, C
 /// Per-iteration inputs (exchange buffers, records, risk measures, etc.) are
 /// passed via [`BackwardPassInputs`] at each `run()` call.
 pub struct BackwardPassState {
+    selection_scratch: super::point_selection::SelectionScratch,
     /// Uniform opening probabilities.
     pub(crate) probabilities_buf: Vec<f64>,
 
@@ -235,13 +238,10 @@ pub struct BackwardPassState {
     pub(crate) bwd_stats_unpack_buf: Vec<SolverStatsDelta>,
 
     // ── Per-iteration scratch (reused across stages within one `run()` call) ──
-    /// Staging buffer for cuts produced by one stage's parallel trial-point
-    /// loop, each paired with the index `w` of the worker that produced it.
-    ///
-    /// The worker index resolves the cut's `coefficients_range` against
-    /// `workspaces[w].backward_accum.agg_arena` at merge time. Cleared at the
-    /// start of each stage and grown monotonically.
-    pub(crate) staged_cuts_buf: Vec<(usize, StagedCut)>,
+    /// Cut metadata merged in canonical trial-point order.
+    pub(crate) staged_cuts_buf: Vec<StagedCut>,
+    /// Shared coefficient slots indexed by compact trial position, independent of workers.
+    scenario_coefficients: Vec<f64>,
 
     /// Per-worker solver statistics snapshot taken **before** the stage's parallel
     /// region.
@@ -419,6 +419,7 @@ impl BackwardPassState {
                 n_ranks * n_workers_local * bwd_max_openings
             ],
             staged_cuts_buf: Vec::new(),
+            scenario_coefficients: Vec::new(),
             worker_stats_before: Vec::with_capacity(n_workers_local),
             worker_stats_after: Vec::with_capacity(n_workers_local),
             worker_deltas: Vec::with_capacity(n_workers_local),
@@ -432,6 +433,7 @@ impl BackwardPassState {
             n_state,
             num_stages,
             by_node_scratch: ByNodeScratch::default(),
+            selection_scratch: super::point_selection::SelectionScratch::default(),
             level_nodes_scratch: Vec::new(),
             level_pools_scratch: Vec::new(),
             routed_trials_scratch: Vec::new(),
@@ -1291,22 +1293,6 @@ fn total_solve_count<S: SolverInterface>(workspaces: &[SolverWorkspace<S>]) -> u
         .sum()
 }
 
-/// Resolve the effective backward thread scheduler for the SAMPLED path
-/// (`compute_one_backward_node`'s only caller): an active Dynamic Cut
-/// Selection iteration always forces the by-scenario path (its cut-free lazy
-/// core is incompatible with the by-node frozen-LP load); otherwise the
-/// configured scheduler is unchanged.
-fn resolve_backward_scheduler(
-    dcs_active: bool,
-    configured: BackwardScheduler,
-) -> BackwardScheduler {
-    if dcs_active {
-        BackwardScheduler::ByScenario {}
-    } else {
-        configured
-    }
-}
-
 /// Flatten node `node_pos`'s successor outcome set
 /// `O(n) = {(m, ψ): m ∈ n⁺, ψ ∈ Ω_m}` into `out`, canonical order (ascending
 /// child node id — `node_graph.successors[node_pos]`'s own invariant — then
@@ -1600,14 +1586,42 @@ fn run_one_backward_level<S: SolverInterface + Send, C: Communicator>(
     let mut cut_batch_build_ms = 0u64;
     for (level_idx, &node_pos) in level.iter().enumerate() {
         let trial_points = &routed_trials[routed_offsets[level_idx]..routed_offsets[level_idx + 1]];
+        let mut selected = std::mem::take(&mut state.selection_scratch);
+        let points = if let Some(selection) = inputs.backward_selection {
+            selected.select(
+                selection,
+                inputs.iteration,
+                node_pos,
+                trial_points,
+                inputs.exchange,
+            );
+            selected.points.as_slice()
+        } else {
+            trial_points
+        };
         let nc = compute_one_backward_node(
             state,
             inputs,
             node_pos,
-            trial_points,
+            points,
             node_visit_offsets[level_idx],
             params,
         )?;
+        selected.audit(
+            inputs
+                .backward_selection
+                .and_then(|s| s.audit_relative_tolerance),
+            super::point_selection::PointAuditContext {
+                node: node_pos,
+                node_id: training_ctx.node_graph.node_ids[node_pos],
+                iteration: inputs.iteration,
+                visit_offset: node_visit_offsets[level_idx],
+                pool: &inputs.fcf.pools[nc.pool_id],
+                projection: &training_ctx.cut_state_layouts[nc.pool_id],
+                states: inputs.exchange,
+            },
+        );
+        state.selection_scratch = selected;
         cut_batch_build_ms += nc.cut_batch_build_ms;
         nodes_out.push(nc);
     }
@@ -1778,24 +1792,27 @@ fn compute_one_backward_node<S: SolverInterface + Send, C: Communicator>(
         cut_state: cut_state_projection,
     };
 
-    // `resolve_backward_scheduler` owns the DCS fallback: its cut-free lazy
-    // core is incompatible with the by-node frozen-LP load (sddp.md "By-node
-    // scheduler is warm-start-only").
-    let dcs_active = training_ctx
-        .dcs
-        .filter(|p| p.is_active(inputs.iteration))
-        .is_some();
-    let use_by_node = matches!(
-        resolve_backward_scheduler(dcs_active, state.scheduler),
-        BackwardScheduler::ByNode { .. }
-    );
+    let use_by_node = matches!(state.scheduler, BackwardScheduler::ByNode { .. });
 
     let process_start = Instant::now();
     let (local_solve, parallel_wall_ms): (Result<usize, SddpError>, u64) = if use_by_node {
         let configured_block_size = match state.scheduler {
-            BackwardScheduler::ByNode { block_size } => block_size,
+            BackwardScheduler::ByNode { block_size, .. } => block_size,
             BackwardScheduler::ByScenario {} => None,
         };
+        let point_block_size = match state.scheduler {
+            BackwardScheduler::ByNode {
+                point_block_size, ..
+            } => point_block_size.map_or(1, std::num::NonZeroUsize::get),
+            BackwardScheduler::ByScenario {} => 1,
+        };
+        super::backward::order_nearby_points(
+            &mut state.by_node_scratch,
+            trial_points,
+            inputs.exchange,
+            params.my_rank,
+            point_block_size > 1,
+        );
         let block_size = resolve_block_size(n_openings, configured_block_size);
         let n_blocks = by_node_block_count(n_openings, block_size);
         if state.hardest_first_claim_order {
@@ -1826,8 +1843,12 @@ fn compute_one_backward_node<S: SolverInterface + Send, C: Communicator>(
             &succ_spec,
             &outcomes,
             &*inputs.basis_store,
-            block_size,
-            &state.by_node_scratch.block_order[..n_blocks],
+            &super::backward::ByNodeWorkLayout {
+                opening_block_size: block_size,
+                point_block_size,
+                point_order: &state.by_node_scratch.point_order,
+                block_order: &state.by_node_scratch.block_order[..n_blocks],
+            },
         );
         let elapsed_ms = ms_elapsed(process_start);
         // Telemetry-only merge (sddp.md "by-node scheduler is
@@ -1862,9 +1883,10 @@ fn compute_one_backward_node<S: SolverInterface + Send, C: Communicator>(
         );
         (result, elapsed_ms)
     } else {
-        let basis_slices = inputs
-            .basis_store
-            .split_workers_mut(params.n_workers_local.max(1));
+        let coefficient_len = trial_points.len() * cut_state_projection.n_slots().max(1);
+        if state.scenario_coefficients.len() < coefficient_len {
+            state.scenario_coefficients.resize(coefficient_len, 0.0);
+        }
         let worker_staged = process_stage_backward(
             inputs.workspaces,
             ctx,
@@ -1877,13 +1899,16 @@ fn compute_one_backward_node<S: SolverInterface + Send, C: Communicator>(
             inputs.risk_measures,
             &succ_spec,
             &outcomes,
-            basis_slices,
+            ScenarioStageWork {
+                bases: inputs.basis_store,
+                coefficients: &mut state.scenario_coefficients[..coefficient_len],
+            },
         );
         let elapsed_ms = ms_elapsed(process_start);
 
         let result = by_scenario_finish(
             worker_staged,
-            &*inputs.workspaces,
+            &state.scenario_coefficients,
             trial_points,
             cut_state_projection.n_slots(),
             inputs.fcf,
@@ -1917,13 +1942,18 @@ fn compute_one_backward_node<S: SolverInterface + Send, C: Communicator>(
     })
 }
 
+struct ScenarioStageWork<'a> {
+    bases: &'a mut BasisStore,
+    coefficients: &'a mut [f64],
+}
+
 /// Evaluate this node's routed `trial_points` for a single backward stage,
 /// returning staged cuts (one per trial point).
 // RATIONALE: 10 args are individually-borrowed slices passed through the rayon closure
 // boundary. Bundling them into a struct would require either cloning or an `Arc`, both of
 // which conflict with the zero-allocation HPC constraint for backward-pass hot code.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
+fn process_stage_backward<S: SolverInterface + Send>(
     workspaces: &mut [SolverWorkspace<S>],
     ctx: &StageContext<'_>,
     training_ctx: &TrainingContext<'_>,
@@ -1935,8 +1965,8 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
     risk_measures: &[RiskMeasure],
     succ: &SuccessorSpec<'_>,
     outcomes: &SuccessorOutcomes<'_>,
-    basis_slices: Vec<BasisStoreSliceMut<'_>>,
-) -> Vec<Result<(usize, Vec<StagedCut>), SddpError>> {
+    work: ScenarioStageWork<'_>,
+) -> Vec<Result<Vec<StagedCut>, SddpError>> {
     let n_openings = succ.probabilities.len();
     // Per-stage cut dimension (pool `t`'s `CutStateProjection`). Buffers reused
     // across stages are resized to EXACTLY this each stage, never grown to a
@@ -1955,11 +1985,25 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
             .filter(|params| params.is_active(iteration)),
     );
 
+    debug_assert!(trial_points.windows(2).all(|pair| pair[0] < pair[1]));
+    let tasks = Mutex::new(
+        work.bases
+            .scenario_slices_mut()
+            .take(trial_points.last().map_or(0, |m| m + 1))
+            .enumerate()
+            .filter_map(|(m, basis)| {
+                trial_points
+                    .binary_search(&m)
+                    .ok()
+                    .map(|compacted| (compacted, m, basis))
+            })
+            .zip(work.coefficients.chunks_mut(cut_n_state.max(1))),
+    );
+
     workspaces
         .par_iter_mut()
-        .zip(basis_slices.into_par_iter())
-        .enumerate()
-        .map(|(w, (ws, mut basis_slice))| {
+        .map(|ws| {
+            ws.backward_accum.loaded_child = None;
             // Pre-allocate per-stage buffers. This touches only `ws.backward_accum`,
             // never `ws.solver`: each child's LP load is issued inside
             // `process_by_scenario_backward`, not here.
@@ -1992,41 +2036,29 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
                 *slot = SolverStatsDelta::default();
             }
 
-            // Worker `w` processes exactly the routed trial points whose GLOBAL
-            // scenario index falls in its own basis-slice window, so
-            // `basis_slice.get(m, node)` is in-bounds by construction. A node's
-            // routed subset is scattered across the global scenario axis, so an
-            // even split of `trial_points.len()` would misalign with the
-            // contiguous per-worker basis window and index out of the slice. On a
-            // single-node level the window tiling reproduces the pre-routing
-            // `partition(local_work, n_workers, w)` assignment exactly.
-            let (w_start, w_end) = basis_slice.scenario_window();
-            let owns = move |m: usize| w_start <= m && m < w_end;
-            let count_w = trial_points.iter().filter(|&&m| owns(m)).count();
-            // Grow-only arena (one `cut_n_state` slot per owned trial point);
-            // content is overwritten per trial point before read, so no zero-fill.
-            // Stride is `cut_n_state` — must match the `coefficients_range` length
-            // `process_by_scenario_backward` writes.
-            let arena_len = count_w * cut_n_state;
+            let arena_len = cut_n_state;
             if ws.backward_accum.agg_arena.len() < arena_len {
                 ws.backward_accum.agg_arena.resize(arena_len, 0.0_f64);
             }
             ws.backward_accum.staged_cuts_buf.clear();
+            ws.backward_accum
+                .staged_cuts_buf
+                .reserve(trial_points.len());
             let worker_stage_wall_start = Instant::now();
             // Snapshot the cumulative lazy-scoring accumulator; the delta below
             // attributes this stage's scoring to the backward phase (the accumulator
             // is never reset, so a snapshot-delta is the only correct attribution).
             let scoring_seconds_before = ws.backward_accum.dcs_solve.scoring_time_seconds;
 
-            // `compacted` is the trial point's index within the node's FULL routed
-            // subset (the cut slot's per-pool position); `local_i` is its row in
-            // this worker's own arena. They diverge only when a peer worker owns
-            // earlier routed points — `local_i` skips those, `compacted` counts them.
-            let mut local_i = 0usize;
-            for (compacted, &m) in trial_points.iter().enumerate() {
-                if !owns(m) {
-                    continue;
-                }
+            loop {
+                // The lock transfers exclusive bases, never covers an LP solve.
+                let task = tasks
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .next();
+                let Some(((compacted, m, mut basis_slice), coefficients)) = task else {
+                    break;
+                };
                 // Reset once per trial point across all its children's binding
                 // increments; each child's own cold-head reset + LP load lives inside
                 // the per-child loop in `process_by_scenario_backward` (a child loads a
@@ -2035,8 +2067,7 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
                 ws.backward_accum.slot_increments[..pop].fill(0);
                 // Call before the push to avoid a simultaneous mutable borrow of
                 // `staged_cuts_buf` (push receiver) and `ws` (function argument).
-                let arena_offset = local_i * cut_n_state;
-                let cut = process_by_scenario_backward(
+                let mut cut = process_by_scenario_backward(
                     ws,
                     ctx,
                     training_ctx,
@@ -2051,10 +2082,13 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
                     &opening_solver,
                     m,
                     compacted,
-                    arena_offset,
+                    0,
                 )?;
+                coefficients[..cut_n_state]
+                    .copy_from_slice(&ws.backward_accum.agg_arena[..cut_n_state]);
+                let offset = compacted * cut_n_state.max(1);
+                cut.coefficients_range = offset..offset + cut_n_state;
                 ws.backward_accum.staged_cuts_buf.push(cut);
-                local_i += 1;
             }
 
             ws.worker_timing_buf.backward_wall_ms +=
@@ -2066,10 +2100,7 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
                 - scoring_seconds_before)
                 * 1_000.0;
 
-            // `drain(..)` leaves capacity intact for the next stage; `w` rides
-            // alongside so the merge resolves each cut's `coefficients_range`
-            // against that worker's arena.
-            Ok((w, ws.backward_accum.staged_cuts_buf.drain(..).collect()))
+            Ok(ws.backward_accum.staged_cuts_buf.drain(..).collect())
         })
         .collect()
 }
@@ -2678,6 +2709,7 @@ mod tests {
         );
 
         let mut inputs = BackwardPassInputs {
+            backward_selection: None,
             workspaces: &mut workspaces,
             basis_store: &mut basis_store,
             ctx: &ctx,
@@ -2833,6 +2865,7 @@ mod tests {
         );
 
         let mut inputs = BackwardPassInputs {
+            backward_selection: None,
             workspaces: &mut workspaces,
             basis_store: &mut basis_store,
             ctx: &ctx,
@@ -3223,6 +3256,7 @@ mod tests {
         state_machine.set_scheduler(scheduler);
 
         let mut inputs = BackwardPassInputs {
+            backward_selection: None,
             workspaces: &mut workspaces,
             basis_store: &mut basis_store,
             ctx: &ctx,
@@ -3451,6 +3485,7 @@ mod tests {
             BackwardPassState::new(1, 1, bwd_max_openings, n_state, 1, &state, &horizon);
 
         let mut inputs = BackwardPassInputs {
+            backward_selection: None,
             workspaces: &mut workspaces,
             basis_store: &mut basis_store,
             ctx: &ctx,
@@ -3958,6 +3993,7 @@ mod tests {
         bwd_state.set_profile(resolved);
 
         let mut inputs = BackwardPassInputs {
+            backward_selection: None,
             workspaces: &mut workspaces,
             basis_store: &mut basis_store,
             ctx: &ctx,
@@ -4070,6 +4106,7 @@ mod tests {
         );
 
         let mut inputs = BackwardPassInputs {
+            backward_selection: None,
             workspaces: &mut workspaces,
             basis_store: &mut basis_store,
             ctx: &ctx,
@@ -4476,31 +4513,6 @@ mod tests {
     // ── sampled scheduler resolution ────────────────────────────────────
 
     #[test]
-    fn resolve_backward_scheduler_dcs_forces_by_scenario_else_keeps_configured() {
-        use cobre_io::config::BackwardScheduler;
-
-        // No active DCS: the configured scheduler passes through unchanged.
-        assert!(matches!(
-            resolve_backward_scheduler(false, BackwardScheduler::ByScenario {}),
-            BackwardScheduler::ByScenario {}
-        ));
-        assert!(matches!(
-            resolve_backward_scheduler(false, BackwardScheduler::ByNode { block_size: None }),
-            BackwardScheduler::ByNode { .. }
-        ));
-        // An active DCS iteration always forces the by-scenario path — its
-        // cut-free lazy core is incompatible with the by-node frozen-LP load.
-        assert!(matches!(
-            resolve_backward_scheduler(true, BackwardScheduler::ByNode { block_size: None }),
-            BackwardScheduler::ByScenario {}
-        ));
-        assert!(matches!(
-            resolve_backward_scheduler(true, BackwardScheduler::ByScenario {}),
-            BackwardScheduler::ByScenario {}
-        ));
-    }
-
-    #[test]
     fn by_node_scratch_sizing_follows_configured_scheduler_only() {
         use cobre_io::config::BackwardScheduler;
 
@@ -4513,7 +4525,10 @@ mod tests {
 
         // set_scheduler(ByNode) sizes it.
         let mut by_node_only = BackwardPassState::new(1, 1, 4, 0, 2, &state, &horizon);
-        by_node_only.set_scheduler(BackwardScheduler::ByNode { block_size: None });
+        by_node_only.set_scheduler(BackwardScheduler::ByNode {
+            block_size: None,
+            point_block_size: None,
+        });
         assert!(by_node_only.by_node_scratch_arena_capacity() > 0);
 
         // set_scheduler(ByScenario) keeps it empty.
@@ -4783,6 +4798,7 @@ mod tests {
         );
 
         let mut inputs = BackwardPassInputs {
+            backward_selection: None,
             workspaces: &mut pool.workspaces,
             basis_store: &mut basis_store,
             ctx: &stage_ctx,

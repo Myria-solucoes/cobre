@@ -518,6 +518,8 @@ fn minimal_config(forward_passes: u32, max_iterations: u32) -> Config {
             cost_scale_factor: None,
         },
         training: TrainingConfig {
+            forward_schedule: None,
+            backward_selection: None,
             enabled: true,
             tree_seed: Some(42),
             stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
@@ -911,6 +913,7 @@ fn simulation_ctx_propagates_dynamic_dcs_from_setup() {
             start_iteration: 2,
             seed_window: 5,
             candidate_recency: None,
+            adaptive_max_added_per_round: None,
             max_added_per_round: 10,
             violation_tolerance: 1e-10,
         }),
@@ -945,6 +948,7 @@ fn simulation_ctx_propagates_dynamic_dcs_from_setup() {
     let expected = DcsParams {
         k1: None,
         k2: 5,
+        adaptive_max_added_per_round: None,
         nadic: 10,
         epsilon_viol: 1e-10,
         start_iteration: 2,
@@ -1546,6 +1550,8 @@ fn study_params_from_config_defaults() {
             cost_scale_factor: None,
         },
         training: TrainingConfig {
+            forward_schedule: None,
+            backward_selection: None,
             enabled: true,
             tree_seed: None,
             stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 7 }]),
@@ -1645,6 +1651,8 @@ fn study_params_from_config_explicit() {
             cost_scale_factor: None,
         },
         training: TrainingConfig {
+            forward_schedule: None,
+            backward_selection: None,
             enabled: true,
             tree_seed: Some(1234),
             stopping_rules: Some(vec![
@@ -1730,6 +1738,8 @@ fn minimal_prepare_config() -> cobre_io::Config {
             cost_scale_factor: None,
         },
         training: TrainingConfig {
+            forward_schedule: None,
+            backward_selection: None,
             enabled: true,
             tree_seed: None,
             stopping_rules: None,

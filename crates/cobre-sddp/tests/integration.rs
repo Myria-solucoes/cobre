@@ -551,6 +551,7 @@ fn run_one_deterministic_pass(
         &mut solver,
         TrainingConfig {
             loop_config: LoopConfig {
+                forward_schedule: None,
                 forward_passes: 1,
                 training_enumerated: false,
                 max_iterations: 10,
@@ -560,6 +561,7 @@ fn run_one_deterministic_pass(
                 stopping_rules: iteration_limit(limit),
             },
             cut_management: CutManagementConfig {
+                backward_selection: None,
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
@@ -612,6 +614,7 @@ fn train_converges_with_mock_solver() {
 
     let config = TrainingConfig {
         loop_config: LoopConfig {
+            forward_schedule: None,
             forward_passes: 1,
             training_enumerated: false,
             max_iterations: 10,
@@ -621,6 +624,7 @@ fn train_converges_with_mock_solver() {
             stopping_rules: iteration_limit(10),
         },
         cut_management: CutManagementConfig {
+            backward_selection: None,
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
@@ -710,6 +714,7 @@ fn train_lb_monotonically_nondecreasing() {
     let (tx, rx) = mpsc::channel::<TrainingEvent>();
     let config = TrainingConfig {
         loop_config: LoopConfig {
+            forward_schedule: None,
             forward_passes: 1,
             training_enumerated: false,
             max_iterations: 20,
@@ -719,6 +724,7 @@ fn train_lb_monotonically_nondecreasing() {
             stopping_rules: iteration_limit(6),
         },
         cut_management: CutManagementConfig {
+            backward_selection: None,
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
@@ -797,6 +803,7 @@ fn train_emits_correct_event_sequence() {
     let (tx, rx) = mpsc::channel::<TrainingEvent>();
     let config = TrainingConfig {
         loop_config: LoopConfig {
+            forward_schedule: None,
             forward_passes: 1,
             training_enumerated: false,
             max_iterations: 10,
@@ -806,6 +813,7 @@ fn train_emits_correct_event_sequence() {
             stopping_rules: iteration_limit(3),
         },
         cut_management: CutManagementConfig {
+            backward_selection: None,
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
@@ -898,6 +906,7 @@ fn train_stops_at_iteration_limit() {
         &mut solver,
         TrainingConfig {
             loop_config: LoopConfig {
+                forward_schedule: None,
                 forward_passes: 1,
                 training_enumerated: false,
                 max_iterations: 10,
@@ -907,6 +916,7 @@ fn train_stops_at_iteration_limit() {
                 stopping_rules: iteration_limit(3),
             },
             cut_management: CutManagementConfig {
+                backward_selection: None,
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
@@ -982,6 +992,7 @@ fn train_with_a_shutdown_during_iteration_1(
         &mut solver,
         TrainingConfig {
             loop_config: LoopConfig {
+                forward_schedule: None,
                 forward_passes: 1,
                 training_enumerated: false,
                 max_iterations: iteration_limit,
@@ -991,6 +1002,7 @@ fn train_with_a_shutdown_during_iteration_1(
                 stopping_rules: rules,
             },
             cut_management: CutManagementConfig {
+                backward_selection: None,
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
@@ -1144,6 +1156,7 @@ fn train_propagates_infeasible_error() {
         &mut solver,
         TrainingConfig {
             loop_config: LoopConfig {
+                forward_schedule: None,
                 forward_passes: 1,
                 training_enumerated: false,
                 max_iterations: 10,
@@ -1153,6 +1166,7 @@ fn train_propagates_infeasible_error() {
                 stopping_rules: iteration_limit(10),
             },
             cut_management: CutManagementConfig {
+                backward_selection: None,
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
@@ -1224,6 +1238,7 @@ fn d17_level1_cut_selection_convergence() {
     let (tx, rx) = mpsc::channel::<TrainingEvent>();
     let config = TrainingConfig {
         loop_config: LoopConfig {
+            forward_schedule: None,
             forward_passes: 1,
             training_enumerated: false,
             max_iterations: 10,
@@ -1233,6 +1248,7 @@ fn d17_level1_cut_selection_convergence() {
             stopping_rules: iteration_limit(10),
         },
         cut_management: CutManagementConfig {
+            backward_selection: None,
             cut_selection: Some(CutSelectionStrategy::Level1 {
                 check_frequency: 2,
                 tie_tolerance: 1e-10,
@@ -1370,6 +1386,7 @@ fn d17_level1_cut_selection_reconstruction() {
         &mut solver,
         TrainingConfig {
             loop_config: LoopConfig {
+                forward_schedule: None,
                 forward_passes: 1,
                 training_enumerated: false,
                 max_iterations: 10,
@@ -1379,6 +1396,7 @@ fn d17_level1_cut_selection_reconstruction() {
                 stopping_rules: iteration_limit(10),
             },
             cut_management: CutManagementConfig {
+                backward_selection: None,
                 cut_selection: Some(CutSelectionStrategy::Level1 {
                     check_frequency: 2,
                     tie_tolerance: 1e-10,
@@ -1454,6 +1472,7 @@ fn d18_lml1_cut_selection_convergence() {
     let (tx, rx) = mpsc::channel::<TrainingEvent>();
     let config = TrainingConfig {
         loop_config: LoopConfig {
+            forward_schedule: None,
             forward_passes: 1,
             training_enumerated: false,
             max_iterations: 10,
@@ -1463,6 +1482,7 @@ fn d18_lml1_cut_selection_convergence() {
             stopping_rules: iteration_limit(10),
         },
         cut_management: CutManagementConfig {
+            backward_selection: None,
             cut_selection: Some(CutSelectionStrategy::Lml1 {
                 check_frequency: 2,
                 tie_tolerance: 1e-10,
@@ -1645,6 +1665,7 @@ fn frozen_backward_pass_smoke_test() {
         &mut solver,
         TrainingConfig {
             loop_config: LoopConfig {
+                forward_schedule: None,
                 forward_passes: 1,
                 training_enumerated: false,
                 max_iterations: n_iter,
@@ -1654,6 +1675,7 @@ fn frozen_backward_pass_smoke_test() {
                 stopping_rules: iteration_limit(n_iter),
             },
             cut_management: CutManagementConfig {
+                backward_selection: None,
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,

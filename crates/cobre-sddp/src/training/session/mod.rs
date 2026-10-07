@@ -165,7 +165,34 @@ where
         solver_factory: impl Fn() -> Result<S, SolverError>,
         solver_profiles: SolverProfiles,
     ) -> Result<Self, SddpError> {
+        if config.cut_management.backward_selection.is_some()
+            && (comm.size() != 1 || config.loop_config.training_enumerated)
+        {
+            return Err(SddpError::Validation(
+                "backward_selection requires sampled training with one MPI rank".into(),
+            ));
+        }
+        if let cobre_io::config::BackwardScheduler::ByNode {
+            point_block_size: Some(size),
+            ..
+        } = solver_profiles.backward_scheduler
+            && size.get() > 1
+            && (comm.size() != 1 || config.loop_config.training_enumerated)
+        {
+            return Err(SddpError::Validation(
+                "point_block_size > 1 requires sampled training with one MPI rank".into(),
+            ));
+        }
         let horizon = training_ctx.horizon;
+        if let Some(schedule) = config.loop_config.forward_schedule
+            && (config.loop_config.training_enumerated
+                || schedule.initial_passes.get() > config.loop_config.forward_passes
+                || schedule.full_from_iteration.get() > config.loop_config.max_iterations)
+        {
+            return Err(SddpError::Validation(
+                "invalid forward_schedule for the configured population or iteration budget".into(),
+            ));
+        }
         let state = training_ctx.state;
         let num_stages = horizon.num_stages();
         let total_forward_passes = config.loop_config.forward_passes as usize;
@@ -442,6 +469,10 @@ where
     /// bound evaluation failures.
     pub(crate) fn run_iteration(&mut self, iteration: u64) -> Result<IterationOutcome, SddpError> {
         let iter_start = Instant::now();
+
+        let active_forwards = self.config.loop_config.active_forward_passes(iteration) as usize;
+        self.ranks.set_active_total(active_forwards);
+        self.exchange_bufs.set_active_total(active_forwards);
 
         // Snapshot before this iteration's solves so the post-backward delta
         // isolates this iteration's contribution.
@@ -895,7 +926,7 @@ where
             self.runtime.event_sender(),
             TrainingEvent::ForwardPassComplete {
                 iteration,
-                scenarios: self.config.loop_config.forward_passes,
+                scenarios: self.config.loop_config.active_forward_passes(iteration),
                 #[allow(clippy::cast_precision_loss)]
                 ub_mean: if local_n > 0 {
                     local_cost_sum / local_n as f64
@@ -1964,6 +1995,7 @@ mod tests {
     ) -> TrainingConfig {
         TrainingConfig {
             loop_config: LoopConfig {
+                forward_schedule: None,
                 forward_passes,
                 training_enumerated: false,
                 max_iterations,
@@ -1973,6 +2005,7 @@ mod tests {
                 stopping_rules: iteration_limit_rules(limit),
             },
             cut_management: CutManagementConfig {
+                backward_selection: None,
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
