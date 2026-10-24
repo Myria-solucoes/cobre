@@ -24,6 +24,8 @@ fn main() {
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    let no_fma = no_fma_flags(&target_env, &target_arch);
 
     // Exactly one LP backend may be enabled; enabling both `highs` and `clp` is
     // rejected at compile time (see the `compile_error!` in `lib.rs`).
@@ -59,6 +61,9 @@ fn main() {
             // programmatically, so disabling it avoids a system dependency that breaks
             // cross-compilation in the Python wheel CI.
             .define("CMAKE_DISABLE_FIND_PACKAGE_ZLIB", "ON");
+        for flag in no_fma {
+            cmake_config.cflag(flag).cxxflag(flag);
+        }
 
         // On MSVC, use static CRT to avoid requiring vcruntime140.dll in the wheel.
         if target_env == "msvc" {
@@ -117,6 +122,7 @@ fn main() {
             .include("csrc")
             .warnings(true)
             .extra_warnings(true);
+        add_flags(&mut build, no_fma);
 
         // Treat HiGHS headers as system includes to suppress third-party warnings
         // while keeping full coverage on our own wrappers. MSVC lacks -isystem.
@@ -145,6 +151,7 @@ fn main() {
             .include("csrc")
             .warnings(true)
             .extra_warnings(true);
+        add_flags(&mut build_cpp, no_fma);
 
         add_system_or_include(&mut build_cpp, target_env == "msvc", &highs_include);
         add_system_or_include(&mut build_cpp, target_env == "msvc", &highs_include_highs);
@@ -202,6 +209,9 @@ fn main() {
         clp_config
             .define("CMAKE_BUILD_TYPE", "Release")
             .define("BUILD_SHARED_LIBS", "OFF");
+        for flag in no_fma {
+            clp_config.cflag(flag).cxxflag(flag);
+        }
 
         // MSVC: static CRT (same rationale as HiGHS above).
         if target_env == "msvc" {
@@ -265,6 +275,7 @@ fn main() {
             .include("csrc")
             .warnings(true)
             .extra_warnings(true);
+        add_flags(&mut clp_build, no_fma);
 
         // Treat COIN-OR headers as system includes (same rationale as HiGHS above).
         add_system_or_include(&mut clp_build, target_env == "msvc", &clp_src_include);
@@ -288,6 +299,7 @@ fn main() {
             .include("csrc")
             .warnings(true)
             .extra_warnings(true);
+        add_flags(&mut clp_build_cpp, no_fma);
 
         add_system_or_include(&mut clp_build_cpp, target_env == "msvc", &clp_src_include);
         add_system_or_include(
@@ -306,6 +318,22 @@ fn main() {
         }
 
         clp_build_cpp.compile("clp_wrapper_cpp");
+    }
+}
+
+/// Keeps FMA out of the vendored solvers whatever the compiler's default target,
+/// so LP solutions do not depend on the build host.
+fn no_fma_flags(target_env: &str, target_arch: &str) -> &'static [&'static str] {
+    match (target_env, target_arch) {
+        ("msvc", _) => &[],
+        (_, "x86_64") => &["-ffp-contract=off", "-mno-fma"],
+        _ => &["-ffp-contract=off"],
+    }
+}
+
+fn add_flags(build: &mut cc::Build, flags: &[&str]) {
+    for flag in flags {
+        build.flag(flag);
     }
 }
 
