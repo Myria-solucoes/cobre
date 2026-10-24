@@ -640,6 +640,7 @@ fn default_config() -> FphaColumnLayout {
         spillage_discretization_points: None,
         max_planes_per_hydro: None,
         fitting_window: None,
+        spillage_fit_max_m3s: None,
     }
 }
 
@@ -1360,6 +1361,7 @@ fn fit_fpha_planes_sobradinho_style_end_to_end() {
         spillage_discretization_points: None,
         max_planes_per_hydro: None,
         fitting_window: None,
+        spillage_fit_max_m3s: None,
     };
 
     let result = fit_fpha_planes(
@@ -1422,6 +1424,7 @@ fn fit_fpha_planes_spill_sensitive_yields_negative_gamma_s() {
         spillage_discretization_points: None,
         max_planes_per_hydro: None,
         fitting_window: None,
+        spillage_fit_max_m3s: None,
     };
 
     let result = fit_fpha_planes(
@@ -1480,6 +1483,7 @@ fn fit_fpha_planes_intercepts_are_finite() {
         spillage_discretization_points: None,
         max_planes_per_hydro: None,
         fitting_window: None,
+        spillage_fit_max_m3s: None,
     };
 
     let result = fit_fpha_planes(
@@ -1540,6 +1544,7 @@ fn fit_fpha_planes_run_of_river_yields_zero_gamma_v_end_to_end() {
         spillage_discretization_points: None,
         max_planes_per_hydro: None,
         fitting_window: None,
+        spillage_fit_max_m3s: None,
     };
 
     let result = fit_fpha_planes(
@@ -1647,6 +1652,7 @@ fn fit_fpha_planes_linear_function_produces_one_plane() {
         spillage_discretization_points: None,
         max_planes_per_hydro: None,
         fitting_window: None,
+        spillage_fit_max_m3s: None,
     };
 
     let result = fit_fpha_planes(
@@ -1699,6 +1705,7 @@ fn fit_fpha_planes_propagates_forebay_error_on_empty_rows() {
         spillage_discretization_points: None,
         max_planes_per_hydro: None,
         fitting_window: None,
+        spillage_fit_max_m3s: None,
     };
 
     let err = fit_fpha_planes(
@@ -1743,6 +1750,7 @@ fn single_volume_run_of_river_fits_with_zero_gamma_v() {
         spillage_discretization_points: None,
         max_planes_per_hydro: None,
         fitting_window: None,
+        spillage_fit_max_m3s: None,
     };
 
     let result = fit_fpha_planes(
@@ -1842,6 +1850,7 @@ fn fit_fpha_planes_result_alpha_positive_and_intercept_consistent() {
         spillage_discretization_points: None,
         max_planes_per_hydro: None,
         fitting_window: None,
+        spillage_fit_max_m3s: None,
     };
 
     let result = fit_fpha_planes(
@@ -1894,6 +1903,7 @@ fn alpha_scaled_planes_are_outer_approximation_and_not_double_scaled() {
         spillage_discretization_points: None,
         max_planes_per_hydro: None,
         fitting_window: None,
+        spillage_fit_max_m3s: None,
     };
 
     // Reconstruct the production function and bounds exactly as fit_fpha_planes does,
@@ -2002,6 +2012,7 @@ fn fitted_min_envelope_tracks_production_on_concave_reservoir() {
         spillage_discretization_points: None,
         max_planes_per_hydro: None,
         fitting_window: None,
+        spillage_fit_max_m3s: None,
     };
     let forebay = ForebayTable::new(&rows, &hydro.name).expect("valid VHA curve");
     let pf = ProductionFunction::new(
@@ -2143,6 +2154,7 @@ fn families_single_family_matches_entity_polynomial_planes() {
         spillage_discretization_points: None,
         max_planes_per_hydro: None,
         fitting_window: None,
+        spillage_fit_max_m3s: None,
     };
 
     // Entity-path fit (Sobradinho tailrace = Polynomial [0.0, 0.001]).
@@ -2217,6 +2229,7 @@ fn fit_fpha_planes_none_reduction_is_bit_identical_skip() {
         spillage_discretization_points: None,
         max_planes_per_hydro: None,
         fitting_window: None,
+        spillage_fit_max_m3s: None,
     };
 
     let reference = fit_fpha_planes(
@@ -2296,6 +2309,7 @@ fn fit_fpha_planes_distance_reduction_is_deterministic() {
         spillage_discretization_points: None,
         max_planes_per_hydro: None,
         fitting_window: None,
+        spillage_fit_max_m3s: None,
     };
     let reduction = PlaneReductionConfig::Distance {
         tolerance_pct: 0.5,
@@ -2405,6 +2419,7 @@ fn reduced_sobradinho_planes(reduction: &PlaneReductionConfig) -> Vec<FphaPlane>
         spillage_discretization_points: None,
         max_planes_per_hydro: None,
         fitting_window: None,
+        spillage_fit_max_m3s: None,
     };
     fit_fpha_planes(
         &rows,
