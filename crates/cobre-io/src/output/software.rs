@@ -4,7 +4,7 @@
 pub const SOFTWARE_NAME: &str = "cobre-myria";
 
 /// Fork identity is distinct from the upstream ABI version.
-pub const SOFTWARE_VERSION: &str = "0.18.0-myria.4";
+pub const SOFTWARE_VERSION: &str = "0.18.0-myria.5";
 
 /// How to obtain a policy checkpoint this build loads; every refusal that
 /// says how ends with it.

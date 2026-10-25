@@ -10,9 +10,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Immutable GitHub Release tag (for example v0.18.0-myria.4)
+        description: Immutable GitHub Release tag (for example v0.18.0-myria.5)
         required: true
-        default: v0.18.0-myria.4
+        default: v0.18.0-myria.5
       prerelease:
         description: Publish an opt-in preview without changing the latest release
         type: boolean
@@ -64,6 +64,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Validate retained compatibility patches
         run: |
+          cargo test --locked --release -j 2 -p cobre-io --features schema --lib fit_max
+          cargo test --locked --release -j 2 -p cobre-sddp --lib fpha_fitting
           cargo test --locked --release -j 2 -p cobre-io --lib stationarity
           cargo test --locked --release -j 2 -p cobre-io --lib observation_coverage_outside_horizon
           cargo test --locked --release -j 2 -p cobre-solver --test conformance highs_statistics_include
@@ -136,5 +138,5 @@ jobs:
           gh release create "$RELEASE_TAG" "${release_options[@]}" \
             --target "$GITHUB_SHA" \
             --title "Myria Cobre develop ${RELEASE_TAG#v}" \
-            --notes "Myria runtime built from ${GITHUB_SHA}, based on upstream develop f8ae8f88599ab900c124b46ec0d652dc72620cd3. Adds node-matched forward basis reuse for enumerated training and complete HiGHS retry statistics, with shared census nodes counted once. Retains automatic PAR stationarity regularization, seasonal coverage fixes and upstream format-4 policies. CLI and Python artifacts validated on native Linux x86_64 and ARM64." \
+            --notes "Myria runtime built from ${GITHUB_SHA}, based on upstream develop e135f448325f3fab167418e2fda3f5fc8868e10a. Adds configurable FPHA turbined-flow fitting range. Preserves node-matched forward basis reuse for enumerated training and complete HiGHS retry statistics, with shared census nodes counted once. Retains automatic PAR stationarity regularization, seasonal coverage fixes and upstream format-4 policies. CLI and Python artifacts validated on native Linux x86_64 and ARM64." \
             dist/*.tar.xz dist/*.whl dist/SHA256SUMS
