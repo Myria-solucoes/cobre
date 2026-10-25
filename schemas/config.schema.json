@@ -484,7 +484,7 @@
         },
         "use_warm_start": {
           "default": null,
-          "description": "Warm-start override. By default backward solves warm-start from the\nstored basis and forward and simulation solves are cold.",
+          "description": "Warm-start override. By default backward solves warm-start from the\nstored basis. HiGHS enumerated forward also reuses node bases; sampled\nforward and simulation solves are cold.",
           "type": [
             "boolean",
             "null"
