@@ -27,7 +27,7 @@ def main():
         config['training'].update({
             'selection': {'method': 'sampled', 'forward_passes': 8},
             'stopping_rules': [{'type': 'iteration_limit', 'limit': 4}],
-            'cut_selection': {'selection': {'method': 'level1'}, 'check_frequency': 1},
+            'cut_selection': {'selection': {'method': 'level1', 'check_frequency': 1}},
         })
         config['simulation']['enabled'] = False
         config['policy'] = {'mode': 'fresh', 'checkpointing': {
