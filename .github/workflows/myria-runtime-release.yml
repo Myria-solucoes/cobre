@@ -10,9 +10,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Immutable GitHub Release tag (for example v0.18.0-myria.3)
+        description: Immutable GitHub Release tag (for example v0.18.0-myria.4)
         required: true
-        default: v0.18.0-myria.3
+        default: v0.18.0-myria.4
       prerelease:
         description: Publish an opt-in preview without changing the latest release
         type: boolean
@@ -68,6 +68,7 @@ jobs:
           cargo test --locked --release -j 2 -p cobre-io --lib observation_coverage_outside_horizon
           cargo test --locked --release -j 2 -p cobre-solver --test conformance highs_statistics_include
           cargo test --locked --release -j 2 -p cobre-sddp --features test-support --test mpi_wire k_fan_enumerated_determinism
+          cargo test --locked --release -j 2 -p cobre-sddp --features test-support --test simulation_integration census
 
       - name: Build CLI archive
         run: |
@@ -135,5 +136,5 @@ jobs:
           gh release create "$RELEASE_TAG" "${release_options[@]}" \
             --target "$GITHUB_SHA" \
             --title "Myria Cobre develop ${RELEASE_TAG#v}" \
-            --notes "Myria runtime built from ${GITHUB_SHA}, based on upstream develop f8ae8f88599ab900c124b46ec0d652dc72620cd3. Adds node-matched forward basis reuse for enumerated training and complete HiGHS retry statistics. Retains automatic PAR stationarity regularization, seasonal coverage fixes and upstream format-4 policies. CLI and Python artifacts validated on native Linux x86_64 and ARM64." \
+            --notes "Myria runtime built from ${GITHUB_SHA}, based on upstream develop f8ae8f88599ab900c124b46ec0d652dc72620cd3. Adds node-matched forward basis reuse for enumerated training and complete HiGHS retry statistics, with shared census nodes counted once. Retains automatic PAR stationarity regularization, seasonal coverage fixes and upstream format-4 policies. CLI and Python artifacts validated on native Linux x86_64 and ARM64." \
             dist/*.tar.xz dist/*.whl dist/SHA256SUMS

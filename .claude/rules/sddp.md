@@ -2436,6 +2436,16 @@ on a tree whose worst branch compounds), the `admission_gate_*` gate tests
 (`setup/tests.rs`), and the end-to-end `enumerated_cvar_gap` module
 (`tests/deterministic.rs`).
 
+## Enumerated simulation accounts for physical work once
+
+The census sweep solves each owned node once. During re-expansion,
+`m_rep[node]` owns that node's `SolverStatsDelta`: only the smallest owned
+scenario visiting the node receives its counters and timers. Detailed results
+and costs still expand to every path. Each rank counts its own replicated
+ancestor solve, so cross-rank reduction preserves physical work. The sweep
+unit gate and `simulation_integration` census gates compare reported totals
+with workspace solver counters.
+
 ## Enumerated traversal excludes dynamic cut selection
 
 Myria's HiGHS enumerated forward defaults to reusing the preceding iteration's

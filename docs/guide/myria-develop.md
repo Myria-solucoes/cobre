@@ -13,8 +13,11 @@ setting takes precedence. Sampled training and simulation retain the upstream
 defaults. Reuse can change valid optimal vertices, cuts and convergence paths;
 performance comparisons must use the same precision target. HiGHS statistics
 include the work of every retry, even when the solve ultimately fails.
+Enumerated simulation attributes each node's physical solver work only to the
+first owned scenario visiting it. Totals count shared ancestors once per rank;
+every path still receives its full results, costs and probability.
 
-Outputs and policies identify `cobre-myria` / `0.18.0-myria.3`. The Python ABI
+Outputs and policies identify `cobre-myria` / `0.18.0-myria.4`. The Python ABI
 remains 0.18.0, but policies use native format 4. Reconversion is required
 when switching from the released 0.18 or earlier Myria runtimes. The matching
 CLI and wheel are built and checked on native x86_64 and ARM64 runners.

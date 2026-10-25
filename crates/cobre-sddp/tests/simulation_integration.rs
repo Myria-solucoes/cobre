@@ -1653,10 +1653,8 @@ fn as_enumerated_census(mut setup: StudySetup) -> StudySetup {
 /// gathered `(scenario_id, cost, probability)` rows, and the total realized
 /// LP-solve count across every workspace this run used (the dedup-scale
 /// invariant checks) — measured via the solver-statistics delta around
-/// `simulate()`, the same source `run_worker_scenarios` uses, since
-/// `SimulationRunResult::solver_stats` is per-LEAF (a shared node's stats are
-/// replicated into every leaf that visits it) and cannot answer "how many
-/// solves actually happened."
+/// `simulate()`. Reported scenario statistics must agree with these physical
+/// counters: a shared node belongs to its first owned path, exactly once.
 struct CensusRun {
     results: Vec<SimulationScenarioResult>,
     summary: SimulationSummary,
@@ -1692,6 +1690,16 @@ fn run_census<C: Communicator>(setup: &StudySetup, comm: &C, n_threads: usize) -
         .zip(pool.workspaces.iter().map(|ws| ws.solver.statistics()))
         .map(|(before, after)| SolverStatsDelta::from_snapshots(before, &after).lp_solves)
         .sum();
+
+    let reported_solves: u64 = sim_run_result
+        .solver_stats
+        .iter()
+        .map(|(_, _, delta)| delta.lp_solves)
+        .sum();
+    assert_eq!(
+        reported_solves, actual_lp_solves,
+        "scenario statistics must conserve physical solver work"
+    );
 
     let traversal = Traversal::resolve(
         &setup.inputs.node_graph,

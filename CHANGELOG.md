@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- next-header -->
 
+## [0.18.0-myria.4] - 2026-10-25
+
+- Enumerated simulation attributes each node's solver statistics to its first
+  owned path, avoiding repeated counts and time for shared ancestors. Scenario
+  results, costs and probabilities are unchanged.
+
 ## [0.18.0-myria.3] - 2026-10-25
 
 - Enumerated training reuses each node's captured forward basis by default.

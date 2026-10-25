@@ -397,7 +397,10 @@ fn re_expand(
             );
             let cum_d = ctx.cumulative_discount_factor(StageIdx(t));
             total_cost += cum_d * visit.immediate_cost;
-            SolverStatsDelta::accumulate_into(&mut leaf_stats, &visit.stats);
+            // Attribute physical work once, to the node's first owned path.
+            if scratch.m_rep[node] == p {
+                SolverStatsDelta::accumulate_into(&mut leaf_stats, &visit.stats);
+            }
             stage_results.push(visit.result.clone());
         }
         stats.push((p, -1_i32, leaf_stats));
@@ -663,6 +666,22 @@ mod tests {
         assert_eq!(
             populated, distinct_before_sweep,
             "the arena must be fully populated before re-expansion"
+        );
+        let (costs, stats) = re_expand(
+            plan,
+            &scratch,
+            scenario_range,
+            num_stages,
+            &stage_ctx,
+            &output,
+        )
+        .expect("re-expansion must preserve every path");
+        assert_eq!(costs.len(), k);
+        assert_eq!(stats.len(), k);
+        let reported_solves: u64 = stats.iter().map(|(_, _, delta)| delta.lp_solves).sum();
+        assert_eq!(
+            reported_solves, lp_solves,
+            "shared ancestors were solved once and must be accounted once"
         );
     }
 }
