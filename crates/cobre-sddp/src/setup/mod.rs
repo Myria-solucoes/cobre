@@ -1069,6 +1069,21 @@ fn resolve_solver_profiles(
     let backward_profile =
         Phase::Backward.resolve_profile(config.training_solver_backward.as_ref());
     let forward_profile = Phase::Forward.resolve_profile(config.training_solver_forward.as_ref());
+    #[cfg(feature = "highs")]
+    let forward_profile = if config.training_enumerated
+        && config
+            .training_solver_forward
+            .as_ref()
+            .and_then(|profile| profile.use_warm_start)
+            .is_none()
+    {
+        cobre_solver::HighsProfile {
+            use_warm_start: true,
+            ..forward_profile
+        }
+    } else {
+        forward_profile
+    };
     let simulation_profile = Phase::Simulation.resolve_profile(config.simulation_solver.as_ref());
 
     Ok((backward_profile, forward_profile, simulation_profile))

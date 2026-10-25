@@ -11,8 +11,6 @@ use crate::{ffi, types::SolverError};
 /// Outcome of a successful retry escalation in [`HighsSolver::retry_escalation`].
 pub(super) struct RetryOutcome {
     pub(super) attempts: u64,
-    pub(super) solve_time: f64,
-    pub(super) iterations: u64,
     /// The retry level (0..11) at which the solve succeeded.
     pub(super) level: u32,
 }
@@ -54,19 +52,11 @@ impl HighsSolver {
 
             retry_attempts += 1;
 
-            let t_retry = Instant::now();
-            let retry_status = self.run_once();
-            let retry_time = t_retry.elapsed().as_secs_f64();
+            let (retry_status, retry_time) = self.run_once();
 
             if retry_status == ffi::HIGHS_MODEL_STATUS_OPTIMAL {
-                // SAFETY: handle is valid non-null HiGHS pointer.
-                #[allow(clippy::cast_sign_loss)]
-                let iters =
-                    unsafe { ffi::cobre_highs_get_simplex_iteration_count(self.handle) } as u64;
                 outcome = Some(RetryOutcome {
                     attempts: retry_attempts,
-                    solve_time: retry_time,
-                    iterations: iters,
                     level,
                 });
                 break;

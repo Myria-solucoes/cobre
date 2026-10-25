@@ -849,6 +849,46 @@ fn make_larger_lp_template() -> StageTemplate {
     }
 }
 
+#[cfg(feature = "highs")]
+#[test]
+fn highs_statistics_include_failed_attempts() {
+    let mut solver = HighsSolver::new().unwrap();
+    let mut template = make_larger_lp_template();
+    template.col_upper.fill(0.0);
+    solver.load_model(&template);
+    assert!(matches!(solver.solve(None), Err(SolverError::Infeasible)));
+    let stats = solver.statistics();
+    assert_eq!(stats.solve_count, 1);
+    assert_eq!(stats.failure_count, 1);
+    assert!(stats.retry_count > 0);
+    assert!(stats.total_solve_time_seconds > 0.0);
+}
+
+#[cfg(feature = "highs")]
+#[test]
+fn highs_statistics_include_pivots_before_successful_retry() {
+    let mut solver = HighsSolver::new().unwrap();
+    solver.apply_profile(&cobre_solver::HighsProfile {
+        simplex_iteration_limit: 1,
+        presolve: cobre_solver::PresolveKind::Off,
+        ..Default::default()
+    });
+    solver.load_model(&make_larger_lp_template());
+    let solution = solver.solve(None).unwrap();
+    assert!((solution.objective - 16.0).abs() < 1e-8);
+    let reported_iterations = solution.iterations;
+    let reported_time = solution.solve_time_seconds;
+    let stats = solver.statistics();
+    assert_eq!(stats.first_try_successes, 0);
+    assert!(stats.retry_count >= 2);
+    assert!(
+        stats.total_iterations >= 2,
+        "both capped attempts performed a pivot"
+    );
+    assert_eq!(reported_iterations, stats.total_iterations);
+    assert_eq!(reported_time, stats.total_solve_time_seconds);
+}
+
 /// SS limit row 1: external `time_limit=0` causes graceful failure.
 ///
 /// An externally-set `time_limit=0` causes immediate `TIME_LIMIT` on every

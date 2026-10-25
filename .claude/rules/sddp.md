@@ -2438,6 +2438,16 @@ on a tree whose worst branch compounds), the `admission_gate_*` gate tests
 
 ## Enumerated traversal excludes dynamic cut selection
 
+Myria's HiGHS enumerated forward defaults to reusing the preceding iteration's
+captured basis for the same node. `resolve_solver_profiles` applies this default
+only when `training.solver.forward.use_warm_start` is absent. An explicit choice
+wins; sampled forward and simulation defaults remain unchanged. Each node solve
+still resets and reloads its LP, so a worker's previous node cannot donate an
+implicit basis. Node identity and cut-slot reconstruction remain mandatory.
+`enumerated_forward_reuses_bases_unless_explicitly_disabled` protects resolution;
+`enumerated_k_fan_thread_and_declaration_shapes_agree` requires actual forward
+basis offers before checking thread and declaration invariance.
+
 `admission_gate` (`setup/mod.rs`) rejects `Traversal::Enumerated` paired with
 `CutSelectionStrategy::Dynamic` as a hard `SddpError::Validation`, through
 `reject_dynamic_cut_selection_under_enumerated`. The enumerated backward never

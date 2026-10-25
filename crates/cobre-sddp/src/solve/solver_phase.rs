@@ -7,7 +7,9 @@
 //! [`HighsProfile::default()`] to exploit the sparse cut-subgradient rows, so
 //! backward solves warm-start from the stored basis. [`FORWARD_PROFILE`] and
 //! [`SIMULATION_PROFILE`] are identical to it except for
-//! `use_warm_start: false`, so their solves are cold. A phase's
+//! `use_warm_start: false`. Study setup enables forward basis reuse for
+//! enumerated traversal unless explicitly overridden; sampled forwards and
+//! simulation retain the cold base profile. A phase's
 //! `use_warm_start` override changes either choice. The
 //! CLP backend pins full dual steepest-edge pricing (`dual_pricing_mode = 1`)
 //! and `factorization_frequency = 200`. All values come from an empirical solver

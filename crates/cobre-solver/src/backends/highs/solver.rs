@@ -156,7 +156,11 @@ impl HighsSolver {
     /// The returned view borrows solver-internal buffers and is valid until the next
     /// `&mut self` call. `col_dual` is the reduced cost vector. Row duals follow the
     /// canonical sign convention (per Solver Abstraction SS8).
-    pub(super) fn extract_solution_view(&mut self, solve_time_seconds: f64) -> SolutionView<'_> {
+    pub(super) fn extract_solution_view(
+        &mut self,
+        solve_time_seconds: f64,
+        iterations: u64,
+    ) -> SolutionView<'_> {
         // SAFETY: buffers resized in `load_model`/`add_rows`; HiGHS writes within bounds.
         let status = unsafe {
             ffi::cobre_highs_get_solution(
@@ -176,11 +180,6 @@ impl HighsSolver {
 
         // SAFETY: `self.handle` is a valid, non-null HiGHS pointer.
         let objective = unsafe { ffi::cobre_highs_get_objective_value(self.handle) };
-
-        // SAFETY: iteration count is non-negative so cast is safe.
-        #[allow(clippy::cast_sign_loss)]
-        let iterations =
-            unsafe { ffi::cobre_highs_get_simplex_iteration_count(self.handle) } as u64;
 
         SolutionView {
             objective,
@@ -301,15 +300,23 @@ impl HighsSolver {
         }
     }
 
-    /// Runs the solver once and returns the raw `HiGHS` model status.
-    pub(super) fn run_once(&mut self) -> i32 {
+    /// Runs and accounts for one attempt, including failed attempts.
+    pub(super) fn run_once(&mut self) -> (i32, f64) {
+        let started = Instant::now();
         // SAFETY: `self.handle` is a valid, non-null HiGHS pointer.
         let run_status = unsafe { ffi::cobre_highs_run(self.handle) };
-        if run_status == ffi::HIGHS_STATUS_ERROR {
-            return ffi::HIGHS_MODEL_STATUS_SOLVE_ERROR;
-        }
-        // SAFETY: same.
-        unsafe { ffi::cobre_highs_get_model_status(self.handle) }
+        let status = if run_status == ffi::HIGHS_STATUS_ERROR {
+            ffi::HIGHS_MODEL_STATUS_SOLVE_ERROR
+        } else {
+            // SAFETY: same live handle.
+            unsafe { ffi::cobre_highs_get_model_status(self.handle) }
+        };
+        let elapsed = started.elapsed().as_secs_f64();
+        // SAFETY: same live handle; unavailable iteration counts are negative.
+        let iterations = unsafe { ffi::cobre_highs_get_simplex_iteration_count(self.handle) };
+        self.stats.total_iterations += u64::try_from(iterations).unwrap_or(0);
+        self.stats.total_solve_time_seconds += elapsed;
+        (status, elapsed)
     }
 
     /// Sets per-solve iteration limits before a `run_once()` call.
@@ -491,23 +498,20 @@ impl HighsSolver {
         // wall-clock time is measured after `run_once` to detect stuck solves.
         self.set_iteration_limits();
 
-        let t0 = Instant::now();
-        let model_status = self.run_once();
-        let solve_time = t0.elapsed().as_secs_f64();
+        let iterations_before = self.stats.total_iterations;
+        let time_before = self.stats.total_solve_time_seconds;
+        let (model_status, solve_time) = self.run_once();
 
         self.stats.solve_count += 1;
 
         if model_status == ffi::HIGHS_MODEL_STATUS_OPTIMAL {
-            // SAFETY: handle is valid non-null HiGHS pointer.
-            #[allow(clippy::cast_sign_loss)]
-            let iterations =
-                unsafe { ffi::cobre_highs_get_simplex_iteration_count(self.handle) } as u64;
             self.stats.success_count += 1;
             self.stats.first_try_successes += 1;
-            self.stats.total_iterations += iterations;
-            self.stats.total_solve_time_seconds += solve_time;
             self.restore_iteration_limits();
-            return Ok(self.extract_solution_view(solve_time));
+            return Ok(self.extract_solution_view(
+                self.stats.total_solve_time_seconds - time_before,
+                self.stats.total_iterations - iterations_before,
+            ));
         }
 
         // UNBOUNDED / ITERATION_LIMIT / TIME_LIMIT and a >15s wall-clock are all
@@ -537,10 +541,11 @@ impl HighsSolver {
             Ok(outcome) => {
                 self.stats.retry_count += outcome.attempts;
                 self.stats.success_count += 1;
-                self.stats.total_iterations += outcome.iterations;
-                self.stats.total_solve_time_seconds += outcome.solve_time;
                 self.stats.retry_level_histogram[outcome.level as usize] += 1;
-                Ok(self.extract_solution_view(outcome.solve_time))
+                Ok(self.extract_solution_view(
+                    self.stats.total_solve_time_seconds - time_before,
+                    self.stats.total_iterations - iterations_before,
+                ))
             }
             Err((attempts, err)) => {
                 self.stats.retry_count += attempts;

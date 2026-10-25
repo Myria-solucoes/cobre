@@ -2330,6 +2330,15 @@ mod k_fan_enumerated_determinism {
             "enumerated K-fan training must not error: {:?}",
             outcome.error
         );
+        #[cfg(feature = "highs")]
+        assert!(
+            outcome
+                .result
+                .solver_stats_log
+                .iter()
+                .any(|entry| { entry.phase == "forward" && entry.delta.basis_offered > 0 }),
+            "the determinism gate must exercise reuse of a node's captured basis"
+        );
         (
             outcome.result.final_lb.to_bits(),
             outcome.result.final_ub.to_bits(),

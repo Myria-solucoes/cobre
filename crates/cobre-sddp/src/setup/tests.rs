@@ -1594,6 +1594,40 @@ fn study_params_from_config_defaults() {
     );
 }
 
+#[cfg(feature = "highs")]
+#[test]
+fn enumerated_forward_reuses_bases_unless_explicitly_disabled() {
+    use cobre_io::config::PhaseSolverProfileConfig;
+
+    for enumerated in [false, true] {
+        for requested in [None, Some(false), Some(true)] {
+            let mut config = minimal_config(4, 6);
+            if enumerated {
+                config.training.selection = Some(TrainingSelection::Enumerated {});
+            }
+            config.training.solver.forward = Some(PhaseSolverProfileConfig {
+                use_warm_start: requested,
+                primal_feasibility_tolerance: Some(1e-8),
+                dual_edge_weight: None,
+                scale: None,
+                price: None,
+                dual_feasibility_tolerance: None,
+                presolve: None,
+                simplex_update_limit: None,
+                cost_perturbation: None,
+                refactor_error_tolerance: None,
+                factor_pivot_threshold: None,
+                steepest_edge_devex_fallback_threshold: None,
+            });
+            let params = super::StudyParams::from_config(&config, Vec::new()).unwrap();
+            let (_, forward, simulation) = super::resolve_solver_profiles(&params).unwrap();
+            assert_eq!(forward.use_warm_start, requested.unwrap_or(enumerated));
+            assert_eq!(forward.primal_feasibility_tolerance, 1e-8);
+            assert!(!simulation.use_warm_start);
+        }
+    }
+}
+
 #[test]
 fn iteration_budget_is_the_largest_iteration_limit_rule() {
     use crate::stopping_rule::{StoppingMode, StoppingRule, StoppingRuleSet};

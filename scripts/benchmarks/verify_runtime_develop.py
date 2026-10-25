@@ -43,7 +43,7 @@ def main():
         for output in outputs:
             metadata = cobre.results.load_policy(output)['metadata']
             assert metadata['software'] == 'cobre-myria', metadata
-            assert metadata['software_version'] == '0.18.0-myria.2', metadata
+            assert metadata['software_version'] == '0.18.0-myria.3', metadata
             assert metadata['producer']['completed_iterations'] == 4, metadata
             producers.append(metadata['producer'])
         assert math.isclose(producers[0]['final_lower_bound'], producers[1]['final_lower_bound'],
@@ -60,7 +60,7 @@ def main():
         for output in outputs:
             assert cobre.results.load_policy(output)['metadata']['producer']['completed_iterations'] == 6
         print(json.dumps({'abi_version': cobre.__version__, 'software': 'cobre-myria',
-                          'software_version': '0.18.0-myria.2', 'fresh_iterations': 4,
+                          'software_version': '0.18.0-myria.3', 'fresh_iterations': 4,
                           'resumed_iterations': 6, 'cli_python_parity': True}))
 
 

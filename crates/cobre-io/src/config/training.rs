@@ -562,7 +562,8 @@ pub struct PhaseSolverProfileConfig {
     pub factor_pivot_threshold: Option<f64>,
 
     /// Warm-start override. By default backward solves warm-start from the
-    /// stored basis and forward and simulation solves are cold.
+    /// stored basis. HiGHS enumerated forward also reuses node bases; sampled
+    /// forward and simulation solves are cold.
     #[serde(default)]
     pub use_warm_start: Option<bool>,
 

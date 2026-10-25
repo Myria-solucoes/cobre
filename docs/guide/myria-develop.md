@@ -7,7 +7,14 @@ regularization of automatically estimated PAR models, reported as
 `StationarityRegularized`, and recurring-season historical coverage.
 User-supplied AR coefficients retain the upstream rejection rules.
 
-Outputs and policies identify `cobre-myria` / `0.18.0-myria.2`. The Python ABI
+Enumerated training reuses the forward basis captured for the same node in the
+preceding iteration. An explicit `training.solver.forward.use_warm_start`
+setting takes precedence. Sampled training and simulation retain the upstream
+defaults. Reuse can change valid optimal vertices, cuts and convergence paths;
+performance comparisons must use the same precision target. HiGHS statistics
+include the work of every retry, even when the solve ultimately fails.
+
+Outputs and policies identify `cobre-myria` / `0.18.0-myria.3`. The Python ABI
 remains 0.18.0, but policies use native format 4. Reconversion is required
 when switching from the released 0.18 or earlier Myria runtimes. The matching
 CLI and wheel are built and checked on native x86_64 and ARM64 runners.
