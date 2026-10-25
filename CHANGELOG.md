@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- next-header -->
 
+## [0.18.0-myria.2] - 2026-10-25
+
+- Based on upstream develop `f8ae8f88599ab900c124b46ec0d652dc72620cd3`, including
+  native format-4 policies, corrected cut selection and hydro constraints.
+- Retains explicit regularization of automatically fitted PAR models and
+  recurring-season coverage. User-provided coefficients remain unchanged.
+- Removes the previous fork's approximate point-budget, progressive population
+  and affinity extensions; upstream owns training and scheduling.
+- Distinct output identity prevents reuse of old or official policies.
+- Linux CLI and wheel artifacts are checked together per architecture.
+
+See [the runtime guide](docs/guide/myria-develop.md).
+
 ## [Unreleased]
 
 ### Added

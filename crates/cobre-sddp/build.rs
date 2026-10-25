@@ -97,8 +97,6 @@ fn main() {
         build.file(path);
     }
 
-    build.compile("qhull_r");
-
     // The C shim `csrc/qhull_wrapper.c` is a thin reentrant wrapper exposing a
     // stable convex-hull entry point to Rust; unlike the vendored build above,
     // it compiles with `.warnings(true)` since it's cobre's own code. It
@@ -123,7 +121,9 @@ fn main() {
     shim.opt_level(2);
     disable_fma(&mut shim);
     shim.file(&shim_source);
+    // GNU ld needs the consumer archive before its provider.
     shim.compile("cobre_qhull_shim");
+    build.compile("qhull_r");
 }
 
 /// Keeps FMA out of qhull whatever the compiler's default target: a fused
