@@ -3,6 +3,7 @@
 import argparse
 import json
 import math
+import re
 import shutil
 import subprocess
 import tempfile
@@ -19,6 +20,10 @@ def main():
     parser.add_argument('--case', type=Path, required=True)
     args = parser.parse_args()
     cli = args.cli.resolve()
+    source = Path(__file__).resolve().parents[2] / "crates/cobre-io/src/output/software.rs"
+    match = re.search(r'pub const SOFTWARE_VERSION: &str = "([^"]+)";', source.read_text())
+    assert match is not None, f"missing producer version in {source}"
+    expected_version = match.group(1)
     with tempfile.TemporaryDirectory(prefix='cobre-develop-pair-') as temporary:
         root = Path(temporary)
         case = root / 'case'
@@ -43,7 +48,7 @@ def main():
         for output in outputs:
             metadata = cobre.results.load_policy(output)['metadata']
             assert metadata['software'] == 'cobre-myria', metadata
-            assert metadata['software_version'] == '0.18.0-myria.4', metadata
+            assert metadata['software_version'] == expected_version, metadata
             assert metadata['producer']['completed_iterations'] == 4, metadata
             producers.append(metadata['producer'])
         assert math.isclose(producers[0]['final_lower_bound'], producers[1]['final_lower_bound'],
@@ -60,7 +65,7 @@ def main():
         for output in outputs:
             assert cobre.results.load_policy(output)['metadata']['producer']['completed_iterations'] == 6
         print(json.dumps({'abi_version': cobre.__version__, 'software': 'cobre-myria',
-                          'software_version': '0.18.0-myria.4', 'fresh_iterations': 4,
+                          'software_version': expected_version, 'fresh_iterations': 4,
                           'resumed_iterations': 6, 'cli_python_parity': True}))
 
 
